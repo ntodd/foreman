@@ -25,7 +25,7 @@ defmodule ForemanAgent.Integration.EnvDockerTest do
     File.rm_rf!(root)
     File.mkdir_p!(root)
 
-    base_url = GitServer.start(Path.join(root, "git"), "hello")
+    base_url = GitServer.start(Path.join(root, "git"), ["hello", "sneaky"])
 
     config = %Config{
       data_dir: Path.join(root, "data"),
@@ -280,6 +280,30 @@ defmodule ForemanAgent.Integration.EnvDockerTest do
       ])
 
     assert volumes == ""
+  end
+
+  test "the policy sees through include, extends and interpolation", %{
+    config: config,
+    base_url: base_url
+  } do
+    ctx = ctx(config)
+    env_id = "44444444-4444-4444-8444-444444444444"
+
+    payload =
+      create_payload(env_id, "sneaky-1", base_url, %{
+        "repo" => "ntodd/sneaky",
+        "clone_url" => base_url <> "/sneaky.git",
+        "tailscale" => %{"enabled" => false}
+      })
+
+    # HOME for the agent's children is the agent's own home, which is
+    # inside its data directory here, as on a real box.
+    ctx = put_in(ctx.config.data_dir, System.user_home!())
+
+    assert {:error, message} = Env.run("env.create", payload, ctx)
+    assert message =~ "protected"
+    assert message =~ "helper"
+    assert containers(env_id) == %{}
   end
 
   test "the policy refuses a compose file rewritten from inside the environment", %{
