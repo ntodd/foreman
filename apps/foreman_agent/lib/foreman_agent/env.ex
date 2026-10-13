@@ -494,15 +494,31 @@ defmodule ForemanAgent.Env do
   end
 
   # The CLI's --log-format json lines carry a "text" field; anything else
-  # (build output from docker) passes through as is.
+  # (build output from docker) passes through as is. Debug-level entries
+  # are dropped, and so are the CLI's dumps of the merged compose config,
+  # which carry interpolated secret values.
   defp devcontainer_log(line) do
     case JSON.decode(line) do
-      {:ok, %{"outcome" => _}} -> nil
-      {:ok, %{"type" => "text", "level" => level, "text" => text}} when level >= 2 -> text
-      {:ok, %{"type" => "raw", "text" => text}} -> text
-      {:ok, %{}} -> nil
-      _ -> line
+      {:ok, %{"outcome" => _}} ->
+        nil
+
+      {:ok, %{"type" => "text", "level" => level, "text" => text}} when level >= 3 ->
+        unless compose_dump?(text), do: text
+
+      {:ok, %{"type" => "raw", "text" => text}} ->
+        text
+
+      {:ok, %{}} ->
+        nil
+
+      _ ->
+        line
     end
+  end
+
+  defp compose_dump?(text) do
+    String.starts_with?(text, ["name: ", "services:", "Docker Compose override file"]) and
+      String.contains?(text, "services:")
   end
 
   # Registry credentials go in a throwaway DOCKER_CONFIG for the one
@@ -798,7 +814,10 @@ defmodule ForemanAgent.Env do
     key = {__MODULE__, :pending, make_ref()}
 
     emit = fn lines ->
-      for line <- lines, text = mapper.(line), is_binary(text) do
+      for line <- lines,
+          text = mapper.(strip_ansi(line)),
+          is_binary(text),
+          text = strip_ansi(text) do
         ctx.log.("info", if(String.ends_with?(text, "\n"), do: text, else: text <> "\n"))
       end
     end
@@ -819,6 +838,10 @@ defmodule ForemanAgent.Env do
       end
     end
   end
+
+  # Colors and cursor movement from CLIs, which a log view can't use.
+  @ansi ~r/\e\[[0-9;?]*[ -\/]*[@-~]|\e\][^\a]*(\a|\e\\)|\r(?!\n)/
+  defp strip_ansi(text), do: Regex.replace(@ansi, text, "")
 
   defp last_lines(output) do
     output |> String.split("\n", trim: true) |> Enum.take(-15) |> Enum.join("\n")

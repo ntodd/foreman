@@ -1,13 +1,18 @@
 defmodule ForemanAgent.Handler do
   @moduledoc "Maps each command type to the code that runs it."
 
-  alias ForemanAgent.{Config, Docker, Env, Inventory, Runner, Stats, Updater}
+  alias ForemanAgent.{Config, Docker, Env, Inventory, Redactor, Runner, Stats, Updater}
   alias ForemanProtocol.Command
 
   @spec handle(Command.t(), (String.t(), String.t() -> any())) ::
           {:ok, map()} | {:error, String.t()}
-  def handle(%Command{type: "env." <> _ = type, payload: payload}, log) do
-    Env.run(type, payload, ctx(log))
+  def handle(%Command{type: "env." <> _ = type, payload: payload} = cmd, log) do
+    redactor = Redactor.new(cmd)
+
+    case Env.run(type, payload, ctx(Redactor.wrap_log(redactor, log))) do
+      {:error, message} -> {:error, Redactor.redact(redactor, message)}
+      ok -> ok
+    end
   end
 
   def handle(%Command{type: "box.inventory"}, _log) do

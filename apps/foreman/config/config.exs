@@ -34,7 +34,8 @@ config :foreman, Oban,
        {"*/30 * * * *", Foreman.Jobs.RefreshTokens},
        {"*/15 * * * *", Foreman.Jobs.SyncRepos},
        {"7 * * * *", Foreman.Jobs.CleanupTailnet},
-       {"*/5 * * * *", Foreman.Jobs.Housekeeping}
+       {"*/5 * * * *", Foreman.Jobs.Housekeeping},
+       {"* * * * *", Foreman.Jobs.Dispatch}
      ]}
   ]
 

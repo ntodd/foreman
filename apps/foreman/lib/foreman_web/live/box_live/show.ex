@@ -109,7 +109,7 @@ defmodule ForemanWeb.BoxLive.Show do
       <.header>
         {@box.name}
         <:subtitle>
-          {@box.hostname || "Never connected"}<span :if={@box.os}> · {@box.os}/{@box.arch}</span><span :if={
+          {@box.hostname || "Never connected"}<span :if={@box.arch}> · {@box.arch}</span><span :if={
             @box.agent_version
           }> · agent {@box.agent_version}</span>
         </:subtitle>
@@ -260,13 +260,34 @@ defmodule ForemanWeb.BoxLive.Show do
                   label="Owner"
                   options={Enum.map(@users, &{&1.login, &1.id})}
                 />
-                <.input
-                  field={@form[:shared_user_ids]}
-                  type="select"
-                  multiple
-                  label="Shared with"
-                  options={Enum.map(@users, &{&1.login, &1.id})}
-                />
+                <fieldset>
+                  <legend class="label">Shared with</legend>
+                  <input type="hidden" name="box[shared_user_ids][]" value="" />
+                  <div class="space-y-2">
+                    <label
+                      :for={user <- Enum.reject(@users, &(&1.id == @box.owner_user_id))}
+                      class="flex items-center gap-2 text-sm text-ink"
+                    >
+                      <input
+                        type="checkbox"
+                        class="checkbox"
+                        name="box[shared_user_ids][]"
+                        value={user.id}
+                        checked={user.id in @box.shared_user_ids}
+                      />
+                      {user.login}
+                    </label>
+                  </div>
+                  <p
+                    :if={Enum.all?(@users, &(&1.id == @box.owner_user_id))}
+                    class="text-xs text-ink-3"
+                  >
+                    Nobody else has signed in yet.
+                  </p>
+                  <p class="mt-1.5 text-xs text-ink-3">
+                    People it's shared with can run environments here. Anyone with Docker on a box can read every environment's secrets on it.
+                  </p>
+                </fieldset>
                 <.input
                   field={@form[:desired_agent_version]}
                   label="Desired agent version"

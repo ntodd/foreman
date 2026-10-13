@@ -15,6 +15,7 @@ defmodule Foreman.Application do
       {Registry, keys: :unique, name: Foreman.Registry},
       {Foreman.RateLimit, clean_period: :timer.minutes(1)},
       Foreman.Agents.NonceCache,
+      Foreman.Operations.Redactions,
       Foreman.Operations.LogBuffer,
       Foreman.Capacity.Tracker,
       {DynamicSupervisor, name: Foreman.Environments.Supervisor, strategy: :one_for_one},

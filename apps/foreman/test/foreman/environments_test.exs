@@ -271,6 +271,69 @@ defmodule Foreman.EnvironmentsTest do
     end
   end
 
+  describe "redaction" do
+    test "secret values are scrubbed from stored logs and errors, even ones the agent couldn't know",
+         %{scope: scope, box: box, user: user, repo: repo} do
+      env = environment_fixture(user: user, repo: repo, box: box)
+      connect_agent(box)
+
+      {:ok, _} =
+        Secrets.put_secret(scope, "environment", env, %{
+          "name" => "SIDECAR_TOKEN",
+          "value" => "hunter2-very-secret"
+        })
+
+      flush_dispatches()
+
+      {:ok, op} = Environments.logs(scope, Repo.reload!(env))
+      assert_receive {:dispatch, %Command{type: "env.logs", op_id: op_id}}
+      assert op_id == op.id
+
+      Operations.subscribe(op_id)
+
+      :ok =
+        Agents.handle_event(
+          box.id,
+          event!("op.log", %{
+            op_id: op_id,
+            stream: "stdout",
+            data: "sidecar token=hunter2-very-secret\n"
+          })
+        )
+
+      assert_receive {:op_log, ^op_id, "sidecar token=[redacted]\n"}
+
+      :ok =
+        Agents.handle_event(
+          box.id,
+          event!("op.result", %{
+            op_id: op_id,
+            status: "error",
+            error: "died printing hunter2-very-secret"
+          })
+        )
+
+      op = Operations.get!(op_id)
+      refute Operations.log(op) =~ "hunter2"
+      refute op.error =~ "hunter2"
+    end
+  end
+
+  defp flush_dispatches do
+    receive do
+      {:dispatch, %Command{} = cmd} ->
+        if cmd.type == "env.secrets.write", do: succeed_any(cmd)
+        flush_dispatches()
+    after
+      0 -> :ok
+    end
+  end
+
+  defp succeed_any(cmd) do
+    op = Operations.get!(cmd.op_id)
+    :ok = Agents.handle_event(op.box_id, event!("op.result", %{op_id: cmd.op_id, status: "ok"}))
+  end
+
   describe "events" do
     test "are refused for another box's operations and environments", %{
       scope: scope,

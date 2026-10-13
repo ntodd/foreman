@@ -99,6 +99,19 @@ defmodule ForemanAgent.EnvTest do
             ~s({"type":"text","level":3,"timestamp":1,"text":"Building image"}\n)
           )
 
+          run_opts[:on_output].(
+            ~s({"type":"text","level":2,"timestamp":1,"text":"debug noise"}\n)
+          )
+
+          # The CLI logs the merged compose config, interpolated secrets and all.
+          run_opts[:on_output].(
+            ~s({"type":"text","level":3,"timestamp":1,"text":"name: storefront-2\\nservices:\\n  app:\\n    environment:\\n      NEON_API_KEY: neon_secret"}\n)
+          )
+
+          run_opts[:on_output].(
+            ~s({"type":"raw","level":3,"timestamp":1,"text":"\\u001b[1m\\u001b[31mColored\\u001b[39m\\u001b[22m\\n"}\n)
+          )
+
           case outcome do
             :success ->
               result =
@@ -201,6 +214,9 @@ defmodule ForemanAgent.EnvTest do
       assert File.read!(Path.join(clone, ".git/info/exclude")) =~ "/.devcontainer/.foreman/"
 
       assert_received {:log, "info", "Building image\n"}
+      assert_received {:log, "info", "Colored\n"}
+      refute_received {:log, _, "debug noise\n"}
+      refute_received {:log, _, "name: storefront-2" <> _}
     end
 
     test "doesn't leave a feature lockfile behind unless the repo keeps one", %{ctx: ctx} do

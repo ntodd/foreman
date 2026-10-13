@@ -123,6 +123,8 @@ defmodule Foreman.Environments.Server do
   # Builds the command fresh (current secrets and token) and sends it.
   defp send_op(op, env) do
     with {:ok, cmd, extra} <- Commands.build(op, env) do
+      Foreman.Operations.Redactions.put(op.id, cmd, env)
+
       op =
         if op.status == "queued",
           do:

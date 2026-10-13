@@ -6,7 +6,7 @@ defmodule Foreman.Operations do
   """
   import Ecto.Query
 
-  alias Foreman.Operations.{LogBuffer, Operation}
+  alias Foreman.Operations.{LogBuffer, Operation, Redactions}
   alias Foreman.Repo
 
   @active ~w(queued dispatched running)
@@ -94,6 +94,8 @@ defmodule Foreman.Operations do
           :already
         else
           LogBuffer.flush(op_id)
+          error = error && Redactions.redact(op_id, error)
+          Redactions.delete(op_id)
 
           {:ok,
            mark(get!(op_id), if(status == "ok", do: "succeeded", else: "failed"),

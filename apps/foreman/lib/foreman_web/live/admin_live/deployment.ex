@@ -39,7 +39,9 @@ defmodule ForemanWeb.AdminLive.Deployment do
           "host" => owner.registry_host || "ghcr.io",
           "username" => owner.registry_username || "",
           "token" => ""
-        }, as: :registry)
+        },
+        as: :registry
+      )
 
     {:noreply, assign(socket, registry_owner: owner, registry_form: form)}
   end

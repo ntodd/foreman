@@ -3,3 +3,4 @@
 /tmp/
 .DS_Store
 erl_crash.dump
+/apps/foreman/priv/static/assets/

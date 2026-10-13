@@ -2,7 +2,8 @@ defmodule Foreman.Operations.LogBuffer do
   @moduledoc """
   Collects operation log chunks, broadcasts each as it arrives, and writes
   them to the database in batches, so a chatty build doesn't become a
-  write per line. Each operation keeps at most the last #{div(1_048_576, 1024)} KiB.
+  write per line. Chunks are scrubbed of the environment's secrets
+  before they're broadcast or stored. Each operation keeps at most the last #{div(1_048_576, 1024)} KiB.
   """
   use GenServer
 
@@ -17,6 +18,7 @@ defmodule Foreman.Operations.LogBuffer do
   def start_link(_), do: GenServer.start_link(__MODULE__, nil, name: __MODULE__)
 
   def append(op_id, data) do
+    data = Foreman.Operations.Redactions.redact(op_id, data)
     Phoenix.PubSub.broadcast(Foreman.PubSub, "operation:" <> op_id, {:op_log, op_id, data})
     GenServer.cast(__MODULE__, {:append, op_id, data})
   end
