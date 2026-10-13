@@ -14,6 +14,10 @@
   # (endpoint.ex) sets check_origin: false on purpose; agents aren't
   # browsers, carry no cookies, and sign every connect. The LiveView
   # socket checks origins against PHX_HOST in prod (runtime.exs).
-  ignore: ["Config.CSWH"],
+  #
+  # Config.HTTPS: HTTPS redirects are a runtime setting (the :force_ssl
+  # plug in endpoint.ex, FOREMAN_FORCE_SSL, on by default in prod), so
+  # there's nothing for the static check to find in config/prod.exs.
+  ignore: ["Config.CSWH", "Config.HTTPS"],
   ignore_files: []
 ]
