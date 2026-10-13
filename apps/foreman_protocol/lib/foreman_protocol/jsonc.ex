@@ -1,4 +1,4 @@
-defmodule ForemanAgent.Jsonc do
+defmodule ForemanProtocol.Jsonc do
   @moduledoc """
   Parses JSON with comments and trailing commas, the dialect
   devcontainer.json is written in.

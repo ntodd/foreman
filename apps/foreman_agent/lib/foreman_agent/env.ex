@@ -19,7 +19,8 @@ defmodule ForemanAgent.Env do
   """
 
   alias ForemanAgent.Env.{Affected, Overlay, Policy}
-  alias ForemanAgent.{Jsonc, SafeFS}
+  alias ForemanAgent.SafeFS
+  alias ForemanProtocol.Jsonc
 
   require Logger
 

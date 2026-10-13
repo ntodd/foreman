@@ -1,7 +1,7 @@
-defmodule ForemanAgent.JsoncTest do
+defmodule ForemanProtocol.JsoncTest do
   use ExUnit.Case, async: true
 
-  alias ForemanAgent.Jsonc
+  alias ForemanProtocol.Jsonc
 
   test "parses plain JSON" do
     assert {:ok, %{"a" => [1, 2]}} = Jsonc.decode(~s({"a": [1, 2]}))
