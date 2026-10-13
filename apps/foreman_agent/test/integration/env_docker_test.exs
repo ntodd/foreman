@@ -11,6 +11,7 @@ defmodule ForemanAgent.Integration.EnvDockerTest do
   use ExUnit.Case, async: false
 
   alias ForemanAgent.{Config, Env}
+  alias ForemanAgent.Docker.Engine
   alias ForemanAgent.Test.GitServer
 
   @moduletag :docker
@@ -76,7 +77,7 @@ defmodule ForemanAgent.Integration.EnvDockerTest do
     %{
       config: config,
       runner: ForemanAgent.Runner.Local,
-      docker: ForemanAgent.Docker.Engine,
+      docker: Engine,
       log: fn stream, data -> send(test_pid, {:log, stream, data}) end
     }
   end
@@ -107,7 +108,7 @@ defmodule ForemanAgent.Integration.EnvDockerTest do
   end
 
   defp containers(env_id) do
-    {:ok, list} = ForemanAgent.Docker.Engine.list_containers(["foreman.env_id=#{env_id}"])
+    {:ok, list} = Engine.list_containers(["foreman.env_id=#{env_id}"])
     Map.new(list, &{&1["Labels"]["com.docker.compose.service"], &1})
   end
 
