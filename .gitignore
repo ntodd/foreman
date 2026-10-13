@@ -1,0 +1,5 @@
+# Local tool installs (devcontainer CLI for dev on macOS)
+/.tools/
+/tmp/
+.DS_Store
+erl_crash.dump
