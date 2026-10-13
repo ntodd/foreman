@@ -414,6 +414,7 @@ defmodule ForemanAgent.Env do
           "--skip-post-attach",
           "--oci-auth-hardening"
         ] ++
+          lockfile_args(paths.clone, spec.config_path) ++
           dotfiles_args(Map.get(spec, :dotfiles)) ++
           if(opts[:rebuild], do: ["--remove-existing-container"], else: [])
 
@@ -449,6 +450,18 @@ defmodule ForemanAgent.Env do
           {:error, "devcontainer up failed: #{last_lines(output)}"}
       end
     end)
+  end
+
+  # The CLI writes devcontainer-lock.json next to the config. Keep that
+  # behaviour for repos that commit one; otherwise it'd leave an untracked
+  # file in every workspace.
+  defp lockfile_args(clone, config_path) do
+    lockfile = Path.join(Path.dirname(config_path), "devcontainer-lock.json")
+
+    case SafeFS.resolve(clone, lockfile) do
+      {:ok, _} -> []
+      {:error, _} -> ["--no-lockfile"]
+    end
   end
 
   defp describe(%{"description" => d}) when is_binary(d) and d != "", do: " (#{d})"
@@ -695,7 +708,13 @@ defmodule ForemanAgent.Env do
         "-w",
         spec.remote_workspace_folder,
         container,
-        "git"
+        # The workspace's owner inside the container depends on the host
+        # (Docker Desktop maps it to root), and this only reads status.
+        "git",
+        "-c",
+        "safe.directory=*",
+        "-c",
+        "core.fsmonitor=false"
       ]
 
       with {:ok, status} <-

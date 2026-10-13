@@ -203,6 +203,19 @@ defmodule ForemanAgent.EnvTest do
       assert_received {:log, "info", "Building image\n"}
     end
 
+    test "doesn't leave a feature lockfile behind unless the repo keeps one", %{ctx: ctx} do
+      stub_tools()
+      assert {:ok, _} = Env.run("env.create", payload(), ctx)
+      {"devcontainer", args, _} = List.last(runs())
+      assert "--no-lockfile" in args
+
+      clone = Path.join([ctx.config.envs_root, @env_id, "workspace", "storefront"])
+      File.write!(Path.join(clone, ".devcontainer/devcontainer-lock.json"), "{}")
+      assert {:ok, _} = Env.run("env.rebuild", payload(), ctx)
+      {"devcontainer", args, _} = List.last(runs())
+      refute "--no-lockfile" in args
+    end
+
     test "passes dotfiles to the devcontainer CLI", %{ctx: ctx} do
       stub_tools()
 
@@ -475,7 +488,11 @@ defmodule ForemanAgent.EnvTest do
                                   "-w",
                                   "/workspaces/storefront",
                                   "abc123",
-                                  "git" | rest
+                                  "git",
+                                  "-c",
+                                  "safe.directory=*",
+                                  "-c",
+                                  "core.fsmonitor=false" | rest
                                 ],
                                 _ ->
         if "status" in rest do
