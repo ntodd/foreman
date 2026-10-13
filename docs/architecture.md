@@ -1,6 +1,6 @@
 # Foreman architecture
 
-Status: draft, 2026-10-13
+Status: implemented (v1), 2026-10-13. See "Implementation notes" at the end for where the build differs from the plan below.
 
 Foreman is a self-hosted replacement for GitHub Codespaces. A Phoenix control plane manages devcontainer environments on Linux boxes you own. A small agent on each box does the work. Every environment joins a Tailscale tailnet, and that's how you reach it. Nothing publishes ports.
 
@@ -27,7 +27,7 @@ Foreman is a self-hosted replacement for GitHub Codespaces. A Phoenix control pl
 | | Personal | Work |
 |---|---|---|
 | Control plane | Linux desktop | Small EC2 instance |
-| Database | Postgres on the desktop | RDS, or Postgres on the same instance |
+| Database | SQLite (the default) | Postgres: Neon or RDS (`FOREMAN_DB=postgres` at build) |
 | Boxes | The desktop (local agent) | One or more Linux boxes per developer |
 | Users | 1 | 4 |
 | GitHub App installed on | `ntodd` | `acme` |
@@ -38,7 +38,7 @@ Both deployments run the same code with different config. Company secrets never 
 ## Components
 
 ```
-Browser ──LiveView──► Control plane (Phoenix + Postgres, tailnet-only)
+Browser ──LiveView──► Control plane (Phoenix, SQLite or Postgres, tailnet-only)
                          ▲  WSS (agent dials out)
           ┌──────────────┼───────────────┐
      agent (desktop)  agent (box-a)  agent (box-b)
@@ -155,7 +155,7 @@ As a result, environments don't come back after a reboot until the control plane
      --workspace-folder <clone> \
      --override-config <override> \
      --id-label foreman.env_id=<id> \
-     --additional-features '{"ghcr.io/ntodd/foreman-features/foreman:1": {}}' \
+     --additional-features '{"./.foreman/feature": {"tailscale": true}}' \
      [--dotfiles-repository <user's dotfiles repo>]
    ```
 
@@ -188,7 +188,7 @@ volumes:
 
 ### Foreman feature
 
-A public devcontainer feature (`ghcr.io/ntodd/foreman-features/foreman`). The agent adds it with `--additional-features`, so repos don't declare it.
+A devcontainer feature that ships inside the agent release, so a box always runs the feature version its agent was built with. The agent copies it into the clone at `<config dir>/.foreman/feature` (excluded through `.git/info/exclude`) and adds it with `--additional-features`, so repos don't declare it. (Spike 1 showed the CLI resolves local features against the repo's devcontainer folder, not the override config's.)
 
 - **Tailscale:**
   - Installs `tailscale` and `tailscaled` from the static tarball, with a checksum check.
@@ -450,7 +450,7 @@ Anyone with Docker access on a box can read every secret of every environment on
 
 ## Agent self-update
 
-1. CI builds the agent release for each target architecture on a tag. It signs the tarball with an ed25519 (minisign) key that lives only in CI, then uploads the tarball and signature to the control plane.
+1. CI builds the agent release for each target architecture on a tag. It signs it with an ed25519 key that lives only in CI (`mix foreman_agent.sign`; the signature covers the version, target and SHA-256), then the tarball and signature are registered with the control plane.
 2. An admin sets the desired agent version, globally or per box. An agent running a different version receives `agent.update`.
 3. The agent downloads the release from the control plane and verifies the signature against the public key compiled into it.
 4. It unpacks to `/opt/foreman-agent/releases/<version>`, switches the `current` symlink and exits. systemd restarts it on the new version.
@@ -590,3 +590,49 @@ These are facts to confirm during build steps 1–2, not decisions.
 | DevPod | Upstream stalled since 2025. The community fork points to Devsy | No control plane or secrets model |
 | Gitpod / Ona | Self-hosted is dead. Being acquired by OpenAI | Gone |
 | Daytona | Pivoted to AI sandboxes; source closed | Gone |
+
+## Implementation notes
+
+Written after building v1 on 2026-10-13. Where the build differs from
+the plan above, the build wins.
+
+### Spike results
+
+| Spike | Result |
+|---|---|
+| 1. Overlay through `--override-config` | Works: absolute `dockerComposeFile` paths plus the overlay, and `ports: !reset []` strips published ports. The repo-opt-in fallback isn't needed. Local features resolve against the repo's `.devcontainer`, hence the copy described under "Foreman feature". |
+| 2. `up` on a stopped container | Reuses the container, starts the whole project and runs `postStartCommand`. Start is `devcontainer up`. |
+| 3. Feature entrypoint after `docker restart` | Runs again. |
+| 4. Tailscale SSH | Not tested: no tailnet in the build environment. The feature installs and starts Tailscale; joining needs a real OAuth client. |
+| 5. Scoped token lifetime | Not tested against GitHub (no app in the build environment). Tokens are re-scoped every four hours regardless. |
+| 6. Feature pull credentials | The agent sets `DOCKER_CONFIG` for the CLI process, which both Docker and the CLI's OCI client read. Not tested against a private package. |
+
+### Differences
+
+- **Database:** SQLite by default, Postgres optional, chosen at compile
+  time (`FOREMAN_DB`), because Ecto fixes a repo's adapter when it
+  compiles. Migrations use only the portable DSL; the suite passes on
+  both.
+- **Dispatch:** the operations table is the queue. A per-environment
+  process (started on demand) sends one operation at a time; a
+  minute-by-minute sweep catches anything queued from elsewhere.
+  In-flight operations are resent with the same op_id on reconnect.
+- **Secrets on the box:** 0600 files in a 0700 tmpfs directory, owned by
+  the agent user. On Linux the devcontainer CLI maps the container's
+  user to the agent's uid, so the environment can read them.
+- **Redaction:** secret values are scrubbed from operation logs and
+  errors by both the agent and the control plane (the CLI logs the
+  merged compose config with interpolated values).
+- **Compose policy:** the agent checks the merged compose config on
+  every start and refuses host binds, host files, the Docker socket and
+  devices by default; see [security.md](security.md).
+- **`initializeCommand`** is dropped: it would run on the box.
+- **Restart affected:** recreates the non-devcontainer services that
+  interpolate a changed variable, then stops and re-`up`s the
+  devcontainer service (entrypoint and `postStartCommand` run again). If
+  the devcontainer service itself interpolates a changed variable, the
+  CLI recreates it.
+- **Destroy:** a git status check runs inside the container first; with
+  uncommitted or unpushed work, the UI asks for the environment's name.
+- **Not built yet:** idle auto-stop, per-service limits for sidecars,
+  Incus isolation, webhooks (repos are polled).

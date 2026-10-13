@@ -1,0 +1,58 @@
+# End-to-end runs
+
+Two runs, both against real Docker and the real devcontainer CLI, using
+the fixture repo in `apps/foreman_agent/test/fixtures/repos/hello` (an
+app service and a sidecar that reads `${SIDECAR_TOKEN}`).
+
+## Through the UI (macOS or Linux, Docker Desktop is fine)
+
+A dev control plane and a local agent, driven by a headless Chromium
+browser over the DevTools protocol (`cdp.mjs`, no npm dependencies).
+
+```sh
+# Serve the fixture repo over git's dumb HTTP protocol
+e2e/make-git-fixture.sh tmp/e2e/git
+(cd tmp/e2e/git && python3 -m http.server 8899 --bind 127.0.0.1) &
+
+# Control plane, with clone URLs pointed at the fixture server
+cd apps/foreman
+rm -f foreman_dev.db* && mix ecto.setup
+mix run ../../e2e/seed.exs            # prints E2E_JOIN_TOKEN=fj_...
+PORT=4100 FOREMAN_GIT_BASE_URL=http://127.0.0.1:8899 mix phx.server &
+
+# Agent, enrolled with the printed token, driving Docker Desktop
+cd ../foreman_agent
+R=$(cd ../.. && pwd)
+FOREMAN_URL=http://localhost:4100 FOREMAN_JOIN_TOKEN=fj_... \
+  FOREMAN_AGENT_DATA_DIR=$R/tmp/e2e/agent FOREMAN_ENVS_ROOT=$R/tmp/e2e/envs \
+  FOREMAN_SECRETS_ROOT=$R/tmp/e2e/run FOREMAN_RELEASE_ROOT=$R/tmp/e2e/opt \
+  FOREMAN_DEVCONTAINER_CLI=$R/.tools/node_modules/.bin/devcontainer \
+  FOREMAN_ALLOWED_GIT_HOSTS=127.0.0.1 FOREMAN_INSECURE_GIT_HOSTS=127.0.0.1 \
+  FOREMAN_TUN_DEVICE=true mix run --no-halt &
+
+# The run: sign in, create an environment, wait for it, add a secret,
+# Restart affected, container logs, every page, dark mode, destroy.
+cd ../.. && node e2e/local.mjs          # screenshots in tmp/e2e/shots
+ONLY=pages node e2e/local.mjs           # just the page tour
+```
+
+`BROWSER` picks the browser binary (default: Microsoft Edge on macOS);
+any Chromium works.
+
+## On a Linux box (docker-in-docker)
+
+The control plane release image, and a box image running the agent
+release with its own Docker daemon. `run.sh` builds both and checks
+enrollment, single-use join tokens, create, what's inside an environment
+(identity, feature, read-only secrets, no published ports, uid mapping,
+0600 secrets other users can't read), secrets delivery, a box reboot
+(tmpfs secrets restored and the environment restarted), a signed agent
+self-update and destroy.
+
+```sh
+e2e/linux/run.sh                 # SKIP_BUILD=1 to reuse images
+e2e/linux/run.sh --down          # remove the stack and its volumes
+```
+
+It needs `mise` (to sign the update with `mix foreman_agent.sign`) and
+`openssl`.
