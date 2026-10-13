@@ -207,6 +207,8 @@ defmodule ForemanProtocol.Schema do
   defp cast_value(v, :service_name, p),
     do: match(v, @service, p, "must be a compose service name")
 
+  defp cast_value(v, :env_name, p), do: match(v, @env_name, p, "must be a variable name")
+
   defp cast_value(v, :version, p), do: match(v, @version, p, "must be a version like 1.2.3")
   defp cast_value(v, :sha256, p), do: match(v, @sha256, p, "must be a lowercase hex SHA-256")
   defp cast_value(v, :ts_tag, p), do: match(v, @ts_tag, p, "must be a Tailscale tag")

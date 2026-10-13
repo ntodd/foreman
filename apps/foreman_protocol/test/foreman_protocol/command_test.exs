@@ -170,16 +170,22 @@ defmodule ForemanProtocol.CommandTest do
                )
     end
 
-    test "validates restart modes and service names" do
-      base = %{"env_id" => @env_id, "slug" => "a", "mode" => "affected", "services" => ["db"]}
+    test "validates restart modes and changed variable names" do
+      base = %{
+        "env_id" => @env_id,
+        "slug" => "a",
+        "mode" => "affected",
+        "changed" => ["NEON_API_KEY"]
+      }
+
       assert {:ok, cmd} = Command.new("env.restart", base)
       assert cmd.payload.mode == "affected"
 
       assert {:error, errors} = Command.new("env.restart", %{base | "mode" => "nuke"})
       assert Enum.any?(errors, &match?({"mode", _}, &1))
 
-      assert {:error, errors} = Command.new("env.restart", %{base | "services" => ["db; rm"]})
-      assert Enum.any?(errors, &match?({"services", _}, &1))
+      assert {:error, errors} = Command.new("env.restart", %{base | "changed" => ["A; rm"]})
+      assert Enum.any?(errors, &match?({"changed", _}, &1))
     end
 
     test "validates agent.update" do

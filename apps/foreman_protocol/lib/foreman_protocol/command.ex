@@ -53,7 +53,7 @@ defmodule ForemanProtocol.Command do
       @env ++
         [
           mode: {{:enum, ["affected", "all"]}, required: true},
-          services: {{:list, :service_name}, default: []},
+          changed: {{:list, :env_name}, default: []},
           compose_env: {:env_map, default: %{}}
         ],
     "env.destroy" => @env,
