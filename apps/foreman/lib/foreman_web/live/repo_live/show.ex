@@ -126,7 +126,7 @@ defmodule ForemanWeb.RepoLive.Show do
 
       <.callout :if={@repo.devcontainer_error} kind="warning">{@repo.devcontainer_error}</.callout>
 
-      <div class="grid gap-6 lg:grid-cols-2">
+      <div class="grid items-start gap-6 lg:grid-cols-2">
         <.panel title="Environments">
           <ul :if={@environments != []} class="-m-5 divide-y divide-line">
             <li
@@ -149,13 +149,23 @@ defmodule ForemanWeb.RepoLive.Show do
           </:subtitle>
           <.form for={@override_form} id="override-form" phx-submit="save_override" class="space-y-3">
             <div class="grid gap-3 sm:grid-cols-2">
-              <.input field={@override_form[:git_name]} label="Git name" />
-              <.input field={@override_form[:git_email]} label="Git email" />
+              <.input
+                field={@override_form[:git_name]}
+                label="Git name"
+                placeholder={@current_scope.user.git_name || @current_scope.user.name}
+              />
+              <.input
+                field={@override_form[:git_email]}
+                label="Git email"
+                placeholder={@current_scope.user.git_email}
+              />
             </div>
             <.input
               field={@override_form[:dotfiles_repository]}
               label="Dotfiles repo"
-              placeholder="https://github.com/you/dotfiles.git"
+              placeholder={
+                @current_scope.user.dotfiles_repository || "https://github.com/you/dotfiles.git"
+              }
             />
             <.input
               field={@override_form[:dotfiles_install_command]}
