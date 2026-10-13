@@ -83,7 +83,10 @@ defmodule Foreman.Agents do
 
   @doc "Handles one event from `box_id`'s agent. Returns :ok or {:error, reason}."
   def handle_event(box_id, %Event{type: "op.accepted", payload: %{op_id: op_id}}) do
-    with :ok <- owns_op(box_id, op_id), do: Operations.mark_running(op_id) && :ok
+    with :ok <- owns_op(box_id, op_id) do
+      Operations.mark_running(op_id)
+      :ok
+    end
   end
 
   def handle_event(box_id, %Event{type: "op.log", payload: %{op_id: op_id, data: data}}) do

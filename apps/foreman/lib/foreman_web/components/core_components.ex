@@ -8,12 +8,11 @@ defmodule ForemanWeb.CoreComponents do
   with doc strings and declarative assigns. You may customize and style
   them in any way you want, based on your application growth and needs.
 
-  The foundation for styling is Tailwind CSS, a utility-first CSS framework,
-  augmented with daisyUI, a Tailwind CSS plugin that provides UI components
-  and themes. Here are useful references:
-
-    * [daisyUI](https://daisyui.com/docs/intro/) - a good place to get
-      started and see the available components.
+  The foundation for styling is Tailwind CSS over the role tokens in
+  `assets/css/app.css` (canvas, subtle, muted, line, ink, accent, and
+  the status colors). Components use those names rather than palette
+  hues, so the dark theme flows through without per-component variants.
+  Here are useful references:
 
     * [Tailwind CSS](https://tailwindcss.com) - the foundational framework
       we build on. You will use it for layout, sizing, flexbox, grid, and
@@ -27,6 +26,11 @@ defmodule ForemanWeb.CoreComponents do
 
   """
   use Phoenix.Component
+
+  use Phoenix.VerifiedRoutes,
+    endpoint: ForemanWeb.Endpoint,
+    router: ForemanWeb.Router,
+    statics: ForemanWeb.static_paths()
 
   alias Phoenix.LiveView.JS
 
@@ -61,26 +65,29 @@ defmodule ForemanWeb.CoreComponents do
       :if={msg = render_slot(@inner_block) || Phoenix.Flash.get(@flash, @kind)}
       id={@id}
       phx-click={JS.push("lv:clear-flash", value: %{key: @kind}) |> hide("##{@id}")}
-      role="alert"
-      class="toast toast-top toast-end z-50"
+      role={if @kind == :error, do: "alert", else: "status"}
+      class="pointer-events-auto flex w-full max-w-sm cursor-pointer items-start gap-3 rounded-xl border border-line bg-raised p-3.5 pr-3 text-sm shadow-overlay animate-fade-up"
       {@rest}
     >
-      <div class={[
-        "alert w-80 sm:w-96 max-w-80 sm:max-w-96 text-wrap",
-        @kind == :info && "alert-info",
-        @kind == :error && "alert-error"
+      <span class={[
+        "mt-0.5 grid size-5 shrink-0 place-items-center rounded-full",
+        @kind == :info && "bg-success-soft text-success",
+        @kind == :error && "bg-danger-soft text-danger"
       ]}>
-        <.icon :if={@kind == :info} name="hero-information-circle" class="size-5 shrink-0" />
-        <.icon :if={@kind == :error} name="hero-exclamation-circle" class="size-5 shrink-0" />
-        <div>
-          <p :if={@title} class="font-semibold">{@title}</p>
-          <p>{msg}</p>
-        </div>
-        <div class="flex-1" />
-        <button type="button" class="group self-start cursor-pointer" aria-label="close">
-          <.icon name="hero-x-mark" class="size-5 opacity-40 group-hover:opacity-70" />
-        </button>
+        <.icon :if={@kind == :info} name="hero-check-micro" class="size-3.5" />
+        <.icon :if={@kind == :error} name="hero-exclamation-triangle-micro" class="size-3.5" />
+      </span>
+      <div class="min-w-0 flex-1">
+        <p :if={@title} class="font-semibold text-ink">{@title}</p>
+        <p class="text-ink-2">{msg}</p>
       </div>
+      <button
+        type="button"
+        class="-m-1 rounded-md p-1 text-ink-3 transition-colors hover:text-ink"
+        aria-label="close"
+      >
+        <.icon name="hero-x-mark-micro" class="size-4" />
+      </button>
     </div>
     """
   end
@@ -88,38 +95,420 @@ defmodule ForemanWeb.CoreComponents do
   @doc """
   Renders a button with navigation support.
 
+  Variants map to intent: `primary` is the page's one main action
+  (org brand fill), `secondary` (the default) is everything else,
+  `ghost` is a quiet in-row action, and the danger pair marks
+  destructive actions. Sizes are the 32px (`sm`) and 36px (`md`)
+  controls. Custom classes extend the variant, so width and alignment
+  tweaks (`w-full`, `shrink-0`) compose without restating the style.
+
   ## Examples
 
-      <.button>Send!</.button>
-      <.button phx-click="go" variant="primary">Send!</.button>
+      <.button phx-click="save" variant="primary">Save</.button>
+      <.button icon="hero-arrow-up-tray" size="sm">Upload</.button>
       <.button navigate={~p"/"}>Home</.button>
+      <.button variant="danger_outline" href={~p"/users/log-out"} method="delete">
+        Sign out everywhere
+      </.button>
   """
-  attr :rest, :global, include: ~w(href navigate patch method download name value disabled)
-  attr :class, :any
-  attr :variant, :string, values: ~w(primary)
+  attr :rest, :global,
+    include: ~w(href navigate patch method download name value type disabled target rel)
+
+  attr :variant, :string,
+    default: "secondary",
+    values: ~w(primary secondary ghost danger danger_outline)
+
+  attr :size, :string, default: "md", values: ~w(sm md)
+  attr :icon, :string, default: nil, doc: "a leading heroicon name"
+
+  attr :wrap, :boolean,
+    default: false,
+    doc:
+      "lets a label that names something (a title, an email) wrap onto more lines rather than run past a narrow screen"
+
+  attr :class, :any, default: nil, doc: "extra classes appended to the variant classes"
   slot :inner_block, required: true
 
   def button(%{rest: rest} = assigns) do
-    variants = %{"primary" => "btn-primary", nil => "btn-primary btn-soft"}
-
-    assigns =
-      assign_new(assigns, :class, fn ->
-        ["btn", Map.fetch!(variants, assigns[:variant])]
-      end)
-
     if rest[:href] || rest[:navigate] || rest[:patch] do
       ~H"""
-      <.link class={@class} {@rest}>
+      <.link class={[button_class(@variant, @size, @wrap), @class]} {@rest}>
+        <.icon :if={@icon} name={@icon} class="size-4 shrink-0" />
         {render_slot(@inner_block)}
       </.link>
       """
     else
       ~H"""
-      <button class={@class} {@rest}>
+      <button class={[button_class(@variant, @size, @wrap), @class]} {@rest}>
+        <.icon :if={@icon} name={@icon} class="size-4 shrink-0" />
         {render_slot(@inner_block)}
       </button>
       """
     end
+  end
+
+  defp button_class(variant, size, wrap) do
+    [
+      "relative inline-flex select-none items-center justify-center gap-2 rounded-lg font-medium",
+      # A wrapping label reads from the left, avoids a lone last word,
+      # and breaks inside a long one (an email) when it has to.
+      if(wrap, do: "max-w-full text-left text-pretty wrap-anywhere", else: "whitespace-nowrap"),
+      "transition-[background-color,box-shadow,color,transform] duration-150 ease-(--ease-out-expo) active:translate-y-px",
+      # A disabled button that looks enabled is a promise the page
+      # can't keep; the pointer-events rule also stops the hover
+      # treatment from firing on a control that will not respond.
+      "disabled:pointer-events-none disabled:opacity-50 aria-disabled:pointer-events-none aria-disabled:opacity-50",
+      "phx-submit-loading:opacity-80 phx-click-loading:opacity-80",
+      button_size_class(size, wrap),
+      button_variant_class(variant)
+    ]
+  end
+
+  # One line is the same height either way; a wrapping label grows a
+  # line at a time from there.
+  defp button_size_class("sm", false), do: "h-8 px-3 text-[13px]"
+  defp button_size_class("md", false), do: "h-9 px-3.5 text-sm"
+  defp button_size_class("sm", true), do: "min-h-8 px-3 py-1.5 text-[13px]"
+  defp button_size_class("md", true), do: "min-h-9 px-3.5 py-2 text-sm"
+
+  defp button_variant_class("primary"),
+    do: "bg-accent text-accent-fg shadow-control hover:bg-accent-hover"
+
+  defp button_variant_class("secondary"),
+    do: "border border-line-strong bg-canvas text-ink shadow-control hover:bg-subtle"
+
+  defp button_variant_class("ghost"), do: "text-ink-2 hover:bg-muted hover:text-ink"
+
+  defp button_variant_class("danger"),
+    do: "bg-danger text-white shadow-control hover:brightness-95"
+
+  defp button_variant_class("danger_outline"),
+    do: "border border-line-strong bg-canvas text-danger shadow-control hover:bg-danger-soft"
+
+  @doc """
+  Renders a ghost icon-only button: ink-3 at rest, a well-gray wash
+  on hover, and an accessible name via `label`. Renders a link when
+  navigation attributes are present.
+
+  ## Examples
+
+      <.icon_button icon="hero-bell" label="Notifications" />
+      <.icon_button
+        icon="hero-arrow-right-start-on-rectangle"
+        label="Log out"
+        href={~p"/users/log-out"}
+        method="delete"
+      />
+  """
+  attr :icon, :string, required: true
+  attr :label, :string, required: true, doc: "the accessible name; also the hover title"
+  attr :size, :string, default: "md", values: ~w(sm md)
+  attr :class, :any, default: nil, doc: "extra classes appended to the base classes"
+  attr :rest, :global, include: ~w(href navigate patch method disabled target rel)
+
+  def icon_button(%{rest: rest} = assigns) do
+    if rest[:href] || rest[:navigate] || rest[:patch] do
+      ~H"""
+      <.link
+        class={[icon_button_class(@size), @class]}
+        aria-label={@label}
+        title={@label}
+        {@rest}
+      >
+        <.icon name={@icon} class={icon_button_icon_class(@size)} />
+      </.link>
+      """
+    else
+      ~H"""
+      <button
+        type="button"
+        class={[icon_button_class(@size), @class]}
+        aria-label={@label}
+        title={@label}
+        {@rest}
+      >
+        <.icon name={@icon} class={icon_button_icon_class(@size)} />
+      </button>
+      """
+    end
+  end
+
+  defp icon_button_class(size) do
+    [
+      "inline-flex shrink-0 items-center justify-center rounded-lg text-ink-3 transition-colors duration-150",
+      "hover:bg-muted hover:text-ink disabled:pointer-events-none disabled:opacity-50",
+      if(size == "sm", do: "size-7", else: "size-9")
+    ]
+  end
+
+  defp icon_button_icon_class("sm"), do: "size-4"
+  defp icon_button_icon_class("md"), do: "size-[18px]"
+
+  @doc """
+  Renders a small status pill.
+
+  Colors are the state vocabulary, not decoration: `zinc` is neutral,
+  `emerald` done or visible, `amber` in progress or partial, `rose`
+  failed or destructive, and `brand` the org accent for the one
+  emphasized label. `sky` is kept for compatibility and renders
+  neutral; the system has no blue info color. `soft` (the default)
+  fills from the soft tint; `outline` is a hairline pill for drafts
+  and not-yet states. `dot` leads the label with a status dot, and
+  `pulse` breathes it while work is in flight.
+
+  ## Examples
+
+      <.badge>Viewer</.badge>
+      <.badge color="emerald" dot>Ready</.badge>
+      <.badge color="amber" dot pulse>Processing</.badge>
+      <.badge color="brand">Super admin</.badge>
+      <.badge size="sm" variant="outline">Yes/no</.badge>
+  """
+  attr :variant, :string, default: "soft", values: ~w(soft outline)
+  attr :dot, :boolean, default: false, doc: "lead with a status dot"
+  attr :pulse, :boolean, default: false, doc: "pulse the dot; for work still in flight"
+
+  attr :color, :string,
+    default: "zinc",
+    values: ~w(zinc brand emerald amber sky rose)
+
+  attr :size, :string,
+    default: "md",
+    values: ~w(sm md),
+    doc: "`sm` is the chip for narrow rails, where the default crowds the row it labels"
+
+  attr :class, :any, default: nil, doc: "extra classes appended to the variant classes"
+  attr :rest, :global
+  slot :inner_block, required: true
+
+  def badge(assigns) do
+    ~H"""
+    <span
+      class={[
+        "inline-flex shrink-0 items-center gap-1.5 whitespace-nowrap rounded-full font-medium",
+        badge_size_class(@size),
+        badge_class(@variant, @color),
+        @class
+      ]}
+      {@rest}
+    >
+      <span
+        :if={@dot}
+        data-dot
+        class={["size-1.5 shrink-0 rounded-full bg-current", @pulse && "animate-status-pulse"]}
+        aria-hidden="true"
+      />
+      {render_slot(@inner_block)}
+    </span>
+    """
+  end
+
+  defp badge_size_class("sm"), do: "h-5 px-2 text-[11px]"
+  defp badge_size_class("md"), do: "h-6 px-2.5 text-xs"
+
+  defp badge_class("soft", "zinc"), do: "bg-muted text-ink-2"
+  defp badge_class("soft", "sky"), do: "bg-muted text-ink-2"
+  defp badge_class("soft", "brand"), do: "bg-accent-soft text-accent-ink"
+  defp badge_class("soft", "emerald"), do: "bg-success-soft text-success"
+  defp badge_class("soft", "amber"), do: "bg-warning-soft text-warning"
+  defp badge_class("soft", "rose"), do: "bg-danger-soft text-danger"
+
+  defp badge_class("outline", "brand"),
+    do: "border border-accent/40 text-accent-ink"
+
+  defp badge_class("outline", "emerald"), do: "border border-success/35 text-success"
+  defp badge_class("outline", "amber"), do: "border border-warning/35 text-warning"
+  defp badge_class("outline", "rose"), do: "border border-danger/35 text-danger"
+  defp badge_class("outline", _neutral), do: "border border-line-strong text-ink-2"
+
+  @doc """
+  Renders a moment in the viewer's own time zone.
+
+  The server renders UTC, so the text is right before JavaScript runs;
+  the hook then reformats it in the browser's zone and locale, and
+  again after every patch puts the UTC text back. `relative` reads as
+  "5 min ago" for the past week, then as a date, keeps itself current
+  while the page is open, and carries the full time as its title.
+
+  ## Examples
+
+      <.local_time id="video-publish-time" at={@video.publish_at} />
+      <.local_time id="card-date" at={@at} format="date" />
+      <.local_time id="entry-at" at={@entry.at} format="relative" />
+  """
+  attr :id, :string, required: true
+  attr :at, DateTime, required: true
+  attr :format, :string, default: "datetime", values: ~w(datetime date relative)
+  attr :class, :any, default: nil
+
+  def local_time(assigns) do
+    ~H"""
+    <time
+      id={@id}
+      datetime={DateTime.to_iso8601(@at)}
+      data-format={@format}
+      phx-hook=".LocalTime"
+      class={@class}
+    >
+      {utc_text(@at, @format)}
+    </time>
+    <script :type={Phoenix.LiveView.ColocatedHook} name=".LocalTime">
+      const formats = {
+        datetime: {
+          month: "short", day: "numeric", year: "numeric",
+          hour: "numeric", minute: "2-digit", timeZoneName: "short"
+        },
+        date: { month: "short", day: "numeric" }
+      }
+
+      const relative = new Intl.RelativeTimeFormat(undefined, { numeric: "auto", style: "short" })
+      const steps = [[60, "second"], [60, "minute"], [24, "hour"], [7, "day"]]
+
+      // "just now", "5 min ago", "yesterday"; past a week, a date.
+      function sinceNow(at) {
+        let amount = (at - Date.now()) / 1000
+        if (Math.abs(amount) < 45) return relative.format(0, "second")
+
+        for (const [size, unit] of steps) {
+          if (Math.abs(amount) < size) return relative.format(Math.round(amount), unit)
+          amount /= size
+        }
+
+        const date = at.getFullYear() === new Date().getFullYear()
+          ? { month: "short", day: "numeric" }
+          : { month: "short", day: "numeric", year: "numeric" }
+        return new Intl.DateTimeFormat(undefined, date).format(at)
+      }
+
+      export default {
+        mounted() {
+          this.localize()
+          if (this.el.dataset.format === "relative") {
+            this.timer = setInterval(() => this.localize(), 30_000)
+          }
+        },
+        updated() { this.localize() },
+        destroyed() { clearInterval(this.timer) },
+        localize() {
+          const at = new Date(this.el.getAttribute("datetime"))
+          if (isNaN(at)) return
+          const format = this.el.dataset.format
+          this.el.textContent = format === "relative"
+            ? sinceNow(at)
+            : new Intl.DateTimeFormat(undefined, formats[format] || formats.datetime).format(at)
+          this.el.title = new Intl.DateTimeFormat(undefined, formats.datetime).format(at)
+        }
+      }
+    </script>
+    """
+  end
+
+  defp utc_text(at, "date"), do: Calendar.strftime(at, "%b %-d")
+  defp utc_text(at, _datetime), do: Calendar.strftime(at, "%b %-d, %Y %H:%M UTC")
+
+  @doc """
+  Renders a secondary section navigation: a horizontal, scrollable
+  pill row on small screens that becomes a sticky vertical rail on
+  desktop. Pair with `subnav_link/1` children.
+
+  ## Examples
+
+      <.subnav id="asset-subnav" label="Asset sections">
+        <.subnav_link patch={~p"/assets/1"} icon="hero-squares-2x2" active>
+          Details
+        </.subnav_link>
+      </.subnav>
+  """
+  attr :id, :string, required: true
+  attr :label, :string, default: "Sections"
+  slot :inner_block, required: true
+
+  def subnav(assigns) do
+    ~H"""
+    <nav
+      id={@id}
+      aria-label={@label}
+      class="-mx-1 -my-1 flex gap-1 overflow-x-auto p-1 lg:sticky lg:top-20 lg:m-0 lg:flex-col lg:overflow-visible lg:p-0"
+    >
+      {render_slot(@inner_block)}
+    </nav>
+    """
+  end
+
+  @doc """
+  A link inside `subnav/1`: leading icon, label, and an optional
+  trailing count. The active item lifts onto a hairline-ringed
+  surface in ink, icon included: section tabs never take the org
+  accent, which stays on the sidebar's active icon, the primary
+  action, focus, and selection. Announced via `aria-current`.
+  """
+  attr :icon, :string, required: true
+  attr :count, :integer, default: nil
+  attr :active, :boolean, default: false
+  attr :rest, :global, include: ~w(id href navigate patch)
+  slot :inner_block, required: true
+
+  def subnav_link(assigns) do
+    ~H"""
+    <.link
+      aria-current={@active && "page"}
+      class={[
+        "flex h-8 shrink-0 items-center gap-2.5 rounded-lg px-2.5 text-sm transition-colors duration-150",
+        if(@active,
+          do: "bg-subtle font-medium text-ink ring-1 ring-line",
+          else: "text-ink-2 hover:bg-muted hover:text-ink"
+        )
+      ]}
+      {@rest}
+    >
+      <.icon
+        name={@icon}
+        class={["size-4 shrink-0", if(@active, do: "text-ink", else: "text-ink-3")]}
+      />
+      <span class="truncate">{render_slot(@inner_block)}</span>
+      <span :if={@count} class="ml-auto pl-2 text-xs tabular-nums text-ink-3">
+        {@count}
+      </span>
+    </.link>
+    """
+  end
+
+  @doc """
+  Renders an empty state: a 48px icon well, an optional title, one or
+  two sentences, and an optional action.
+
+  ## Examples
+
+      <.empty_state id="assets-empty" icon="hero-film">
+        No assets yet — your first upload starts the catalog.
+        <:action>
+          <.button size="sm">Upload your first video</.button>
+        </:action>
+      </.empty_state>
+  """
+  attr :id, :string, default: nil
+  attr :icon, :string, required: true
+  attr :title, :string, default: nil
+  attr :class, :any, default: nil, doc: "extra classes appended to the panel classes"
+  slot :inner_block, required: true, doc: "the one-line explanation"
+  slot :action
+
+  def empty_state(assigns) do
+    ~H"""
+    <div
+      id={@id}
+      class={["flex flex-col items-center px-6 py-12 text-center", @class]}
+    >
+      <span class="grid size-12 place-items-center rounded-2xl bg-subtle text-ink-3 ring-1 ring-line">
+        <.icon name={@icon} class="size-6" />
+      </span>
+      <p :if={@title} class="mt-4 text-[15px] font-semibold text-ink">{@title}</p>
+      <p class={["max-w-sm text-sm text-ink-2", if(@title, do: "mt-1", else: "mt-4")]}>
+        {render_slot(@inner_block)}
+      </p>
+      <div :if={@action != []} class="mt-5">{render_slot(@action)}</div>
+    </div>
+    """
   end
 
   @doc """
@@ -211,8 +600,8 @@ defmodule ForemanWeb.CoreComponents do
       end)
 
     ~H"""
-    <div class="fieldset mb-2">
-      <label for={@id}>
+    <div class="mb-3">
+      <label for={@id} class="flex cursor-pointer items-center gap-2.5 text-sm text-ink">
         <input
           type="hidden"
           name={@name}
@@ -220,17 +609,17 @@ defmodule ForemanWeb.CoreComponents do
           disabled={@rest[:disabled]}
           form={@rest[:form]}
         />
-        <span class="label">
-          <input
-            type="checkbox"
-            id={@id}
-            name={@name}
-            value="true"
-            checked={@checked}
-            class={@class || "checkbox checkbox-sm"}
-            {@rest}
-          />{@label}
-        </span>
+        <input
+          type="checkbox"
+          id={@id}
+          name={@name}
+          value="true"
+          checked={@checked}
+          aria-invalid={@errors != [] && "true"}
+          class={@class || "checkbox"}
+          {@rest}
+        />
+        <span :if={@label} class="font-medium">{@label}</span>
       </label>
       <.error :for={msg <- @errors}>{msg}</.error>
     </div>
@@ -239,20 +628,26 @@ defmodule ForemanWeb.CoreComponents do
 
   def input(%{type: "select"} = assigns) do
     ~H"""
-    <div class="fieldset mb-2">
-      <label for={@id}>
-        <span :if={@label} class="label mb-1">{@label}</span>
+    <div class="mb-3">
+      <label :if={@label} for={@id} class="label">{@label}</label>
+      <div class="relative">
         <select
           id={@id}
           name={@name}
-          class={[@class || "w-full select", @errors != [] && (@error_class || "select-error")]}
+          class={[@class || "input", @errors != [] && @error_class]}
           multiple={@multiple}
+          aria-invalid={@errors != [] && "true"}
           {@rest}
         >
           <option :if={@prompt} value="">{@prompt}</option>
           {Phoenix.HTML.Form.options_for_select(@options, @value)}
         </select>
-      </label>
+        <.icon
+          :if={!@multiple}
+          name="hero-chevron-up-down-micro"
+          class="pointer-events-none absolute right-2.5 top-1/2 size-4 -translate-y-1/2 text-ink-3"
+        />
+      </div>
       <.error :for={msg <- @errors}>{msg}</.error>
     </div>
     """
@@ -260,19 +655,15 @@ defmodule ForemanWeb.CoreComponents do
 
   def input(%{type: "textarea"} = assigns) do
     ~H"""
-    <div class="fieldset mb-2">
-      <label for={@id}>
-        <span :if={@label} class="label mb-1">{@label}</span>
-        <textarea
-          id={@id}
-          name={@name}
-          class={[
-            @class || "w-full textarea",
-            @errors != [] && (@error_class || "textarea-error")
-          ]}
-          {@rest}
-        >{Phoenix.HTML.Form.normalize_value("textarea", @value)}</textarea>
-      </label>
+    <div class="mb-3">
+      <label :if={@label} for={@id} class="label">{@label}</label>
+      <textarea
+        id={@id}
+        name={@name}
+        class={[@class || "input", @errors != [] && @error_class]}
+        aria-invalid={@errors != [] && "true"}
+        {@rest}
+      >{Phoenix.HTML.Form.normalize_value("textarea", @value)}</textarea>
       <.error :for={msg <- @errors}>{msg}</.error>
     </div>
     """
@@ -281,55 +672,98 @@ defmodule ForemanWeb.CoreComponents do
   # All other inputs text, datetime-local, url, password, etc. are handled here...
   def input(assigns) do
     ~H"""
-    <div class="fieldset mb-2">
-      <label for={@id}>
-        <span :if={@label} class="label mb-1">{@label}</span>
-        <input
-          type={@type}
-          name={@name}
-          id={@id}
-          value={Phoenix.HTML.Form.normalize_value(@type, @value)}
-          class={[
-            @class || "w-full input",
-            @errors != [] && (@error_class || "input-error")
-          ]}
-          {@rest}
-        />
-      </label>
+    <div class="mb-3">
+      <label :if={@label} for={@id} class="label">{@label}</label>
+      <input
+        type={@type}
+        name={@name}
+        id={@id}
+        value={Phoenix.HTML.Form.normalize_value(@type, @value)}
+        class={[@class || "input", @errors != [] && @error_class]}
+        aria-invalid={@errors != [] && "true"}
+        {@rest}
+      />
       <.error :for={msg <- @errors}>{msg}</.error>
     </div>
     """
   end
 
-  # Helper used by inputs to generate form errors
-  defp error(assigns) do
+  @doc """
+  Renders one form error message.
+
+  `input/1` calls this for its own field errors. It is public because
+  some errors have no input to hang off: an `{:array, :string}` field
+  edited as a list of rows collects its errors on the field itself
+  ("must not contain duplicate options"), and those still have to
+  reach the page in the same voice as every other error.
+
+  ## Examples
+
+      <.error :for={msg <- Enum.map(@form[:options].errors, &translate_error/1)}>
+        {msg}
+      </.error>
+  """
+  attr :rest, :global
+  slot :inner_block, required: true
+
+  def error(assigns) do
     ~H"""
-    <p class="mt-1.5 flex gap-2 items-center text-sm text-error">
-      <.icon name="hero-exclamation-circle" class="size-5" />
+    <p class="mt-1.5 flex items-center gap-1.5 text-[13px] font-medium text-danger" {@rest}>
+      <.icon name="hero-exclamation-circle-micro" class="size-4 shrink-0" />
       {render_slot(@inner_block)}
     </p>
     """
   end
 
   @doc """
-  Renders a header with title.
+  Renders one row of a definition list: a quiet term and its value.
+
+  Built for read-only fact panels — media metadata, the record ids and
+  timestamps on a settings page. Wrap a group of these in a `<dl>`.
+
+  ## Examples
+
+      <dl class="space-y-3">
+        <.fact term="Added">{format_date(@asset.inserted_at)}</.fact>
+      </dl>
   """
+  attr :term, :string, required: true
+  slot :inner_block, required: true
+
+  def fact(assigns) do
+    ~H"""
+    <div class="flex items-center justify-between gap-4 text-sm">
+      <dt class="shrink-0 text-ink-2">{@term}</dt>
+      <dd class="flex min-w-0 items-center font-medium text-ink tabular-nums">
+        {render_slot(@inner_block)}
+      </dd>
+    </div>
+    """
+  end
+
+  @doc """
+  Renders a page header: title, optional subtitle, and the page's
+  actions on the right.
+  """
+  attr :class, :any, default: nil
   slot :inner_block, required: true
   slot :subtitle
   slot :actions
 
   def header(assigns) do
     ~H"""
-    <header class={[@actions != [] && "flex items-center justify-between gap-6", "pb-4"]}>
-      <div>
-        <h1 class="text-lg font-semibold leading-8">
+    <header class={["flex flex-wrap items-end justify-between gap-x-6 gap-y-3 pb-4", @class]}>
+      <div class="min-w-0">
+        <h1 class="text-2xl/8 font-semibold tracking-[-0.02em] text-ink">
           {render_slot(@inner_block)}
         </h1>
-        <p :if={@subtitle != []} class="text-sm text-base-content/70">
+        <p :if={@subtitle != []} class="mt-1 text-sm text-ink-2">
           {render_slot(@subtitle)}
         </p>
       </div>
-      <div class="flex-none">{render_slot(@actions)}</div>
+      <div :if={@actions != []} class="flex flex-wrap items-center gap-2">
+        {render_slot(@actions)}
+      </div>
     </header>
     """
   end
@@ -355,6 +789,8 @@ defmodule ForemanWeb.CoreComponents do
 
   slot :col, required: true do
     attr :label, :string
+    attr :class, :any, doc: "extra classes for the column's header and cells"
+    attr :align, :string, values: ~w(left right), doc: "right-aligns counts and other numbers"
   end
 
   slot :action, doc: "the slot for showing user actions in the last table column"
@@ -365,35 +801,62 @@ defmodule ForemanWeb.CoreComponents do
         assign(assigns, row_id: assigns.row_id || fn {id, _item} -> id end)
       end
 
+    # Clickable rows wash the whole row on hover, so their cells pad
+    # both outer edges and the table pulls out by the same amount: the
+    # wash runs past the content while the content still lines up with
+    # the page.
     ~H"""
-    <table class="table table-zebra">
-      <thead>
-        <tr>
-          <th :for={col <- @col}>{col[:label]}</th>
-          <th :if={@action != []}>
-            <span class="sr-only">Actions</span>
-          </th>
-        </tr>
-      </thead>
-      <tbody id={@id} phx-update={is_struct(@rows, Phoenix.LiveView.LiveStream) && "stream"}>
-        <tr :for={row <- @rows} id={@row_id && @row_id.(row)}>
-          <td
-            :for={col <- @col}
-            phx-click={@row_click && @row_click.(row)}
-            class={@row_click && "hover:cursor-pointer"}
-          >
-            {render_slot(col, @row_item.(row))}
-          </td>
-          <td :if={@action != []} class="w-0 font-semibold">
-            <div class="flex gap-4">
-              <%= for action <- @action do %>
-                {render_slot(action, @row_item.(row))}
-              <% end %>
-            </div>
-          </td>
-        </tr>
-      </tbody>
-    </table>
+    <div class={["overflow-x-auto", @row_click && "-mx-3"]}>
+      <table class="w-full border-separate border-spacing-0 text-sm">
+        <thead>
+          <tr>
+            <th
+              :for={col <- @col}
+              class={[
+                "border-b border-line px-3 py-2 text-xs font-medium text-ink-2",
+                !@row_click && "first:pl-0",
+                if(col[:align] == "right", do: "text-right", else: "text-left"),
+                col[:class]
+              ]}
+            >
+              {col[:label]}
+            </th>
+            <th :if={@action != []} class={["border-b border-line py-2 pl-3", @row_click && "pr-3"]}>
+              <span class="sr-only">{"Actions"}</span>
+            </th>
+          </tr>
+        </thead>
+        <tbody id={@id} phx-update={is_struct(@rows, Phoenix.LiveView.LiveStream) && "stream"}>
+          <tr :for={row <- @rows} id={@row_id && @row_id.(row)} class="group">
+            <td
+              :for={col <- @col}
+              phx-click={@row_click && @row_click.(row)}
+              class={[
+                "border-b border-line px-3 py-3 align-middle text-ink transition-colors",
+                if(@row_click, do: "cursor-pointer group-hover:bg-subtle", else: "first:pl-0"),
+                col[:align] == "right" && "text-right",
+                col[:class]
+              ]}
+            >
+              {render_slot(col, @row_item.(row))}
+            </td>
+            <td
+              :if={@action != []}
+              class={[
+                "w-0 border-b border-line py-3 pl-3 text-right transition-colors",
+                @row_click && "pr-3 group-hover:bg-subtle"
+              ]}
+            >
+              <div class="flex items-center justify-end gap-1">
+                <%= for action <- @action do %>
+                  {render_slot(action, @row_item.(row))}
+                <% end %>
+              </div>
+            </td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
     """
   end
 
@@ -413,14 +876,12 @@ defmodule ForemanWeb.CoreComponents do
 
   def list(assigns) do
     ~H"""
-    <ul class="list">
-      <li :for={item <- @item} class="list-row">
-        <div class="list-col-grow">
-          <div class="font-bold">{item.title}</div>
-          <div>{render_slot(item)}</div>
-        </div>
-      </li>
-    </ul>
+    <dl class="divide-y divide-line text-sm">
+      <div :for={item <- @item} class="flex items-baseline justify-between gap-4 py-2.5">
+        <dt class="text-ink-2">{item.title}</dt>
+        <dd class="text-right font-medium text-ink tabular-nums">{render_slot(item)}</dd>
+      </div>
+    </dl>
     """
   end
 
@@ -451,15 +912,149 @@ defmodule ForemanWeb.CoreComponents do
     """
   end
 
+  @doc """
+  Renders a user's avatar: the profile photo stored at SSO login, an
+  external avatar URL as a fallback, or the first letter of their
+  email.
+
+  ## Examples
+
+      <.avatar user={@current_scope.user} />
+      <.avatar user={user} class="size-8 text-sm" />
+  """
+  attr :user, Foreman.Accounts.User, required: true
+  attr :class, :string, default: "size-10"
+
+  def avatar(%{user: %{avatar_url: url}} = assigns) when is_binary(url) do
+    ~H"""
+    <img src={@user.avatar_url} class={[@class, "shrink-0 rounded-full object-cover"]} alt="" />
+    """
+  end
+
+  def avatar(assigns) do
+    ~H"""
+    <div class={[
+      @class,
+      "flex shrink-0 select-none items-center justify-center rounded-full bg-muted font-semibold text-ink-2"
+    ]}>
+      {@user.login |> String.first() |> String.upcase()}
+    </div>
+    """
+  end
+
+  @doc """
+  Renders a modal dialog.
+
+  Open it from anywhere with `show_modal/2`; it closes on escape,
+  click-away, or its close button.
+
+  ## Examples
+
+      <.modal id="upload-modal">
+        <h2 id="upload-modal-title">Upload videos</h2>
+        ...
+      </.modal>
+
+      <.button phx-click={show_modal("upload-modal")}>Upload</.button>
+
+  An element with id `"\#{id}-title"` inside the modal labels the
+  dialog for assistive technology.
+  """
+  attr :id, :string, required: true
+  attr :show, :boolean, default: false, doc: "opens the modal on mount"
+
+  attr :on_cancel, JS,
+    default: %JS{},
+    doc: "extra JS commands to run when the modal is dismissed"
+
+  slot :inner_block, required: true
+
+  def modal(assigns) do
+    ~H"""
+    <div
+      id={@id}
+      phx-mounted={@show && show_modal(@id)}
+      phx-remove={hide_modal(@id)}
+      data-cancel={JS.exec(@on_cancel, "phx-remove")}
+      class="relative z-50 hidden"
+    >
+      <div
+        id={"#{@id}-bg"}
+        class="fixed inset-0 bg-zinc-900/40 backdrop-blur-[2px]"
+        aria-hidden="true"
+      />
+      <div
+        class="fixed inset-0 overflow-y-auto"
+        aria-labelledby={"#{@id}-title"}
+        role="dialog"
+        aria-modal="true"
+        tabindex="0"
+      >
+        <div class="flex min-h-full items-center justify-center p-4 sm:p-6">
+          <.focus_wrap
+            id={"#{@id}-container"}
+            phx-window-keydown={JS.exec("data-cancel", to: "##{@id}")}
+            phx-key="escape"
+            phx-click-away={JS.exec("data-cancel", to: "##{@id}")}
+            class="relative hidden w-full max-w-lg rounded-2xl bg-raised p-6 shadow-overlay ring-1 ring-line"
+          >
+            <.icon_button
+              icon="hero-x-mark"
+              label="close"
+              phx-click={JS.exec("data-cancel", to: "##{@id}")}
+              class="absolute right-3 top-3"
+            />
+            <div id={"#{@id}-content"}>
+              {render_slot(@inner_block)}
+            </div>
+          </.focus_wrap>
+        </div>
+      </div>
+    </div>
+    """
+  end
+
+  @doc """
+  Opens the modal with the given id.
+  """
+  def show_modal(js \\ %JS{}, id) when is_binary(id) do
+    js
+    |> JS.show(to: "##{id}")
+    |> JS.show(
+      to: "##{id}-bg",
+      time: 200,
+      transition: {"transition-opacity ease-out duration-200", "opacity-0", "opacity-100"}
+    )
+    |> show("##{id}-container")
+    |> JS.add_class("overflow-hidden", to: "body")
+    |> JS.focus_first(to: "##{id}-content")
+  end
+
+  @doc """
+  Closes the modal with the given id.
+  """
+  def hide_modal(js \\ %JS{}, id) do
+    js
+    |> JS.hide(
+      to: "##{id}-bg",
+      transition: {"transition-opacity ease-in duration-200", "opacity-100", "opacity-0"}
+    )
+    |> hide("##{id}-container")
+    |> JS.hide(to: "##{id}", transition: {"block", "block", "block"})
+    |> JS.remove_class("overflow-hidden", to: "body")
+    |> JS.pop_focus()
+  end
+
   ## JS Commands
 
-  def show(js \\ %JS{}, selector) do
+  def show(js \\ %JS{}, selector, display \\ "block") do
     JS.show(js,
       to: selector,
-      time: 300,
+      display: display,
+      time: 220,
       transition:
-        {"transition-all ease-out duration-300",
-         "opacity-0 translate-y-4 sm:translate-y-0 sm:scale-95",
+        {"transition-all ease-(--ease-out-expo) duration-220",
+         "opacity-0 translate-y-2 sm:translate-y-0 sm:scale-[0.98]",
          "opacity-100 translate-y-0 sm:scale-100"}
     )
   end
@@ -467,26 +1062,15 @@ defmodule ForemanWeb.CoreComponents do
   def hide(js \\ %JS{}, selector) do
     JS.hide(js,
       to: selector,
-      time: 200,
+      time: 150,
       transition:
-        {"transition-all ease-in duration-200", "opacity-100 translate-y-0 sm:scale-100",
-         "opacity-0 translate-y-4 sm:translate-y-0 sm:scale-95"}
+        {"transition-all ease-in duration-150", "opacity-100 translate-y-0 sm:scale-100",
+         "opacity-0 translate-y-2 sm:translate-y-0 sm:scale-[0.98]"}
     )
   end
 
-  @doc """
-  Translates an error message using gettext.
-  """
+  @doc "Interpolates an Ecto error message."
   def translate_error({msg, opts}) do
-    # You can make use of gettext to translate error messages by
-    # uncommenting and adjusting the following code:
-
-    # if count = opts[:count] do
-    #   Gettext.dngettext(ForemanWeb.Gettext, "errors", msg, msg, count, opts)
-    # else
-    #   Gettext.dgettext(ForemanWeb.Gettext, "errors", msg, opts)
-    # end
-
     Enum.reduce(opts, msg, fn {key, value}, acc ->
       String.replace(acc, "%{#{key}}", fn _ -> to_string(value) end)
     end)

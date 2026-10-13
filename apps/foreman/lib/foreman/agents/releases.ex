@@ -30,7 +30,22 @@ defmodule Foreman.Agents.Releases do
   configured release public key, so the control plane can't be used to
   hand out a build CI didn't sign.
   """
+  # sobelow_skip ["Traversal.FileModule"]
+  # version and target are checked against strict patterns before they
+  # reach a path; tarball_path is the admin's own upload.
   def register(version, target, tarball_path, signature) do
+    with :ok <- check_name(version, ~r/\A\d{1,4}\.\d{1,4}\.\d{1,4}(-[0-9A-Za-z.]{1,32})?\z/, "version"),
+         :ok <- check_name(target, ~r/\A(linux|darwin)-(amd64|arm64)\z/, "target") do
+      do_register(version, target, tarball_path, signature)
+    end
+  end
+
+  defp check_name(value, pattern, label) do
+    if is_binary(value) and Regex.match?(pattern, value), do: :ok, else: {:error, "invalid #{label}"}
+  end
+
+  # sobelow_skip ["Traversal.FileModule"]
+  defp do_register(version, target, tarball_path, signature) do
     sha =
       tarball_path
       |> File.stream!(65_536)

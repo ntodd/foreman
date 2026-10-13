@@ -1,0 +1,19 @@
+# Read by `mix sobelow --config` (the precommit alias). Every finding at
+# any confidence fails the build unless an inline `# sobelow_skip [...]`
+# explains it.
+[
+  verbose: false,
+  private: true,
+  skip: true,
+  router: nil,
+  exit: "low",
+  format: "txt",
+  out: nil,
+  threshold: "low",
+  # Config.CSWH: config checks ignore inline skips. The agent socket
+  # (endpoint.ex) sets check_origin: false on purpose; agents aren't
+  # browsers, carry no cookies, and sign every connect. The LiveView
+  # socket checks origins against PHX_HOST in prod (runtime.exs).
+  ignore: ["Config.CSWH"],
+  ignore_files: []
+]

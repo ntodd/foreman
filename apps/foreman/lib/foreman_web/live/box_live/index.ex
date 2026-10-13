@@ -1,0 +1,190 @@
+defmodule ForemanWeb.BoxLive.Index do
+  @moduledoc "Boxes: their status and capacity, and (admins) adding new ones."
+  use ForemanWeb, :live_view
+
+  import ForemanWeb.ForemanComponents
+
+  alias Foreman.{Accounts, Boxes, Capacity, Environments, Scope}
+
+  @impl true
+  def mount(_params, _session, socket) do
+    if connected?(socket), do: Phoenix.PubSub.subscribe(Foreman.PubSub, "boxes")
+
+    {:ok,
+     socket
+     |> assign(:page_title, "Boxes")
+     |> assign(:join, nil)
+     |> assign(
+       :form,
+       to_form(%{"box_name" => "", "owner_user_id" => socket.assigns.current_scope.user.id},
+         as: :box
+       )
+     )
+     |> assign(
+       :users,
+       if(Scope.admin?(socket.assigns.current_scope), do: Accounts.list_users(), else: [])
+     )
+     |> load()}
+  end
+
+  defp load(socket) do
+    boxes =
+      for box <- Boxes.list_boxes(socket.assigns.current_scope) do
+        envs = Environments.live_for_box(box.id)
+
+        %{
+          box: box,
+          online: Boxes.online?(box.id),
+          summary: Capacity.box_summary(box, envs),
+          count: length(envs)
+        }
+      end
+
+    assign(socket, :boxes, boxes)
+  end
+
+  @impl true
+  def handle_event("create_token", %{"box" => params}, socket) do
+    case Boxes.create_join_token(socket.assigns.current_scope, params) do
+      {:ok, token} ->
+        name = params["box_name"]
+
+        command =
+          "curl -fsSL #{Foreman.Config.base_url()}/agent/install.sh | sudo sh -s -- --token #{token}"
+
+        {:noreply, assign(socket, :join, %{name: name, token: token, command: command})}
+
+      {:error, %Ecto.Changeset{} = changeset} ->
+        {:noreply, assign(socket, :form, to_form(changeset, as: :box))}
+
+      {:error, _} ->
+        {:noreply, put_flash(socket, :error, "Only admins can add boxes.")}
+    end
+  end
+
+  def handle_event("done", _params, socket), do: {:noreply, assign(socket, :join, nil)}
+
+  @impl true
+  def handle_info(_message, socket), do: {:noreply, load(socket)}
+
+  @impl true
+  def render(assigns) do
+    ~H"""
+    <Layouts.app flash={@flash} current_scope={@current_scope} current_path={@current_path}>
+      <:breadcrumb>Boxes</:breadcrumb>
+
+      <.header>
+        Boxes
+        <:subtitle>
+          Machines running the Foreman agent. The agent dials out, so boxes need no open ports.
+        </:subtitle>
+      </.header>
+
+      <div :if={@boxes != []} class="grid gap-4 md:grid-cols-2">
+        <.link
+          :for={card <- @boxes}
+          navigate={~p"/boxes/#{card.box.id}"}
+          id={"box-#{card.box.id}"}
+          class="rounded-xl border border-line bg-raised p-5 shadow-xs transition-shadow hover:shadow-raised"
+        >
+          <div class="mb-4 flex items-start justify-between gap-3">
+            <div class="min-w-0">
+              <p class="truncate text-[15px] font-semibold text-ink">{card.box.name}</p>
+              <p class="truncate text-xs text-ink-3">
+                {card.box.hostname || "never connected"}<span :if={card.box.agent_version}> · agent {card.box.agent_version}</span><span :if={
+                  card.box.owner_user
+                }> · {card.box.owner_user.login}</span>
+              </p>
+            </div>
+            <div class="flex items-center gap-1.5">
+              <.badge :if={card.summary.contention} color="amber" size="sm">Contention</.badge>
+              <.box_status online={card.online} />
+            </div>
+          </div>
+          <div class="grid gap-3 sm:grid-cols-2">
+            <.capacity_bar
+              label="CPU used"
+              value={card.summary.used_cpus}
+              max={card.summary.cpus}
+              unit=" cores"
+              threshold={card.box.contention_threshold}
+            />
+            <.capacity_bar
+              label="CPU provisioned"
+              value={card.summary.provisioned_cpus}
+              max={card.summary.cpus}
+              unit=" cores"
+              threshold={card.box.contention_threshold}
+            />
+            <.capacity_bar
+              label="Memory used"
+              value={card.summary.used_memory_mb}
+              max={card.summary.memory_mb}
+              unit=" GiB"
+              format={&gib/1}
+              threshold={card.box.contention_threshold}
+            />
+            <.capacity_bar
+              label="Memory provisioned"
+              value={card.summary.provisioned_memory_mb}
+              max={card.summary.memory_mb}
+              unit=" GiB"
+              format={&gib/1}
+              threshold={card.box.contention_threshold}
+            />
+          </div>
+          <p class="mt-4 text-xs text-ink-3">
+            {card.count} {if card.count == 1, do: "environment", else: "environments"} · policy: {card.box.capacity_policy}
+          </p>
+        </.link>
+      </div>
+
+      <.panel :if={@boxes == []}>
+        <.empty_state id="no-boxes" icon="hero-server-stack" title="No boxes yet">
+          {if Scope.admin?(@current_scope),
+            do: "Add one below: it takes one command on the machine.",
+            else: "Ask an admin to add a box for you."}
+        </.empty_state>
+      </.panel>
+
+      <.panel :if={Scope.admin?(@current_scope)} title="Add a box" id="add-box">
+        <:subtitle>Creates a single-use join token that expires in an hour.</:subtitle>
+        <%= if @join do %>
+          <div class="space-y-4">
+            <.command
+              id="install-command"
+              label={"Run this on #{@join.name} (Linux with Docker, git and Node):"}
+              command={@join.command}
+            />
+            <.callout kind="info">
+              The token is shown once. The agent generates its own key and uses the token to enroll; after that, the token is spent.
+            </.callout>
+            <.button size="sm" phx-click="done">Done</.button>
+          </div>
+        <% else %>
+          <.form
+            for={@form}
+            id="join-token-form"
+            phx-submit="create_token"
+            class="grid items-end gap-3 sm:grid-cols-[1fr_1fr_auto]"
+          >
+            <.input
+              field={@form[:box_name]}
+              label="Box name"
+              placeholder="desktop"
+              autocomplete="off"
+            />
+            <.input
+              field={@form[:owner_user_id]}
+              type="select"
+              label="Owner"
+              options={Enum.map(@users, &{&1.login, &1.id})}
+            />
+            <.button type="submit" variant="primary">Create join token</.button>
+          </.form>
+        <% end %>
+      </.panel>
+    </Layouts.app>
+    """
+  end
+end
