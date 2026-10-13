@@ -24,7 +24,7 @@ defmodule ForemanWeb.AuthHTML do
 
         <p :if={@dev_sign_in} class="mt-5 text-center text-xs text-ink-3">
           Development:
-          <.link href={~p"/dev/sign-in/dev"} class="font-medium text-accent-ink underline">sign in as "dev"</.link>
+          <.link href="/dev/sign-in/dev" class="font-medium text-accent-ink underline">sign in as "dev"</.link>
         </p>
       </div>
     </Layouts.app>

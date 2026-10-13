@@ -22,7 +22,8 @@ defmodule Mix.Tasks.ForemanAgent.Sign do
 
   def run([version, target, path]) do
     private =
-      System.get_env("FOREMAN_RELEASE_PRIVATE_KEY") || Mix.raise("FOREMAN_RELEASE_PRIVATE_KEY is not set")
+      System.get_env("FOREMAN_RELEASE_PRIVATE_KEY") ||
+        Mix.raise("FOREMAN_RELEASE_PRIVATE_KEY is not set")
 
     sha = path |> File.read!() |> then(&:crypto.hash(:sha256, &1)) |> Base.encode16(case: :lower)
     Mix.shell().info(Auth.sign_release(version, target, sha, Base.decode64!(private)))

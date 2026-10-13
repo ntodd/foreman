@@ -5,7 +5,9 @@ defmodule ForemanProtocol.RedactionTest do
 
   test "replaces values, longest first, and skips short ones" do
     r = Redaction.prepare(["abcdef123", "abcdef123456", "on", nil])
-    assert Redaction.redact(r, "x abcdef123456 y abcdef123 z on") == "x [redacted] y [redacted] z on"
+
+    assert Redaction.redact(r, "x abcdef123456 y abcdef123 z on") ==
+             "x [redacted] y [redacted] z on"
   end
 
   test "matches the lines of a multi-line value" do
