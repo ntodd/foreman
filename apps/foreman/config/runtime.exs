@@ -119,6 +119,9 @@ if config_env() == :prod do
   config :foreman, ForemanWeb.Endpoint,
     url: [host: host, port: 443, scheme: "https"],
     http: [ip: ip],
-    check_origin: ["https://" <> host | String.split(System.get_env("FOREMAN_EXTRA_ORIGINS", ""), ",", trim: true)],
+    check_origin: [
+      "https://" <> host
+      | String.split(System.get_env("FOREMAN_EXTRA_ORIGINS", ""), ",", trim: true)
+    ],
     secret_key_base: secret_key_base
 end

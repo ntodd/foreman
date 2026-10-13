@@ -65,14 +65,23 @@ defmodule ForemanWeb.Endpoint do
   # loopback. On in production (FOREMAN_FORCE_SSL).
   defp force_ssl(conn, _opts) do
     if Application.get_env(:foreman, :force_ssl, false) do
-      Plug.SSL.call(conn, Plug.SSL.init(rewrite_on: [:x_forwarded_proto], exclude: ["localhost", "127.0.0.1"]))
+      Plug.SSL.call(
+        conn,
+        Plug.SSL.init(rewrite_on: [:x_forwarded_proto], exclude: ["localhost", "127.0.0.1"])
+      )
     else
       conn
     end
   end
 
   defp session(conn, _opts) do
-    opts = Keyword.put(@session_options, :secure, Application.get_env(:foreman, :secure_cookies, false))
+    opts =
+      Keyword.put(
+        @session_options,
+        :secure,
+        Application.get_env(:foreman, :secure_cookies, false)
+      )
+
     Plug.Session.call(conn, Plug.Session.init(opts))
   end
 end

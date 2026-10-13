@@ -158,13 +158,22 @@ defmodule ForemanWeb.EnvironmentLive.Index do
 
             <div class="flex items-center gap-1.5">
               <.button
-                :if={env.observed_state in ~w(stopped error missing partial)}
+                :if={env.created_once and env.observed_state in ~w(stopped error missing partial)}
                 size="sm"
                 icon="hero-play-mini"
                 phx-click="start"
                 phx-value-id={env.id}
               >
                 Start
+              </.button>
+              <.button
+                :if={not env.created_once and env.observed_state == "error"}
+                size="sm"
+                icon="hero-arrow-path-mini"
+                phx-click="retry"
+                phx-value-id={env.id}
+              >
+                Retry
               </.button>
               <.button
                 :if={env.observed_state == "running"}

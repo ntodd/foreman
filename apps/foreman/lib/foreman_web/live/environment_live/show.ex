@@ -70,6 +70,7 @@ defmodule ForemanWeb.EnvironmentLive.Show do
     result =
       case action do
         "start" -> Environments.start(scope, env)
+        "retry" -> Environments.retry(scope, env)
         "stop" -> Environments.stop(scope, env)
         "rebuild" -> Environments.rebuild(scope, env)
         "restart_affected" -> Environments.restart(scope, env, :affected)
@@ -220,7 +221,7 @@ defmodule ForemanWeb.EnvironmentLive.Show do
         <:actions>
           <.state_badge state={@env.observed_state} />
           <.button
-            :if={@env.observed_state in ~w(stopped error missing partial)}
+            :if={@env.created_once and @env.observed_state in ~w(stopped error missing partial)}
             phx-click="action"
             phx-value-do="start"
             icon="hero-play-mini"
@@ -228,6 +229,16 @@ defmodule ForemanWeb.EnvironmentLive.Show do
             size="sm"
           >
             Start
+          </.button>
+          <.button
+            :if={not @env.created_once and @env.observed_state == "error"}
+            phx-click="action"
+            phx-value-do="retry"
+            icon="hero-arrow-path-mini"
+            variant="primary"
+            size="sm"
+          >
+            Retry
           </.button>
           <.button
             :if={@env.observed_state in ~w(running partial)}

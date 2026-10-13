@@ -206,6 +206,9 @@ defmodule Foreman.Environments do
   def restart(scope, env, :all), do: action(scope, env, :restart_all)
   def git_status(scope, env), do: action(scope, env, :git_status)
 
+  @doc "Runs the create again, for an environment whose first create failed."
+  def retry(scope, env), do: action(scope, env, :create)
+
   def logs(scope, env, service \\ nil) do
     action(scope, env, :logs, %{"service" => service, "tail" => 300})
   end
@@ -220,7 +223,7 @@ defmodule Foreman.Environments do
         case action do
           :stop -> "stopped"
           :destroy -> "destroyed"
-          a when a in [:start, :rebuild, :restart_affected, :restart_all] -> "running"
+          a when a in [:create, :start, :rebuild, :restart_affected, :restart_all] -> "running"
           _ -> env.desired_state
         end
 

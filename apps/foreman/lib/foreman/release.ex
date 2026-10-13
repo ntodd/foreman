@@ -23,8 +23,11 @@ defmodule Foreman.Release do
     {:ok, _} = Application.ensure_all_started(@app)
 
     case Foreman.Agents.Releases.register(version, target, tarball_path, signature) do
-      {:ok, release} -> IO.puts("published agent #{release.version} for #{release.target} (#{release.sha256})")
-      {:error, message} -> raise "couldn't publish: #{inspect(message)}"
+      {:ok, release} ->
+        IO.puts("published agent #{release.version} for #{release.target} (#{release.sha256})")
+
+      {:error, message} ->
+        raise "couldn't publish: #{inspect(message)}"
     end
   end
 
