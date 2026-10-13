@@ -36,6 +36,7 @@ if config_env() != :test do
     allowed_org: System.get_env("FOREMAN_ALLOWED_ORG"),
     git_base_url: System.get_env("FOREMAN_GIT_BASE_URL", "https://github.com"),
     agent_release_public_key: System.get_env("FOREMAN_AGENT_RELEASE_PUBLIC_KEY"),
+    agent_release_dir: System.get_env("FOREMAN_AGENT_RELEASE_DIR"),
     github_app: %{
       app_id: System.get_env("FOREMAN_GITHUB_APP_ID"),
       client_id: System.get_env("FOREMAN_GITHUB_CLIENT_ID"),
@@ -109,9 +110,15 @@ if config_env() == :prod do
     |> String.to_charlist()
     |> :inet.parse_address()
 
+  config :foreman,
+    force_ssl: System.get_env("FOREMAN_FORCE_SSL", "true") == "true",
+    secure_cookies: System.get_env("FOREMAN_SECURE_COOKIES", "true") == "true",
+    # Overrides the https://PHX_HOST base URL agents and GitHub are given.
+    base_url: System.get_env("FOREMAN_BASE_URL")
+
   config :foreman, ForemanWeb.Endpoint,
     url: [host: host, port: 443, scheme: "https"],
     http: [ip: ip],
-    check_origin: ["https://" <> host],
+    check_origin: ["https://" <> host | String.split(System.get_env("FOREMAN_EXTRA_ORIGINS", ""), ",", trim: true)],
     secret_key_base: secret_key_base
 end

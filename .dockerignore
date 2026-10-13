@@ -1,0 +1,11 @@
+**/_build
+**/deps
+**/tmp
+**/node_modules
+**/*.db
+**/*.db-*
+**/.elixir_ls
+**/erl_crash.dump
+.tools
+.git
+apps/foreman/priv/static/assets

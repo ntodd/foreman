@@ -1,7 +1,8 @@
 defmodule ForemanAgent.MixProject do
   use Mix.Project
 
-  @version "0.1.0"
+  # CI sets the version for tagged builds; self-update compares it.
+  @version System.get_env("FOREMAN_AGENT_VERSION", "0.1.0")
 
   def project do
     [
@@ -71,6 +72,7 @@ defmodule ForemanAgent.MixProject do
   defp copy_feature(release) do
     target = Path.join([release.path, "lib", "foreman_agent-#{@version}", "priv", "feature"])
     File.rm_rf!(target)
+    File.mkdir_p!(Path.dirname(target))
     File.cp_r!(Path.expand("../../features/src/foreman", __DIR__), target)
     release
   end

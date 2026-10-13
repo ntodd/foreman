@@ -30,7 +30,18 @@ defmodule ForemanAgent.Handler do
   def handle(%Command{type: "box.gc"}, log), do: gc(ctx(log))
 
   def handle(%Command{type: "agent.update", payload: payload}, log) do
-    Updater.run(payload, Config.get(), log)
+    with {:ok, result} <- Updater.run(payload, Config.get(), log) do
+      # Exit once the result has had time to reach the control plane;
+      # systemd (or the box's loop) starts the new release.
+      if Application.get_env(:foreman_agent, :exit_after_update, true) do
+        spawn(fn ->
+          Process.sleep(3_000)
+          System.stop(0)
+        end)
+      end
+
+      {:ok, result}
+    end
   end
 
   def inventory do

@@ -5,6 +5,8 @@
 #   bin/foreman eval 'Code.eval_file("e2e/seed.exs")'
 alias Foreman.{Accounts, Boxes, Repos, Scope}
 
+{:ok, _} = Application.ensure_all_started(:foreman)
+
 login = System.get_env("E2E_ADMIN", "dev")
 box_name = System.get_env("E2E_BOX", "local")
 

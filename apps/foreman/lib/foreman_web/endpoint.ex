@@ -1,8 +1,8 @@
 defmodule ForemanWeb.Endpoint do
   use Phoenix.Endpoint, otp_app: :foreman
 
-  # Signed and encrypted. Secure-only in production, where the control
-  # plane is served over HTTPS (tailscale serve).
+  # Signed and encrypted. The Secure flag is added at runtime
+  # (FOREMAN_SECURE_COOKIES, on in production).
   @session_options [
     store: :cookie,
     key: "_foreman_key",
@@ -10,7 +10,6 @@ defmodule ForemanWeb.Endpoint do
     encryption_salt: "ZqJ3p1fU",
     same_site: "Lax",
     http_only: true,
-    secure: Application.compile_env(:foreman, :secure_cookies, false),
     max_age: 30 * 24 * 60 * 60
   ]
 
@@ -46,6 +45,7 @@ defmodule ForemanWeb.Endpoint do
     param_key: "request_logger",
     cookie_key: "request_logger"
 
+  plug :force_ssl
   plug Plug.RequestId
   plug Plug.Telemetry, event_prefix: [:phoenix, :endpoint]
 
@@ -57,6 +57,22 @@ defmodule ForemanWeb.Endpoint do
 
   plug Plug.MethodOverride
   plug Plug.Head
-  plug Plug.Session, @session_options
+  plug :session
   plug ForemanWeb.Router
+
+  # Redirects to HTTPS unless the request arrived over it (directly, or
+  # through `tailscale serve`, which sets X-Forwarded-Proto) or from
+  # loopback. On in production (FOREMAN_FORCE_SSL).
+  defp force_ssl(conn, _opts) do
+    if Application.get_env(:foreman, :force_ssl, false) do
+      Plug.SSL.call(conn, Plug.SSL.init(rewrite_on: [:x_forwarded_proto], exclude: ["localhost", "127.0.0.1"]))
+    else
+      conn
+    end
+  end
+
+  defp session(conn, _opts) do
+    opts = Keyword.put(@session_options, :secure, Application.get_env(:foreman, :secure_cookies, false))
+    Plug.Session.call(conn, Plug.Session.init(opts))
+  end
 end

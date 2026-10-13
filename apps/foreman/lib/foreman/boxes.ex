@@ -188,10 +188,14 @@ defmodule Foreman.Boxes do
 
   def update_box(%Scope{} = scope, %Box{} = box, attrs) do
     with :ok <- authorize_admin(scope),
-         {:ok, box} <- box |> Box.settings_changeset(normalize(attrs)) |> Repo.update() do
-      Audit.log(scope, "box.update", box)
-      broadcast(box, :updated)
-      {:ok, box}
+         {:ok, updated} <- box |> Box.settings_changeset(normalize(attrs)) |> Repo.update() do
+      Audit.log(scope, "box.update", updated)
+      broadcast(updated, :updated)
+
+      if updated.desired_agent_version != box.desired_agent_version and online?(updated.id),
+        do: Foreman.Agents.Releases.maybe_update(updated)
+
+      {:ok, updated}
     end
   end
 

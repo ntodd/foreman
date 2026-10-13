@@ -1,0 +1,197 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  # Weekly, for advisories published against a lock nobody has touched.
+  schedule:
+    - cron: "23 6 * * 1"
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+env:
+  ELIXIR_VERSION: "1.20.4"
+  OTP_VERSION: "29.1.1"
+
+jobs:
+  protocol:
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: apps/foreman_protocol
+    env:
+      MIX_ENV: test
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: erlef/setup-beam@54075bcc5e249e4758d363f27d099f55d843f124 # v1.24.1
+        with:
+          elixir-version: ${{ env.ELIXIR_VERSION }}
+          otp-version: ${{ env.OTP_VERSION }}
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            apps/foreman_protocol/deps
+            apps/foreman_protocol/_build
+          key: protocol-${{ env.ELIXIR_VERSION }}-${{ env.OTP_VERSION }}-${{ hashFiles('apps/foreman_protocol/mix.lock') }}
+      - run: mix deps.get
+      - run: mix format --check-formatted
+      - run: mix compile --warnings-as-errors
+      - run: mix credo --strict
+      - run: mix test
+
+  agent:
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: apps/foreman_agent
+    env:
+      MIX_ENV: test
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: erlef/setup-beam@54075bcc5e249e4758d363f27d099f55d843f124 # v1.24.1
+        with:
+          elixir-version: ${{ env.ELIXIR_VERSION }}
+          otp-version: ${{ env.OTP_VERSION }}
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            apps/foreman_agent/deps
+            apps/foreman_agent/_build
+          key: agent-${{ env.ELIXIR_VERSION }}-${{ env.OTP_VERSION }}-${{ hashFiles('apps/foreman_agent/mix.lock') }}
+      - run: mix deps.get
+      - run: mix format --check-formatted
+      - run: mix compile --warnings-as-errors
+      - run: mix credo --strict
+      - run: mix test
+
+  # The agent against a real Docker daemon and the real devcontainer CLI.
+  agent-docker:
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: apps/foreman_agent
+    env:
+      MIX_ENV: test
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: erlef/setup-beam@54075bcc5e249e4758d363f27d099f55d843f124 # v1.24.1
+        with:
+          elixir-version: ${{ env.ELIXIR_VERSION }}
+          otp-version: ${{ env.OTP_VERSION }}
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "22"
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            apps/foreman_agent/deps
+            apps/foreman_agent/_build
+          key: agent-${{ env.ELIXIR_VERSION }}-${{ env.OTP_VERSION }}-${{ hashFiles('apps/foreman_agent/mix.lock') }}
+      - name: Install the devcontainer CLI
+        run: npm install --prefix "$RUNNER_TEMP/devcontainer" --no-fund --no-audit @devcontainers/cli@0.89.0
+      - run: mix deps.get
+      - run: mix test --only docker
+        env:
+          FOREMAN_DEVCONTAINER_CLI: ${{ runner.temp }}/devcontainer/node_modules/.bin/devcontainer
+
+  control-plane:
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        db: [sqlite, postgres]
+    defaults:
+      run:
+        working-directory: apps/foreman
+    env:
+      MIX_ENV: test
+      FOREMAN_DB: ${{ matrix.db }}
+      DATABASE_URL: ecto://postgres:postgres@localhost/foreman_test
+    services:
+      postgres:
+        image: ${{ matrix.db == 'postgres' && 'public.ecr.aws/docker/library/postgres:18' || '' }}
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 2s
+          --health-timeout 5s
+          --health-retries 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: erlef/setup-beam@54075bcc5e249e4758d363f27d099f55d843f124 # v1.24.1
+        with:
+          elixir-version: ${{ env.ELIXIR_VERSION }}
+          otp-version: ${{ env.OTP_VERSION }}
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            apps/foreman/deps
+            apps/foreman/_build
+          key: cp-${{ matrix.db }}-${{ env.ELIXIR_VERSION }}-${{ env.OTP_VERSION }}-${{ hashFiles('apps/foreman/mix.lock') }}
+      - run: mix deps.get
+      - run: mix format --check-formatted
+      - run: mix compile --warnings-as-errors
+      - run: mix credo --strict
+      - run: mix sobelow --config --exit
+      - run: mix test
+
+  feature:
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "22"
+      - name: ShellCheck
+        run: shellcheck -s sh features/src/foreman/install.sh features/src/foreman/scripts/* docker/box-entrypoint.sh apps/foreman/priv/agent/install.sh
+      - name: Test the feature in a real devcontainer
+        run: npx --yes @devcontainers/cli@0.89.0 features test --features foreman --base-image mcr.microsoft.com/devcontainers/base:debian --skip-scenarios features
+
+  images:
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Build the control plane image
+        run: docker build -f docker/control-plane.Dockerfile -t foreman .
+      - name: Build the box image
+        run: docker build -f docker/box.Dockerfile --target box -t foreman-box .
+
+  security:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - uses: erlef/setup-beam@54075bcc5e249e4758d363f27d099f55d843f124 # v1.24.1
+        with:
+          elixir-version: ${{ env.ELIXIR_VERSION }}
+          otp-version: ${{ env.OTP_VERSION }}
+      - name: Audit Hex advisories and retirements
+        if: ${{ !cancelled() }}
+        run: |
+          for app in foreman foreman_agent foreman_protocol; do
+            (cd "apps/$app" && mix deps.get >/dev/null && mix hex.audit) || exit 1
+          done
+      - name: Audit the control plane's dependencies (mix_audit)
+        if: ${{ !cancelled() }}
+        working-directory: apps/foreman
+        run: MIX_ENV=test mix deps.audit
+      - name: Scan for secrets
+        if: ${{ !cancelled() }}
+        uses: gitleaks/gitleaks-action@ff98106e4c7b2bc287b24eaf42907196329070c7 # v2.3.9
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
