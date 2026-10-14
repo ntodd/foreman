@@ -27,7 +27,7 @@ defmodule Foreman.TailscaleTest do
        [
          %{"id" => "1", "hostname" => env.slug, "tags" => ["tag:foreman-env"]},
          %{"id" => "2", "hostname" => "storefront-9", "tags" => ["tag:foreman-env"]},
-         %{"id" => "3", "hostname" => "nates-laptop", "tags" => []}
+         %{"id" => "3", "hostname" => "monas-laptop", "tags" => []}
        ]}
     end)
 
@@ -40,12 +40,12 @@ defmodule Foreman.TailscaleTest do
     on_exit(fn -> Application.put_env(:foreman, :slug_style, :personal) end)
 
     repo = repo_fixture(tailscale_tags: ["tag:staging-access"])
-    user = user_fixture(login: "NTodd")
+    user = user_fixture(login: "Mona")
 
     assert Tailscale.tags_for(repo, user) == [
              "tag:foreman-env",
              "tag:staging-access",
-             "tag:foreman-ntodd"
+             "tag:foreman-mona"
            ]
   end
 end

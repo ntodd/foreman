@@ -17,23 +17,22 @@ Foreman is a self-hosted replacement for GitHub Codespaces. A Phoenix control pl
 ## Non-goals
 
 - Codespaces compatibility. Repos can change to fit Foreman.
-- Multi-tenancy. Each deployment serves one team. The personal and work setups are separate deployments.
+- Multi-tenancy. Each deployment serves one team. A personal setup and a team setup are separate deployments.
 - A browser editor. You connect with your own editor or tools over SSH on the tailnet.
-- Remote IDE integration. Remote IDEs reach environments over SSH on the tailnet, which Foreman already provides.
 - Non-compose devcontainers (`image` / `dockerFile` configs) in v1. Every target repo uses compose.
 
 ## Deployments
 
-| | Personal | Work |
+| | Personal | Team |
 |---|---|---|
 | Control plane | Linux desktop | Small EC2 instance |
 | Database | SQLite (the default) | Postgres: Neon or RDS (`FOREMAN_DB=postgres` at build) |
 | Boxes | The desktop (local agent) | One or more Linux boxes per developer |
-| Users | 1 | 4 |
-| GitHub App installed on | `ntodd` | `acme` |
-| Tailnet | Personal | Work (Standard plan) |
+| Users | 1 | A few |
+| GitHub App installed on | Your account | The org |
+| Tailnet | Personal | The team's (Standard plan) |
 
-Both deployments run the same code with different config. Company secrets never live on the personal deployment.
+Both deployments run the same code with different config. Team secrets never live on a personal deployment.
 
 ## Components
 
@@ -125,13 +124,13 @@ The overlay sets `restart: "no"` on every service, so the agent controls start o
 2. The control plane resolves secrets and sends `env.secrets.write`.
 3. The control plane sends `env.start` for every environment whose desired state is `running`.
 
-As a result, environments don't come back after a reboot until the control plane is reachable. The personal control plane runs on the same box, so this only affects the work deployment.
+As a result, environments don't come back after a reboot until the control plane is reachable. The personal control plane runs on the same box, so this only affects team deployments.
 
 ## Environment lifecycle
 
 ### Naming
 
-- **Slug:** `<repo>-<n>` on the personal deployment, `<repo>-<login>-<n>` on work. For example `storefront-2` or `monolith-ntodd-1`.
+- **Slug:** `<repo>-<n>` on the personal deployment, `<repo>-<login>-<n>` on a team deployment. For example `storefront-2` or `storefront-alice-1`.
 - **The slug is used as:**
   - the compose project name (`COMPOSE_PROJECT_NAME`), which makes every named volume unique per copy
   - the Tailscale hostname
@@ -205,7 +204,7 @@ A devcontainer feature that ships inside the agent release, so a box always runs
 
 ### Stop, rebuild, destroy
 
-- **Stop:** `docker compose stop`. Sidecars get a graceful shutdown; for example, monolith's Neon Local deletes its branch on stop.
+- **Stop:** `docker compose stop`. Sidecars get a graceful shutdown; for example, a Neon Local sidecar deletes its branch on stop.
 - **Rebuild:** `devcontainer up --remove-existing-container`. Named volumes, the clone and the Tailscale identity survive.
 - **Destroy:**
   1. The agent runs `env.git_status`. The UI warns about a dirty tree or unpushed commits.
@@ -216,7 +215,7 @@ A devcontainer feature that ships inside the agent release, so a box always runs
 
 ### Tailscale per environment
 
-- **Auth keys:** the control plane holds a Tailscale OAuth client with the `auth_keys` scope. It mints one key per environment (`?ephemeral=false&preauthorized=true`) tagged `tag:foreman-env`, plus any tags configured on the repo (storefront uses `tag:staging-access`).
+- **Auth keys:** the control plane holds a Tailscale OAuth client with the `auth_keys` scope. It mints one key per environment (`?ephemeral=false&preauthorized=true`) tagged `tag:foreman-env`, plus any tags configured on the repo (for example `tag:staging-access`).
   - Tagged devices have key expiry disabled.
   - The auth key is only needed the first time. State persists in the `tailscale-state` volume, so rebuilds keep the same node.
 - **Hostname:** the slug, so you reach environments at `storefront-2`, `storefront-2:4000`, and so on.
@@ -224,10 +223,9 @@ A devcontainer feature that ships inside the agent release, so a box always runs
   - Hostnames land in public certificate transparency logs, so keep them bland.
   - Let's Encrypt rate limits are another reason to keep state persistent.
 - **SSH:** Tailscale SSH.
-  - The feature runs `tailscale up --ssh`, so `ssh nate@storefront-2` works on port 22 with no keys and no sshd.
+  - The feature runs `tailscale up --ssh`, so `ssh vscode@storefront-2` works on port 22 with no keys and no sshd.
   - Tailnet ACLs decide who can log in as which local user.
-  - SSH rules use `action: accept`, not `check`, so editors aren't sent to re-authenticate.
-  - Remote IDEs need nothing more.
+  - SSH rules use `action: accept`, not `check`, so editors and other SSH tools aren't sent to re-authenticate.
 - **DNS:** `--accept-dns` points `resolv.conf` at MagicDNS, which forwards to Docker's resolver. The feature keeps the existing check that compose service names still resolve.
 - **Cleanup:** an Oban job removes tailnet devices that no longer match a live environment.
 
@@ -237,7 +235,7 @@ Each environment is a full tailnet node, and anything running inside it (an npm 
 
 - `tag:foreman-env` may not initiate connections to user devices or to other environments.
 - Repo tags grant extra access when needed.
-- Work: environments also carry a per-developer tag (`tag:foreman-<login>`), owned by the OAuth client. That lets SSH and network rules limit each developer to their own environments. Whether developers can reach each other's environments is a team decision.
+- Team: environments also carry a per-developer tag (`tag:foreman-<login>`), owned by the OAuth client. That lets SSH and network rules limit each developer to their own environments. Whether developers can reach each other's environments is a team decision.
 
 ### Control plane exposure
 
@@ -247,7 +245,7 @@ The control plane listens only on the tailnet.
 
 ### Pricing note
 
-The Personal plan is free but non-commercial only. Work needs Standard ($8/seat/month), which includes 50 tagged devices and charges $1/month for each one after that. Environment nodes count as tagged devices, so cleaning up dead nodes saves money.
+The Personal plan is free but non-commercial only. A team needs Standard ($8/seat/month), which includes 50 tagged devices and charges $1/month for each one after that. Environment nodes count as tagged devices, so cleaning up dead nodes saves money.
 
 A Mac can be on only one tailnet at a time, so working on both deployments means switching between tailnets.
 
@@ -264,7 +262,7 @@ Secrets resolve in order of increasing priority:
 
 Values are write-only in the UI: once saved, they can be replaced but not read back. Every change goes to the audit log.
 
-- **Encryption:** Cloak.Ecto with AES-GCM. The personal key lives in the deployment's environment. The work key lives in AWS KMS or Secrets Manager.
+- **Encryption:** Cloak.Ecto with AES-GCM. The personal key lives in the deployment's environment. A team deployment's key lives in AWS KMS or Secrets Manager.
 - **Permissions:**
   - Owner and repo secrets: admins.
   - User secrets: the user.
@@ -286,7 +284,7 @@ Secrets reach a running environment in three ways:
 | Channel | Example | When a change takes effect |
 |---|---|---|
 | `secrets.env` sourced at login (default) | most app secrets | New shells immediately; running processes after a restart |
-| Compose interpolation (`${VAR}` in compose files) | monolith's Neon Local sidecars | After the affected services are recreated |
+| Compose interpolation (`${VAR}` in compose files) | sidecars such as Neon Local | After the affected services are recreated |
 | GitHub token file | git, `gh` | On the next use; no restart needed |
 
 Foreman doesn't use `--secrets-file` or `--remote-env`. The devcontainer CLI passes those values as `-e NAME=VALUE` on the host's `docker exec` command line, where any user on the box can read them with `ps` ([devcontainers/cli#1317](https://github.com/devcontainers/cli/issues/1317), open).
@@ -313,9 +311,9 @@ A full recreate is a separate **Rebuild** action and isn't offered here.
 
 ### App
 
-A GitHub App, installed on `ntodd` for personal and on `acme` for work (the org install needs admin approval).
+A GitHub App, installed on your account for a personal deployment or on the org for a team (the org install needs an org owner).
 
-- **Login:** the app's user OAuth flow. Membership in the installed org (or a configured team) controls who can log in to the work deployment.
+- **Login:** the app's user OAuth flow. Membership in the installed org (or a configured team) controls who can log in to a team deployment.
 - **Tokens:** user access tokens last 8 hours. Refresh tokens last 6 months and are single-use. Refreshes are serialized per user with a row lock, so two concurrent refreshes can't burn the same refresh token.
 - **Repo browsing:**
   - List the installation's repos.
@@ -329,7 +327,7 @@ By default, each environment gets a scoped user token from `POST /applications/{
 - **Scope:**
   - **Repos:** the environment's repo plus any extra repos configured on it.
   - **Permissions:** configured per repo, defaulting to `contents:write`, `pull_requests:write`, `issues:write` and `metadata:read`.
-- **Identity:** the token acts as the user, so commits are pushed and PRs opened as you, not as a bot. At work that keeps "can't approve your own PR" rules meaningful.
+- **Identity:** the token acts as the user, so commits are pushed and PRs opened as you, not as a bot. On a team that keeps "can't approve your own PR" rules meaningful.
 - **Refresh:** scoped tokens come without a refresh token. An Oban job refreshes the parent token and re-scopes it every few hours, then sends the new file through `env.secrets.write`.
 - **Opt-out:** a per-repo setting gives that repo's environments the user's unscoped token. Use it for repos where you regularly work across other projects.
 - **When refresh fails:** this happens when the refresh token expires (6 months unused) or is revoked.
@@ -338,11 +336,11 @@ By default, each environment gets a scoped user token from `POST /applications/{
   - The UI shows a banner, and the agent writes a notice that new shells print.
   - After the user logs in again, Foreman re-scopes and sends fresh tokens to every running environment that user owns.
 
-### Container registry (work only)
+### Private container registries
 
-The personal deployment pulls only public images and features, including the Foreman feature. Work needs credentials for monolith's private `ghcr.io/acme/devcontainer-features/base`.
+Public images and features, including the Foreman feature, need no credentials. A repo whose devcontainer uses a private image or feature on GHCR does.
 
-GHCR only accepts classic PATs; GitHub App tokens and fine-grained PATs can log in but can't pull. Work uses a machine user's classic PAT, and Foreman automates everything around it that it can:
+GHCR only accepts classic PATs; GitHub App tokens and fine-grained PATs can log in but can't pull. Foreman uses a machine user's classic PAT, and Foreman automates everything around it that it can:
 
 - **First-class setting:** registry credentials (host, username, token) are an owner setting, separate from environment secrets.
 - **Validation on save:**
@@ -386,7 +384,7 @@ Foreman never assumes a box has room for everything provisioned on it. By defaul
 
 - **Default:** no limits. Every container takes what it can get, which is how the desktop works today.
 - **Optional limits:** CPU and memory limits can be set per repo as a default, and per environment as an override. When set, the overlay applies `cpus` and `mem_limit` to the devcontainer service. Per-service limits for sidecars can come later if needed.
-- **`hostRequirements`:** never treated as a limit. Monolith asks for 8 CPUs and 8 GB, so Foreman warns when placing it on a box that has less. It's also the estimate used for contention when an environment has no limits.
+- **`hostRequirements`:** never treated as a limit. A repo that asks for 8 CPUs and 8 GB gets a warning when it's placed on a box that has less. It's also the estimate used for contention when an environment has no limits.
 
 ### Reporting
 
@@ -446,7 +444,7 @@ Every target repo uses the `docker-in-docker` feature, which runs the devcontain
 
 ### Secrets exposure on a box
 
-Anyone with Docker access on a box can read every secret of every environment on it. At work, that is a reason to keep boxes single-owner and to treat any access grant to another developer as a trust decision.
+Anyone with Docker access on a box can read every secret of every environment on it. On a team, that is a reason to keep boxes single-owner and to treat any access grant to another developer as a trust decision.
 
 ## Agent self-update
 
@@ -472,22 +470,6 @@ What a repo needs to work well under Foreman:
   - The `sshd` feature and any published SSH port. Tailscale SSH replaces them.
 - **Only if spike 1 falls back to opt-in:** list a gitignored `foreman.compose.yml` in `dockerComposeFile`.
 - **Optional:** `ports:` can stay. The overlay strips them anyway.
-
-### Migration notes
-
-- **storefront, storefront-assets, webapp:**
-  - Remove the tool socket mounts.
-  - Remove the IDE runtime mount, `ide-serve.sh` and `IDE_SERVE_PORT`; the IDE connects over SSH on the tailnet.
-  - Remove the Tailscale scripts and settings.
-  - Remove the hand-kept port registry comments.
-  - Move `.storefront.env` and `.env` values into Foreman secrets.
-- **toolbox:** same, minus Tailscale.
-- **monolith:**
-  - Fix `workspaceFolder: /workspaces/${localWorkspaceFolderBasename}` together with the `..:/workspaces` mount. Outside Codespaces the repo root is mounted at `/workspaces`, so that folder very likely doesn't exist.
-  - Move the Codespaces secrets into Foreman: the repo secrets (`HEX_API_KEY`, `OBAN_LICENSE_KEY`, `NEON_*`, and others) and the user secrets (`DEV_USER_EMAIL`, `DEV_USER_OID`, `LEGACY_DATABASE_URL`).
-  - Decide GHCR access for the private base feature.
-  - `customizations.codespaces` can be dropped.
-  - The `secrets` declarations in `devcontainer.json` are worth keeping. Foreman can read them to prompt for missing values when an environment is created.
 
 ## Data model (sketch)
 
@@ -550,7 +532,7 @@ Locked in on 2026-10-13.
 | Box overcommit | `allow` by default; `warn` and `refuse` are per-box options |
 | Git identity and dotfiles | User defaults with per-repo overrides |
 | Incus isolation | Deferred until boxes are actually shared |
-| GHCR (work only) | Machine-user classic PAT as a first-class registry credential, validated on save, expiry tracked, with a runbook |
+| GHCR (private images) | Machine-user classic PAT as a first-class registry credential, validated on save, expiry tracked, with a runbook |
 
 ## Spikes
 
@@ -569,17 +551,17 @@ These are facts to confirm during build steps 1–2, not decisions.
 
 ## Build order
 
-1. **Spike, no UI or agent:** a Mix task that clones storefront, writes the overlay and override config, adds the Foreman feature and runs `devcontainer up`. Done when two copies of storefront run side by side on the tailnet. This answers spikes 1–4.
-2. Run the same spike on monolith to surface its Codespaces-specific behaviour and answer spike 6.
+1. **Spike, no UI or agent:** a Mix task that clones a sample repo, writes the overlay and override config, adds the Foreman feature and runs `devcontainer up`. Done when two copies run side by side on the tailnet. This answers spikes 1–4.
+2. Run the same spike on a repo coming off Codespaces to surface Codespaces-specific behaviour and answer spike 6.
 3. Control plane and local agent over a Channel, with a LiveView environment list, start/stop and log streaming.
 4. Secrets: scopes, Cloak, file delivery, restart now or later.
 5. GitHub App: login, repo browsing, scoped tokens, credential helper.
 6. Capacity reporting, limits and box policy.
 7. Remote agents: enrollment, signed self-update.
-8. Work rollout:
+8. Team rollout:
    - registry credentials and the GHCR runbook
    - per-developer Tailscale tags
-   - migrating monolith off Codespaces
+   - migrating the team's repos off Codespaces
 9. Incus isolation, only once shared boxes happen.
 
 ## Prior art

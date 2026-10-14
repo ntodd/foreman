@@ -23,9 +23,9 @@ box_name = System.get_env("E2E_BOX", "local")
 scope = Scope.for_user(admin)
 
 repo =
-  case Repos.get_repo_by_full_name("ntodd/hello") do
+  case Repos.get_repo_by_full_name("acme/hello") do
     nil ->
-      {:ok, repo} = Repos.add_repo(scope, "ntodd/hello", %{devcontainer_path: ".devcontainer/devcontainer.json", host_requirements: %{"cpus" => 2, "memory" => "2gb"}})
+      {:ok, repo} = Repos.add_repo(scope, "acme/hello", %{devcontainer_path: ".devcontainer/devcontainer.json", host_requirements: %{"cpus" => 2, "memory" => "2gb"}})
       repo
 
     repo ->

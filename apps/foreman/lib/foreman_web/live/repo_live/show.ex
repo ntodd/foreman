@@ -194,7 +194,7 @@ defmodule ForemanWeb.RepoLive.Show do
           <.input
             field={@settings_form[:extra_repos]}
             label="Extra repos the scoped token can reach"
-            placeholder="storefront-assets, shared-config"
+            placeholder="shared-config, design-system"
           />
           <.input
             field={@settings_form[:tailscale_tags]}

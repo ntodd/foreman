@@ -51,7 +51,7 @@ defmodule ForemanWeb.RepoLive.Index do
          |> push_navigate(to: ~p"/repos/#{repo.id}")}
 
       {:error, _} ->
-        {:noreply, put_flash(socket, :error, "Use the owner/name form, like ntodd/storefront.")}
+        {:noreply, put_flash(socket, :error, "Use the owner/name form, like acme/storefront.")}
     end
   end
 

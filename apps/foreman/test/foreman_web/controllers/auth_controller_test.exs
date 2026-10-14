@@ -13,7 +13,7 @@ defmodule ForemanWeb.AuthControllerTest do
       private_key: "k"
     })
 
-    Application.put_env(:foreman, :admins, ["ntodd"])
+    Application.put_env(:foreman, :admins, ["mona"])
 
     on_exit(fn ->
       Application.delete_env(:foreman, :github_app) && Application.delete_env(:foreman, :admins)
@@ -46,7 +46,7 @@ defmodule ForemanWeb.AuthControllerTest do
     end)
 
     expect(Foreman.GitHub.ClientMock, :get_user, fn "ghu_x" ->
-      {:ok, %{"id" => 1, "login" => "ntodd", "name" => "Nate"}}
+      {:ok, %{"id" => 1, "login" => "mona", "name" => "Mona"}}
     end)
 
     conn =

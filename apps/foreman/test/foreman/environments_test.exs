@@ -10,7 +10,7 @@ defmodule Foreman.EnvironmentsTest do
   setup :verify_on_exit!
 
   setup do
-    user = user_fixture(git_name: "Nate", git_email: "nate@pixelauthority.com")
+    user = user_fixture(git_name: "Mona", git_email: "mona@example.com")
     repo = repo_fixture(name: "storefront")
     box = box_fixture(owner_user_id: user.id)
     %{user: user, repo: repo, box: box, scope: Scope.for_user(user)}
@@ -80,7 +80,7 @@ defmodule Foreman.EnvironmentsTest do
       assert p.branch == "feature/x"
       assert p.compose_env == %{"API_KEY" => "k1"}
       assert p.files["secrets.env"] =~ "export API_KEY='k1'"
-      assert p.files["gitconfig"] =~ ~s(email = "nate@pixelauthority.com")
+      assert p.files["gitconfig"] =~ ~s(email = "mona@example.com")
       refute Map.has_key?(p.files, "github-token")
       assert p.tailscale == %{enabled: false, tags: []}
 
@@ -532,7 +532,10 @@ defmodule Foreman.EnvironmentsTest do
 
       assert_receive {:dispatch, cmd}
       assert cmd.payload.files["github-token"] == "ghs_scoped"
-      assert_receive {:scoped, target, ["storefront", "storefront-assets"], %{"contents" => "write"}}
+
+      assert_receive {:scoped, target, ["storefront", "storefront-assets"],
+                      %{"contents" => "write"}}
+
       assert target == repo.owner.login
     end
 

@@ -63,34 +63,21 @@ environment's page. An admin can change these per box with
 | Where the value is read | How it reaches it | After a change |
 |---|---|---|
 | A login shell, a dev server you start | `/run/foreman/secrets.env` | New shells immediately; **Restart all** for running processes |
-| A compose file (`${NEON_API_KEY}`) | Compose interpolation at start | **Restart affected** recreates the services that use it |
+| A compose file (`${DATABASE_URL}`) | Compose interpolation at start | **Restart affected** recreates the services that use it |
 | git and `gh` | `/run/foreman/github-token` | Nothing; read on every use |
 
-## storefront, storefront-assets, webapp, toolbox
+## Coming from Codespaces
 
-- Remove the tool socket mounts.
-- Remove the IDE runtime mount, `ide-serve.sh` and `IDE_SERVE_PORT`;
-  the IDE connects over Tailscale SSH.
-- Remove the Tailscale scripts and settings (toolbox has none).
-- Remove the hand-kept port registry comments.
-- Move `.storefront.env` and `.env` values into Foreman secrets.
-- storefront: add `tag:staging-access` to the repo's Tailscale tags in
-  Foreman so its environments can reach a staging database.
-
-## monolith
-
-- `workspaceFolder: /workspaces/${localWorkspaceFolderBasename}` with
-  the `..:/workspaces` mount: outside Codespaces the repo root is mounted
-  at `/workspaces`, so that folder doesn't exist. Use
-  `"workspaceFolder": "/workspaces"`, or mount `../..:/workspaces`.
-- Move the Codespaces secrets into Foreman. Repo secrets: `HEX_API_KEY`,
-  `OBAN_LICENSE_KEY`, `NEON_*` and the rest of the shared ones. User
-  secrets (each developer's): `DEV_USER_EMAIL`, `DEV_USER_OID`,
-  `LEGACY_DATABASE_URL`.
-- Add the GHCR registry credential for the private base feature:
+- **`workspaceFolder`:** `/workspaces/${localWorkspaceFolderBasename}`
+  with a `..:/workspaces` mount only works in Codespaces. Elsewhere the
+  repo root is mounted at `/workspaces`, so that folder doesn't exist.
+  Use `"workspaceFolder": "/workspaces"`, or mount `../..:/workspaces`.
+- **Codespaces secrets:** shared ones become repo secrets in Foreman;
+  per-developer ones become each developer's own secrets.
+- **Private images or features on GHCR:** add a registry credential, see
   [ghcr-machine-user.md](ghcr-machine-user.md).
-- `customizations.codespaces` can go. The `secrets` declarations in
+- **`customizations.codespaces`** can go. The `secrets` declarations in
   `devcontainer.json` are worth keeping as documentation.
-- Neon Local's sidecars get their settings through compose
-  interpolation, and delete their branch on a graceful stop, which is
-  what **Stop** does.
+- **Sidecars configured through compose interpolation** pick up changed
+  secrets with **Restart affected**. **Stop** stops them gracefully, so
+  shutdown hooks (deleting a temporary database branch, say) still run.

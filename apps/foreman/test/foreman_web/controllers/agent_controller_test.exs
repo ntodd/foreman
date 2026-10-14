@@ -15,11 +15,11 @@ defmodule ForemanWeb.AgentControllerTest do
       post(conn, ~p"/api/agents/enroll", %{
         "join_token" => token,
         "public_key" => public,
-        "hostname" => "nate-desktop"
+        "hostname" => "mona-desktop"
       })
 
     assert %{"agent_id" => id, "box" => "desktop"} = json_response(conn, 201)
-    assert Repo.get!(Foreman.Boxes.Box, id).hostname == "nate-desktop"
+    assert Repo.get!(Foreman.Boxes.Box, id).hostname == "mona-desktop"
 
     again =
       post(build_conn(), ~p"/api/agents/enroll", %{"join_token" => token, "public_key" => public})

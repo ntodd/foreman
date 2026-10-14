@@ -1,8 +1,8 @@
 # Private images and features on GHCR
 
-Only the team deployment needs this: monolith's devcontainer pulls
-`ghcr.io/acme/devcontainer-features/base`, which is
-private. The personal deployment pulls only public images.
+You only need this when a repo's devcontainer pulls a private image or
+feature from GHCR, such as `ghcr.io/acme/devcontainer-features/base`.
+Public images and features need no credentials.
 
 GHCR only lets **classic** personal access tokens pull private packages;
 GitHub App tokens and fine-grained tokens can log in but can't pull. So
@@ -37,7 +37,7 @@ Personal access tokens → Tokens (classic) → Generate new token**.
 
 ## 4. Paste it into Foreman
 
-**Deployment → acme → Container registry credential →
+**Deployment → *your org* → Container registry credential →
 Add**: registry `ghcr.io`, the machine user's login, and the token.
 
 Foreman checks it before saving:

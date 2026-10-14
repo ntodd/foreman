@@ -24,7 +24,7 @@ printf '%s\n' \
   "FOREMAN_ENCRYPTION_KEY=$(openssl rand -base64 32)" \
   "PHX_HOST=desktop.tail1234.ts.net" \
   "FOREMAN_LISTEN_IP=0.0.0.0" \
-  "FOREMAN_ADMINS=ntodd" | sudo tee /etc/foreman/foreman.env >/dev/null
+  "FOREMAN_ADMINS=your-github-login" | sudo tee /etc/foreman/foreman.env >/dev/null
 sudo chmod 0600 /etc/foreman/foreman.env
 
 docker run -d --name foreman --restart unless-stopped \
@@ -56,7 +56,7 @@ docker logs foreman 2>&1 | grep -A1 "setup token"
 Then create the GitHub App on your account (one click on GitHub) and
 install it on the repos Foreman should see. See
 [github-app.md](github-app.md). Sign in with GitHub afterwards; with
-`FOREMAN_ADMINS=ntodd`, you're the admin.
+`FOREMAN_ADMINS` set to your login, you're the admin.
 
 ## 3. Connect Tailscale
 

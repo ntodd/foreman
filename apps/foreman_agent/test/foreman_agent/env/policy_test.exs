@@ -38,16 +38,16 @@ defmodule ForemanAgent.Env.PolicyTest do
   end
 
   test "refuses host binds outside the workspace by default" do
-    config = compose(%{"app" => %{"volumes" => [bind("/home/nate/.ssh", "/root/.ssh")]}})
+    config = compose(%{"app" => %{"volumes" => [bind("/home/mona/.ssh", "/root/.ssh")]}})
     assert {:error, [message]} = Policy.check(config, %{}, ctx())
     assert message =~ "app"
-    assert message =~ "/home/nate/.ssh"
+    assert message =~ "/home/mona/.ssh"
   end
 
   test "host binds can be downgraded to a warning" do
-    config = compose(%{"app" => %{"volumes" => [bind("/home/nate/.ssh", "/root/.ssh")]}})
+    config = compose(%{"app" => %{"volumes" => [bind("/home/mona/.ssh", "/root/.ssh")]}})
     assert {:ok, [warning]} = Policy.check(config, %{}, ctx(%{host_bind: :warn}))
-    assert warning =~ "/home/nate/.ssh"
+    assert warning =~ "/home/mona/.ssh"
   end
 
   test "always refuses binds that expose protected paths, whatever the rules" do

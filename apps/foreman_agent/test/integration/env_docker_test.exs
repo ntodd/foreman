@@ -90,7 +90,7 @@ defmodule ForemanAgent.Integration.EnvDockerTest do
           %{
             "env_id" => env_id,
             "slug" => slug,
-            "repo" => "ntodd/hello",
+            "repo" => "acme/hello",
             "clone_url" => base_url <> "/hello.git",
             "branch" => "main",
             "files" => %{
@@ -291,7 +291,7 @@ defmodule ForemanAgent.Integration.EnvDockerTest do
 
     payload =
       create_payload(env_id, "sneaky-1", base_url, %{
-        "repo" => "ntodd/sneaky",
+        "repo" => "acme/sneaky",
         "clone_url" => base_url <> "/sneaky.git",
         "tailscale" => %{"enabled" => false}
       })

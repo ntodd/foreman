@@ -12,8 +12,8 @@ git -C "$work" init -q -b main
 git -C "$work" add -A
 git -C "$work" -c user.name=Foreman -c user.email=e2e@example.com commit -qm "Fixture"
 
-mkdir -p "$dest/ntodd"
-rm -rf "$dest/ntodd/hello.git"
-git clone -q --bare "$work" "$dest/ntodd/hello.git"
-git -C "$dest/ntodd/hello.git" update-server-info
-echo "$dest/ntodd/hello.git"
+mkdir -p "$dest/acme"
+rm -rf "$dest/acme/hello.git"
+git clone -q --bare "$work" "$dest/acme/hello.git"
+git -C "$dest/acme/hello.git" update-server-info
+echo "$dest/acme/hello.git"

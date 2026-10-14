@@ -7,8 +7,8 @@ defmodule Foreman.AccountsTest do
 
   @profile %{
     "id" => 42,
-    "login" => "ntodd",
-    "name" => "Nate",
+    "login" => "mona",
+    "name" => "Mona",
     "avatar_url" => "https://avatars.example/42"
   }
   @tokens %{
@@ -20,7 +20,7 @@ defmodule Foreman.AccountsTest do
 
   describe "sign_in_from_github/3" do
     test "the first user becomes admin when no admins are configured" do
-      assert {:ok, %User{login: "ntodd", role: "admin"} = user} =
+      assert {:ok, %User{login: "mona", role: "admin"} = user} =
                Accounts.sign_in_from_github(@profile, @tokens,
                  config: %{admins: [], allowed_users: [], allowed_org: nil},
                  org_member?: false
@@ -43,7 +43,7 @@ defmodule Foreman.AccountsTest do
     end
 
     test "configured admins are admins; allowed users and org members are members" do
-      config = %{admins: ["ntodd"], allowed_users: ["alice"], allowed_org: "acme"}
+      config = %{admins: ["mona"], allowed_users: ["alice"], allowed_org: "acme"}
 
       assert {:ok, %User{role: "admin"}} =
                Accounts.sign_in_from_github(@profile, @tokens, config: config, org_member?: false)
@@ -63,33 +63,33 @@ defmodule Foreman.AccountsTest do
     end
 
     test "matches users by GitHub id, so a renamed account keeps its data" do
-      config = %{admins: ["ntodd"], allowed_users: [], allowed_org: nil}
+      config = %{admins: ["mona"], allowed_users: [], allowed_org: nil}
 
       {:ok, user} =
         Accounts.sign_in_from_github(@profile, @tokens, config: config, org_member?: false)
 
-      renamed = %{@profile | "login" => "nate"}
-      config = %{config | admins: ["nate"]}
+      renamed = %{@profile | "login" => "monalisa"}
+      config = %{config | admins: ["monalisa"]}
 
-      assert {:ok, %User{id: id, login: "nate"}} =
+      assert {:ok, %User{id: id, login: "monalisa"}} =
                Accounts.sign_in_from_github(renamed, @tokens, config: config, org_member?: false)
 
       assert id == user.id
     end
 
     test "disabled users can't sign in" do
-      user = user_fixture(login: "ntodd", github_id: 42)
+      user = user_fixture(login: "mona", github_id: 42)
       Repo.update!(Ecto.Changeset.change(user, disabled_at: DateTime.utc_now()))
-      config = %{admins: ["ntodd"], allowed_users: [], allowed_org: nil}
+      config = %{admins: ["mona"], allowed_users: [], allowed_org: nil}
 
       assert {:error, :disabled} =
                Accounts.sign_in_from_github(@profile, @tokens, config: config, org_member?: false)
     end
 
     test "signing in clears an expired GitHub login" do
-      user = user_fixture(login: "ntodd", github_id: 42)
+      user = user_fixture(login: "mona", github_id: 42)
       Repo.update!(Ecto.Changeset.change(user, github_login_expired: true))
-      config = %{admins: ["ntodd"], allowed_users: [], allowed_org: nil}
+      config = %{admins: ["mona"], allowed_users: [], allowed_org: nil}
 
       assert {:ok, %User{github_login_expired: false}} =
                Accounts.sign_in_from_github(@profile, @tokens, config: config, org_member?: false)
@@ -139,31 +139,31 @@ defmodule Foreman.AccountsTest do
 
   describe "git identity and dotfiles" do
     test "repo overrides beat user defaults field by field" do
-      user = user_fixture(git_name: "Nate", git_email: "nate@pixelauthority.com")
+      user = user_fixture(git_name: "Mona", git_email: "mona@example.com")
 
       {:ok, user} =
         Accounts.update_preferences(Scope.for_user(user), %{
-          "dotfiles_repository" => "https://github.com/ntodd/dotfiles.git"
+          "dotfiles_repository" => "https://github.com/mona/dotfiles.git"
         })
 
       repo = repo_fixture()
 
       assert %{
-               git_name: "Nate",
-               git_email: "nate@pixelauthority.com",
-               dotfiles_repository: "https://github.com/ntodd/dotfiles.git"
+               git_name: "Mona",
+               git_email: "mona@example.com",
+               dotfiles_repository: "https://github.com/mona/dotfiles.git"
              } =
                Accounts.effective_identity(user, repo)
 
       {:ok, _} =
         Accounts.put_repo_setting(Scope.for_user(user), repo, %{
-          "git_email" => "ntodd@work.example"
+          "git_email" => "mona@work.example"
         })
 
       assert %{
-               git_name: "Nate",
-               git_email: "ntodd@work.example",
-               dotfiles_repository: "https://github.com/ntodd/dotfiles.git"
+               git_name: "Mona",
+               git_email: "mona@work.example",
+               dotfiles_repository: "https://github.com/mona/dotfiles.git"
              } =
                Accounts.effective_identity(user, repo)
     end

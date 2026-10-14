@@ -14,8 +14,8 @@ defmodule ForemanAgent.RedactorTest do
           %{
             "env_id" => @env_id,
             "slug" => "storefront-2",
-            "repo" => "ntodd/storefront",
-            "clone_url" => "https://github.com/ntodd/storefront.git",
+            "repo" => "acme/storefront",
+            "clone_url" => "https://github.com/acme/storefront.git",
             "branch" => "main",
             "files" => %{
               "github-token" => "ghs_tokenvalue123",

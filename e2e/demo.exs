@@ -49,7 +49,7 @@ user = fn login, name, email ->
     Accounts.sign_in_from_github(
       %{"id" => :erlang.phash2(login), "login" => login, "name" => name, "avatar_url" => nil},
       %{access_token: nil, refresh_token: nil},
-      config: %{admins: ["nate"], allowed_users: ["nate", "jordan", "sam"], allowed_org: nil}
+      config: %{admins: ["mona"], allowed_users: ["mona", "jordan", "sam"], allowed_org: nil}
     )
 
   {:ok, user} =
@@ -58,10 +58,10 @@ user = fn login, name, email ->
   user
 end
 
-nate = user.("nate", "Nate", "nate@acme.dev")
+mona = user.("mona", "Mona", "mona@acme.dev")
 jordan = user.("jordan", "Jordan", "jordan@acme.dev")
 sam = user.("sam", "Sam", "sam@acme.dev")
-admin = Scope.for_user(nate)
+admin = Scope.for_user(mona)
 
 repo = fn name, reqs ->
   {:ok, repo} =
@@ -85,8 +85,8 @@ for {scope_name, subject, name, value} <- [
       {"repo", storefront, "STRIPE_SECRET_KEY", "sk_test_demo"},
       {"repo", storefront, "DATABASE_URL", "postgres://postgres@db/storefront"},
       {"repo", api, "DATABASE_URL", "postgres://postgres@db/api"},
-      {"user", nate, "OPENAI_API_KEY", "demo"},
-      {"user", nate, "AWS_PROFILE", "dev"}
+      {"user", mona, "OPENAI_API_KEY", "demo"},
+      {"user", mona, "AWS_PROFILE", "dev"}
     ] do
   {:ok, _} = Secrets.put_secret(admin, scope_name, subject, %{"name" => name, "value" => value})
 end
@@ -112,7 +112,7 @@ box = fn name, owner_user, hostname, arch, cpus, memory_gb, disk_gb, free_gb ->
   })
 end
 
-desktop = box.("desktop", nate, "nate-desktop", "x86_64", 16, 64, 1800, 1210)
+desktop = box.("desktop", mona, "mona-desktop", "x86_64", 16, 64, 1800, 1210)
 box_a = box.("box-a", jordan, "box-a", "x86_64", 8, 32, 450, 290)
 box_b = box.("box-b", sam, "box-b", "aarch64", 8, 32, 450, 310)
 
@@ -147,19 +147,19 @@ env = fn repo, index, owner_user, box, branch, state, minutes, extra ->
 end
 
 sf1 =
-  env.(storefront, 1, nate, desktop, "main", "running", 60 * 26, %{
+  env.(storefront, 1, mona, desktop, "main", "running", 60 * 26, %{
     services: ["app", "db", "redis", "worker"]
   })
 
 sf2 =
-  env.(storefront, 2, nate, desktop, "checkout-redesign", "running", 95, %{
+  env.(storefront, 2, mona, desktop, "checkout-redesign", "running", 95, %{
     services: ["app", "db", "redis", "worker"],
     pending_restart: true,
     pending_changes: ["STRIPE_SECRET_KEY"]
   })
 
-api1 = env.(api, 1, nate, desktop, "main", "running", 60 * 50, %{})
-docs1 = env.(docs, 1, nate, desktop, "main", "stopped", 60 * 72, %{services: ["app"]})
+api1 = env.(api, 1, mona, desktop, "main", "running", 60 * 50, %{})
+docs1 = env.(docs, 1, mona, desktop, "main", "stopped", 60 * 72, %{services: ["app"]})
 _api2 = env.(api, 2, jordan, box_a, "rate-limits", "running", 60 * 5, %{})
 
 _sf3 =
@@ -265,7 +265,7 @@ for {b, envs} <- [
 end
 
 port = System.get_env("PORT", "4000")
-IO.puts("demo control plane on http://localhost:#{port}, sign in at /dev/sign-in/nate")
+IO.puts("demo control plane on http://localhost:#{port}, sign in at /dev/sign-in/mona")
 IO.puts("DEMO_ENV_PENDING=/environments/#{sf2.id}")
 IO.puts("DEMO_ENV_RUNNING=/environments/#{sf1.id}")
 IO.puts("DEMO_BOX=/boxes/#{desktop.id}")

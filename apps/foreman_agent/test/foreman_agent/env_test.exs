@@ -53,8 +53,8 @@ defmodule ForemanAgent.EnvTest do
           %{
             "env_id" => @env_id,
             "slug" => "storefront-2",
-            "repo" => "ntodd/storefront",
-            "clone_url" => "https://github.com/ntodd/storefront.git",
+            "repo" => "acme/storefront",
+            "clone_url" => "https://github.com/acme/storefront.git",
             "branch" => "main",
             "files" => %{"secrets.env" => "export A='1'\n", "github-token" => "ghu_secret"},
             "compose_env" => %{"NEON_API_KEY" => "neon_secret"},
@@ -174,7 +174,7 @@ defmodule ForemanAgent.EnvTest do
                "--branch",
                "main",
                "--",
-               "https://github.com/ntodd/storefront.git",
+               "https://github.com/acme/storefront.git",
                clone
              ]
 
@@ -236,14 +236,14 @@ defmodule ForemanAgent.EnvTest do
       stub_tools()
 
       dotfiles = %{
-        "repository" => "https://github.com/ntodd/dotfiles.git",
+        "repository" => "https://github.com/mona/dotfiles.git",
         "install_command" => "./install.sh"
       }
 
       assert {:ok, _} = Env.run("env.create", payload(%{"dotfiles" => dotfiles}), ctx)
 
       {"devcontainer", args, _} = List.last(runs())
-      assert arg(args, "--dotfiles-repository") == "https://github.com/ntodd/dotfiles.git"
+      assert arg(args, "--dotfiles-repository") == "https://github.com/mona/dotfiles.git"
       assert arg(args, "--dotfiles-install-command") == "./install.sh"
     end
 
@@ -358,7 +358,11 @@ defmodule ForemanAgent.EnvTest do
 
     test "fails clearly for an environment this box never prepared", %{ctx: ctx} do
       assert {:error, message} =
-               Env.run("env.start", %{env_id: @env_id, slug: "storefront-2", compose_env: %{}}, ctx)
+               Env.run(
+                 "env.start",
+                 %{env_id: @env_id, slug: "storefront-2", compose_env: %{}},
+                 ctx
+               )
 
       assert message =~ "rebuild"
     end
@@ -424,12 +428,22 @@ defmodule ForemanAgent.EnvTest do
       assert {:ok, %{"restarted" => "all"}} =
                Env.run(
                  "env.restart",
-                 %{env_id: @env_id, slug: "storefront-2", mode: "all", changed: [], compose_env: %{}},
+                 %{
+                   env_id: @env_id,
+                   slug: "storefront-2",
+                   mode: "all",
+                   changed: [],
+                   compose_env: %{}
+                 },
                  ctx
                )
 
       calls = runs()
-      assert Enum.any?(calls, fn {_, args, _} -> args == ["compose", "-p", "storefront-2", "stop"] end)
+
+      assert Enum.any?(calls, fn {_, args, _} ->
+               args == ["compose", "-p", "storefront-2", "stop"]
+             end)
+
       assert {"devcontainer", _, _} = List.last(calls)
     end
   end
@@ -519,7 +533,8 @@ defmodule ForemanAgent.EnvTest do
         end
       end)
 
-      assert {:ok, result} = Env.run("env.git_status", %{env_id: @env_id, slug: "storefront-2"}, ctx)
+      assert {:ok, result} =
+               Env.run("env.git_status", %{env_id: @env_id, slug: "storefront-2"}, ctx)
 
       assert result == %{
                "branch" => "main",

@@ -11,14 +11,14 @@ defmodule ForemanProtocol.CommandTest do
       %{
         "env_id" => @env_id,
         "slug" => "storefront-2",
-        "repo" => "ntodd/storefront",
-        "clone_url" => "https://github.com/ntodd/storefront.git",
+        "repo" => "acme/storefront",
+        "clone_url" => "https://github.com/acme/storefront.git",
         "branch" => "main",
         "config_path" => ".devcontainer/devcontainer.json",
         "files" => %{"secrets.env" => "export A='1'\n", "github-token" => "ghu_x"},
         "compose_env" => %{"NEON_API_KEY" => "secret"},
         "limits" => %{"cpus" => 2.5, "memory_mb" => 4096},
-        "dotfiles" => %{"repository" => "https://github.com/ntodd/dotfiles.git"},
+        "dotfiles" => %{"repository" => "https://github.com/mona/dotfiles.git"},
         "tailscale" => %{"enabled" => true, "tags" => ["tag:foreman-env"]}
       },
       overrides
@@ -36,7 +36,7 @@ defmodule ForemanProtocol.CommandTest do
       assert cmd.payload.files == %{"secrets.env" => "export A='1'\n", "github-token" => "ghu_x"}
       assert cmd.payload.compose_env == %{"NEON_API_KEY" => "secret"}
       assert cmd.payload.limits == %{cpus: 2.5, memory_mb: 4096}
-      assert cmd.payload.dotfiles.repository == "https://github.com/ntodd/dotfiles.git"
+      assert cmd.payload.dotfiles.repository == "https://github.com/mona/dotfiles.git"
       assert cmd.payload.tailscale == %{enabled: true, tags: ["tag:foreman-env"]}
     end
 
@@ -80,7 +80,15 @@ defmodule ForemanProtocol.CommandTest do
     end
 
     test "rejects slugs that are not DNS labels" do
-      for bad <- ["Storefront", "-storefront", "storefront-", "store_front", "store.front", String.duplicate("a", 64), ""] do
+      for bad <- [
+            "Storefront",
+            "-storefront",
+            "storefront-",
+            "store_front",
+            "store.front",
+            String.duplicate("a", 64),
+            ""
+          ] do
         assert {:error, errors} = Command.new("env.stop", %{"env_id" => @env_id, "slug" => bad})
         assert Enum.any?(errors, &match?({"slug", _}, &1)), "expected #{inspect(bad)} to fail"
       end
@@ -135,7 +143,7 @@ defmodule ForemanProtocol.CommandTest do
 
     test "only accepts https clone URLs and repo names of the owner/name form" do
       for bad <- [
-            "git@github.com:ntodd/storefront.git",
+            "git@github.com:acme/storefront.git",
             "ext::sh -c touch% /tmp/pwned",
             "file:///etc",
             "-u"

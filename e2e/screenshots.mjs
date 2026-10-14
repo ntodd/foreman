@@ -93,7 +93,7 @@ const frame = async (img, theme, file) => {
 }
 
 try {
-  await browser.goto(`${base}/dev/sign-in/nate`)
+  await browser.goto(`${base}/dev/sign-in/mona`)
   await browser.waitFor("location.pathname === '/'")
 
   const pages = [

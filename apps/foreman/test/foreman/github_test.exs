@@ -22,7 +22,7 @@ defmodule Foreman.GitHubTest do
   describe "sync_repos/0" do
     test "creates owners and repos from installations, and detects devcontainers" do
       expect(ClientMock, :list_installations, fn _ ->
-        {:ok, [%{"id" => 77, "account" => %{"login" => "ntodd", "type" => "User", "id" => 9}}]}
+        {:ok, [%{"id" => 77, "account" => %{"login" => "acme", "type" => "User", "id" => 9}}]}
       end)
 
       expect(ClientMock, :installation_token, fn _, 77 -> {:ok, "ghs_install"} end)
@@ -31,7 +31,7 @@ defmodule Foreman.GitHubTest do
         {:ok,
          [
            %{
-             "full_name" => "ntodd/storefront",
+             "full_name" => "acme/storefront",
              "name" => "storefront",
              "id" => 1,
              "default_branch" => "main",
@@ -39,27 +39,27 @@ defmodule Foreman.GitHubTest do
              "archived" => false
            },
            %{
-             "full_name" => "ntodd/notes",
+             "full_name" => "acme/notes",
              "name" => "notes",
              "id" => 2,
              "default_branch" => "trunk",
              "private" => false,
              "archived" => false
            },
-           %{"full_name" => "ntodd/old", "name" => "old", "id" => 3, "archived" => true}
+           %{"full_name" => "acme/old", "name" => "old", "id" => 3, "archived" => true}
          ]}
       end)
 
       stub(ClientMock, :list_dir, fn _, _, ".devcontainer" -> {:error, :not_found} end)
 
       stub(ClientMock, :get_file, fn
-        _, "ntodd/storefront", ".devcontainer/devcontainer.json", nil ->
+        _, "acme/storefront", ".devcontainer/devcontainer.json", nil ->
           {:ok, ~s({
              // jsonc
              "dockerComposeFile": "docker-compose.yml",
              "service": "app",
              "hostRequirements": {"cpus": 8, "memory": "16gb"},
-             "features": {"ghcr.io/ntodd/private-feature:1": {}, "ghcr.io/devcontainers/features/node:1": {}},
+             "features": {"ghcr.io/acme/private-feature:1": {}, "ghcr.io/devcontainers/features/node:1": {}},
            })}
 
         _, _, _, _ ->
@@ -68,20 +68,20 @@ defmodule Foreman.GitHubTest do
 
       assert {:ok, 3} = GitHub.sync_repos()
 
-      storefront = Foreman.Repos.get_repo_by_full_name("ntodd/storefront")
+      storefront = Foreman.Repos.get_repo_by_full_name("acme/storefront")
       assert storefront.devcontainer_path == ".devcontainer/devcontainer.json"
       assert storefront.host_requirements == %{"cpus" => 8, "memory" => "16gb"}
-      assert storefront.private_registry_refs == ["ghcr.io/ntodd/private-feature:1"]
+      assert storefront.private_registry_refs == ["ghcr.io/acme/private-feature:1"]
       assert storefront.owner.installation_id == 77
 
-      notes = Foreman.Repos.get_repo_by_full_name("ntodd/notes")
+      notes = Foreman.Repos.get_repo_by_full_name("acme/notes")
       assert notes.devcontainer_path == nil
       assert notes.default_branch == "trunk"
 
-      assert Foreman.Repos.get_repo_by_full_name("ntodd/old") == nil
+      assert Foreman.Repos.get_repo_by_full_name("acme/old") == nil
 
       assert Foreman.Repos.list_repos(with_devcontainer: true) |> Enum.map(& &1.full_name) == [
-               "ntodd/storefront"
+               "acme/storefront"
              ]
     end
 
@@ -98,7 +98,7 @@ defmodule Foreman.GitHubTest do
           {:error, :not_found}
       end)
 
-      result = GitHub.detect_devcontainer("t", "ntodd/x", "ntodd")
+      result = GitHub.detect_devcontainer("t", "acme/x", "acme")
       assert result.devcontainer_path == ".devcontainer/web/devcontainer.json"
       assert result.devcontainer_error =~ "compose"
     end
@@ -188,16 +188,16 @@ defmodule Foreman.GitHubTest do
         {:ok,
          %{
            "id" => 5,
-           "slug" => "foreman-nate",
+           "slug" => "foreman-mona",
            "client_id" => "Iv1.new",
            "client_secret" => "sek",
            "pem" => "-----BEGIN RSA PRIVATE KEY-----",
-           "html_url" => "https://github.com/apps/foreman-nate"
+           "html_url" => "https://github.com/apps/foreman-mona"
          }}
       end)
 
       assert {:ok, _} = GitHub.complete_manifest("code123")
-      assert %{client_id: "Iv1.new", slug: "foreman-nate"} = GitHub.app()
+      assert %{client_id: "Iv1.new", slug: "foreman-mona"} = GitHub.app()
 
       raw = Repo.one(from s in "settings", where: s.key == "github_app", select: s.value)
       refute raw =~ "sek"

@@ -12,7 +12,7 @@ does both with an OAuth client:
 
 1. In the admin console: **Settings → OAuth clients → Generate**.
 2. Scopes: **Auth Keys: write** and **Devices Core: write**.
-3. Tags: `tag:foreman-env`, plus any repo tags you'll use (storefront uses
+3. Tags: `tag:foreman-env`, plus any repo tags you'll use (for example
    `tag:staging-access`) and, on a team deployment, one
    `tag:foreman-<login>` per developer.
 4. Set `FOREMAN_TAILSCALE_CLIENT_ID` and `FOREMAN_TAILSCALE_CLIENT_SECRET`.
@@ -34,7 +34,7 @@ aren't granted.
     "tag:foreman-env": ["autogroup:admin"],
     "tag:staging-access": ["autogroup:admin"],
     // Team deployments: one per developer.
-    "tag:foreman-ntodd": ["autogroup:admin"]
+    "tag:foreman-alice": ["autogroup:admin"]
   },
 
   "grants": [
@@ -42,7 +42,7 @@ aren't granted.
     {"src": ["autogroup:member"], "dst": ["tag:foreman-env"], "ip": ["*"]},
 
     // Team: each developer reaches their own (replace the rule above).
-    // {"src": ["alice@example.com"], "dst": ["tag:foreman-ntodd"], "ip": ["*"]},
+    // {"src": ["alice@example.com"], "dst": ["tag:foreman-alice"], "ip": ["*"]},
 
     // What a repo tag grants environments, e.g. a staging database.
     {"src": ["tag:staging-access"], "dst": ["tag:staging"], "ip": ["*"]}
