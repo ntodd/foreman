@@ -13,7 +13,16 @@ defmodule ForemanAgent.MixProject do
       start_permanent: Mix.env() == :prod,
       deps: deps(),
       aliases: aliases(),
-      releases: releases()
+      releases: releases(),
+      # Advisories `mix hex.audit` reports that don't reach the agent. Each
+      # needs its reason here; drop it once a fixed release is locked.
+      hex: [
+        ignore_advisories: [
+          # No fix released. Bandit is a test-only dependency (a stand-in
+          # control plane) and isn't in the release.
+          "EEF-CVE-2026-105659"
+        ]
+      ]
     ]
   end
 
