@@ -70,7 +70,9 @@ curl -fsSL -D "$tmp/headers" -o "$tmp/agent.tar.gz" "$FOREMAN_URL/agent/releases
   fail "couldn't download the agent from $FOREMAN_URL (has a release been published for $target?)"
 version=$(sed -n 's/^x-foreman-version: *\([^[:space:]]*\).*/\1/ip' "$tmp/headers" | tail -1)
 sha=$(sed -n 's/^x-foreman-sha256: *\([0-9a-f]*\).*/\1/ip' "$tmp/headers" | tail -1)
-[ -n "$version" ] && [ -n "$sha" ] || fail "the release download is missing its version or digest"
+if [ -z "$version" ] || [ -z "$sha" ]; then
+  fail "the release download is missing its version or digest"
+fi
 printf '%s  %s\n' "$sha" "$tmp/agent.tar.gz" | sha256sum -c - >/dev/null || fail "the download doesn't match its digest"
 
 dest="/opt/foreman-agent/releases/$version"
