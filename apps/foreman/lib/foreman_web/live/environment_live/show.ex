@@ -195,8 +195,9 @@ defmodule ForemanWeb.EnvironmentLive.Show do
 
   defp tailscale?, do: Foreman.Tailscale.configured?()
 
+  # <.link> only takes http(s) and a few other schemes as strings.
   defp vscode_url(env) do
-    "vscode://vscode-remote/ssh-remote+#{env.remote_user}@#{env.slug}#{env.workspace_folder}"
+    {:vscode, "//vscode-remote/ssh-remote+#{env.remote_user}@#{env.slug}#{env.workspace_folder}"}
   end
 
   @impl true
