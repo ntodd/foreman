@@ -11,13 +11,15 @@ nothing publishes ports.
   <img alt="The Environments page: three boxes with CPU and memory bars, and seven environments across them, running, stopped, creating, and one waiting on a restart" src="docs/images/environments-light.png">
 </picture>
 
-```
-Browser ──LiveView──► Control plane (Phoenix, SQLite or Postgres, tailnet-only)
-                         ▲  WebSocket (agents dial out, signed with ed25519)
-          ┌──────────────┼───────────────┐
-     agent (desktop)  agent (box-a)  agent (box-b)
-          │  Docker + @devcontainers/cli
-     environments ── tailscaled ──► tailnet ◄── laptops (ssh, editors, browsers)
+```mermaid
+flowchart TB
+    browser["Browser"] -->|LiveView| cp["Control plane<br>Phoenix, tailnet-only<br>SQLite or Postgres"]
+    cp <-->|"WebSocket<br>agents dial out<br>ed25519-signed"| desktop["agent (desktop)"]
+    cp <--> boxa["agent (box-a)"]
+    cp <--> boxb["agent (box-b)"]
+    desktop -->|"Docker + @devcontainers/cli"| envs["environments"]
+    envs -->|tailscaled| tailnet(("tailnet"))
+    laptops["laptops<br>ssh, editors, browsers"] --> tailnet
 ```
 
 - **Control plane** (`apps/foreman`): Phoenix + LiveView. Owns users,
