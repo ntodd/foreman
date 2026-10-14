@@ -120,6 +120,24 @@ defmodule ForemanWeb.PagesTest do
              Foreman.Operations.list_for_environment(env.id)
   end
 
+  test "a running operation can be cancelled from the environment page", %{
+    conn: conn,
+    user: user,
+    repo: repo,
+    box: box
+  } do
+    env = environment_fixture(user: user, repo: repo, box: box)
+    {:ok, _} = Registry.register(Foreman.Registry, {:agent, box.id}, nil)
+    {:ok, op} = Foreman.Environments.rebuild(Foreman.Scope.for_user(user), env)
+    assert_receive {:dispatch, %{type: "env.rebuild"}}
+
+    {:ok, view, _html} = live(conn, ~p"/environments/#{env.id}")
+    view |> element("#cancel-op", "Cancel rebuild") |> render_click()
+
+    assert_receive {:dispatch, %{type: "op.cancel", payload: %{target_op_id: target}}}
+    assert target == op.id
+  end
+
   test "destroying asks git first and requires typing the slug when work would be lost", %{
     conn: conn,
     user: user,
