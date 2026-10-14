@@ -63,6 +63,36 @@ defmodule ForemanWeb.PagesTest do
     assert html =~ "64 CPUs"
   end
 
+  test "with Tailscale, a started environment shows SSH and an Open in VS Code link", %{
+    conn: conn,
+    user: user,
+    repo: repo,
+    box: box
+  } do
+    Application.put_env(:foreman, :tailscale, %{client_id: "c", client_secret: "s"})
+    on_exit(fn -> Application.delete_env(:foreman, :tailscale) end)
+
+    env = environment_fixture(user: user, repo: repo, box: box)
+
+    env =
+      Repo.update!(
+        Ecto.Changeset.change(env,
+          remote_user: "vscode",
+          workspace_folder: "/workspaces/storefront",
+          devcontainer_service: "app"
+        )
+      )
+
+    {:ok, view, _html} = live(conn, ~p"/environments/#{env.id}")
+    assert has_element?(view, "#ssh-command", "ssh vscode@#{env.slug}")
+
+    assert has_element?(
+             view,
+             ~s|a[href="vscode://vscode-remote/ssh-remote+vscode@#{env.slug}/workspaces/storefront"]|,
+             "Open in VS Code"
+           )
+  end
+
   test "the environment page offers restart now or later after a secrets change", %{
     conn: conn,
     user: user,
