@@ -10,6 +10,19 @@ the database. Everything is reachable only on your tailnet.
 - systemd
 - Tailscale, logged in to your tailnet
 
+On a fresh Ubuntu machine, install Docker from
+[Docker's apt repository](https://docs.docker.com/engine/install/ubuntu/),
+Node from [NodeSource](https://github.com/nodesource/distributions), and
+Tailscale with `curl -fsSL https://tailscale.com/install.sh | sh`.
+
+If you have more than one Tailscale account, check the box joined the
+tailnet your laptops are on before going further:
+
+```sh
+tailscale switch --list    # the starred tailnet is the current one
+tailscale status           # the peers it can see
+```
+
 ## 1. Run the control plane
 
 Build the image (or use one CI built), and keep its settings in a file
@@ -24,7 +37,8 @@ printf '%s\n' \
   "FOREMAN_ENCRYPTION_KEY=$(openssl rand -base64 32)" \
   "PHX_HOST=desktop.tail1234.ts.net" \
   "FOREMAN_LISTEN_IP=0.0.0.0" \
-  "FOREMAN_ADMINS=your-github-login" | sudo tee /etc/foreman/foreman.env >/dev/null
+  "FOREMAN_ADMINS=your-github-login" \
+  "FOREMAN_AGENT_RELEASE_DIR=/var/lib/foreman/releases" | sudo tee /etc/foreman/foreman.env >/dev/null
 sudo chmod 0600 /etc/foreman/foreman.env
 
 docker run -d --name foreman --restart unless-stopped \
@@ -34,12 +48,20 @@ docker run -d --name foreman --restart unless-stopped \
   foreman
 ```
 
-`PHX_HOST` is the desktop's MagicDNS name. The port is published on
+`PHX_HOST` is the desktop's MagicDNS name (`tailscale status --json |
+jq -r .Self.DNSName`, without the trailing dot). Keeping published agent
+releases in the data volume means they survive a container recreate. The port is published on
 loopback only; Tailscale serves it to the tailnet over HTTPS:
 
 ```sh
 sudo tailscale serve --bg --https=443 http://127.0.0.1:4000
 ```
+
+If your tailnet policy isn't the default allow-all, your laptops won't
+see the desktop until a rule lets them reach it. Tag the desktop
+`tag:foreman` and grant your machines port 443 on it; see
+[tailscale.md](tailscale.md#the-control-plane-host). Firefox reporting
+"Server Not Found" for the `.ts.net` name usually means exactly this.
 
 **Back up `FOREMAN_ENCRYPTION_KEY`.** Every secret, token and key in the
 database is encrypted with it; without it they're gone.
