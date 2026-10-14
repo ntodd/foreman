@@ -56,3 +56,17 @@ e2e/linux/run.sh --down          # remove the stack and its volumes
 
 It needs `mise` (to sign the update with `mix foreman_agent.sign`) and
 `openssl`.
+
+## README screenshots
+
+`demo.exs` starts a dev control plane on its own database
+(`tmp/demo`) with made-up boxes, repos and environments. Stand-in agent
+processes keep the boxes online; nothing touches Docker, GitHub or a
+tailnet. `screenshots.mjs` captures four pages in light and dark at 2x
+and frames each in a browser window, writing `docs/images/`.
+
+```sh
+cd apps/foreman
+PORT=4100 mix run --no-start ../../e2e/demo.exs &
+cd ../.. && node e2e/screenshots.mjs
+```

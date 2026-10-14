@@ -6,6 +6,11 @@ clones it, builds the devcontainer, delivers its secrets and joins it to
 your tailnet. Run as many copies of a repo side by side as you like;
 nothing publishes ports.
 
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/images/environments-dark.png">
+  <img alt="The Environments page: three boxes with CPU and memory bars, and seven environments across them, running, stopped, creating, and one waiting on a restart" src="docs/images/environments-light.png">
+</picture>
+
 ```
 Browser ──LiveView──► Control plane (Phoenix, SQLite or Postgres, tailnet-only)
                          ▲  WebSocket (agents dial out, signed with ed25519)
@@ -49,6 +54,32 @@ The design, and the decisions behind it, are in
 - Boxes enroll with a one-time token, survive reboots (the control plane
   restores secrets and restarts environments), and update their agents
   from signed releases.
+
+An environment right after one of its secrets changed. New shells
+already have the new value; running services keep the old one until you
+pick a restart.
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/images/environment-dark.png">
+  <img alt="An environment page: a Secrets changed callout with Restart affected, Restart all and Later, the Tailscale SSH command, an Open in VS Code button, and the create log" src="docs/images/environment-light.png">
+</picture>
+
+Boxes, with what's in use next to what's provisioned.
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/images/boxes-dark.png">
+  <img alt="The Boxes page: three online boxes, each with CPU and memory used and provisioned" src="docs/images/boxes-light.png">
+</picture>
+
+Your own secrets. Values are encrypted and can't be read back.
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/images/secrets-dark.png">
+  <img alt="The Secrets page: two secrets with Replace and delete, and a form to add one, optionally limited to some repos" src="docs/images/secrets-light.png">
+</picture>
+
+The screenshots use made-up data; `e2e/demo.exs` and
+`e2e/screenshots.mjs` regenerate them (see [e2e/README.md](e2e/README.md)).
 
 ## Running it
 
