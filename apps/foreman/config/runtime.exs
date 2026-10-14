@@ -11,8 +11,13 @@ if System.get_env("PHX_SERVER") do
   config :foreman, ForemanWeb.Endpoint, server: true
 end
 
+# HTTP/2 is off: tailscale serve and other proxies talk HTTP/1.1 to the
+# endpoint, and Bandit's HTTP/2 has an unfixed advisory (see mix.exs).
 config :foreman, ForemanWeb.Endpoint,
-  http: [port: String.to_integer(System.get_env("PORT", "4000"))]
+  http: [
+    port: String.to_integer(System.get_env("PORT", "4000")),
+    http_2_options: [enabled: false]
+  ]
 
 if config_env() == :dev do
   config :foreman, ForemanWeb.Endpoint,

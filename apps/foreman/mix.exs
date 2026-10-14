@@ -22,7 +22,10 @@ defmodule Foreman.MixProject do
           "EEF-CVE-2026-95105",
           # No fix released. Affects Cloak.Ecto.PBKDF2 fields, which no
           # schema uses.
-          "EEF-CVE-2026-94206"
+          "EEF-CVE-2026-94206",
+          # No fix released. Bandit's HTTP/2 send deadlines; HTTP/2 is
+          # disabled on the endpoint (config/runtime.exs).
+          "EEF-CVE-2026-105659"
         ]
       ]
     ]
