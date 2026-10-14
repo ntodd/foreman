@@ -96,13 +96,27 @@ to the box it runs on (up to the limits in "Known gaps").
   parents.
 - `initializeCommand` is dropped from the config the devcontainer CLI
   sees (it would run on the box).
-- The merged compose config is checked on every start (anything inside
-  can rewrite it): host binds outside the workspace, the Docker socket,
-  host files read through `env_file`/`secrets`/`configs`/build
-  contexts, and host devices are refused by default; binds that expose
-  the agent's state, other environments or secrets directories are
-  always refused. Privileged services, docker-in-docker and host
-  namespaces are warnings. Per-box overrides via `FOREMAN_POLICY`.
+- Environments run unprivileged. On every start (anything inside can
+  rewrite its own config) the agent checks the merged compose config,
+  `devcontainer.json`, and what the devcontainer CLI resolves from
+  features, before anything runs. By default it refuses all of these:
+  - privileged containers: `privileged: true`, the docker-in-docker
+    feature, any feature whose metadata asks for privileged, and
+    capabilities that amount to root on the box (`SYS_ADMIN`,
+    `SYS_MODULE`, `SYS_RAWIO`, `DAC_READ_SEARCH`, `BPF`, `PERFMON`,
+    `MAC_ADMIN`, `ALL`)
+  - the host's network, PID or IPC namespace
+  - the Docker socket, including through a feature's mounts
+  - host binds outside the workspace, and host files read through
+    `env_file`, `secrets`, `configs` or build contexts
+  - host devices other than `/dev/net/tun`
+
+  Binds that expose the agent's state, other environments or secrets
+  directories are refused whatever the box allows. A box can loosen a
+  rule with `FOREMAN_POLICY` on its agent (for example
+  `privileged=allow`). The agent reports its policy when it connects,
+  and the control plane shows any box that has loosened one with a red
+  alert on its page and its cards.
 - git status before a destroy runs inside the container, not on the
   box (a repo's `.git/config` can name programs to run).
 - Secrets on a box: a tmpfs directory per environment, 0700, files
@@ -131,14 +145,14 @@ no ports are published.
 
 These are accepted for now, or need someone to try them:
 
-1. **Docker access is root.** The agent user is in the `docker` group,
-   and most target repos use the docker-in-docker feature, which runs
-   the devcontainer privileged. Code in such an environment is root on
-   the box: it can read every other environment's secrets, the agent's
-   key, and the host. The policy check makes a rewritten compose file
-   harder to abuse, not impossible. v1's answer is policy: a box belongs
-   to one person. Shared boxes should wait for per-developer Incus
-   containers.
+1. **The agent is root on its box.** The agent user is in the `docker`
+   group, which is root in all but name. Environments don't get that by
+   default, since privileged containers are refused, but a box that sets
+   `privileged=allow` gives code in its environments root on the box:
+   every other environment's secrets, the agent's key, and the host.
+   The policy check makes a rewritten compose file harder to abuse, not
+   impossible. A box belongs to one person, and shared boxes should
+   wait for per-developer Incus containers or VMs.
 2. **Container root reads 0600 files.** Root in a container has
    `CAP_DAC_OVERRIDE`, so it reads the secrets directory regardless of
    ownership. That's the environment's own secrets, by design, but also
@@ -158,8 +172,9 @@ These are accepted for now, or need someone to try them:
 5. **A compromised control plane can run repo code on every box.** It
    can't run arbitrary commands (fixed vocabulary, clone host
    allowlist), but it can create environments from any repo the GitHub
-   App sees, and their lifecycle hooks run as root in privileged
-   containers. Keep the control plane tailnet-only and its admins few.
+   App sees, and their lifecycle hooks run in those environments (as
+   root on the box, on a box that allows privileged). Keep the control
+   plane tailnet-only and its admins few.
 6. **The first install trusts the control plane.** `install.sh` checks
    the agent tarball against a SHA-256 the control plane sends, not the
    release signature (updates after that are signature-checked).
@@ -189,7 +204,9 @@ These are accepted for now, or need someone to try them:
 - Get a secret value back out: the UI, LiveView events, the audit log,
   operation logs, error messages, `inspect` output in logs.
 - From inside an environment: escape to the box without privileged
-  mode; make the agent read or write outside the workspace (symlinks in
+  mode; get privileges past the policy (a feature's metadata,
+  `devcontainer.json` capabilities, a capability not on the list); make
+  the agent read or write outside the workspace (symlinks in
   `.devcontainer`, `.git/info`, compose file paths); get a rewritten
   compose file past the policy (YAML anchors, `extends`, `include`,
   interpolation into bind sources, long-syntax binds).

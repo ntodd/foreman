@@ -39,10 +39,12 @@ ONLY=pages node e2e/local.mjs           # just the page tour
 `BROWSER` picks the browser binary (default: Microsoft Edge on macOS);
 any Chromium works.
 
-## On a Linux box (docker-in-docker)
+## On an emulated Linux box
 
 The control plane release image, and a box image running the agent
-release with its own Docker daemon. `run.sh` builds both and checks
+release with its own Docker daemon. The box container runs privileged
+to host that daemon, the way a real box's Docker runs on its host; the
+environments inside it don't. `run.sh` builds both and checks
 enrollment, single-use join tokens, create, what's inside an environment
 (identity, feature, read-only secrets, no published ports, uid mapping,
 0600 secrets other users can't read), secrets delivery, a box reboot

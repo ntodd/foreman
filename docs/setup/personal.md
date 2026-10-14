@@ -147,6 +147,9 @@ and nobody else can sign in.
 
 Agent settings (in `/etc/foreman-agent/agent.env`, written by the
 install script) are documented in
-`apps/foreman_agent/config/runtime.exs`. The one you're most likely to
-change is `FOREMAN_POLICY`, which relaxes or tightens what a box
-accepts from a repo's compose files (see [../security.md](../security.md)).
+`apps/foreman_agent/config/runtime.exs`. `FOREMAN_POLICY` opens up
+what a box accepts from a repo, such as privileged containers for the
+docker-in-docker feature. Everything is refused by default, and a box
+that opens something up gets a red alert in the control plane. Read
+[repos.md](repos.md#docker-inside-an-environment) before you reach for
+it; there's usually a way that doesn't need it.
