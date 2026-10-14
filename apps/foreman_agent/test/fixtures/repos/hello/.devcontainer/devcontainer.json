@@ -1,0 +1,12 @@
+{
+  // A minimal compose devcontainer for the agent's Docker tests.
+  "name": "hello",
+  "dockerComposeFile": ["docker-compose.yml"],
+  "service": "app",
+  "workspaceFolder": "/workspaces/${localWorkspaceFolderBasename}",
+  "remoteUser": "vscode",
+  "postStartCommand": "date +%s%N >> /tmp/poststart.log",
+  // Runs on the box itself; Foreman must drop it.
+  "initializeCommand": "touch /tmp/foreman-initialize-command-ran",
+  "hostRequirements": {"cpus": 2, "memory": "2gb"},
+}

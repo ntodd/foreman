@@ -1,0 +1,10 @@
+# Tries to get a host path past the policy without writing it in the
+# main file: through include, extends and interpolation.
+include:
+  - extra.yml
+services:
+  app:
+    image: alpine:3.22
+    command: ["sleep", "1000000"]
+    volumes:
+      - ../..:/workspaces

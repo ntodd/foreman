@@ -1,0 +1,50 @@
+# Weekly update PRs. Patch and minor bumps arrive grouped; majors stay
+# separate. Dependabot opens no security PRs for Hex, so CI's weekly
+# security job catches new advisories.
+version: 2
+updates:
+  - package-ecosystem: mix
+    directory: /apps/foreman
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    groups:
+      control-plane-minor:
+        update-types: [minor, patch]
+
+  - package-ecosystem: mix
+    directory: /apps/foreman_agent
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    groups:
+      agent-minor:
+        update-types: [minor, patch]
+
+  - package-ecosystem: mix
+    directory: /apps/foreman_protocol
+    schedule:
+      interval: weekly
+      day: monday
+    groups:
+      protocol-minor:
+        update-types: [minor, patch]
+
+  # Actions are pinned to commit SHAs with the release in a comment;
+  # Dependabot updates both.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    groups:
+      actions-minor:
+        update-types: [minor, patch]
+
+  - package-ecosystem: docker
+    directory: /docker
+    schedule:
+      interval: weekly
+      day: monday

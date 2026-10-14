@@ -1,0 +1,170 @@
+defmodule Foreman.Agents do
+  @moduledoc """
+  The link to agents: sending commands to a connected agent's channel and
+  handling the events agents send back.
+
+  Each connected agent's channel process registers under
+  `{:agent, box_id}`. Events are only accepted for operations and
+  environments that belong to the sending box.
+  """
+  import Ecto.Query
+
+  alias Foreman.{Boxes, Environments, Operations, Repo, Scope}
+  alias Foreman.Capacity.Tracker
+  alias Foreman.Environments.Environment
+  alias Foreman.Operations.Operation
+  alias ForemanProtocol.{Command, Event}
+
+  require Logger
+
+  @doc "Called by the channel process once an agent has joined."
+  def register(box_id) do
+    case Registry.register(Foreman.Registry, {:agent, box_id}, nil) do
+      {:ok, _} ->
+        :ok
+
+      {:error, {:already_registered, old}} ->
+        # A second connection for the same box replaces the first.
+        Process.exit(old, :kill)
+        Process.sleep(20)
+        register(box_id)
+    end
+  end
+
+  @doc "Sends a command to a box's agent. `{:error, :offline}` if it isn't connected."
+  def dispatch(box_id, %Command{} = cmd) do
+    case Registry.lookup(Foreman.Registry, {:agent, box_id}) do
+      [{pid, _}] ->
+        send(pid, {:dispatch, cmd})
+        :ok
+
+      [] ->
+        {:error, :offline}
+    end
+  end
+
+  @doc """
+  Runs a box-level command (inventory, stats, gc). Returns the operation,
+  whose result arrives later.
+  """
+  def run_box_command(%Scope{} = scope, box, type)
+      when type in ["box.inventory", "box.stats", "box.gc"] do
+    if Scope.admin?(scope) do
+      {:ok, cmd} = Command.new(type, %{})
+
+      op =
+        Operations.create!(%{
+          id: cmd.op_id,
+          box_id: box.id,
+          user_id: Scope.user_id(scope),
+          action: type,
+          command: type,
+          status: "dispatched",
+          dispatched_at: DateTime.utc_now()
+        })
+
+      case dispatch(box.id, cmd) do
+        :ok ->
+          {:ok, op}
+
+        {:error, :offline} ->
+          {:ok,
+           Operations.mark(op, "failed",
+             error: "the box is offline",
+             finished_at: DateTime.utc_now()
+           )}
+      end
+    else
+      {:error, :unauthorized}
+    end
+  end
+
+  # -- events --------------------------------------------------------------------
+
+  @doc "Handles one event from `box_id`'s agent. Returns :ok or {:error, reason}."
+  def handle_event(box_id, %Event{type: "op.accepted", payload: %{op_id: op_id}}) do
+    with :ok <- owns_op(box_id, op_id) do
+      Operations.mark_running(op_id)
+      :ok
+    end
+  end
+
+  def handle_event(box_id, %Event{type: "op.log", payload: %{op_id: op_id, data: data}}) do
+    with :ok <- owns_op(box_id, op_id), do: Operations.append_log(op_id, data)
+  end
+
+  def handle_event(box_id, %Event{type: "op.result", payload: payload}) do
+    with :ok <- owns_op(box_id, payload.op_id) do
+      case Operations.finish(
+             payload.op_id,
+             payload.status,
+             payload[:result] || %{},
+             payload[:error]
+           ) do
+        {:ok, op} -> Environments.apply_result(op)
+        :already -> :ok
+        :unknown -> :ok
+      end
+
+      :ok
+    end
+  end
+
+  def handle_event(box_id, %Event{type: "box.inventory", payload: %{environments: envs}}) do
+    Environments.reconcile_inventory(box_id, envs)
+  end
+
+  def handle_event(box_id, %Event{type: "box.stats", payload: stats}) do
+    owned = MapSet.new(Environments.live_ids_for_box(box_id))
+
+    stats = %{
+      stats
+      | environments: Map.filter(stats.environments, fn {id, _} -> MapSet.member?(owned, id) end)
+    }
+
+    Tracker.record(box_id, stats)
+    Boxes.record_capacity(box_id, stats.capacity)
+    :ok
+  end
+
+  def handle_event(box_id, %Event{type: "env.state", payload: %{env_id: env_id, state: state}}) do
+    Environments.observe(box_id, env_id, state)
+  end
+
+  defp owns_op(box_id, op_id) do
+    case Repo.one(from o in Operation, where: o.id == ^op_id, select: o.box_id) do
+      ^box_id ->
+        :ok
+
+      nil ->
+        {:error, :unknown_operation}
+
+      _other ->
+        Logger.warning("box #{box_id} sent an event for another box's operation #{op_id}")
+        {:error, :not_yours}
+    end
+  end
+
+  @doc "Called when an agent joins: resend what was in flight and dispatch what's queued."
+  def agent_connected(box) do
+    for op <- Operations.active_for_box(box.id) do
+      if op.environment_id,
+        do: Environments.Server.resend(op.environment_id, op.id),
+        else:
+          Operations.mark(op, "failed",
+            error: "agent reconnected before reporting a result",
+            finished_at: DateTime.utc_now()
+          )
+    end
+
+    for env_id <- Operations.environments_with_queued(box.id),
+        do: Environments.Server.kick(env_id)
+
+    Foreman.Agents.Releases.maybe_update(box)
+    :ok
+  end
+
+  def env_belongs_to_box?(env_id, box_id) do
+    Repo.exists?(from e in Environment, where: e.id == ^env_id and e.box_id == ^box_id)
+  end
+end

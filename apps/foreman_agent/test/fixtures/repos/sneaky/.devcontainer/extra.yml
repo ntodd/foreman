@@ -1,0 +1,9 @@
+services:
+  base:
+    image: alpine:3.22
+    volumes:
+      - ${HOME}:/agent-home
+  helper:
+    extends:
+      service: base
+    command: ["sleep", "1000000"]

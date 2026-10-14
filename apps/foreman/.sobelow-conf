@@ -1,0 +1,23 @@
+# Read by `mix sobelow --config` (the precommit alias). Every finding at
+# any confidence fails the build unless an inline `# sobelow_skip [...]`
+# explains it.
+[
+  verbose: false,
+  private: true,
+  skip: true,
+  router: nil,
+  exit: "low",
+  format: "txt",
+  out: nil,
+  threshold: "low",
+  # Config.CSWH: config checks ignore inline skips. The agent socket
+  # (endpoint.ex) sets check_origin: false on purpose; agents aren't
+  # browsers, carry no cookies, and sign every connect. The LiveView
+  # socket checks origins against PHX_HOST in prod (runtime.exs).
+  #
+  # Config.HTTPS: HTTPS redirects are a runtime setting (the :force_ssl
+  # plug in endpoint.ex, FOREMAN_FORCE_SSL, on by default in prod), so
+  # there's nothing for the static check to find in config/prod.exs.
+  ignore: ["Config.CSWH", "Config.HTTPS"],
+  ignore_files: []
+]

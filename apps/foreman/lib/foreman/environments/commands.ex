@@ -1,0 +1,238 @@
+defmodule Foreman.Environments.Commands do
+  @moduledoc """
+  Builds the agent command for a queued operation.
+
+  Built when the operation is sent (not when it's queued), so it carries
+  the secrets, GitHub token and identity as they are at that moment.
+  Returns the command plus extra args to record on the operation (the
+  secret hashes it applied, whether it carried a token).
+  """
+
+  alias Foreman.{Accounts, Config, GitHub, Repo, Secrets, Tailscale}
+  alias Foreman.Environments.Environment
+  alias Foreman.Operations.Operation
+  alias ForemanProtocol.Command
+
+  require Logger
+
+  @spec build(Operation.t(), Environment.t()) :: {:ok, Command.t(), map()} | {:error, String.t()}
+  def build(%Operation{} = op, %Environment{} = env) do
+    env = Repo.preload(env, [:user, :box, repo: :owner])
+
+    case op.action do
+      action when action in ["create", "rebuild"] ->
+        up(op, env, "env.#{action}")
+
+      "start" ->
+        with_secrets(env, fn s ->
+          command(op, "env.start", base(env) |> Map.put(:compose_env, s.values))
+        end)
+
+      "stop" ->
+        command(op, "env.stop", base(env))
+
+      "destroy" ->
+        command(op, "env.destroy", base(env))
+
+      "restart_all" ->
+        with_secrets(env, fn s -> command(op, "env.restart", restart(env, "all", [], s)) end)
+
+      "restart_affected" ->
+        with_secrets(env, fn s ->
+          command(op, "env.restart", restart(env, "affected", op.args["changed"] || [], s))
+        end)
+
+      "secrets_write" ->
+        secrets_write(op, env)
+
+      "git_status" ->
+        command(op, "env.git_status", base(env))
+
+      "logs" ->
+        command(
+          op,
+          "env.logs",
+          base(env)
+          |> put_present(:service, op.args["service"])
+          |> Map.put(:tail, op.args["tail"] || 300)
+        )
+    end
+  end
+
+  defp base(env), do: %{env_id: env.id, slug: env.slug}
+
+  defp restart(env, mode, changed, s),
+    do: base(env) |> Map.merge(%{mode: mode, changed: changed, compose_env: s.values})
+
+  defp with_secrets(env, fun) do
+    secrets = secrets(env)
+
+    with {:ok, cmd, extra} <- fun.(secrets) do
+      {:ok, cmd, Map.put(extra, "secret_hashes", secrets.hashes)}
+    end
+  end
+
+  defp up(op, env, type) do
+    secrets = secrets(env)
+    identity = Accounts.effective_identity(env.user, env.repo)
+    {token, token_notice} = github_token(env)
+
+    with {:ok, ts_key, env} <- tailscale_key(env, op.action) do
+      files =
+        file_set(env, secrets, identity, token, token_notice)
+        |> put_present("ts-authkey", ts_key)
+
+      payload =
+        base(env)
+        |> Map.merge(%{
+          repo: env.repo.full_name,
+          clone_url: "#{Config.git_base_url()}/#{env.repo.full_name}.git",
+          branch: env.branch,
+          config_path: env.repo.devcontainer_path || ".devcontainer/devcontainer.json",
+          files: files,
+          compose_env: secrets.values,
+          limits: limits(env),
+          tailscale: %{
+            enabled: Tailscale.configured?(),
+            tags:
+              if(Tailscale.configured?(), do: Tailscale.tags_for(env.repo, env.user), else: [])
+          }
+        })
+        |> put_present(:dotfiles, dotfiles(identity))
+        |> put_present(:registry_auth, registry_auth(env.repo.owner))
+
+      with {:ok, cmd, _} <- command(op, type, payload) do
+        {:ok, cmd, %{"secret_hashes" => secrets.hashes, "token" => token != nil}}
+      end
+    end
+  end
+
+  defp secrets_write(op, env) do
+    secrets = secrets(env)
+    identity = Accounts.effective_identity(env.user, env.repo)
+    {token, notice} = github_token(env)
+    files = file_set(env, secrets, identity, token, notice)
+
+    with {:ok, cmd, _} <- command(op, "env.secrets.write", %{env_id: env.id, files: files}) do
+      {:ok, cmd, %{"token" => token != nil}}
+    end
+  end
+
+  defp command(op, type, payload) do
+    case Command.new(type, payload, op_id: op.id) do
+      {:ok, cmd} -> {:ok, cmd, %{}}
+      {:error, errors} -> {:error, "couldn't build #{type}: #{inspect(errors)}"}
+    end
+  end
+
+  defp secrets(env) do
+    values = Secrets.resolve(env)
+    %{values: values, hashes: Secrets.hashes(values)}
+  end
+
+  defp file_set(env, secrets, identity, token, token_notice) do
+    %{
+      "secrets.env" => Secrets.render_env_file(secrets.values),
+      "gitconfig" => gitconfig(identity),
+      "notices" => notices(env, secrets, token_notice)
+    }
+    |> put_present("github-token", token)
+  end
+
+  @doc false
+  def gitconfig(identity) do
+    lines =
+      [
+        identity.git_name && "\tname = \"#{identity.git_name}\"",
+        identity.git_email && "\temail = \"#{identity.git_email}\""
+      ]
+      |> Enum.reject(&is_nil/1)
+
+    case lines do
+      [] -> ""
+      lines -> "# Managed by Foreman.\n[user]\n" <> Enum.join(lines, "\n") <> "\n"
+    end
+  end
+
+  defp notices(env, secrets, token_notice) do
+    changed = Secrets.changed_names(env.applied_secret_hashes, secrets.hashes)
+
+    pending =
+      if env.created_once and changed != [],
+        do:
+          "Foreman: secrets changed (#{Enum.join(changed, ", ")}). New shells have them; restart the environment to apply them to running processes.\n"
+
+    [pending, token_notice] |> Enum.reject(&is_nil/1) |> Enum.join()
+  end
+
+  defp github_token(env) do
+    if GitHub.configured?() do
+      case GitHub.environment_token(env.user, env.repo) do
+        {:ok, token} ->
+          {token, nil}
+
+        {:error, :login_expired} ->
+          {nil,
+           "Foreman: your GitHub login expired, so git push and gh won't work here. Sign in to Foreman again to fix it.\n"}
+
+        {:error, reason} ->
+          Logger.warning("couldn't get a GitHub token for #{env.slug}: #{inspect(reason)}")
+
+          {nil,
+           "Foreman: couldn't get a GitHub token for this environment. Check its repo's token settings.\n"}
+      end
+    else
+      {nil, nil}
+    end
+  end
+
+  # A new node needs an auth key on its first boot only; the node's state
+  # volume keeps its identity after that.
+  defp tailscale_key(env, "create") do
+    cond do
+      not Tailscale.configured?() ->
+        {:ok, nil, env}
+
+      env.ts_authkey ->
+        {:ok, env.ts_authkey, env}
+
+      true ->
+        case Tailscale.create_auth_key(env, env.repo, env.user) do
+          {:ok, %{key: key}} ->
+            env = env |> Environment.state_changeset(%{ts_authkey: key}) |> Repo.update!()
+            {:ok, key, env}
+
+          {:error, reason} ->
+            {:error, "couldn't create a Tailscale auth key: #{inspect(reason)}"}
+        end
+    end
+  end
+
+  defp tailscale_key(env, _action), do: {:ok, env.ts_authkey, env}
+
+  defp limits(env) do
+    %{}
+    |> put_present(:cpus, env.cpu_limit || env.repo.cpu_limit)
+    |> put_present(:memory_mb, env.memory_limit_mb || env.repo.memory_limit_mb)
+  end
+
+  defp dotfiles(%{dotfiles_repository: nil}), do: nil
+
+  defp dotfiles(identity) do
+    put_present(
+      %{repository: identity.dotfiles_repository},
+      :install_command,
+      identity.dotfiles_install_command
+    )
+  end
+
+  defp registry_auth(%{registry_token: token} = owner) when is_binary(token) do
+    [%{host: owner.registry_host || "ghcr.io", username: owner.registry_username, token: token}]
+  end
+
+  defp registry_auth(_), do: nil
+
+  defp put_present(map, _key, nil), do: map
+  defp put_present(map, _key, ""), do: map
+  defp put_present(map, key, value), do: Map.put(map, key, value)
+end

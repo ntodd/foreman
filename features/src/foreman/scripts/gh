@@ -1,0 +1,29 @@
+#!/bin/sh
+# Runs the real gh with the environment's current GitHub token. The token
+# is refreshed every few hours, so it's read on every call rather than
+# exported once into a shell that may outlive it.
+self_dir=/usr/local/share/foreman/bin
+real=
+
+old_ifs=$IFS
+IFS=:
+for dir in $PATH; do
+  [ "$dir" = "$self_dir" ] && continue
+  if [ -x "$dir/gh" ]; then
+    real="$dir/gh"
+    break
+  fi
+done
+IFS=$old_ifs
+
+if [ -z "$real" ]; then
+  echo "gh is not installed in this environment" >&2
+  exit 127
+fi
+
+if [ -z "${GH_TOKEN:-}" ] && [ -s /run/foreman/github-token ]; then
+  GH_TOKEN=$(cat /run/foreman/github-token)
+  export GH_TOKEN
+fi
+
+exec "$real" "$@"

@@ -1,0 +1,6 @@
+{
+  "name": "sneaky",
+  "dockerComposeFile": "docker-compose.yml",
+  "service": "app",
+  "workspaceFolder": "/workspaces/sneaky"
+}
