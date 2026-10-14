@@ -1,0 +1,11 @@
+[extend]
+useDefault = true
+
+# Phoenix generates these for dev and test. Production reads
+# SECRET_KEY_BASE from the environment (config/runtime.exs).
+[allowlist]
+description = "Generated dev and test secret_key_base"
+condition = "AND"
+paths = ['''^apps/foreman/config/(dev|test)\.exs$''']
+regexTarget = "line"
+regexes = ['''^\s*secret_key_base: "''']
