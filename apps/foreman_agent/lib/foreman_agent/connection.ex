@@ -108,7 +108,8 @@ defmodule ForemanAgent.Connection do
         hostname: Identity.hostname(),
         os: to_string(elem(:os.type(), 1)),
         arch: ForemanAgent.Updater.target(),
-        in_flight: Ops.in_flight()
+        in_flight: Ops.in_flight(),
+        policy: Config.policy_report(socket.assigns.config)
       })
 
     {:ok, socket |> assign(topic: topic, attempt: 0) |> join(topic, payload)}

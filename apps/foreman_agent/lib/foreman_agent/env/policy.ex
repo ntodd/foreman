@@ -12,17 +12,20 @@ defmodule ForemanAgent.Env.Policy do
   Some things are refused no matter what the box allows: binds that expose
   the agent's own state, other environments, or secrets directories.
   Everything else is a rule with an action per box: `:refuse`, `:warn` or
-  `:allow`.
+  `:allow`. Every rule refuses unless the box opts out (see
+  `ForemanProtocol.Policy`).
+
+  Features can ask for privileges in their own metadata, so `check/3`
+  covers the repo's files and `check_resolved/2` covers what the
+  devcontainer CLI resolves, features included.
   """
 
-  @default_rules %{
-    host_bind: :refuse,
-    host_file: :refuse,
-    docker_socket: :refuse,
-    devices: :refuse,
-    privileged: :warn,
-    host_namespace: :warn
-  }
+  @default_rules Map.new(ForemanProtocol.Policy.defaults(), fn {rule, action} ->
+                   {String.to_atom(rule), String.to_atom(action)}
+                 end)
+
+  # Capabilities that are root on the box from inside a container.
+  @root_caps ~w(ALL SYS_ADMIN SYS_MODULE SYS_RAWIO DAC_READ_SEARCH BPF PERFMON MAC_ADMIN)
 
   @allowed_devices ["/dev/net/tun"]
   @docker_sockets ["/run/docker.sock", "/var/run/docker.sock"]
@@ -38,9 +41,60 @@ defmodule ForemanAgent.Env.Policy do
 
   @spec check(map(), map(), ctx()) :: {:ok, [String.t()]} | {:error, [String.t()]}
   def check(compose, devcontainer, ctx) do
-    findings =
-      compose_findings(compose, ctx) ++ devcontainer_findings(devcontainer, ctx)
+    verdict(compose_findings(compose, ctx) ++ devcontainer_findings(devcontainer, ctx))
+  end
 
+  @doc """
+  Checks the output of `devcontainer read-configuration
+  --include-merged-configuration`: what each feature asks for, and the
+  mounts after features are merged in.
+  """
+  @spec check_resolved(map(), ctx()) :: {:ok, [String.t()]} | {:error, [String.t()]}
+  def check_resolved(resolved, ctx) do
+    merged = resolved["mergedConfiguration"] || %{}
+    features = resolved_features(resolved)
+
+    verdict(
+      Enum.flat_map(features, &feature_findings(&1, ctx)) ++
+        mount_findings(merged, ctx) ++ unattributed_privileged(resolved, features, ctx)
+    )
+  end
+
+  defp resolved_features(resolved) do
+    for set <- get_in(resolved, ["featuresConfiguration", "featureSets"]) || [],
+        feature <- set["features"] || [] do
+      {get_in(set, ["sourceInformation", "userFeatureId"]) || feature["id"], feature}
+    end
+  end
+
+  defp feature_findings({id, feature}, ctx) do
+    caps = root_caps(feature["capAdd"])
+
+    [
+      feature["privileged"] == true && rule(ctx, :privileged, privileged_feature(id)),
+      caps != [] &&
+        rule(
+          ctx,
+          :privileged,
+          "feature #{id} adds #{Enum.join(caps, ", ")}, which is root on the box"
+        )
+    ]
+    |> Enum.filter(& &1)
+  end
+
+  # Privileged in the merged config that no feature or devcontainer.json
+  # owns up to. Refused all the same.
+  defp unattributed_privileged(resolved, features, ctx) do
+    attributed? =
+      Enum.any?(features, fn {_, f} -> f["privileged"] == true end) or
+        get_in(resolved, ["configuration", "privileged"]) == true
+
+    if get_in(resolved, ["mergedConfiguration", "privileged"]) == true and not attributed?,
+      do: [rule(ctx, :privileged, "the devcontainer runs privileged, which is root on the box")],
+      else: []
+  end
+
+  defp verdict(findings) do
     refused = for {:refuse, msg} <- findings, do: msg
     warned = for {:warn, msg} <- findings, do: msg
 
@@ -174,13 +228,17 @@ defmodule ForemanAgent.Env.Policy do
   defp device_source(other), do: inspect(other)
 
   defp privilege_findings(service, svc, ctx) do
-    caps = svc["cap_add"] || []
+    caps = root_caps(svc["cap_add"])
 
     [
       svc["privileged"] == true &&
         rule(ctx, :privileged, "service '#{service}' runs privileged, which is root on the box"),
-      Enum.any?(caps, &(&1 in ["ALL", "SYS_ADMIN", "CAP_SYS_ADMIN"])) &&
-        rule(ctx, :privileged, "service '#{service}' adds #{Enum.join(caps, ", ")}"),
+      caps != [] &&
+        rule(
+          ctx,
+          :privileged,
+          "service '#{service}' adds #{Enum.join(caps, ", ")}, which is root on the box"
+        ),
       svc["network_mode"] == "host" &&
         rule(ctx, :host_namespace, "service '#{service}' uses the host network"),
       svc["pid"] == "host" &&
@@ -191,24 +249,14 @@ defmodule ForemanAgent.Env.Policy do
     |> Enum.filter(& &1)
   end
 
+  # The repo's own devcontainer.json. docker-in-docker is caught by name
+  # here so it fails fast; check_resolved/2 catches any feature by its
+  # metadata.
   defp devcontainer_findings(config, ctx) do
     features =
       for {id, _opts} <- config["features"] || %{},
           String.contains?(id, "docker-in-docker") do
-        rule(
-          ctx,
-          :privileged,
-          "the docker-in-docker feature runs the devcontainer privileged, which is root on the box"
-        )
-      end
-
-    mounts =
-      for mount <- config["mounts"] || [],
-          {source, target, type, ro} = parse_mount(mount),
-          type == "bind",
-          is_binary(source),
-          finding <- bind_finding("devcontainer.json", source, target, ro, ctx) do
-        finding
+        rule(ctx, :privileged, privileged_feature(id))
       end
 
     privileged =
@@ -218,8 +266,45 @@ defmodule ForemanAgent.Env.Policy do
         ],
         else: []
 
-    features ++ mounts ++ privileged
+    caps =
+      case root_caps(config["capAdd"]) do
+        [] ->
+          []
+
+        caps ->
+          [
+            rule(
+              ctx,
+              :privileged,
+              "devcontainer.json adds #{Enum.join(caps, ", ")}, which is root on the box"
+            )
+          ]
+      end
+
+    features ++ mount_findings(config, ctx) ++ privileged ++ caps
   end
+
+  defp mount_findings(config, ctx) do
+    for mount <- List.wrap(config["mounts"]),
+        {source, target, type, ro} = parse_mount(mount),
+        type == "bind",
+        is_binary(source),
+        finding <- bind_finding("devcontainer.json", source, target, ro, ctx) do
+      finding
+    end
+  end
+
+  defp privileged_feature(id),
+    do: "feature #{id} runs the devcontainer privileged, which is root on the box"
+
+  defp root_caps(caps) when is_list(caps) do
+    Enum.filter(caps, fn cap ->
+      is_binary(cap) and
+        (cap |> String.upcase() |> String.replace_prefix("CAP_", "")) in @root_caps
+    end)
+  end
+
+  defp root_caps(_), do: []
 
   defp parse_mount(%{} = m), do: {m["source"], m["target"], m["type"], m["readonly"] == true}
 

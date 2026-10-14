@@ -56,6 +56,10 @@ defmodule ForemanAgent.Config do
 
   def put(%__MODULE__{} = config), do: :persistent_term.put(__MODULE__, config)
 
+  @doc "The box's policy as it's reported to the control plane on join."
+  def policy_report(%__MODULE__{policy_rules: rules}),
+    do: Map.new(rules, fn {rule, action} -> {to_string(rule), to_string(action)} end)
+
   @doc "Paths no environment may ever bind-mount."
   def protected_paths(%__MODULE__{} = c),
     do: [c.data_dir, c.envs_root, c.secrets_root, c.release_root]

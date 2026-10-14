@@ -25,7 +25,7 @@ defmodule ForemanAgent.Integration.EnvDockerTest do
     File.rm_rf!(root)
     File.mkdir_p!(root)
 
-    base_url = GitServer.start(Path.join(root, "git"), ["hello", "sneaky"])
+    base_url = GitServer.start(Path.join(root, "git"), ["hello", "sneaky", "innocent"])
 
     config = %Config{
       data_dir: Path.join(root, "data"),
@@ -303,6 +303,25 @@ defmodule ForemanAgent.Integration.EnvDockerTest do
     assert {:error, message} = Env.run("env.create", payload, ctx)
     assert message =~ "protected"
     assert message =~ "helper"
+    assert containers(env_id) == %{}
+  end
+
+  test "the policy refuses a feature that asks for privileged in its own metadata", %{
+    config: config,
+    base_url: base_url
+  } do
+    env_id = "55555555-5555-4555-8555-555555555555"
+
+    payload =
+      create_payload(env_id, "innocent-1", base_url, %{
+        "repo" => "acme/innocent",
+        "clone_url" => base_url <> "/innocent.git",
+        "tailscale" => %{"enabled" => false}
+      })
+
+    assert {:error, message} = Env.run("env.create", payload, ctx(config))
+    assert message =~ "./innocent"
+    assert message =~ "privileged"
     assert containers(env_id) == %{}
   end
 

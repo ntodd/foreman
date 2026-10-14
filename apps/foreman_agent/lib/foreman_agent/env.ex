@@ -348,21 +348,23 @@ defmodule ForemanAgent.Env do
   end
 
   defp check_policy(merged, devcontainer, paths, config) do
-    ctx = %{
+    case Policy.check(merged, devcontainer, policy_ctx(paths, config)) do
+      {:ok, warnings} -> {:ok, warnings}
+      {:error, refused} -> {:error, refusal(refused)}
+    end
+  end
+
+  defp policy_ctx(paths, config) do
+    %{
       workspace_root: paths.workspace,
       secrets_dir: paths.secrets,
       protected: ForemanAgent.Config.protected_paths(config),
       rules: config.policy_rules
     }
-
-    case Policy.check(merged, devcontainer, ctx) do
-      {:ok, warnings} ->
-        {:ok, warnings}
-
-      {:error, refused} ->
-        {:error, "refused by this box's policy:\n" <> Enum.map_join(refused, "\n", &("- " <> &1))}
-    end
   end
+
+  defp refusal(refused),
+    do: "refused by this box's policy:\n" <> Enum.map_join(refused, "\n", &("- " <> &1))
 
   # The CLI resolves local features against the repo's devcontainer
   # folder, so the feature is copied in there (and excluded from git).
@@ -397,60 +399,102 @@ defmodule ForemanAgent.Env do
         |> compose_env(spec.slug, Map.get(p, :compose_env, %{}))
         |> then(&if(docker_config, do: Map.put(&1, "DOCKER_CONFIG", docker_config), else: &1))
 
-      args =
-        [
-          "up",
-          "--workspace-folder",
-          paths.clone,
-          "--config",
-          Path.join(paths.clone, spec.config_path),
-          "--override-config",
-          prepared.override_path,
-          "--id-label",
-          "foreman.env_id=#{spec.env_id}",
-          "--additional-features",
-          JSON.encode!(%{@feature_ref => Overlay.feature_options(spec.tailscale)}),
-          "--log-format",
-          "json",
-          "--skip-post-attach",
-          "--oci-auth-hardening"
-        ] ++
-          lockfile_args(paths.clone, spec.config_path) ++
-          dotfiles_args(Map.get(spec, :dotfiles)) ++
-          if(opts[:rebuild], do: ["--remove-existing-container"], else: [])
+      config_args = [
+        "--workspace-folder",
+        paths.clone,
+        "--config",
+        Path.join(paths.clone, spec.config_path),
+        "--override-config",
+        prepared.override_path,
+        "--additional-features",
+        JSON.encode!(%{@feature_ref => Overlay.feature_options(spec.tailscale)}),
+        "--log-format",
+        "json",
+        "--oci-auth-hardening"
+      ]
 
-      ctx.log.("info", "Starting the devcontainer\n")
-
-      {:ok, %{status: status, output: output}} =
-        run_lines(
-          ctx,
-          ctx.config.devcontainer,
-          args,
-          [env: env, keep: 262_144],
-          &devcontainer_log/1
-        )
-
-      case {status, find_outcome(output)} do
-        {0, %{"outcome" => "success"} = outcome} ->
-          {:ok,
-           %{
-             "container_id" => outcome["containerId"],
-             "remote_user" => outcome["remoteUser"],
-             "remote_workspace_folder" => outcome["remoteWorkspaceFolder"],
-             "compose_project" => outcome["composeProjectName"] || spec.slug,
-             "services" => prepared.services,
-             "devcontainer_service" => prepared.devcontainer_service,
-             "warnings" => prepared.warnings,
-             "host_requirements" => prepared.config["hostRequirements"]
-           }}
-
-        {_, %{"message" => message} = outcome} ->
-          {:error, "devcontainer up failed: #{message}#{describe(outcome)}"}
-
-        {_, _} ->
-          {:error, "devcontainer up failed: #{last_lines(output)}"}
+      with {:ok, warnings} <- check_resolved(config_args, env, paths, ctx) do
+        warnings = Enum.uniq(prepared.warnings ++ warnings)
+        up(paths, spec, %{prepared | warnings: warnings}, config_args, env, ctx, opts)
       end
     end)
+  end
+
+  # Features can ask for privileges in their own metadata, which only the
+  # CLI resolves. Ask it what the devcontainer will get before running it.
+  defp check_resolved(config_args, env, paths, ctx) do
+    args = ["read-configuration", "--include-merged-configuration" | config_args]
+
+    {:ok, %{status: status, output: output}} =
+      run_lines(ctx, ctx.config.devcontainer, args, [env: env, keep: 1_048_576], fn _ -> nil end)
+
+    resolved =
+      output
+      |> String.split("\n", trim: true)
+      |> Enum.find_value(fn line ->
+        case JSON.decode(line) do
+          {:ok, %{"mergedConfiguration" => _} = resolved} -> resolved
+          _ -> nil
+        end
+      end)
+
+    if status != 0 or is_nil(resolved) do
+      {:error, "devcontainer read-configuration failed: #{last_lines(output)}"}
+    else
+      case Policy.check_resolved(resolved, policy_ctx(paths, ctx.config)) do
+        {:ok, warnings} ->
+          Enum.each(warnings, &ctx.log.("info", "Warning: #{&1}\n"))
+          {:ok, warnings}
+
+        {:error, refused} ->
+          {:error, refusal(refused)}
+      end
+    end
+  end
+
+  defp up(paths, spec, prepared, config_args, env, ctx, opts) do
+    args =
+      ["up" | config_args] ++
+        [
+          "--id-label",
+          "foreman.env_id=#{spec.env_id}",
+          "--skip-post-attach"
+        ] ++
+        lockfile_args(paths.clone, spec.config_path) ++
+        dotfiles_args(Map.get(spec, :dotfiles)) ++
+        if(opts[:rebuild], do: ["--remove-existing-container"], else: [])
+
+    ctx.log.("info", "Starting the devcontainer\n")
+
+    {:ok, %{status: status, output: output}} =
+      run_lines(
+        ctx,
+        ctx.config.devcontainer,
+        args,
+        [env: env, keep: 262_144],
+        &devcontainer_log/1
+      )
+
+    case {status, find_outcome(output)} do
+      {0, %{"outcome" => "success"} = outcome} ->
+        {:ok,
+         %{
+           "container_id" => outcome["containerId"],
+           "remote_user" => outcome["remoteUser"],
+           "remote_workspace_folder" => outcome["remoteWorkspaceFolder"],
+           "compose_project" => outcome["composeProjectName"] || spec.slug,
+           "services" => prepared.services,
+           "devcontainer_service" => prepared.devcontainer_service,
+           "warnings" => prepared.warnings,
+           "host_requirements" => prepared.config["hostRequirements"]
+         }}
+
+      {_, %{"message" => message} = outcome} ->
+        {:error, "devcontainer up failed: #{message}#{describe(outcome)}"}
+
+      {_, _} ->
+        {:error, "devcontainer up failed: #{last_lines(output)}"}
+    end
   end
 
   # The CLI writes devcontainer-lock.json next to the config. Keep that
