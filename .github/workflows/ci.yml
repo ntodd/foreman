@@ -156,7 +156,7 @@ jobs:
         with:
           node-version: "22"
       - name: ShellCheck
-        run: shellcheck -s sh features/src/foreman/install.sh features/src/foreman/scripts/* docker/box-entrypoint.sh apps/foreman/priv/agent/install.sh
+        run: shellcheck -s sh features/src/foreman/install.sh features/src/foreman/scripts/* docker/box-entrypoint.sh apps/foreman/priv/agent/install.sh scripts/publish-agent-release.sh
       - name: Test the feature in a real devcontainer
         run: npx --yes @devcontainers/cli@0.89.0 features test --features foreman --base-image mcr.microsoft.com/devcontainers/base:debian --skip-scenarios features
 

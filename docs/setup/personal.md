@@ -69,33 +69,75 @@ box instead of over the tailnet.
 ## 4. Publish an agent release
 
 Boxes install and update the agent from releases the control plane
-serves. CI builds and signs them (the signing key never touches the
-control plane). By hand:
+serves. CI builds and signs them, and the signing key never touches the
+control plane. Make the keypair once (`mix` here needs the Elixir from
+`mise.toml`):
 
 ```sh
 cd apps/foreman_agent
-mix foreman_agent.sign --keygen   # once; keep the private key out of the repo
+mix foreman_agent.sign --keygen   # prints the private key, then the public one
+```
 
+The public key is compiled into every agent, which checks updates
+against it, so a lost private key means reinstalling every box. Keep a
+copy somewhere safe, give it to CI, and keep it out of the repo:
+
+```sh
+gh secret set FOREMAN_RELEASE_PRIVATE_KEY      # paste the private key
+gh variable set FOREMAN_RELEASE_PUBLIC_KEY --body '<public key>'
+```
+
+Add `FOREMAN_AGENT_RELEASE_PUBLIC_KEY=<public key>` to the control
+plane's settings and recreate the container.
+
+To release, push a tag. The `Agent release` workflow builds the agent
+for `linux-amd64` and `linux-arm64`, signs both and attaches them to a
+GitHub release:
+
+```sh
+git tag v0.1.0 && git push origin v0.1.0
+```
+
+The control plane doesn't fetch from GitHub. On its host, with `gh`
+logged in, register the release:
+
+```sh
+scripts/publish-agent-release.sh 0.1.0
+```
+
+To roll a newer version out later, release and register it, then set
+each box's desired agent version on its page.
+
+The agent is built on Ubuntu 22.04 and runs on Ubuntu 22.04+ and
+Debian 12+. It bundles the Erlang runtime, which needs the build
+system's glibc and OpenSSL or newer, so a box older than that won't
+start it.
+
+### By hand
+
+Without CI, build and sign on any machine with Docker and Elixir:
+
+```sh
 docker build -f docker/box.Dockerfile --target agent-tarball \
   --build-arg FOREMAN_AGENT_VERSION=0.1.0 \
   --build-arg FOREMAN_RELEASE_PUBLIC_KEY=<public key> \
   -o out .
+cd apps/foreman_agent
 FOREMAN_RELEASE_PRIVATE_KEY=<private key> \
-  mix foreman_agent.sign 0.1.0 linux-amd64 out/foreman_agent.tar.gz   # prints the signature
+  mix foreman_agent.sign 0.1.0 linux-amd64 ../../out/foreman_agent.tar.gz   # prints the signature
 ```
 
-Add `FOREMAN_AGENT_RELEASE_PUBLIC_KEY=<public key>` to the control
-plane's settings, then register the tarball:
+Leave `FOREMAN_RELEASE_PUBLIC_KEY` unset when signing. The agent reads
+it at compile time, and mix refuses to run when it differs at run time.
+Build on the box's architecture (`linux-arm64` on ARM). Then register
+it; the copy is owned by root, so remove it as root:
 
 ```sh
 docker cp out/foreman_agent.tar.gz foreman:/tmp/agent.tar.gz
 docker exec foreman env -u PHX_SERVER /app/bin/foreman eval \
   'Foreman.Release.publish_agent("0.1.0", "linux-amd64", "/tmp/agent.tar.gz", "<signature>")'
+docker exec -u 0 foreman rm /tmp/agent.tar.gz
 ```
-
-Build on the box's architecture (`linux-arm64` on ARM). To roll a newer
-version out later, publish it and set each box's desired agent version
-on its page.
 
 ## 5. Add the desktop as a box
 
