@@ -74,6 +74,7 @@ defmodule Foreman.Fixtures do
             "disk_free_mb" => 500_000
           }),
         capacity_policy: Map.get(attrs, :capacity_policy, "allow"),
+        policy: Map.get(attrs, :policy, ForemanProtocol.Policy.defaults()),
         agent_version: "0.1.0",
         protocol_version: 1
       }

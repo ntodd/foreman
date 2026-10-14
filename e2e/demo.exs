@@ -102,6 +102,7 @@ box = fn name, owner_user, hostname, arch, cpus, memory_gb, disk_gb, free_gb ->
     hostname: hostname,
     os: "linux",
     arch: arch,
+    policy: ForemanProtocol.Policy.defaults(),
     capacity: %{
       "cpus" => cpus,
       "memory_mb" => memory_gb * 1024,
