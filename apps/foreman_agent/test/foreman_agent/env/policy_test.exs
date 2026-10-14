@@ -107,7 +107,7 @@ defmodule ForemanAgent.Env.PolicyTest do
     assert message =~ "build context"
   end
 
-  test "warns about privileged services and host namespaces by default" do
+  test "refuses privileged services and host namespaces by default" do
     config =
       compose(%{
         "app" => %{"privileged" => true},
@@ -115,21 +115,63 @@ defmodule ForemanAgent.Env.PolicyTest do
         "pid" => %{"pid" => "host"}
       })
 
-    assert {:ok, warnings} = Policy.check(config, %{}, ctx())
-    assert Enum.any?(warnings, &(&1 =~ "privileged"))
-    assert Enum.any?(warnings, &(&1 =~ "host network"))
-    assert Enum.any?(warnings, &(&1 =~ "host PID"))
+    assert {:error, messages} = Policy.check(config, %{}, ctx())
+    assert Enum.any?(messages, &(&1 =~ "privileged"))
+    assert Enum.any?(messages, &(&1 =~ "host network"))
+    assert Enum.any?(messages, &(&1 =~ "host PID"))
   end
 
-  test "privileged can be refused per box" do
-    config = compose(%{"app" => %{"privileged" => true}})
-    assert {:error, _} = Policy.check(config, %{}, ctx(%{privileged: :refuse}))
+  test "a box can open up privileged and host namespaces, as an exception" do
+    config =
+      compose(%{"app" => %{"privileged" => true}, "net" => %{"network_mode" => "host"}})
+
+    assert {:ok, []} =
+             Policy.check(config, %{}, ctx(%{privileged: :allow, host_namespace: :allow}))
+
+    assert {:ok, warnings} =
+             Policy.check(config, %{}, ctx(%{privileged: :warn, host_namespace: :warn}))
+
+    assert length(warnings) == 2
   end
 
-  test "treats the docker-in-docker feature as privileged" do
+  test "refuses capabilities that amount to root on the box, and allows the rest" do
+    for cap <- [
+          "ALL",
+          "SYS_ADMIN",
+          "CAP_SYS_ADMIN",
+          "SYS_MODULE",
+          "SYS_RAWIO",
+          "dac_read_search",
+          "BPF"
+        ] do
+      config = compose(%{"app" => %{"cap_add" => ["NET_ADMIN", cap]}})
+
+      assert {:error, [message]} = Policy.check(config, %{}, ctx()),
+             "expected #{cap} to be refused"
+
+      assert message =~ cap
+    end
+
+    config = compose(%{"app" => %{"cap_add" => ["NET_ADMIN", "NET_RAW", "SYS_PTRACE"]}})
+    assert {:ok, []} = Policy.check(config, %{}, ctx())
+  end
+
+  test "refuses the docker-in-docker feature by default" do
     devcontainer = %{"features" => %{"ghcr.io/devcontainers/features/docker-in-docker:2" => %{}}}
-    assert {:ok, [warning]} = Policy.check(compose(%{"app" => %{}}), devcontainer, ctx())
-    assert warning =~ "docker-in-docker"
+    assert {:error, [message]} = Policy.check(compose(%{"app" => %{}}), devcontainer, ctx())
+    assert message =~ "docker-in-docker"
+
+    assert {:ok, [warning]} =
+             Policy.check(compose(%{"app" => %{}}), devcontainer, ctx(%{privileged: :warn}))
+
+    assert warning == message
+  end
+
+  test "checks privileged and capAdd in devcontainer.json" do
+    devcontainer = %{"privileged" => true, "capAdd" => ["SYS_ADMIN"]}
+    assert {:error, messages} = Policy.check(compose(%{"app" => %{}}), devcontainer, ctx())
+    assert Enum.any?(messages, &(&1 =~ "devcontainer.json sets privileged"))
+    assert Enum.any?(messages, &(&1 =~ "SYS_ADMIN"))
   end
 
   test "checks devcontainer.json mounts too" do
@@ -157,5 +199,94 @@ defmodule ForemanAgent.Env.PolicyTest do
 
     assert {:error, [message]} = Policy.check(config, %{}, ctx())
     assert message =~ "/dev/sda"
+  end
+
+  describe "the resolved configuration (features included)" do
+    defp resolved(features, merged \\ %{}) do
+      %{
+        "mergedConfiguration" => merged,
+        "featuresConfiguration" => %{
+          "featureSets" =>
+            for {id, meta} <- features do
+              %{"sourceInformation" => %{"userFeatureId" => id}, "features" => [meta]}
+            end
+        }
+      }
+    end
+
+    test "refuses a feature whose own metadata asks for privileged, and names it" do
+      config =
+        resolved(
+          [{"ghcr.io/acme/features/sneaky:1", %{"id" => "sneaky", "privileged" => true}}],
+          %{
+            "privileged" => true
+          }
+        )
+
+      assert {:error, [message]} = Policy.check_resolved(config, ctx())
+      assert message =~ "ghcr.io/acme/features/sneaky:1"
+      assert message =~ "privileged"
+    end
+
+    test "refuses dangerous capabilities from features and allows the Foreman feature's" do
+      config =
+        resolved([
+          {"ghcr.io/acme/features/caps:1", %{"id" => "caps", "capAdd" => ["SYS_MODULE"]}},
+          {"ghcr.io/ntodd/foreman-features/foreman:1",
+           %{"id" => "foreman", "capAdd" => ["NET_ADMIN", "NET_RAW"]}}
+        ])
+
+      assert {:error, [message]} = Policy.check_resolved(config, ctx())
+      assert message =~ "ghcr.io/acme/features/caps:1"
+      assert message =~ "SYS_MODULE"
+    end
+
+    test "checks mounts that features add" do
+      config =
+        resolved([], %{
+          "mounts" => [
+            %{
+              "source" => "/var/run/docker.sock",
+              "target" => "/var/run/docker-host.sock",
+              "type" => "bind"
+            },
+            %{
+              "source" => "dind-var-lib-docker",
+              "target" => "/var/lib/docker",
+              "type" => "volume"
+            }
+          ]
+        })
+
+      assert {:error, [message]} = Policy.check_resolved(config, ctx())
+      assert message =~ "Docker socket"
+    end
+
+    test "still refuses privileged when it can't tell where it came from" do
+      assert {:error, [message]} =
+               Policy.check_resolved(resolved([], %{"privileged" => true}), ctx())
+
+      assert message =~ "privileged"
+    end
+
+    test "passes a clean configuration, and anything the box has opened up" do
+      clean =
+        resolved([{"ghcr.io/devcontainers/features/node:1", %{"id" => "node"}}], %{
+          "capAdd" => ["NET_ADMIN"]
+        })
+
+      assert {:ok, []} = Policy.check_resolved(clean, ctx())
+
+      dind =
+        resolved(
+          [
+            {"ghcr.io/devcontainers/features/docker-in-docker:2",
+             %{"id" => "docker-in-docker", "privileged" => true}}
+          ],
+          %{"privileged" => true}
+        )
+
+      assert {:ok, []} = Policy.check_resolved(dind, ctx(%{privileged: :allow}))
+    end
   end
 end

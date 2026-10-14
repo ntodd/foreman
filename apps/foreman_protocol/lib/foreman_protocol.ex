@@ -23,7 +23,10 @@ defmodule ForemanProtocol do
     hostname: {:string, required: true},
     os: {:string, required: true},
     arch: {:string, required: true},
-    in_flight: {{:list, :uuid}, default: []}
+    in_flight: {{:list, :uuid}, default: []},
+    policy:
+      {{:map_of, {:enum, ForemanProtocol.Policy.rules()},
+        {:enum, ForemanProtocol.Policy.actions()}}, default: %{}}
   ]
 
   @doc "Validates the payload an agent sends when it joins its topic."

@@ -1,0 +1,10 @@
+{
+  // A feature with an innocent name that asks for privileged in its own
+  // metadata. The agent must refuse it before anything starts.
+  "name": "innocent",
+  "dockerComposeFile": ["docker-compose.yml"],
+  "service": "app",
+  "workspaceFolder": "/workspaces/${localWorkspaceFolderBasename}",
+  "remoteUser": "vscode",
+  "features": {"./innocent": {}}
+}

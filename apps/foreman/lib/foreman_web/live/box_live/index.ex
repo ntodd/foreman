@@ -85,7 +85,13 @@ defmodule ForemanWeb.BoxLive.Index do
           :for={card <- @boxes}
           navigate={~p"/boxes/#{card.box.id}"}
           id={"box-#{card.box.id}"}
-          class="rounded-xl border border-line bg-raised p-5 shadow-xs transition-shadow hover:shadow-raised"
+          class={[
+            "rounded-xl border bg-raised p-5 shadow-xs transition-shadow hover:shadow-raised",
+            if(Foreman.Boxes.policy_exceptions(card.box) == [],
+              do: "border-line",
+              else: "border-danger/50 ring-1 ring-danger/30"
+            )
+          ]}
         >
           <div class="mb-4 flex items-start justify-between gap-3">
             <div class="min-w-0">
@@ -97,6 +103,7 @@ defmodule ForemanWeb.BoxLive.Index do
               </p>
             </div>
             <div class="flex items-center gap-1.5">
+              <.box_policy_badge box={card.box} />
               <.badge :if={card.summary.contention} color="amber" size="sm">Contention</.badge>
               <.box_status online={card.online} />
             </div>
@@ -134,7 +141,7 @@ defmodule ForemanWeb.BoxLive.Index do
             />
           </div>
           <p class="mt-4 text-xs text-ink-3">
-            {card.count} {if card.count == 1, do: "environment", else: "environments"} · policy: {card.box.capacity_policy}
+            {card.count} {if card.count == 1, do: "environment", else: "environments"} · placement: {card.box.capacity_policy}
           </p>
         </.link>
       </div>

@@ -158,6 +158,7 @@ defmodule Foreman.Boxes do
         hostname: join.hostname,
         os: join.os,
         arch: join.arch,
+        policy: if(join.policy == %{}, do: nil, else: join.policy),
         last_seen_at: DateTime.utc_now()
       )
       |> Repo.update!()
@@ -165,6 +166,30 @@ defmodule Foreman.Boxes do
     broadcast(box, :online)
     box
   end
+
+  @policy_labels %{
+    "privileged" =>
+      "privileged containers (docker-in-docker, privileged: true, SYS_ADMIN and the like)",
+    "host_namespace" => "the host's network, PID or IPC namespace",
+    "docker_socket" => "the Docker socket",
+    "host_bind" => "bind mounts from outside the workspace",
+    "host_file" => "env files, secrets and build contexts from outside the workspace",
+    "devices" => "host devices"
+  }
+
+  @doc """
+  The rules a box's agent has opened up from the default (refuse
+  everything), each with what it lets in. Empty for a box on the default
+  policy, and for one whose agent hasn't reported a policy.
+  """
+  def policy_exceptions(%Box{policy: policy}) when is_map(policy) do
+    for {rule, action} <- ForemanProtocol.Policy.relaxed(policy) do
+      %{rule: rule, action: action, label: Map.fetch!(@policy_labels, rule)}
+    end
+    |> Enum.sort_by(&(&1.rule != "privileged"))
+  end
+
+  def policy_exceptions(%Box{}), do: []
 
   def agent_left(box_id) do
     if box = get_box(box_id) do

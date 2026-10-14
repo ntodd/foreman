@@ -419,21 +419,24 @@ The agent has Docker access, which means root on the box. That makes a compromis
 
 The fixed vocabulary limits what an attacker can do, but it doesn't make `env.create` safe. Creating an environment from a repo runs that repo's Dockerfiles and lifecycle hooks.
 
-### Privileged docker-in-docker
+### No docker-in-docker
 
-Every target repo uses the `docker-in-docker` feature, which runs the devcontainer privileged. Privileged means root on the box from inside the environment.
+Environments run unprivileged. The agent refuses privileged containers by default, and that includes the `docker-in-docker` feature, which runs the devcontainer privileged. A privileged container is root on the box: it can mount the host's disks, load kernel modules, and read every environment's secrets and the agent's key.
 
-**v1 is policy-based:**
-- A box belongs to one user, and only runs that user's environments unless the owner grants access to someone else.
-- The blast radius is the owner's own box, the same as today.
-- Repos should drop `docker-in-docker` where nothing in them uses Docker.
+**Instead of Docker inside an environment:**
+- **Services** (databases, caches, search, browsers for tests) go in the compose file as sidecars, which is what most docker-in-docker setups were really for.
+- **Image builds** go to a remote builder or CI. `fly deploy`, for example, builds remotely unless told otherwise.
+- **Pulling, retagging and pushing images** works without a daemon, using `crane` or `skopeo`.
+
+**When a repo really needs Docker inside:** its box opts in with `FOREMAN_POLICY=privileged=allow`, and the control plane shows that box with a red alert. The blast radius is that box, so it should be a box with nothing else on it: its own VM, or later a per-developer Incus container.
 
 **Deferred until boxes are actually shared:** run one Incus system container per developer per box, with `security.nesting=true` and its own dockerd, and a Foreman agent inside it.
 - The control plane sees each of these as a separate box, so no app code changes.
 - The isolation boundary then matches the trust boundary, which is the developer.
+- A privileged environment inside it is root only in that developer's container.
 - This needs a spike.
 
-**Ruled out:**
+**Ruled out as ways to make privileged Docker safe:**
 
 | Option | Why |
 |---|---|
@@ -463,7 +466,9 @@ What a repo needs to work well under Foreman:
 - **Required:**
   - A compose-based devcontainer.
   - No bind mounts to host paths outside the repo. They break on other boxes and collide between copies.
+  - No privileged containers, including the `docker-in-docker` feature, unless the box opts in. See [No docker-in-docker](#no-docker-in-docker).
 - **Remove:**
+  - The `docker-in-docker` feature. Services move to compose sidecars; image builds move to a remote builder or CI.
   - Repo-level Tailscale setup: install scripts, `tailscale-up.sh`, `TS_*` settings, the authkey mount, and `cap_add`/`devices` added only for Tailscale. The Foreman feature replaces all of it.
   - `env_file` entries pointing at gitignored files. Those values become Foreman secrets.
   - Dotfiles, git identity and SSH `authorized_keys` setup in `postCreateCommand`. Foreman covers them.
@@ -605,9 +610,13 @@ the plan above, the build wins.
 - **Redaction:** secret values are scrubbed from operation logs and
   errors by both the agent and the control plane (the CLI logs the
   merged compose config with interpolated values).
-- **Compose policy:** the agent checks the merged compose config on
-  every start and refuses host binds, host files, the Docker socket and
-  devices by default; see [security.md](security.md).
+- **Compose policy:** the agent checks the merged compose config,
+  `devcontainer.json` and the features the CLI resolves (with
+  `devcontainer read-configuration --include-merged-configuration`)
+  on every start, and refuses privileged containers, host namespaces,
+  host binds, host files, the Docker socket and devices unless the box
+  opts out. Agents report their policy on join; see
+  [security.md](security.md).
 - **`initializeCommand`** is dropped: it would run on the box.
 - **Restart affected:** recreates the non-devcontainer services that
   interpolate a changed variable, then stops and re-`up`s the

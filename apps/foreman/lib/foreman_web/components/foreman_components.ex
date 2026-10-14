@@ -54,6 +54,59 @@ defmodule ForemanWeb.ForemanComponents do
     """
   end
 
+  @doc """
+  The chip on a box card when the box's agent accepts more than the
+  default policy. Privileged is called out by name.
+  """
+  attr :box, :map, required: true
+
+  def box_policy_badge(assigns) do
+    assigns = assign(assigns, :exceptions, Foreman.Boxes.policy_exceptions(assigns.box))
+
+    ~H"""
+    <.badge :if={@exceptions != []} color="rose" size="sm" data-role="policy-alert">
+      {if Enum.any?(@exceptions, &(&1.rule == "privileged")),
+        do: "Privileged allowed",
+        else: "Policy relaxed"}
+    </.badge>
+    """
+  end
+
+  @doc "The box page's alert for a box that accepts more than the default policy."
+  attr :box, :map, required: true
+
+  def box_policy_alert(assigns) do
+    exceptions = Foreman.Boxes.policy_exceptions(assigns.box)
+
+    assigns =
+      assigns
+      |> assign(:exceptions, exceptions)
+      |> assign(:privileged, Enum.any?(exceptions, &(&1.rule == "privileged")))
+
+    ~H"""
+    <.callout :if={@exceptions != []} kind="danger" id="box-policy-alert" class="border-2">
+      <p class="text-[15px] font-semibold">
+        {if @privileged,
+          do: "Environments on this box can run privileged",
+          else: "This box accepts more than the default policy"}
+      </p>
+      <p :if={@privileged} class="mt-1">
+        Privileged code is root on the box: it can read every environment's secrets, the agent's key and anything else on the machine. Only allow it on a box that holds nothing else you care about.
+      </p>
+      <ul class="mt-2 list-disc space-y-0.5 pl-5">
+        <li :for={e <- @exceptions}>
+          {if e.action == "allow", do: "Allowed", else: "Allowed with a warning"}: {e.label}
+        </li>
+      </ul>
+      <p class="mt-2 text-xs">
+        Set by <span class="font-mono">FOREMAN_POLICY</span>
+        in <span class="font-mono">/etc/foreman-agent/agent.env</span>
+        on the box. Remove it and restart the agent to refuse these again.
+      </p>
+    </.callout>
+    """
+  end
+
   @doc "A labelled capacity bar: used (or provisioned) of total."
   attr :label, :string, required: true
   attr :value, :any, required: true

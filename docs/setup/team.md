@@ -42,9 +42,10 @@ browser redirect, so a tailnet host name works.
 Make a join token per box with its developer as the owner. A box runs
 only its owner's environments unless it's shared on its page. Sharing is
 a trust decision: anyone with Docker on a box can read every
-environment's secrets on it, and the docker-in-docker feature makes
-environments privileged (root on the box). See
-[../security.md](../security.md).
+environment's secrets on it. Environments themselves run unprivileged,
+so code in one can't do that, unless the box allows privileged
+containers (`FOREMAN_POLICY=privileged=allow`, shown with a red alert).
+Don't allow it on a shared box. See [../security.md](../security.md).
 
 Boxes allow placement past capacity by default and show contention. A
 box that's tight on memory can be set to **warn** (ask first) or

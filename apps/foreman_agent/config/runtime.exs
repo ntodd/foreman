@@ -10,7 +10,9 @@ if config_env() != :test do
     end
   end
 
-  # FOREMAN_POLICY="host_bind=warn,privileged=refuse"
+  # Every rule refuses by default. A box opens one up as an exception, for
+  # example FOREMAN_POLICY="privileged=allow", and the control plane shows
+  # that box with a red alert.
   rules = ~w(host_bind host_file docker_socket devices privileged host_namespace)
   actions = ~w(refuse warn allow)
 

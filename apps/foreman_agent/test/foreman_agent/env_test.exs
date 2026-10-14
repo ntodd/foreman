@@ -74,6 +74,13 @@ defmodule ForemanAgent.EnvTest do
     devcontainer = Keyword.get(opts, :devcontainer, @devcontainer)
     outcome = Keyword.get(opts, :outcome, :success)
 
+    resolved =
+      Keyword.get(opts, :resolved, %{
+        "configuration" => %{},
+        "mergedConfiguration" => %{"capAdd" => ["NET_ADMIN", "NET_RAW"]},
+        "featuresConfiguration" => %{"featureSets" => []}
+      })
+
     stub(RunnerMock, :run, fn command, args, run_opts ->
       send(test_pid, {:run, command, args, run_opts})
 
@@ -93,6 +100,10 @@ defmodule ForemanAgent.EnvTest do
           end
 
           {:ok, %{status: 0, output: ""}}
+
+        {"devcontainer", ["read-configuration" | _]} ->
+          log = ~s({"type":"text","level":3,"timestamp":1,"text":"Resolving features"}\n)
+          {:ok, %{status: 0, output: log <> JSON.encode!(resolved) <> "\n"}}
 
         {"devcontainer", _} ->
           run_opts[:on_output].(
@@ -166,7 +177,7 @@ defmodule ForemanAgent.EnvTest do
       clone = Path.join([config.envs_root, @env_id, "workspace", "storefront"])
       meta = Path.join([config.envs_root, @env_id, "meta"])
 
-      [git, _services, _policy, up] = runs()
+      [git, _services, _policy, read_config, up] = runs()
 
       {"git", git_args, git_opts} = git
 
@@ -194,6 +205,16 @@ defmodule ForemanAgent.EnvTest do
       refute Enum.any?(up_args, &(&1 =~ "neon_secret"))
       assert up_opts[:env]["NEON_API_KEY"] == "neon_secret"
       assert up_opts[:env]["COMPOSE_PROJECT_NAME"] == "storefront-2"
+
+      # What features ask for is checked first, against the same config.
+      {"devcontainer", ["read-configuration" | rc_args], rc_opts} = read_config
+      assert "--include-merged-configuration" in rc_args
+
+      for flag <- ["--workspace-folder", "--config", "--override-config", "--additional-features"] do
+        assert arg(rc_args, flag) == arg(up_args, flag)
+      end
+
+      assert rc_opts[:env] == up_opts[:env]
 
       override = meta |> Path.join("devcontainer.json") |> File.read!() |> JSON.decode!()
       refute Map.has_key?(override, "initializeCommand")
@@ -285,6 +306,27 @@ defmodule ForemanAgent.EnvTest do
       refute Enum.any?(runs(), &match?({"devcontainer", _, _}, &1))
     end
 
+    test "refuses a feature that asks for privileged before anything runs", %{ctx: ctx} do
+      stub_tools(
+        resolved: %{
+          "configuration" => %{},
+          "mergedConfiguration" => %{"privileged" => true},
+          "featuresConfiguration" => %{
+            "featureSets" => [
+              %{
+                "sourceInformation" => %{"userFeatureId" => "ghcr.io/acme/features/sneaky:1"},
+                "features" => [%{"id" => "sneaky", "privileged" => true}]
+              }
+            ]
+          }
+        }
+      )
+
+      assert {:error, message} = Env.run("env.create", payload(), ctx)
+      assert message =~ "ghcr.io/acme/features/sneaky:1"
+      refute Enum.any?(runs(), &match?({"devcontainer", ["up" | _], _}, &1))
+    end
+
     test "requires a compose-based devcontainer", %{ctx: ctx} do
       stub_tools(devcontainer: ~s({"image": "mcr.microsoft.com/devcontainers/base"}))
       assert {:error, message} = Env.run("env.create", payload(), ctx)
@@ -321,10 +363,13 @@ defmodule ForemanAgent.EnvTest do
 
       assert {:ok, _} = Env.run("env.create", payload(%{"registry_auth" => auth}), ctx)
 
-      {"devcontainer", args, opts} = List.last(runs())
+      [{"devcontainer", _, rc_opts}, {"devcontainer", args, opts}] =
+        Enum.filter(runs(), &match?({"devcontainer", _, _}, &1))
+
       refute Enum.any?(args, &(&1 =~ "ghp_registry"))
       docker_config = opts[:env]["DOCKER_CONFIG"]
       assert is_binary(docker_config)
+      assert rc_opts[:env]["DOCKER_CONFIG"] == docker_config
       refute File.exists?(docker_config)
     end
   end

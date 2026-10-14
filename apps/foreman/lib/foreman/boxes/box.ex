@@ -21,6 +21,7 @@ defmodule Foreman.Boxes.Box do
     field :capacity, :map
     field :capacity_policy, :string, default: "allow"
     field :contention_threshold, :float, default: 0.9
+    field :policy, :map
     field :last_seen_at, :utc_datetime_usec
     field :revoked_at, :utc_datetime_usec
     timestamps()

@@ -50,6 +50,13 @@ The design, and the decisions behind it, are in
 - A GitHub token per environment, scoped to its repo by default (a repo
   can opt out to the user's own token), refreshed every few hours.
 - Git identity and dotfiles per user, overridable per repo.
+- Environments run unprivileged. Privileged containers (including
+  docker-in-docker), host namespaces, the Docker socket and host mounts
+  are refused, checked against features as well as the repo's own
+  files. A box can open one up as an exception, and the control plane
+  shows it with a red alert. Services go in the compose file as
+  sidecars instead; see
+  [docs/setup/repos.md](docs/setup/repos.md#docker-inside-an-environment).
 - Capacity reporting per box: used and provisioned CPU and memory, with
   contention warnings. Boxes allow overcommit by default and can be set
   to warn or refuse.
@@ -120,7 +127,7 @@ control plane).
 |---|---|
 | `cd apps/foreman_protocol && mix test` | Message contracts, signatures, redaction |
 | `cd apps/foreman_agent && mix test` | Agent logic with fakes for Docker and the CLIs |
-| `cd apps/foreman_agent && mix test --only docker` | The agent against real Docker and the devcontainer CLI: two copies side by side, secrets, restart affected, rebuild, destroy, a tampered compose file refused |
+| `cd apps/foreman_agent && mix test --only docker` | The agent against real Docker and the devcontainer CLI: two copies side by side, secrets, restart affected, rebuild, destroy, a tampered compose file and a feature asking for privileged both refused |
 | `cd apps/foreman && mix test` | Control plane (run with `FOREMAN_DB=postgres` too) |
 | `devcontainer features test ... features` | The feature in a real devcontainer |
 | `e2e/` | Full runs through the UI and on an emulated Linux box; see [e2e/README.md](e2e/README.md) |

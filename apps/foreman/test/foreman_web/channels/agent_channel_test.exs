@@ -63,6 +63,22 @@ defmodule ForemanWeb.AgentChannelTest do
       assert Repo.reload!(box).hostname == "desktop"
     end
 
+    test "records the policy the agent reports", %{box: box} do
+      {:ok, socket} = connect(AgentSocket, %{}, connect_info: signed_connect_info(box))
+      policy = Map.put(ForemanProtocol.Policy.defaults(), "privileged", "allow")
+
+      assert {:ok, _, _} =
+               subscribe_and_join(socket, "agent:#{box.id}", join_payload(%{"policy" => policy}))
+
+      assert Repo.reload!(box).policy == policy
+    end
+
+    test "an agent that doesn't report a policy leaves it unknown", %{box: box} do
+      {:ok, socket} = connect(AgentSocket, %{}, connect_info: signed_connect_info(box))
+      assert {:ok, _, _} = subscribe_and_join(socket, "agent:#{box.id}", join_payload())
+      assert Repo.reload!(box).policy == nil
+    end
+
     test "refuses protocol versions it doesn't speak", %{box: box} do
       {:ok, socket} = connect(AgentSocket, %{}, connect_info: signed_connect_info(box))
 

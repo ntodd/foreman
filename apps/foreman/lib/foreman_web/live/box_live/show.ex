@@ -119,6 +119,8 @@ defmodule ForemanWeb.BoxLive.Show do
         </:actions>
       </.header>
 
+      <.box_policy_alert box={@box} />
+
       <div class="grid gap-6 lg:grid-cols-[minmax(0,1fr)_20rem]">
         <div class="min-w-0 space-y-6">
           <.panel title="Capacity">
@@ -234,7 +236,7 @@ defmodule ForemanWeb.BoxLive.Show do
         </div>
 
         <aside class="space-y-6">
-          <.panel title="Policy">
+          <.panel title="Settings">
             <%= if Scope.admin?(@current_scope) do %>
               <.form for={@form} id="box-settings" phx-submit="save" class="space-y-4">
                 <.input
