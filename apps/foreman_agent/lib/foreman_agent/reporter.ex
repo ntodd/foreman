@@ -1,18 +1,20 @@
 defmodule ForemanAgent.Reporter do
   @moduledoc """
-  Reports the box's inventory (every 15 seconds, when it changes) and
-  stats (every 30 seconds) to the control plane, and an `env.state` event
-  for each environment whose state changed in between.
+  Reports the box's inventory (every 15 seconds, when it changes), host
+  metrics (every 5 seconds) and stats (every 30 seconds) to the control
+  plane, and an `env.state` event for each environment whose state
+  changed in between.
   """
   use GenServer
 
-  alias ForemanAgent.{Handler, Outbox, Stats}
+  alias ForemanAgent.{Handler, HostMetrics, Outbox, Stats}
   alias ForemanProtocol.Event
 
   require Logger
 
   @inventory_every 15_000
   @stats_every 30_000
+  @metrics_every 5_000
 
   def start_link(opts), do: GenServer.start_link(__MODULE__, opts, name: __MODULE__)
 
@@ -22,7 +24,8 @@ defmodule ForemanAgent.Reporter do
   def init(_opts) do
     Process.send_after(self(), :inventory, @inventory_every)
     Process.send_after(self(), :stats, @stats_every)
-    {:ok, %{states: %{}, last: nil}}
+    send(self(), :metrics)
+    {:ok, %{states: %{}, last: nil, cpu: nil}}
   end
 
   @impl true
@@ -41,6 +44,22 @@ defmodule ForemanAgent.Reporter do
     Process.send_after(self(), :stats, @stats_every)
     stats()
     {:noreply, state}
+  end
+
+  def handle_info(:metrics, state) do
+    Process.send_after(self(), :metrics, @metrics_every)
+    ctx = Handler.ctx(fn _, _ -> :ok end)
+
+    source = %{
+      proc: "/proc",
+      disk: fn -> Stats.disk(ctx) end,
+      now: System.system_time(:second)
+    }
+
+    {metrics, cpu} = HostMetrics.sample(source, state.cpu)
+    # The first sample has no CPU baseline yet.
+    if state.cpu, do: push("box.metrics", metrics)
+    {:noreply, %{state | cpu: cpu}}
   end
 
   defp inventory(state) do

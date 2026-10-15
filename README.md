@@ -73,11 +73,20 @@ pick a restart.
   <img alt="An environment page: a Secrets changed callout with Restart affected, Restart all and Later, the Tailscale SSH command, an Open in VS Code button, and the create log" src="docs/images/environment-light.png">
 </picture>
 
-Boxes, with what's in use next to what's provisioned.
+Boxes, with live CPU and memory trends next to what's provisioned.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/images/boxes-dark.png">
-  <img alt="The Boxes page: three online boxes, each with CPU and memory used and provisioned" src="docs/images/boxes-light.png">
+  <img alt="The Boxes page: three online boxes, each with a live CPU and memory trend line and provisioned CPU and memory bars" src="docs/images/boxes-light.png">
+</picture>
+
+A box over the last day: CPU and memory as the box total over each
+environment's share, disk, and load against the core count. Ranges run
+from 15 minutes to 7 days, and the charts update every 5 seconds.
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/images/box-dark.png">
+  <img alt="A box page: a range picker set to 1d, and four charts. CPU and Memory stack three environments under a box total line; Disk is a flat line at 590 of 1800 GiB; Load peaks under the 16-core line" src="docs/images/box-light.png">
 </picture>
 
 Your own secrets. Values are encrypted and can't be read back.

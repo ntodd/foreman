@@ -153,5 +153,48 @@ defmodule ForemanWeb.AgentChannelTest do
       assert_reply ref, :ok
       assert Repo.reload!(box).capacity["cpus"] == 8
     end
+
+    test "records host metrics", %{socket: socket, box: box} do
+      Foreman.Metrics.subscribe(box.id)
+
+      {:ok, metrics} =
+        Event.new("box.metrics", %{
+          at: System.system_time(:second),
+          cpu_percent: 42.0,
+          memory_total_mb: 8_000,
+          memory_used_mb: 2_000,
+          disk_total_mb: 100,
+          disk_used_mb: 60
+        })
+
+      ref = push(socket, "event", Event.to_wire(metrics))
+      assert_reply ref, :ok
+      assert_receive {:box_metrics, _, %{cpu: 42.0, memory_used: 2_000}}
+    end
+
+    test "records per-environment usage for the box's own environments", %{
+      socket: socket,
+      box: box
+    } do
+      env = environment_fixture(box: box)
+      stranger = Ecto.UUID.generate()
+
+      {:ok, stats} =
+        Event.new("box.stats", %{
+          capacity: %{cpus: 8, memory_mb: 32_768},
+          environments: %{
+            env.id => %{cpu_percent: 25.0, memory_mb: 512},
+            stranger => %{cpu_percent: 99.0, memory_mb: 9_999}
+          }
+        })
+
+      ref = push(socket, "event", Event.to_wire(stats))
+      assert_reply ref, :ok
+
+      assert %{series: [%{slug: slug, cpu: [{_, 25.0}]}]} =
+               Foreman.Metrics.env_series(box.id, "15m")
+
+      assert slug == env.slug
+    end
   end
 end

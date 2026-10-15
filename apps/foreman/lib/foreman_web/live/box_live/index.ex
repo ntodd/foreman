@@ -4,11 +4,19 @@ defmodule ForemanWeb.BoxLive.Index do
 
   import ForemanWeb.ForemanComponents
 
-  alias Foreman.{Accounts, Boxes, Capacity, Environments, Scope}
+  alias Foreman.{Accounts, Boxes, Capacity, Environments, Metrics, Scope}
+  alias ForemanWeb.BoxCharts
+
+  # The cards' trend lines cover the last half hour, redrawn this often.
+  @trend_range "30m"
+  @trend_every 30
 
   @impl true
   def mount(_params, _session, socket) do
-    if connected?(socket), do: Phoenix.PubSub.subscribe(Foreman.PubSub, "boxes")
+    if connected?(socket) do
+      Phoenix.PubSub.subscribe(Foreman.PubSub, "boxes")
+      Metrics.subscribe_all()
+    end
 
     {:ok,
      socket
@@ -32,15 +40,27 @@ defmodule ForemanWeb.BoxLive.Index do
       for box <- Boxes.list_boxes(socket.assigns.current_scope) do
         envs = Environments.live_for_box(box.id)
 
+        trend = Metrics.box_series(box.id, @trend_range)
+
         %{
           box: box,
           online: Boxes.online?(box.id),
           summary: Capacity.box_summary(box, envs),
-          count: length(envs)
+          count: length(envs),
+          trend: trend,
+          latest: List.last(trend.points)
         }
       end
 
     assign(socket, :boxes, boxes)
+  end
+
+  defp update_card(socket, box_id, fun) do
+    assign(
+      socket,
+      :boxes,
+      Enum.map(socket.assigns.boxes, &if(&1.box.id == box_id, do: fun.(&1), else: &1))
+    )
   end
 
   @impl true
@@ -65,12 +85,28 @@ defmodule ForemanWeb.BoxLive.Index do
   def handle_event("done", _params, socket), do: {:noreply, assign(socket, :join, nil)}
 
   @impl true
+  def handle_info({:box_metrics, box_id, point}, socket) do
+    {:noreply,
+     update_card(socket, box_id, fn card ->
+       card = %{card | latest: point}
+
+       if point.at - card.trend.until >= @trend_every,
+         do: %{card | trend: Metrics.box_series(box_id, @trend_range)},
+         else: card
+     end)}
+  end
+
   def handle_info(_message, socket), do: {:noreply, load(socket)}
 
   @impl true
   def render(assigns) do
     ~H"""
-    <Layouts.app flash={@flash} current_scope={@current_scope} current_path={@current_path}>
+    <Layouts.app
+      flash={@flash}
+      current_scope={@current_scope}
+      current_path={@current_path}
+      width="full"
+    >
       <:breadcrumb>Boxes</:breadcrumb>
 
       <.header>
@@ -80,7 +116,7 @@ defmodule ForemanWeb.BoxLive.Index do
         </:subtitle>
       </.header>
 
-      <div :if={@boxes != []} class="grid gap-4 md:grid-cols-2">
+      <div :if={@boxes != []} class="grid gap-4 md:grid-cols-2 2xl:grid-cols-3">
         <.link
           :for={card <- @boxes}
           navigate={~p"/boxes/#{card.box.id}"}
@@ -108,8 +144,43 @@ defmodule ForemanWeb.BoxLive.Index do
               <.box_status online={card.online} />
             </div>
           </div>
+          <div :if={card.latest} class="mb-4 grid gap-4 sm:grid-cols-2">
+            <div data-metric="cpu">
+              <p class="flex items-baseline justify-between gap-2 text-xs">
+                <span class="text-ink-2">CPU</span>
+                <span class="font-semibold text-ink">{BoxCharts.pct(card.latest.cpu)}</span>
+              </p>
+              <ForemanWeb.Charts.sparkline
+                points={Enum.map(card.trend.points, &{&1.at, &1.cpu})}
+                since={card.trend.since}
+                until={card.trend.until}
+                ymax={cpu_scale(card.trend.points)}
+                gap={card.trend.step * 3}
+                class="mt-1.5 h-10 w-full"
+              />
+            </div>
+            <div data-metric="memory">
+              <p class="flex items-baseline justify-between gap-2 text-xs">
+                <span class="text-ink-2">Memory</span>
+                <span class="font-semibold text-ink">
+                  {:erlang.float_to_binary(card.latest.memory_used / 1024, decimals: 1)} of {BoxCharts.gib(
+                    card.latest.memory_total
+                  )}
+                </span>
+              </p>
+              <ForemanWeb.Charts.sparkline
+                points={Enum.map(card.trend.points, &{&1.at, &1.memory_used})}
+                since={card.trend.since}
+                until={card.trend.until}
+                ymax={max(card.latest.memory_total, 1)}
+                gap={card.trend.step * 3}
+                class="mt-1.5 h-10 w-full"
+              />
+            </div>
+          </div>
           <div class="grid gap-3 sm:grid-cols-2">
             <.capacity_bar
+              :if={is_nil(card.latest)}
               label="CPU used"
               value={card.summary.used_cpus}
               max={card.summary.cpus}
@@ -124,6 +195,7 @@ defmodule ForemanWeb.BoxLive.Index do
               threshold={card.box.contention_threshold}
             />
             <.capacity_bar
+              :if={is_nil(card.latest)}
               label="Memory used"
               value={card.summary.used_memory_mb}
               max={card.summary.memory_mb}
@@ -193,5 +265,12 @@ defmodule ForemanWeb.BoxLive.Index do
       </.panel>
     </Layouts.app>
     """
+  end
+
+  # The CPU trend is scaled to its own peak (at least 20%), so a quiet
+  # box still shows its shape; the headline carries the absolute value.
+  defp cpu_scale(points) do
+    peak = points |> Enum.map(& &1.cpu_max) |> Enum.max(fn -> 0 end)
+    ForemanWeb.Charts.Geometry.nice_max(max(peak * 1.2, 20))
   end
 end

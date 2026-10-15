@@ -1,7 +1,7 @@
 defmodule ForemanProtocol.Event do
   @moduledoc """
   An event an agent sends to the control plane: operation progress and
-  results, box inventory and stats, and observed environment state.
+  results, box inventory, stats and metrics, and observed environment state.
   """
 
   alias ForemanProtocol.Schema
@@ -51,6 +51,19 @@ defmodule ForemanProtocol.Event do
         {{:map_of, :uuid,
           {:object, cpu_percent: {:number, default: 0}, memory_mb: {:number, default: 0}}},
          default: %{}}
+    ],
+    # Host-wide usage, sampled every few seconds. `at` is the agent's
+    # Unix time in seconds; cpu_percent is of the whole box (0-100).
+    "box.metrics" => [
+      at: {:integer, required: true},
+      cpu_percent: {:number, required: true},
+      load1: {:number, default: 0},
+      memory_total_mb: {:integer, required: true},
+      memory_used_mb: {:integer, required: true},
+      swap_total_mb: {:integer, default: 0},
+      swap_used_mb: {:integer, default: 0},
+      disk_total_mb: {:integer, required: true},
+      disk_used_mb: {:integer, required: true}
     ],
     "env.state" => [
       env_id: {:uuid, required: true},

@@ -160,7 +160,9 @@ defmodule ForemanWeb.ForemanComponents do
 
   defp fmt(value, _), do: to_string(value)
 
-  def gib(mb) when is_number(mb), do: :erlang.float_to_binary(Float.round(mb / 1024, 1), [:short])
+  # One decimal below 100 GiB, whole numbers above ("1758", not "1.8e3").
+  def gib(mb) when is_number(mb) and mb >= 100 * 1024, do: Integer.to_string(round(mb / 1024))
+  def gib(mb) when is_number(mb), do: :erlang.float_to_binary(mb / 1024, decimals: 1)
   def gib(_), do: "0"
 
   @doc "A shell command with a copy button."

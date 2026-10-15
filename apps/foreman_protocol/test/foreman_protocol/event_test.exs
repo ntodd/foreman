@@ -62,6 +62,38 @@ defmodule ForemanProtocol.EventTest do
     assert {:error, _} = Event.new("box.stats", payload)
   end
 
+  test "box.metrics reports host usage at a point in time" do
+    payload = %{
+      at: 1_760_500_000,
+      cpu_percent: 37.5,
+      load1: 0.42,
+      memory_total_mb: 16_000,
+      memory_used_mb: 6_000,
+      swap_total_mb: 2_048,
+      swap_used_mb: 10,
+      disk_total_mb: 100_000,
+      disk_used_mb: 40_000
+    }
+
+    assert {:ok, event} = Event.new("box.metrics", payload)
+    assert event.payload.cpu_percent == 37.5
+    assert event.payload.memory_used_mb == 6_000
+  end
+
+  test "box.metrics defaults swap and load, and needs a time" do
+    payload = %{
+      at: 1_760_500_000,
+      cpu_percent: 1,
+      memory_total_mb: 1,
+      memory_used_mb: 1,
+      disk_total_mb: 1,
+      disk_used_mb: 1
+    }
+
+    assert {:ok, %{payload: %{swap_used_mb: 0, load1: 0}}} = Event.new("box.metrics", payload)
+    assert {:error, _} = Event.new("box.metrics", Map.delete(payload, :at))
+  end
+
   test "env.state reports an observed state change" do
     assert {:ok, _} = Event.new("env.state", %{env_id: @env_id, state: "stopped"})
     assert {:error, _} = Event.new("env.state", %{env_id: @env_id, state: "exploded"})

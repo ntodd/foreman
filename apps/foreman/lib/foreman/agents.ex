@@ -9,7 +9,7 @@ defmodule Foreman.Agents do
   """
   import Ecto.Query
 
-  alias Foreman.{Boxes, Environments, Operations, Repo, Scope}
+  alias Foreman.{Boxes, Environments, Metrics, Operations, Repo, Scope}
   alias Foreman.Capacity.Tracker
   alias Foreman.Environments.Environment
   alias Foreman.Operations.Operation
@@ -151,16 +151,20 @@ defmodule Foreman.Agents do
   end
 
   def handle_event(box_id, %Event{type: "box.stats", payload: stats}) do
-    owned = MapSet.new(Environments.live_ids_for_box(box_id))
-
-    stats = %{
-      stats
-      | environments: Map.filter(stats.environments, fn {id, _} -> MapSet.member?(owned, id) end)
-    }
+    slugs = Environments.live_slugs_for_box(box_id)
+    stats = %{stats | environments: Map.take(stats.environments, Map.keys(slugs))}
 
     Tracker.record(box_id, stats)
     Boxes.record_capacity(box_id, stats.capacity)
-    :ok
+
+    Metrics.record_envs(
+      box_id,
+      Map.new(stats.environments, fn {id, usage} -> {id, Map.put(usage, :slug, slugs[id])} end)
+    )
+  end
+
+  def handle_event(box_id, %Event{type: "box.metrics", payload: sample}) do
+    Metrics.record_box(box_id, sample)
   end
 
   def handle_event(box_id, %Event{type: "env.state", payload: %{env_id: env_id, state: state}}) do

@@ -388,7 +388,11 @@ Foreman never assumes a box has room for everything provisioned on it. By defaul
 
 ### Reporting
 
-Each box reports total cores, memory and disk, plus live usage per environment (aggregated from `docker stats`). The UI shows:
+Each box reports total cores, memory and disk, plus live usage per environment (aggregated from `docker stats`) every 30 seconds (`box.stats`). Every 5 seconds it also sends host-wide CPU, memory, swap, load and disk (`box.metrics`), read from `/proc` and `df` without going through Docker.
+
+The control plane stores both (`box_metrics`, `env_metrics`, with Unix-second timestamps so bucketing is integer math on SQLite and Postgres) and keeps 7 days; an hourly Oban job (`PruneMetrics`) deletes older rows. Environment samples keep the slug and no foreign key, so a destroyed environment stays on its box's charts until it ages out. Reads are bucketed to about 240 points whatever the range (15 minutes to 7 days). The box page charts CPU and memory as the box total over each environment's share, plus disk and load against the core count, and updates live; the box list shows half-hour CPU and memory trends. Agents older than the metrics event keep working and their charts stay empty.
+
+The UI shows:
 
 - current usage per environment and per box
 - **provisioned:** for each running environment, the first available of:

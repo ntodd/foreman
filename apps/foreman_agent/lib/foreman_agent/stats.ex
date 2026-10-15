@@ -74,7 +74,8 @@ defmodule ForemanAgent.Stats do
 
   defp memory_mb(_), do: 0
 
-  defp disk(ctx) do
+  @doc "Total and free MB on the filesystem holding the environments."
+  def disk(ctx) do
     case ctx.runner.run("df", ["-Pk", ctx.config.envs_root], env: %{}) do
       {:ok, %{status: 0, output: output}} -> parse_df(output)
       _ -> {0, 0}

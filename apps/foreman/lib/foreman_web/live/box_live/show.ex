@@ -4,12 +4,16 @@ defmodule ForemanWeb.BoxLive.Show do
 
   import ForemanWeb.ForemanComponents
 
-  alias Foreman.{Accounts, Agents, Boxes, Capacity, Environments, Operations, Scope}
+  alias Foreman.{Accounts, Agents, Boxes, Capacity, Environments, Metrics, Operations, Scope}
 
   @impl true
   def mount(%{"id" => id}, _session, socket) do
     box = Boxes.get_visible_box!(socket.assigns.current_scope, id)
-    if connected?(socket), do: Phoenix.PubSub.subscribe(Foreman.PubSub, "boxes")
+
+    if connected?(socket) do
+      Phoenix.PubSub.subscribe(Foreman.PubSub, "boxes")
+      Metrics.subscribe(box.id)
+    end
 
     {:ok,
      socket
@@ -19,7 +23,25 @@ defmodule ForemanWeb.BoxLive.Show do
        :users,
        if(Scope.admin?(socket.assigns.current_scope), do: Accounts.list_users(), else: [])
      )
+     |> assign(:range, "1h")
+     |> assign(:latest, nil)
      |> load()}
+  end
+
+  @impl true
+  def handle_params(params, _uri, socket) do
+    range = if params["range"] in Metrics.ranges(), do: params["range"], else: "1h"
+    {:noreply, socket |> assign(:range, range) |> load_metrics()}
+  end
+
+  defp load_metrics(socket) do
+    %{box: box, range: range} = socket.assigns
+    series = Metrics.box_series(box.id, range)
+
+    socket
+    |> assign(:series, series)
+    |> assign(:env_series, Metrics.env_series(box.id, range))
+    |> assign(:fetched_at, series.until)
   end
 
   defp load(socket) do
@@ -97,12 +119,30 @@ defmodule ForemanWeb.BoxLive.Show do
   end
 
   @impl true
+  def handle_info({:box_metrics, _box_id, point}, socket) do
+    socket = assign(socket, :latest, point)
+
+    # Redraw once a new bucket's worth of samples has arrived.
+    if point.at - socket.assigns.fetched_at >= socket.assigns.series.step,
+      do: {:noreply, load_metrics(socket)},
+      else: {:noreply, socket}
+  end
+
+  def handle_info({:box_stats, box_id}, %{assigns: %{box: %{id: box_id}}} = socket),
+    do: {:noreply, socket |> load() |> load_metrics()}
+
+  def handle_info({:box_stats, _other}, socket), do: {:noreply, socket}
   def handle_info(_message, socket), do: {:noreply, load(socket)}
 
   @impl true
   def render(assigns) do
     ~H"""
-    <Layouts.app flash={@flash} current_scope={@current_scope} current_path={@current_path}>
+    <Layouts.app
+      flash={@flash}
+      current_scope={@current_scope}
+      current_path={@current_path}
+      width="full"
+    >
       <:breadcrumb navigate={~p"/boxes"}>Boxes</:breadcrumb>
       <:breadcrumb>{@box.name}</:breadcrumb>
 
@@ -120,6 +160,26 @@ defmodule ForemanWeb.BoxLive.Show do
       </.header>
 
       <.box_policy_alert box={@box} />
+
+      <section id="usage" class="space-y-3">
+        <div class="flex flex-wrap items-center justify-between gap-3">
+          <nav id="range-picker" class="segmented" aria-label="Time range">
+            <.link
+              :for={range <- Metrics.ranges()}
+              patch={~p"/boxes/#{@box.id}?range=#{range}"}
+              aria-current={to_string(range == @range)}
+            >{range}</.link>
+          </nav>
+          <p class="flex items-center gap-2 text-xs text-ink-3">
+            <span class={[
+              "size-1.5 rounded-full",
+              if(@online, do: "bg-success motion-safe:animate-pulse", else: "bg-line-strong")
+            ]} />
+            {if @online, do: "Live, every 5 seconds", else: "Box offline"}
+          </p>
+        </div>
+        <ForemanWeb.BoxCharts.usage box={@box} series={@series} envs={@env_series} latest={@latest} />
+      </section>
 
       <div class="grid gap-6 lg:grid-cols-[minmax(0,1fr)_20rem]">
         <div class="min-w-0 space-y-6">

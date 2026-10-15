@@ -265,6 +265,86 @@ for {b, envs} <- [
   Tracker.record(b.id, %{capacity: b.capacity, environments: Map.new(live, &{&1.id, envs})})
 end
 
+# A week of box and environment metrics: a working-hours rhythm with
+# noise and the odd build spike, every 5 seconds for the last day and
+# every minute before that. Then a live sample every 5 seconds.
+:rand.seed(:exsss, {7, 11, 13})
+now = System.system_time(:second)
+
+wave = fn at, cpus ->
+  hour = rem(div(at, 3_600), 24)
+  day = 0.5 + 0.5 * :math.sin((hour - 9) / 24 * 2 * :math.pi())
+  spike = if rem(div(at, 300), 37) == 0, do: 55, else: 0
+  cpu = min(4 + 30 * day + :rand.uniform() * 9 + spike, 99.0)
+  {Float.round(cpu, 1), Float.round(cpu / 100 * cpus * (0.9 + :rand.uniform() * 0.3), 2)}
+end
+
+box_sample = fn b, at, mem_frac ->
+  cap = b.capacity
+  {cpu, load} = wave.(at, cap["cpus"])
+  total = cap["memory_mb"]
+  disk = cap["disk_mb"]
+  grown = (now - at) / (7 * 86_400) * 18_000
+
+  %{
+    box_id: b.id,
+    at: at,
+    cpu_percent: cpu,
+    load1: load,
+    memory_total_mb: total,
+    memory_used_mb: round(total * (mem_frac + cpu / 1_000)),
+    swap_total_mb: 2_048,
+    swap_used_mb: 0,
+    disk_total_mb: disk,
+    disk_used_mb: round(disk - cap["disk_free_mb"] - grown)
+  }
+end
+
+times = Enum.to_list((now - 7 * 86_400)..(now - 86_400)//60) ++ Enum.to_list((now - 86_400)..now//5)
+
+for {b, mem_frac} <- [{desktop, 0.28}, {box_a, 0.41}, {box_b, 0.18}] do
+  times
+  |> Enum.map(&box_sample.(b, &1, mem_frac))
+  |> Enum.chunk_every(2_000)
+  |> Enum.each(&Repo.insert_all(Foreman.Metrics.BoxMetric, &1))
+
+  live_envs =
+    Repo.all(from(e in Environment, where: e.box_id == ^b.id and e.observed_state == "running"))
+
+  env_times = Enum.to_list((now - 7 * 86_400)..(now - 86_400)//300) ++ Enum.to_list((now - 86_400)..now//30)
+
+  live_envs
+  |> Enum.with_index()
+  |> Enum.flat_map(fn {e, i} ->
+    share = 0.55 / (i + 1)
+
+    Enum.map(env_times, fn at ->
+      {cpu, _} = wave.(at, b.capacity["cpus"])
+
+      %{
+        box_id: b.id,
+        env_id: e.id,
+        slug: e.slug,
+        at: at,
+        cpu_percent: Float.round(cpu * share * b.capacity["cpus"], 1),
+        memory_mb: round(b.capacity["memory_mb"] * mem_frac * share * (0.9 + :rand.uniform() * 0.1))
+      }
+    end)
+  end)
+  |> Enum.chunk_every(4_000)
+  |> Enum.each(&Repo.insert_all(Foreman.Metrics.EnvMetric, &1))
+
+  spawn(fn ->
+    Stream.repeatedly(fn ->
+      Process.sleep(5_000)
+      at = System.system_time(:second)
+      sample = box_sample.(b, at, mem_frac) |> Map.delete(:box_id)
+      Foreman.Metrics.record_box(b.id, sample)
+    end)
+    |> Stream.run()
+  end)
+end
+
 port = System.get_env("PORT", "4000")
 IO.puts("demo control plane on http://localhost:#{port}, sign in at /dev/sign-in/mona")
 IO.puts("DEMO_ENV_PENDING=/environments/#{sf2.id}")
