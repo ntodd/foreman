@@ -11,8 +11,13 @@ if System.get_env("PHX_SERVER") do
   config :foreman, ForemanWeb.Endpoint, server: true
 end
 
+# HTTP/1.1 only. Foreman sits behind a TLS proxy and nothing it serves
+# needs HTTP/2; see EEF-CVE-2026-105659 in mix.exs.
 config :foreman, ForemanWeb.Endpoint,
-  http: [port: String.to_integer(System.get_env("PORT", "4000"))]
+  http: [
+    port: String.to_integer(System.get_env("PORT", "4000")),
+    http_2_options: [enabled: false]
+  ]
 
 if config_env() == :dev do
   config :foreman, ForemanWeb.Endpoint,

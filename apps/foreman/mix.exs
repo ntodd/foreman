@@ -22,7 +22,10 @@ defmodule Foreman.MixProject do
           "EEF-CVE-2026-95105",
           # No fix released. Affects Cloak.Ecto.PBKDF2 fields, which no
           # schema uses.
-          "EEF-CVE-2026-94206"
+          "EEF-CVE-2026-94206",
+          # No fix released (fixed upstream in bandit d88b219). An HTTP/2
+          # flow-control stall; config/runtime.exs turns HTTP/2 off.
+          "EEF-CVE-2026-105659"
         ]
       ]
     ]
