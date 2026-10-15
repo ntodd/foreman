@@ -19,7 +19,7 @@ defmodule Foreman.Environments do
   alias Foreman.Boxes.Box
   alias Foreman.Environments.{Environment, Server}
   alias Foreman.Repos.Repo, as: GitRepo
-  alias Foreman.{Audit, Capacity, Operations, Repo, Scope, Secrets}
+  alias Foreman.{Agents, Audit, Capacity, Operations, Repo, Scope, Secrets}
 
   require Logger
 
@@ -215,6 +215,39 @@ defmodule Foreman.Environments do
 
   @doc "\"Later\": leaves the pending-restart badge and notice in place. Nothing to do."
   def restart_later(_scope, env), do: {:ok, env}
+
+  @doc """
+  Stops one of the environment's operations: a queued one is dropped, a
+  dispatched or running one is killed on the box. A stopped create or
+  start leaves the environment in error, ready to retry or rebuild.
+  """
+  def cancel_operation(%Scope{} = scope, %Environment{} = env, op_id) do
+    with :ok <- authorize(scope, env),
+         {:ok, op} <- fetch_operation(env, op_id),
+         {:ok, op} <- do_cancel(op, scope) do
+      Audit.log(scope, "environment.cancel", env, %{"action" => op.action})
+      {:ok, op}
+    end
+  end
+
+  defp fetch_operation(env, op_id) do
+    case Operations.get(op_id) do
+      %Foreman.Operations.Operation{environment_id: id} = op when id == env.id -> {:ok, op}
+      _ -> {:error, "That operation isn't this environment's."}
+    end
+  end
+
+  defp do_cancel(%{status: "queued"} = op, _scope) do
+    op = Operations.cancel_queued(op)
+    apply_result(op)
+    {:ok, op}
+  end
+
+  defp do_cancel(%{status: status} = op, scope) when status in ["dispatched", "running"] do
+    with :ok <- Agents.cancel_operation(op, Scope.user_id(scope)), do: {:ok, op}
+  end
+
+  defp do_cancel(_op, _scope), do: {:error, "That operation has already finished."}
 
   defp action(%Scope{} = scope, %Environment{} = env, action, args \\ %{}) do
     with :ok <- authorize(scope, env),

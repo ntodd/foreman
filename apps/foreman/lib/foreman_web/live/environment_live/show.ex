@@ -37,6 +37,7 @@ defmodule ForemanWeb.EnvironmentLive.Show do
     socket
     |> assign(:env, env)
     |> assign(:ops, ops)
+    |> assign(:in_progress, in_progress(ops))
     |> assign(:online, Boxes.online?(env.box_id))
     |> assign(:provisioned, Capacity.provisioned(env, env.repo))
     |> assign(:usage, Foreman.Capacity.Tracker.latest_usage(env.id))
@@ -48,6 +49,13 @@ defmodule ForemanWeb.EnvironmentLive.Show do
     do: watch_op(socket, op.id)
 
   defp select_default_op(socket), do: socket
+
+  # The operation a Cancel button stops: the one on the box if there is
+  # one, otherwise the next queued. `ops` is newest first.
+  defp in_progress(ops) do
+    Enum.find(ops, &(&1.status in ~w(dispatched running))) ||
+      ops |> Enum.reverse() |> Enum.find(&(&1.status == "queued"))
+  end
 
   defp watch_op(socket, op_id) do
     if connected?(socket) do
@@ -85,6 +93,15 @@ defmodule ForemanWeb.EnvironmentLive.Show do
   end
 
   def handle_event("later", _params, socket), do: {:noreply, assign(socket, :later, true)}
+
+  def handle_event("cancel_op", %{"id" => id}, socket) do
+    %{current_scope: scope, env: env} = socket.assigns
+
+    case Environments.cancel_operation(scope, env, id) do
+      {:ok, _op} -> {:noreply, load(socket)}
+      {:error, reason} -> {:noreply, put_flash(socket, :error, error_message(reason))}
+    end
+  end
 
   def handle_event("select_op", %{"id" => id}, socket), do: {:noreply, watch_op(socket, id)}
 
@@ -373,6 +390,16 @@ defmodule ForemanWeb.EnvironmentLive.Show do
 
       <.panel title="Activity" padded={false} id="activity">
         <:actions>
+          <.button
+            :if={@in_progress}
+            id="cancel-op"
+            size="sm"
+            variant="ghost"
+            phx-click="cancel_op"
+            phx-value-id={@in_progress.id}
+            data-confirm={"Cancel #{String.downcase(action_label(@in_progress.action))}? Foreman stops waiting on it; retry or rebuild the environment afterwards."}
+            icon="hero-x-circle-mini"
+          >Cancel {String.downcase(action_label(@in_progress.action))}</.button>
           <.button
             size="sm"
             variant="ghost"

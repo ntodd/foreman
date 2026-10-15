@@ -98,7 +98,7 @@ defmodule Foreman.Operations do
           Redactions.delete(op_id)
 
           {:ok,
-           mark(get!(op_id), if(status == "ok", do: "succeeded", else: "failed"),
+           mark(get!(op_id), finished_status(status, error),
              result: result,
              error: error,
              finished_at: DateTime.utc_now()
@@ -109,6 +109,12 @@ defmodule Foreman.Operations do
         :unknown
     end
   end
+
+  # The agent reports an operation it killed for `op.cancel` as the error
+  # "cancelled" (ForemanAgent.Ops).
+  defp finished_status("ok", _error), do: "succeeded"
+  defp finished_status(_status, "cancelled"), do: "cancelled"
+  defp finished_status(_status, _error), do: "failed"
 
   def cancel_queued(%Operation{status: "queued"} = op),
     do: mark(op, "cancelled", finished_at: DateTime.utc_now())

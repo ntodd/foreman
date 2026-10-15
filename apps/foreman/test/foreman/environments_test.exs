@@ -617,4 +617,94 @@ defmodule Foreman.EnvironmentsTest do
       assert Repo.reload!(env).ts_authkey == nil
     end
   end
+
+  describe "cancel_operation" do
+    test "kills a running create on the box and leaves the environment ready to retry", %{
+      scope: scope,
+      repo: repo,
+      box: box
+    } do
+      connect_agent(box)
+
+      {:ok, env} =
+        Environments.create_environment(scope, %{"repo_id" => repo.id, "box_id" => box.id})
+
+      assert_receive {:dispatch, %Command{type: "env.create"} = create}
+      :ok = Agents.handle_event(box.id, event!("op.accepted", %{op_id: create.op_id}))
+
+      assert {:ok, _} = Environments.cancel_operation(scope, env, create.op_id)
+
+      assert_receive {:dispatch, %Command{type: "op.cancel"} = cancel}
+      assert cancel.payload.target_op_id == create.op_id
+      assert Operations.get!(create.op_id).status == "running"
+
+      # What the agent reports for the killed operation, then for op.cancel.
+      fail(box, create, "cancelled")
+      succeed(box, cancel)
+
+      assert Operations.get!(create.op_id).status == "cancelled"
+      assert Operations.get!(cancel.op_id).status == "succeeded"
+      env = Repo.reload!(env)
+      assert env.observed_state == "error"
+      assert env.status_message == "cancelled"
+    end
+
+    test "drops a queued operation without asking the box", %{
+      scope: scope,
+      repo: repo,
+      box: box
+    } do
+      {:ok, env} =
+        Environments.create_environment(scope, %{"repo_id" => repo.id, "box_id" => box.id})
+
+      [op] = Operations.list_for_environment(env.id)
+      assert op.status == "queued"
+
+      assert {:ok, %{status: "cancelled"}} = Environments.cancel_operation(scope, env, op.id)
+      refute_received {:dispatch, _}
+      assert Repo.reload!(env).observed_state == "error"
+    end
+
+    test "says so when the box is offline", %{scope: scope, repo: repo, box: box} do
+      connect_agent(box)
+
+      {:ok, env} =
+        Environments.create_environment(scope, %{"repo_id" => repo.id, "box_id" => box.id})
+
+      assert_receive {:dispatch, %Command{type: "env.create"} = create}
+      Registry.unregister(Foreman.Registry, {:agent, box.id})
+
+      assert {:error, "The box is offline" <> _} =
+               Environments.cancel_operation(scope, env, create.op_id)
+
+      assert Operations.get!(create.op_id).status == "dispatched"
+    end
+
+    test "refuses finished operations, other environments' and other people's", %{
+      scope: scope,
+      repo: repo,
+      box: box
+    } do
+      connect_agent(box)
+
+      {:ok, env} =
+        Environments.create_environment(scope, %{"repo_id" => repo.id, "box_id" => box.id})
+
+      assert_receive {:dispatch, %Command{type: "env.create"} = create}
+
+      {:ok, other} =
+        Environments.create_environment(scope, %{"repo_id" => repo.id, "box_id" => box.id})
+
+      assert {:error, "That operation isn't" <> _} =
+               Environments.cancel_operation(scope, other, create.op_id)
+
+      stranger = Scope.for_user(user_fixture())
+      assert {:error, :unauthorized} = Environments.cancel_operation(stranger, env, create.op_id)
+
+      succeed(box, create, @up_result)
+
+      assert {:error, "That operation has already finished."} =
+               Environments.cancel_operation(scope, env, create.op_id)
+    end
+  end
 end

@@ -79,6 +79,42 @@ defmodule Foreman.Agents do
     end
   end
 
+  @doc """
+  Asks the agent to stop a dispatched or running operation. It kills the
+  operation's processes and reports it with the error "cancelled", which
+  marks it cancelled. The `op.cancel` command is recorded as a box
+  operation of its own, so the agent's result for it is acknowledged.
+  """
+  def cancel_operation(%Operation{status: status} = target, user_id)
+      when status in ["dispatched", "running"] do
+    {:ok, cmd} = Command.new("op.cancel", %{target_op_id: target.id})
+
+    op =
+      Operations.create!(%{
+        id: cmd.op_id,
+        box_id: target.box_id,
+        user_id: user_id,
+        action: "op.cancel",
+        command: "op.cancel",
+        args: %{"target_op_id" => target.id},
+        status: "dispatched",
+        dispatched_at: DateTime.utc_now()
+      })
+
+    case dispatch(target.box_id, cmd) do
+      :ok ->
+        :ok
+
+      {:error, :offline} ->
+        Operations.mark(op, "failed",
+          error: "the box is offline",
+          finished_at: DateTime.utc_now()
+        )
+
+        {:error, "The box is offline, so the operation can't be stopped."}
+    end
+  end
+
   # -- events --------------------------------------------------------------------
 
   @doc "Handles one event from `box_id`'s agent. Returns :ok or {:error, reason}."
