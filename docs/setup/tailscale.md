@@ -10,12 +10,37 @@ Foreman mints a single-use, pre-authorized auth key for each new
 environment, and deletes devices when environments are destroyed. It
 does both with an OAuth client:
 
-1. In the admin console: **Settings → OAuth clients → Generate**.
-2. Scopes: **Auth Keys: write** and **Devices Core: write**.
-3. Tags: `tag:foreman-env`, plus any repo tags you'll use (for example
+1. Add the tags to `tagOwners` in the policy file first (see
+   [ACLs](#acls)). The console only offers tags that already exist.
+2. In the admin console: **Trust credentials → Credential → OAuth**.
+   (Older consoles had this under Settings → OAuth clients.)
+3. Scopes: **Keys → Auth Keys: write** and **Devices → Core: write**.
+4. Tags: `tag:foreman-env`, plus any repo tags you'll use (for example
    `tag:staging-access`) and, on a team deployment, one
    `tag:foreman-<login>` per developer.
-4. Set `FOREMAN_TAILSCALE_CLIENT_ID` and `FOREMAN_TAILSCALE_CLIENT_SECRET`.
+5. Copy the client ID and secret; the secret is only shown once. Put
+   them in the control plane's env file, without quotes (`--env-file`
+   keeps quotes as part of the value):
+
+   ```sh
+   FOREMAN_TAILSCALE_CLIENT_ID=...
+   FOREMAN_TAILSCALE_CLIENT_SECRET=...
+   ```
+
+6. Recreate the container. `docker restart` doesn't reread
+   `--env-file`; only a new container does.
+
+To check the client works, ask the API for the tailnet's devices from
+inside the container:
+
+```sh
+docker exec foreman /app/bin/foreman eval '
+  Application.ensure_all_started(:req)
+  IO.inspect(Foreman.Tailscale.Client.impl().list_devices(Foreman.Tailscale.creds()))'
+```
+
+Environments created before the client was set up aren't on the
+tailnet. Rebuild them to join.
 
 Keys are tagged, so the devices they create don't expire. A node's
 identity lives in a volume, so the key is only used on the first boot
