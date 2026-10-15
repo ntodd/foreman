@@ -93,6 +93,28 @@ defmodule ForemanWeb.PagesTest do
            )
   end
 
+  test "without Tailscale, a started environment says why SSH and VS Code are missing", %{
+    conn: conn,
+    user: user,
+    repo: repo,
+    box: box
+  } do
+    env = environment_fixture(user: user, repo: repo, box: box)
+
+    env =
+      Repo.update!(
+        Ecto.Changeset.change(env,
+          remote_user: "vscode",
+          workspace_folder: "/workspaces/storefront",
+          devcontainer_service: "app"
+        )
+      )
+
+    {:ok, view, _html} = live(conn, ~p"/environments/#{env.id}")
+    refute has_element?(view, "#ssh-command")
+    assert has_element?(view, "#tailscale-off", "FOREMAN_TAILSCALE_CLIENT_ID")
+  end
+
   test "the environment page offers restart now or later after a secrets change", %{
     conn: conn,
     user: user,

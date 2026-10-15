@@ -124,14 +124,15 @@ WantedBy=multi-user.target
 EOF
 
 # Self-update keeps the version it replaced in `previous`. If the new one
-# keeps failing, switch back to it.
+# keeps failing, switch back to it. A first install has nothing to go back
+# to; the agent's own unit already shows that failure.
 cat > /etc/systemd/system/foreman-agent-rollback.service <<'EOF'
 [Unit]
 Description=Roll the Foreman agent back to its previous release
 
 [Service]
 Type=oneshot
-ExecStart=/bin/sh -c 'cd /opt/foreman-agent && [ -L previous ] && ln -sfn "$(readlink previous)" current && rm previous && systemctl reset-failed foreman-agent && systemctl start foreman-agent'
+ExecStart=/bin/sh -c 'cd /opt/foreman-agent && if [ -L previous ]; then ln -sfn "$(readlink previous)" current && rm previous && systemctl reset-failed foreman-agent && systemctl start foreman-agent; else echo "no previous release to roll back to"; fi'
 EOF
 
 systemctl daemon-reload
