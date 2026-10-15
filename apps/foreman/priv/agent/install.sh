@@ -136,7 +136,11 @@ ExecStart=/bin/sh -c 'cd /opt/foreman-agent && if [ -L previous ]; then ln -sfn 
 EOF
 
 systemctl daemon-reload
-systemctl enable --now foreman-agent
+systemctl enable foreman-agent
+# Restart, not start: on a re-run the agent may already be running (or
+# have hit its start limit) with the old settings and join token.
+systemctl reset-failed foreman-agent 2>/dev/null || true
+systemctl restart foreman-agent
 
 echo "foreman: waiting for the agent to enroll"
 i=0
