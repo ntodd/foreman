@@ -84,7 +84,8 @@ install it on the repos Foreman should see. See
 
 Create an OAuth client and set `FOREMAN_TAILSCALE_CLIENT_ID` and
 `FOREMAN_TAILSCALE_CLIENT_SECRET` in `/etc/foreman/foreman.env`, then
-recreate the container. See [tailscale.md](tailscale.md). Without it,
+recreate the container (`docker restart` keeps the old environment;
+`docker rm -f foreman` and the `docker run` above picks up the new one). See [tailscale.md](tailscale.md). Without it,
 environments still work, but you reach them with `docker exec` on the
 box instead of over the tailnet.
 

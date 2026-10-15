@@ -69,6 +69,34 @@ If a repo really needs a Docker daemon in its environments, run them on
 a box that allows it (`FOREMAN_POLICY=privileged=allow`) and treat that
 box as belonging to whatever runs in it. Its own VM is a good fit.
 
+## Postgres 18 and its data volume
+
+The `postgres:18` images keep data in a version-named directory under
+`/var/lib/postgresql`, and refuse to start if something is mounted at the
+old `/var/lib/postgresql/data`. A compose file written for 17 or earlier
+then leaves the environment partly running, with the database exiting on
+every start. Mount the volume one level up:
+
+```yaml
+services:
+  db:
+    image: postgres:18-alpine
+    volumes:
+      - postgres-data:/var/lib/postgresql   # not /var/lib/postgresql/data
+```
+
+Or pin the image to `postgres:17` until you're ready to move.
+
+## Builds and caching
+
+Every environment on a box builds through the box's Docker daemon, so a
+second copy of a repo reuses the first one's image layers, and a
+different branch rebuilds from the first layer whose files changed. The
+cache is per box, and the agent's cleanup drops build cache that hasn't
+been used for a week. Rebuild reuses the cache too: it recreates the
+containers, it doesn't refetch a base image tag that has moved, so pin
+base images rather than relying on `:latest`.
+
 ## What to remove
 
 - **The docker-in-docker feature:** see
