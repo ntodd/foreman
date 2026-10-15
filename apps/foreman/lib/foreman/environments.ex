@@ -60,10 +60,14 @@ defmodule Foreman.Environments do
     |> Repo.all()
   end
 
-  def live_ids_for_box(box_id) do
+  @doc "The box's live environments, id => slug."
+  def live_slugs_for_box(box_id) do
     Repo.all(
-      from e in Environment, where: e.box_id == ^box_id and is_nil(e.destroyed_at), select: e.id
+      from e in Environment,
+        where: e.box_id == ^box_id and is_nil(e.destroyed_at),
+        select: {e.id, e.slug}
     )
+    |> Map.new()
   end
 
   def live_slugs,

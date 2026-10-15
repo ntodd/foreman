@@ -35,6 +35,7 @@ config :foreman, Oban,
        {"*/15 * * * *", Foreman.Jobs.SyncRepos},
        {"7 * * * *", Foreman.Jobs.CleanupTailnet},
        {"*/5 * * * *", Foreman.Jobs.Housekeeping},
+       {"23 * * * *", Foreman.Jobs.PruneMetrics},
        {"* * * * *", Foreman.Jobs.Dispatch}
      ]}
   ]

@@ -34,6 +34,13 @@ const envPath = async slug => {
   return browser.evaluate(expr)
 }
 
+const boxPath = async name => {
+  await browser.goto(`${base}/boxes`)
+  const expr = `[...document.querySelectorAll("a[id^=box-]")].find(a => a.querySelector("p")?.textContent.trim() === ${JSON.stringify(name)})?.getAttribute("href")`
+  await browser.waitFor(`(${expr}) != null`)
+  return browser.evaluate(expr)
+}
+
 const capture = async (file, path, theme) => {
   await viewport(width, height, 2)
   // The theme lives in the app origin's localStorage, so set it from there.
@@ -100,6 +107,7 @@ try {
     ["environments", "/"],
     ["environment", await envPath("storefront-2")],
     ["boxes", "/boxes"],
+    ["box", (await boxPath("desktop")) + "?range=1d"],
     ["secrets", "/secrets"],
   ]
 

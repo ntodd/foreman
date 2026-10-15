@@ -530,3 +530,99 @@ progress.bar::-moz-progress-bar {
 progress.bar.bar-warning { color: var(--color-warning); }
 progress.bar.bar-danger { color: var(--color-danger); }
 progress.bar.bar-muted { color: var(--color-line-strong); }
+
+/* Charts (ForemanWeb.Charts). Categorical series colors in fixed order,
+   validated (dataviz validate_palette.js) against the raised surface in
+   each theme; light slots 3-5 are under 3:1, so stacked charts always
+   carry a legend with values. */
+:root {
+  --series-1: #2a78d6;
+  --series-2: #eb6834;
+  --series-3: #1baf7a;
+  --series-4: #eda100;
+  --series-5: #e87ba4;
+  --series-6: #008300;
+  --series-7: #6250d6;
+  --series-8: #e34948;
+  --series-other: #a1a1af;
+}
+
+[data-theme="dark"] {
+  --series-1: #3987e5;
+  --series-2: #d95926;
+  --series-3: #199e70;
+  --series-4: #c98500;
+  --series-5: #d55181;
+  --series-6: #008300;
+  --series-7: #9085e9;
+  --series-8: #e66767;
+  --series-other: #55556a;
+}
+
+.chart-value { font-variant-numeric: normal; }
+
+.chart-grid { height: 0; border-top: 1px solid var(--color-line); }
+
+.chart-tick { background: var(--color-raised); padding-right: 0.25rem; }
+
+.chart-line {
+  fill: none;
+  stroke: var(--stroke);
+  stroke-width: 2px;
+  stroke-linejoin: round;
+  stroke-linecap: round;
+  vector-effect: non-scaling-stroke;
+}
+
+.chart-line-thin { stroke-width: 1.5px; }
+
+/* Stacked bands: a wash of the series hue, with a 2px surface gap
+   between neighbours. */
+.chart-area {
+  fill: color-mix(in srgb, var(--fill) 22%, transparent);
+  stroke: var(--color-raised);
+  stroke-width: 2px;
+  vector-effect: non-scaling-stroke;
+}
+
+.chart-ref {
+  stroke: var(--color-line-strong);
+  stroke-width: 1px;
+  vector-effect: non-scaling-stroke;
+}
+
+.chart-crosshair { width: 0; border-left: 1px solid var(--color-ink-3); }
+
+.chart-plot { outline: none; touch-action: pan-y; }
+.chart-plot:focus-visible { box-shadow: 0 0 0 2px var(--color-focus); border-radius: 0.25rem; }
+
+.chart-key-line,
+.chart-key-area {
+  display: inline-block;
+  background: var(--key);
+}
+.chart-key-line { width: 0.75rem; height: 2px; border-radius: 1px; }
+.chart-key-area { width: 0.625rem; height: 0.625rem; border-radius: 2px; }
+
+/* The range picker: a segmented control. */
+.segmented {
+  display: inline-flex;
+  padding: 2px;
+  gap: 2px;
+  border-radius: 0.5rem;
+  background: var(--color-muted);
+}
+.segmented a {
+  padding: 0.25rem 0.625rem;
+  border-radius: 0.375rem;
+  font-size: 0.75rem;
+  font-weight: 500;
+  color: var(--color-ink-2);
+  font-variant-numeric: tabular-nums;
+}
+.segmented a:hover { color: var(--color-ink); }
+.segmented a[aria-current="true"] {
+  background: var(--color-raised);
+  color: var(--color-ink);
+  box-shadow: var(--shadow-xs);
+}
