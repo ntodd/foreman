@@ -52,6 +52,27 @@ defmodule ForemanWeb.BoxMetricsTest do
     assert has_element?(view, "#load-chart", "4 cores")
   end
 
+  test "charts use no inline styles, which production's CSP blocks", %{
+    conn: conn,
+    box: box,
+    user: user
+  } do
+    env = environment_fixture(box: box, user: user)
+    now = System.system_time(:second)
+    for i <- 0..11, do: Metrics.insert_box!(box.id, sample(now - 60 + i * 5))
+
+    Metrics.record_envs(
+      box.id,
+      %{env.id => %{slug: env.slug, cpu_percent: 50.0, memory_mb: 512}},
+      now
+    )
+
+    for path <- [~p"/boxes/#{box.id}", ~p"/boxes"] do
+      {:ok, _view, html} = live(conn, path)
+      refute html =~ ~r/\sstyle=/, "inline style attribute on #{path}"
+    end
+  end
+
   test "the range picker patches the URL and redraws", %{conn: conn, box: box} do
     {:ok, view, _html} = live(conn, ~p"/boxes/#{box.id}")
     assert has_element?(view, ~s|#range-picker a[aria-current="true"]|, "1h")

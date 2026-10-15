@@ -72,6 +72,8 @@ export async function launch({ binary, profile, port = 9333, width = 1440, heigh
     send,
     evaluate,
     consoleErrors,
+    // Subscribe to DevTools events ({method, params}).
+    on: listener => listeners.push(listener),
     async goto(url) {
       await send("Page.navigate", { url })
       await browser.waitFor("document.readyState === 'complete'")

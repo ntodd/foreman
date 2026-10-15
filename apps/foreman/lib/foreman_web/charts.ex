@@ -5,8 +5,10 @@ defmodule ForemanWeb.Charts do
 
   A chart has one value axis. Series are `%{label, color, kind, points}`:
   `gap` (optional) overrides the chart's for that series. `kind` is `:line` (`[{at, value}]`) or `:area` (`[{at, lower, upper}]`,
-  for stacks; see `Geometry.stack/1`). `color` is a CSS color, normally
-  one of the `--series-*` or `--color-*` variables. `format` turns a value
+  for stacks; see `Geometry.stack/1`). `color` is a class that sets the
+  series hue (`series-1`..`series-8`, `series-other`, `series-accent`):
+  production's CSP allows no inline style attributes, so nothing here
+  uses one, and the hook positions the tick labels from data attributes. `format` turns a value
   into its label for ticks, the tooltip and the legend.
   """
   use Phoenix.Component
@@ -14,8 +16,9 @@ defmodule ForemanWeb.Charts do
   alias ForemanWeb.Charts.Geometry
 
   @doc "The categorical series colors, in fixed order (see app.css)."
-  def series_color(i) when i in 0..7, do: "var(--series-#{i + 1})"
-  def other_color, do: "var(--series-other)"
+  def series_color(i) when i in 0..7, do: "series-#{i + 1}"
+  def other_color, do: "series-other"
+  def accent_color, do: "series-accent"
 
   attr :id, :string, required: true
   attr :title, :string, required: true
@@ -59,13 +62,11 @@ defmodule ForemanWeb.Charts do
         class="mt-3 flex flex-wrap gap-x-4 gap-y-1.5 px-5 text-xs"
       >
         <li :for={s <- @series ++ @legend} class="flex min-w-0 items-center gap-1.5">
-          <span
-            class={[
-              "shrink-0",
-              if(Map.get(s, :kind) == :line, do: "chart-key-line", else: "chart-key-area")
-            ]}
-            style={"--key: #{s.color}"}
-          />
+          <span class={[
+            "shrink-0",
+            s.color,
+            if(Map.get(s, :kind) == :line, do: "chart-key-line", else: "chart-key-area")
+          ]} />
           <span class="truncate text-ink-2">{s.label}</span>
           <span :if={v = legend_value(s, @format)} class="tabular-nums font-medium text-ink">{v}</span>
         </li>
@@ -84,9 +85,8 @@ defmodule ForemanWeb.Charts do
         aria-label={"#{@title} over time"}
       >
         <div
-          :for={{tick, label} <- @y_ticks}
-          class="chart-grid pointer-events-none absolute inset-x-0"
-          style={"top: #{Geometry.y(tick, @dom)}%"}
+          :for={{position, label} <- @y_ticks}
+          class={["chart-grid pointer-events-none absolute inset-x-0", position]}
         >
           <span
             :if={label}
@@ -106,8 +106,7 @@ defmodule ForemanWeb.Charts do
             <path
               :if={s.kind == :area}
               d={Geometry.area_path(s.points, series_dom(s, @dom))}
-              class="chart-area"
-              style={"--fill: #{s.color}"}
+              class={["chart-area", s.color]}
             />
           <% end %>
           <line
@@ -122,16 +121,15 @@ defmodule ForemanWeb.Charts do
             <path
               :if={s.kind == :line}
               d={Geometry.line_path(s.points, series_dom(s, @dom))}
-              class="chart-line"
-              style={"--stroke: #{s.color}"}
+              class={["chart-line", s.color]}
             />
           <% end %>
         </svg>
 
         <span
           :if={@ref}
+          data-top={Geometry.y(@ref.value, @dom)}
           class="chart-tick pointer-events-none absolute right-0 text-[11px] text-ink-3"
-          style={"top: calc(#{Geometry.y(@ref.value, @dom)}% - 1.1rem)"}
         >
           {@ref.label}
         </span>
@@ -157,8 +155,8 @@ defmodule ForemanWeb.Charts do
         <time
           :for={at <- @x_ticks}
           data-tick={at}
+          data-left={Geometry.x(at, @dom) / 10}
           class="absolute -translate-x-1/2 whitespace-nowrap"
-          style={"left: #{Geometry.x(at, @dom) / 10}%"}
         >
           {DateTime.from_unix!(at) |> Calendar.strftime("%H:%M")}
         </time>
@@ -195,8 +193,14 @@ defmodule ForemanWeb.Charts do
           this.times = [...all].sort((a, b) => a - b)
           this.gap = Number(this.el.dataset.gap)
           const figure = this.el.closest("figure")
+          // Positions are set from script: the CSP allows no inline style
+          // attributes, but styles set through the DOM are fine.
           for (const tick of figure.querySelectorAll("[data-tick]")) {
             tick.textContent = time(Number(tick.dataset.tick), this.until - this.since)
+            tick.style.left = tick.dataset.left + "%"
+          }
+          for (const label of this.el.querySelectorAll("[data-top]")) {
+            label.style.top = `calc(${label.dataset.top}% - 1.1rem)`
           }
         },
         fromPointer(e) {
@@ -251,8 +255,7 @@ defmodule ForemanWeb.Charts do
             const row = document.createElement("p")
             row.className = "flex items-center gap-2"
             const key = document.createElement("span")
-            key.className = "chart-key-line"
-            key.style.setProperty("--key", s.color)
+            key.className = "chart-key-line " + s.color
             const value = document.createElement("span")
             value.className = "font-semibold tabular-nums text-ink"
             value.textContent = label
@@ -299,13 +302,11 @@ defmodule ForemanWeb.Charts do
     >
       <path
         d={Geometry.area_path(Enum.map(@points, fn {at, v} -> {at, 0, v} end), @dom)}
-        class="chart-area"
-        style="--fill: var(--color-accent)"
+        class="chart-area series-accent"
       />
       <path
         d={Geometry.line_path(@points, @dom)}
-        class="chart-line chart-line-thin"
-        style="--stroke: var(--color-accent)"
+        class="chart-line chart-line-thin series-accent"
       />
     </svg>
     """
@@ -325,7 +326,8 @@ defmodule ForemanWeb.Charts do
 
   # Gridlines at the baseline, the middle and the top; the baseline goes
   # unlabelled, since every chart here starts at zero.
-  defp y_ticks(ymax, format), do: [{0, nil}, {ymax / 2, format.(ymax / 2)}, {ymax, format.(ymax)}]
+  defp y_ticks(ymax, format),
+    do: [{"top-full", nil}, {"top-1/2", format.(ymax / 2)}, {"top-0", format.(ymax)}]
 
   defp payload(series, format) do
     series
