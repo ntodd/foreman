@@ -203,7 +203,12 @@ defmodule ForemanWeb.EnvironmentLive.Show do
   @impl true
   def render(assigns) do
     ~H"""
-    <Layouts.app flash={@flash} current_scope={@current_scope} current_path={@current_path}>
+    <Layouts.app
+      flash={@flash}
+      current_scope={@current_scope}
+      current_path={@current_path}
+      width="full"
+    >
       <:breadcrumb navigate={~p"/"}>Environments</:breadcrumb>
       <:breadcrumb>{@env.slug}</:breadcrumb>
 
@@ -309,47 +314,16 @@ defmodule ForemanWeb.EnvironmentLive.Show do
                 <span class="font-mono">http://{@env.slug}:PORT</span>
                 on the tailnet. Nothing publishes ports.</span>
               </div>
+              <p :if={not tailscale?()} id="tailscale-off" class="text-xs text-ink-3">
+                SSH and VS Code need the environment on your tailnet. Set
+                <span class="font-mono">FOREMAN_TAILSCALE_CLIENT_ID</span>
+                and <span class="font-mono">FOREMAN_TAILSCALE_CLIENT_SECRET</span>
+                on Foreman, then rebuild.
+              </p>
             </div>
             <p :if={is_nil(@env.remote_user)} class="text-sm text-ink-3">
               Connection details appear once the environment has started.
             </p>
-          </.panel>
-
-          <.panel title="Activity" padded={false} id="activity">
-            <:actions>
-              <.button
-                size="sm"
-                variant="ghost"
-                phx-click="action"
-                phx-value-do="logs"
-                icon="hero-document-text-mini"
-              >Container logs</.button>
-            </:actions>
-            <div class="grid md:grid-cols-[15rem_minmax(0,1fr)]">
-              <ul class="max-h-[28rem] divide-y divide-line overflow-y-auto border-b border-line md:border-b-0 md:border-r">
-                <li :for={op <- @ops}>
-                  <button
-                    type="button"
-                    phx-click="select_op"
-                    phx-value-id={op.id}
-                    class={[
-                      "block w-full px-4 py-2.5 text-left transition-colors hover:bg-subtle",
-                      @selected_op == op.id && "bg-subtle"
-                    ]}
-                  >
-                    <span class="block truncate text-sm font-medium text-ink">{action_label(op.action)}</span>
-                    <span class="mt-0.5 flex items-center justify-between gap-2">
-                      <.op_status status={op.status} />
-                      <span class="text-xs text-ink-3">
-                        <.local_time id={"op-time-#{op.id}"} at={op.inserted_at} format="relative" />
-                      </span>
-                    </span>
-                  </button>
-                </li>
-                <li :if={@ops == []} class="px-4 py-6 text-sm text-ink-3">Nothing yet.</li>
-              </ul>
-              <pre id="op-log" phx-hook="LogTail" class="log-view h-[28rem] p-4 md:rounded-br-xl">{@log}<span :if={@log == ""} class="text-studio-ink-2">No output yet.</span></pre>
-            </div>
           </.panel>
 
           <.live_component
@@ -396,6 +370,43 @@ defmodule ForemanWeb.EnvironmentLive.Show do
           </.panel>
         </aside>
       </div>
+
+      <.panel title="Activity" padded={false} id="activity">
+        <:actions>
+          <.button
+            size="sm"
+            variant="ghost"
+            phx-click="action"
+            phx-value-do="logs"
+            icon="hero-document-text-mini"
+          >Container logs</.button>
+        </:actions>
+        <div class="grid md:grid-cols-[15rem_minmax(0,1fr)]">
+          <ul class="max-h-[28rem] divide-y divide-line overflow-y-auto border-b border-line md:border-b-0 md:border-r">
+            <li :for={op <- @ops}>
+              <button
+                type="button"
+                phx-click="select_op"
+                phx-value-id={op.id}
+                class={[
+                  "block w-full px-4 py-2.5 text-left transition-colors hover:bg-subtle",
+                  @selected_op == op.id && "bg-subtle"
+                ]}
+              >
+                <span class="block truncate text-sm font-medium text-ink">{action_label(op.action)}</span>
+                <span class="mt-0.5 flex items-center justify-between gap-2">
+                  <.op_status status={op.status} />
+                  <span class="text-xs text-ink-3">
+                    <.local_time id={"op-time-#{op.id}"} at={op.inserted_at} format="relative" />
+                  </span>
+                </span>
+              </button>
+            </li>
+            <li :if={@ops == []} class="px-4 py-6 text-sm text-ink-3">Nothing yet.</li>
+          </ul>
+          <pre id="op-log" phx-hook="LogTail" class="log-view h-[28rem] p-4 md:rounded-br-xl">{@log}<span :if={@log == ""} class="text-studio-ink-2">No output yet.</span></pre>
+        </div>
+      </.panel>
 
       <.modal :if={@destroy_check} id="destroy-modal" show on_cancel={JS.push("cancel_destroy")}>
         <h2 id="destroy-modal-title" class="text-lg font-semibold text-ink">Destroy {@env.slug}?</h2>
