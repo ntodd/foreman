@@ -112,7 +112,7 @@ defmodule ForemanWeb.BoxCharts do
   end
 
   defp line(label, points),
-    do: %{label: label, kind: :line, color: "var(--color-accent)", points: points}
+    do: %{label: label, kind: :line, color: accent_color(), points: points}
 
   # Stacked environment bands, colored by slug so a color sticks to its
   # environment whatever the order.

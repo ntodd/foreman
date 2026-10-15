@@ -565,9 +565,21 @@ progress.bar.bar-muted { color: var(--color-line-strong); }
 
 .chart-tick { background: var(--color-raised); padding-right: 0.25rem; }
 
+/* Series hues as classes: production's CSP blocks inline styles. */
+.series-1 { --c: var(--series-1); }
+.series-2 { --c: var(--series-2); }
+.series-3 { --c: var(--series-3); }
+.series-4 { --c: var(--series-4); }
+.series-5 { --c: var(--series-5); }
+.series-6 { --c: var(--series-6); }
+.series-7 { --c: var(--series-7); }
+.series-8 { --c: var(--series-8); }
+.series-other { --c: var(--series-other); }
+.series-accent { --c: var(--color-accent); }
+
 .chart-line {
   fill: none;
-  stroke: var(--stroke);
+  stroke: var(--c);
   stroke-width: 2px;
   stroke-linejoin: round;
   stroke-linecap: round;
@@ -579,7 +591,7 @@ progress.bar.bar-muted { color: var(--color-line-strong); }
 /* Stacked bands: a wash of the series hue, with a 2px surface gap
    between neighbours. */
 .chart-area {
-  fill: color-mix(in srgb, var(--fill) 22%, transparent);
+  fill: color-mix(in srgb, var(--c) 22%, transparent);
   stroke: var(--color-raised);
   stroke-width: 2px;
   vector-effect: non-scaling-stroke;
@@ -599,7 +611,7 @@ progress.bar.bar-muted { color: var(--color-line-strong); }
 .chart-key-line,
 .chart-key-area {
   display: inline-block;
-  background: var(--key);
+  background: var(--c);
 }
 .chart-key-line { width: 0.75rem; height: 2px; border-radius: 1px; }
 .chart-key-area { width: 0.625rem; height: 0.625rem; border-radius: 2px; }
