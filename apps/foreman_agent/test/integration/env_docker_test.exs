@@ -112,6 +112,24 @@ defmodule ForemanAgent.Integration.EnvDockerTest do
     Map.new(list, &{&1["Labels"]["com.docker.compose.service"], &1})
   end
 
+  # Docker can report a container mid-transition for a moment after
+  # compose returns, so poll briefly, and name the stragglers if any.
+  defp assert_states(env_id, state, tries \\ 20) do
+    states = Map.new(containers(env_id), fn {service, c} -> {service, c["State"]} end)
+
+    cond do
+      Enum.all?(states, fn {_, s} -> s == state end) ->
+        :ok
+
+      tries > 0 ->
+        Process.sleep(500)
+        assert_states(env_id, state, tries - 1)
+
+      true ->
+        flunk("expected every container #{state}, got #{inspect(states)}")
+    end
+  end
+
   defp exec(container, args, user \\ "vscode") do
     System.cmd("docker", ["exec", "-u", user, container | args], stderr_to_stdout: true)
   end
@@ -233,7 +251,7 @@ defmodule ForemanAgent.Integration.EnvDockerTest do
 
     # -- stop and start ---------------------------------------------------------
     assert {:ok, _} = Env.run("env.stop", %{env_id: @env1, slug: "hello-1"}, ctx)
-    assert containers(@env1) |> Map.values() |> Enum.all?(&(&1["State"] == "exited"))
+    assert_states(@env1, "exited")
 
     assert {:ok, _} =
              Env.run(
@@ -242,7 +260,7 @@ defmodule ForemanAgent.Integration.EnvDockerTest do
                ctx
              )
 
-    assert containers(@env1) |> Map.values() |> Enum.all?(&(&1["State"] == "running"))
+    assert_states(@env1, "running")
     assert containers(@env1)["app"]["Id"] == app1
 
     # -- rebuild keeps the workspace ----------------------------------------------
