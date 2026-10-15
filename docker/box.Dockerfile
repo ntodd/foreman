@@ -6,7 +6,11 @@
 #
 # The agent target is also exported for self-update tests:
 #   docker build -f docker/box.Dockerfile --target agent-tarball -o tmp/agent .
-ARG ELIXIR_IMAGE=hexpm/elixir:1.20.4-erlang-29.1.1-debian-trixie-20261005-slim
+# The agent release bundles ERTS, which links the build image's glibc and
+# OpenSSL, so it only runs on systems at least that new. Build it on the
+# oldest base boxes should support: jammy runs on Ubuntu 22.04+ and
+# Debian 12+; trixie (OpenSSL 3.5) wouldn't start on Ubuntu 24.04.
+ARG ELIXIR_IMAGE=hexpm/elixir:1.20.4-erlang-29.1.1-ubuntu-jammy-20260810
 ARG RUNTIME_IMAGE=debian:trixie-20261005-slim
 
 FROM ${ELIXIR_IMAGE} AS agent

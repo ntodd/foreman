@@ -451,7 +451,7 @@ Anyone with Docker access on a box can read every secret of every environment on
 
 ## Agent self-update
 
-1. CI builds the agent release for each target architecture on a tag. It signs it with an ed25519 key that lives only in CI (`mix foreman_agent.sign`; the signature covers the version, target and SHA-256), then the tarball and signature are registered with the control plane.
+1. CI builds the agent release for each target architecture on a tag. It signs it with an ed25519 key that lives only in CI (`mix foreman_agent.sign`; the signature covers the version, target and SHA-256), and attaches the tarballs and signatures to a GitHub release. `scripts/publish-agent-release.sh` registers them with the control plane; the control plane never talks to GitHub for releases.
 2. An admin sets the desired agent version, globally or per box. An agent running a different version receives `agent.update`.
 3. The agent downloads the release from the control plane and verifies the signature against the public key compiled into it.
 4. It unpacks to `/opt/foreman-agent/releases/<version>`, switches the `current` symlink and exits. systemd restarts it on the new version.
