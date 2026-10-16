@@ -59,7 +59,9 @@ defmodule Foreman.Environments.Environment do
     |> validate_format(:slug, ~r/\A[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\z/)
     |> validate_branch()
     |> validate_limits()
+    # Postgres names the partial index; SQLite reports the columns instead.
     |> unique_constraint(:slug, name: :environments_live_slug_index)
+    |> unique_constraint(:slug, name: :environments_slug_index)
   end
 
   def limits_changeset(env, attrs) do

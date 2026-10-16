@@ -16,11 +16,12 @@ defmodule Foreman.Fixtures do
       role: Map.get(attrs, :role, "member"),
       access_token: Map.get(attrs, :access_token, "ghu_user#{n}"),
       access_token_expires_at:
-        Map.get(attrs, :access_token_expires_at, DateTime.add(DateTime.utc_now(), 3600)),
+        Map.get(attrs, :access_token_expires_at, DateTime.add(DateTime.utc_now(), 8 * 3600)),
       refresh_token: Map.get(attrs, :refresh_token, "ghr_user#{n}"),
       refresh_token_expires_at: DateTime.add(DateTime.utc_now(), 86_400 * 180),
       git_name: Map.get(attrs, :git_name),
-      git_email: Map.get(attrs, :git_email)
+      git_email: Map.get(attrs, :git_email),
+      disabled_at: Map.get(attrs, :disabled_at)
     }
     |> Repo.insert!()
   end

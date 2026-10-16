@@ -164,11 +164,22 @@ defmodule ForemanWeb.SecretsComponent do
     end
   end
 
+  # Starts from the secret's current repos, so replacing the value doesn't
+  # quietly widen it to every repo.
   def handle_event("edit", %{"name" => name}, socket) do
+    repo_ids =
+      case Enum.find(socket.assigns.secrets, &(&1.name == name)) do
+        %{repo_ids: ids} -> ids
+        nil -> []
+      end
+
     {:noreply,
      socket
      |> assign(:editing, name)
-     |> assign(:form, to_form(%{"name" => name, "value" => "", "repo_ids" => []}, as: :secret))}
+     |> assign(
+       :form,
+       to_form(%{"name" => name, "value" => "", "repo_ids" => repo_ids}, as: :secret)
+     )}
   end
 
   def handle_event("cancel", _params, socket) do
@@ -182,7 +193,7 @@ defmodule ForemanWeb.SecretsComponent do
     %{current_scope: scope, scope_name: scope_name, subject: subject} = socket.assigns
     Secrets.delete_secret(scope, scope_name, subject, name)
     send(self(), {:secret_deleted, name})
-    {:noreply, assign(socket, :secrets, list(socket))}
+    {:noreply, assign(socket, :secrets, list_secrets(socket))}
   end
 
   defp list_secrets(socket) do

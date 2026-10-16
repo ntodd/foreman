@@ -129,20 +129,33 @@ defmodule Foreman.Agents do
     with :ok <- owns_op(box_id, op_id), do: Operations.append_log(op_id, data)
   end
 
+  # The operation and its environment's new state are recorded in one
+  # transaction: if applying the result raises, neither is, and the
+  # agent's redelivery (it keeps results until they're acknowledged)
+  # gets another go rather than being ignored as a repeat.
   def handle_event(box_id, %Event{type: "op.result", payload: payload}) do
-    with :ok <- owns_op(box_id, payload.op_id) do
-      case Operations.finish(
-             payload.op_id,
-             payload.status,
-             payload[:result] || %{},
-             payload[:error]
-           ) do
-        {:ok, op} -> Environments.apply_result(op)
-        :already -> :ok
-        :unknown -> :ok
-      end
+    case owns_op(box_id, payload.op_id) do
+      :ok ->
+        case Operations.finish(
+               payload.op_id,
+               payload.status,
+               payload[:result] || %{},
+               payload[:error],
+               &Environments.record_result/1
+             ) do
+          {:ok, op, env} -> Environments.after_result(op, env)
+          :already -> :ok
+          :unknown -> :ok
+        end
 
-      :ok
+      # Nothing to record it against (pruned, or from another control
+      # plane's database). Acknowledged so the agent stops resending it.
+      {:error, :unknown_operation} ->
+        Logger.warning("box #{box_id} reported a result for unknown operation #{payload.op_id}")
+        :ok
+
+      error ->
+        error
     end
   end
 
@@ -185,17 +198,16 @@ defmodule Foreman.Agents do
     end
   end
 
-  @doc "Called when an agent joins: resend what was in flight and dispatch what's queued."
+  @doc """
+  Called when an agent joins: resend what was in flight and dispatch
+  what's queued. Box commands (gc, stats, an update) aren't resent; their
+  results usually follow straight after the join, from the agent's
+  outbox. Housekeeping fails the ones that never arrive.
+  """
   def agent_connected(box) do
-    for op <- Operations.active_for_box(box.id) do
-      if op.environment_id,
-        do: Environments.Server.resend(op.environment_id, op.id),
-        else:
-          Operations.mark(op, "failed",
-            error: "agent reconnected before reporting a result",
-            finished_at: DateTime.utc_now()
-          )
-    end
+    for op <- Operations.active_for_box(box.id),
+        op.environment_id,
+        do: Environments.Server.resend(op.environment_id, op.id)
 
     for env_id <- Operations.environments_with_queued(box.id),
         do: Environments.Server.kick(env_id)

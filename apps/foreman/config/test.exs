@@ -11,6 +11,9 @@ else
   config :foreman, Foreman.Repo,
     database: Path.expand("../foreman_test#{System.get_env("MIX_TEST_PARTITION")}.db", __DIR__),
     pool_size: 5,
+    # Each sandboxed test holds a transaction, which takes the write lock
+    # when it begins (see config.exs); async tests wait for each other.
+    busy_timeout: 30_000,
     pool: Ecto.Adapters.SQL.Sandbox
 end
 

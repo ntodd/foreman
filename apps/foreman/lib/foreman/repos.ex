@@ -15,7 +15,11 @@ defmodule Foreman.Repos do
   def get_owner_by_login(login), do: Repo.get_by(Owner, login: login)
 
   def list_repos(opts \\ []) do
-    query = from r in GitRepo, where: r.archived == false, order_by: r.full_name, preload: :owner
+    query =
+      from r in GitRepo,
+        where: r.archived == false and is_nil(r.removed_at),
+        order_by: r.full_name,
+        preload: :owner
 
     query =
       if Keyword.get(opts, :with_devcontainer, false),
@@ -30,20 +34,63 @@ defmodule Foreman.Repos do
   def get_repo_by_full_name(full_name),
     do: GitRepo |> Repo.get_by(full_name: full_name) |> Repo.preload(:owner)
 
-  @doc "Creates or updates an owner from GitHub's account data."
+  @doc """
+  Creates or updates an owner from GitHub's account data, matched by
+  GitHub id first so a renamed org keeps its row.
+  """
   def upsert_owner(attrs) do
-    owner = Repo.get_by(Owner, login: attrs[:login] || attrs["login"]) || %Owner{}
+    github_id = attrs[:github_id] || attrs["github_id"]
+    login = attrs[:login] || attrs["login"]
+
+    owner =
+      (github_id && Repo.get_by(Owner, github_id: github_id)) ||
+        Repo.get_by(Owner, login: login) || %Owner{}
+
     owner |> Owner.changeset(attrs) |> Repo.insert_or_update()
   end
 
-  @doc "Creates or updates a repo from GitHub's data (or a manual add)."
+  @doc """
+  Creates or updates a repo from GitHub's data (or a manual add). A repo
+  is matched by its GitHub id first, so a rename or transfer updates the
+  row, keeping its settings, secrets and environments.
+  """
   def upsert_repo(%Owner{} = owner, attrs) do
     full_name = attrs[:full_name] || attrs["full_name"]
-    repo = Repo.get_by(GitRepo, full_name: full_name) || %GitRepo{owner_id: owner.id}
+    by_name = Repo.get_by(GitRepo, full_name: full_name)
+
+    repo =
+      case by_github_id(attrs[:github_id] || attrs["github_id"]) do
+        # Renamed or transferred, unless another row already has the new
+        # name (one created before ids were matched); that one wins.
+        %GitRepo{} = repo when is_nil(by_name) or by_name.id == repo.id -> repo
+        _ -> by_name || %GitRepo{owner_id: owner.id}
+      end
 
     repo
     |> GitRepo.sync_changeset(attrs)
+    |> Ecto.Changeset.put_change(:owner_id, owner.id)
     |> Repo.insert_or_update()
+  end
+
+  defp by_github_id(nil), do: nil
+
+  defp by_github_id(id) do
+    from(r in GitRepo, where: r.github_id == ^id, order_by: r.inserted_at, limit: 1)
+    |> Repo.one()
+  end
+
+  @doc """
+  Marks `owner`'s synced repos that aren't in `github_ids` (the
+  installation's complete repo list) as removed, so they leave the repo
+  list. Manually added repos aren't touched.
+  """
+  def mark_removed(%Owner{id: owner_id}, github_ids) do
+    from(r in GitRepo,
+      where:
+        r.owner_id == ^owner_id and r.manual == false and is_nil(r.removed_at) and
+          not is_nil(r.github_id) and r.github_id not in ^github_ids
+    )
+    |> Repo.update_all(set: [removed_at: DateTime.utc_now()])
   end
 
   @doc "Admins can add a repo by name, e.g. a public repo outside the installation."

@@ -65,7 +65,10 @@ defmodule ForemanWeb.RepoLive.Show do
          socket
          |> assign(:repo, Repos.get_repo!(repo.id))
          |> assign(:settings_form, to_form(settings_params(repo), as: :settings))
-         |> put_flash(:info, "Saved. New tokens and limits apply as environments restart.")}
+         |> put_flash(
+           :info,
+           "Saved. Running environments get a token with the new scope when they next start, or within four hours. New limits apply when an environment is rebuilt."
+         )}
 
       {:error, %Ecto.Changeset{} = changeset} ->
         {:noreply,

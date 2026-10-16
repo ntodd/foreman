@@ -94,7 +94,9 @@ defmodule ForemanWeb.UserAuth do
       end
 
       {:cont,
-       Phoenix.LiveView.attach_hook(socket, :current_path, :handle_params, &put_current_path/3)}
+       socket
+       |> Phoenix.LiveView.attach_hook(:current_path, :handle_params, &put_current_path/3)
+       |> Phoenix.LiveView.attach_hook(:access_changed, :handle_info, &reload_on_access_change/2)}
     else
       {:halt, Phoenix.LiveView.redirect(socket, to: ~p"/sign-in")}
     end
@@ -111,6 +113,15 @@ defmodule ForemanWeb.UserAuth do
       session["session_token"] |> Accounts.get_user_by_session() |> Scope.for_user()
     end)
   end
+
+  # The user was disabled or their role changed: reload the page so it
+  # mounts again with their current access, instead of acting on the
+  # scope this LiveView started with.
+  defp reload_on_access_change(:access_changed, socket) do
+    {:halt, Phoenix.LiveView.redirect(socket, to: socket.assigns[:current_path] || ~p"/")}
+  end
+
+  defp reload_on_access_change(_message, socket), do: {:cont, socket}
 
   defp put_current_path(_params, uri, socket) do
     {:cont, Phoenix.Component.assign(socket, :current_path, URI.parse(uri).path)}

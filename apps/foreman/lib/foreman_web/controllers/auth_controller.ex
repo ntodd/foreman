@@ -42,7 +42,10 @@ defmodule ForemanWeb.AuthController do
     verifier = get_session(conn, :oauth_verifier)
     conn = conn |> delete_session(:oauth_state) |> delete_session(:oauth_verifier)
 
-    with true <- is_binary(expected) and Plug.Crypto.secure_compare(state, expected),
+    # A query string can make `code` or `state` a list or map.
+    with true <-
+           is_binary(code) and is_binary(state) and is_binary(expected) and
+             Plug.Crypto.secure_compare(state, expected),
          {:allow, _} <- Foreman.RateLimit.hit("sign-in:#{remote_ip(conn)}", 60_000, 20),
          {:ok, user} <- GitHub.complete_sign_in(code, verifier, callback_url()) do
       # A fresh login means fresh tokens: push them to this user's environments.
@@ -82,5 +85,5 @@ defmodule ForemanWeb.AuthController do
 
   defp callback_url, do: Foreman.Config.base_url() <> "/auth/github/callback"
 
-  defp remote_ip(conn), do: conn.remote_ip |> :inet.ntoa() |> to_string()
+  defp remote_ip(conn), do: ForemanWeb.ClientIP.from_conn(conn)
 end

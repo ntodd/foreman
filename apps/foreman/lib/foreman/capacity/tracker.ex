@@ -9,6 +9,10 @@ defmodule Foreman.Capacity.Tracker do
   @window_seconds 15 * 60
   @table __MODULE__
 
+  # Boxes report every 30 seconds. A report older than this is from a box
+  # that has gone quiet, and isn't current usage any more.
+  @fresh_seconds 120
+
   def start_link(_), do: GenServer.start_link(__MODULE__, nil, name: __MODULE__)
 
   @doc "Records a box.stats report."
@@ -22,11 +26,11 @@ defmodule Foreman.Capacity.Tracker do
     :ok
   end
 
-  @doc "The latest stats report from a box, or nil."
-  def latest(box_id) do
+  @doc "The latest stats report from a box, or nil if it hasn't reported recently."
+  def latest(box_id, now \\ System.system_time(:second)) do
     case :ets.lookup(@table, {:box, box_id}) do
-      [{_, at, stats}] -> Map.put(stats, :at, at)
-      [] -> nil
+      [{_, at, stats}] when at >= now - @fresh_seconds -> Map.put(stats, :at, at)
+      _ -> nil
     end
   end
 
@@ -51,10 +55,14 @@ defmodule Foreman.Capacity.Tracker do
     end
   end
 
-  def latest_usage(env_id) do
+  @doc "An environment's latest usage, or nil if its box hasn't reported it recently."
+  def latest_usage(env_id, now \\ System.system_time(:second)) do
     case :ets.select_reverse(
            @table,
-           [{{{:env, env_id, :"$1"}, :"$2"}, [], [{{:"$1", :"$2"}}]}],
+           [
+             {{{:env, env_id, :"$1"}, :"$2"}, [{:>=, :"$1", now - @fresh_seconds}],
+              [{{:"$1", :"$2"}}]}
+           ],
            1
          ) do
       {[{_at, usage}], _} -> usage

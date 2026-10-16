@@ -7,6 +7,8 @@ defmodule Foreman.Operations.Redactions do
   """
   use GenServer
 
+  import Ecto.Query
+
   alias Foreman.Environments.Environment
   alias Foreman.Operations.Operation
   alias Foreman.{Repo, Secrets}
@@ -37,6 +39,26 @@ defmodule Foreman.Operations.Redactions do
   end
 
   def delete(op_id), do: :ets.delete(@table, op_id)
+
+  @doc """
+  Drops entries for operations that are over (a log chunk arriving after
+  the result rebuilds one) or gone. Returns how many were dropped.
+  """
+  def prune do
+    ids = :ets.select(@table, [{{:"$1", :_}, [], [:"$1"]}])
+
+    active =
+      Repo.all(
+        from o in Operation,
+          where: o.id in ^ids and o.status in ["queued", "dispatched", "running"],
+          select: o.id
+      )
+      |> MapSet.new()
+
+    stale = Enum.reject(ids, &MapSet.member?(active, &1))
+    Enum.each(stale, &delete/1)
+    length(stale)
+  end
 
   defp values(op_id) do
     case :ets.lookup(@table, op_id) do

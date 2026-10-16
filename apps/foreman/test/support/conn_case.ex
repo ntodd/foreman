@@ -22,7 +22,10 @@ defmodule ForemanWeb.ConnCase do
 
       setup tags do
         Foreman.DataCase.setup_sandbox(tags)
-        {:ok, conn: Phoenix.ConnTest.build_conn()}
+        # Each test gets its own client address, so rate limits (kept in
+        # ETS for the whole run) never carry over from another test.
+        client = {10, :rand.uniform(254), :rand.uniform(254), :rand.uniform(254)}
+        {:ok, conn: %{Phoenix.ConnTest.build_conn() | remote_ip: client}}
       end
     end
   end

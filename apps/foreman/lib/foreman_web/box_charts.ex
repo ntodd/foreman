@@ -27,8 +27,9 @@ defmodule ForemanWeb.BoxCharts do
     env_gap = envs.step * 3
     envs = fold(envs.series)
 
-    mem_total = (latest && latest.memory_total) || cap["memory_mb"] || 1
-    disk_total = (latest && latest.disk_total) || cap["disk_mb"] || 1
+    # A total of 0 means the box couldn't read it (df failing reports 0).
+    mem_total = positive(latest && latest.memory_total) || positive(cap["memory_mb"]) || 1
+    disk_total = positive(latest && latest.disk_total) || positive(cap["disk_mb"]) || 1
 
     peak_cpu = points |> Enum.map(& &1.cpu_max) |> Enum.max(fn -> nil end)
     peak_load = points |> Enum.map(& &1.load1) |> Enum.max(fn -> 0 end)
@@ -110,6 +111,9 @@ defmodule ForemanWeb.BoxCharts do
     </div>
     """
   end
+
+  defp positive(n) when is_number(n) and n > 0, do: n
+  defp positive(_), do: nil
 
   defp line(label, points),
     do: %{label: label, kind: :line, color: accent_color(), points: points}

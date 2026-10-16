@@ -1,0 +1,53 @@
+defmodule Foreman.Jobs.CheckAccess do
+  @moduledoc """
+  Checks that everyone with a live session may still use Foreman (they
+  might have left the org or an allowlist). Token refreshes check too, but
+  someone with no environments may not refresh for weeks.
+
+  Someone whose GitHub login has expired can't be checked against the
+  org, so they're signed out when it comes down to the org; signing in
+  again checks it.
+  """
+  use Oban.Worker, queue: :github, max_attempts: 3, unique: [period: 3600]
+
+  import Ecto.Query
+
+  alias Foreman.Accounts
+  alias Foreman.Accounts.{Session, User}
+
+  @impl true
+  def perform(_job) do
+    if Foreman.GitHub.configured?() do
+      config = Accounts.login_config()
+      Enum.each(signed_in_users(), &check(&1, config))
+    end
+
+    :ok
+  end
+
+  defp check(user, config) do
+    case Accounts.access(user, config) do
+      :allowed ->
+        :ok
+
+      :denied ->
+        Accounts.revoke_access(user, "no longer allowed")
+
+      :ask_org when user.github_login_expired or is_nil(user.refresh_token) ->
+        Accounts.revoke_access(user, "org membership couldn't be checked")
+
+      :ask_org ->
+        Foreman.GitHub.check_access(user)
+    end
+  end
+
+  defp signed_in_users do
+    from(u in User,
+      as: :user,
+      where:
+        is_nil(u.disabled_at) and
+          exists(from s in Session, where: s.user_id == parent_as(:user).id)
+    )
+    |> Foreman.Repo.all()
+  end
+end

@@ -45,10 +45,18 @@ defmodule Foreman.Operations do
     |> Repo.one()
   end
 
+  @doc """
+  The environment's next operation to send: a queued secrets write first
+  (a secret changed after a restart was queued, say, and the restart
+  should see it), then the oldest.
+  """
   def next_queued(env_id) do
     from(o in Operation,
       where: o.environment_id == ^env_id and o.status == "queued",
-      order_by: o.inserted_at,
+      order_by: [
+        asc: fragment("CASE WHEN ? = 'secrets_write' THEN 0 ELSE 1 END", o.action),
+        asc: o.inserted_at
+      ],
       limit: 1
     )
     |> Repo.one()
@@ -76,7 +84,9 @@ defmodule Foreman.Operations do
   end
 
   def mark(%Operation{} = op, status, extra \\ []) do
-    op |> Ecto.Changeset.change([status: status] ++ extra) |> Repo.update!() |> tap(&broadcast/1)
+    op = op |> Ecto.Changeset.change([status: status] ++ extra) |> Repo.update!()
+    if Operation.finished?(op), do: Redactions.delete(op.id)
+    tap(op, &broadcast/1)
   end
 
   def mark_running(op_id) do
@@ -86,28 +96,145 @@ defmodule Foreman.Operations do
     end
   end
 
-  @doc "Records the outcome. Returns `{:ok, op}` the first time, `:already` for a repeat."
+  @doc """
+  Records the outcome. Returns `{:ok, op}` the first time, `:already` for
+  a repeat and `:unknown` for an operation that doesn't exist.
+
+  A result for an operation Housekeeping gave up on is still taken: the
+  agent did the work, so its outcome is the true one.
+  """
   def finish(op_id, status, result, error) do
+    case finish(op_id, status, result, error, fn _op -> nil end) do
+      {:ok, op, _} -> {:ok, op}
+      other -> other
+    end
+  end
+
+  @doc """
+  Like `finish/4`, with `apply` run in the same transaction as the
+  update, given the finished operation, so its effects (the environment's
+  new state) are recorded together with it or not at all. Returns
+  `{:ok, op, applied}`, `applied` being what `apply` returned.
+  """
+  def finish(op_id, status, result, error, apply) do
     case get(op_id) do
       %Operation{} = op ->
-        if Operation.finished?(op) do
-          :already
-        else
-          LogBuffer.flush(op_id)
-          error = error && Redactions.redact(op_id, error)
-          Redactions.delete(op_id)
-
-          {:ok,
-           mark(get!(op_id), finished_status(status, error),
-             result: result,
-             error: error,
-             finished_at: DateTime.utc_now()
-           )}
-        end
+        if Operation.finished?(op) and not timed_out?(op),
+          do: :already,
+          else: do_finish(op_id, status, result, error, apply)
 
       nil ->
         :unknown
     end
+  end
+
+  defp do_finish(op_id, status, result, error, apply) do
+    # Before the transaction: the buffer writes from its own process, which
+    # on SQLite would wait on this transaction's write lock.
+    LogBuffer.flush(op_id)
+    error = error && Redactions.redact(op_id, error)
+
+    {:ok, {op, applied}} =
+      Repo.transact(fn ->
+        op = get!(op_id)
+
+        op =
+          op
+          |> Ecto.Changeset.change(outcome(op, status, result, error))
+          |> Repo.update!()
+
+        {:ok, {op, apply.(op)}}
+      end)
+
+    Redactions.delete(op_id)
+    broadcast(op)
+    {:ok, op, applied}
+  end
+
+  @doc "Whether Housekeeping failed the operation for taking too long (see `timed_out/2`)."
+  def timed_out?(%Operation{status: "failed", args: %{"timed_out" => true}}), do: true
+  def timed_out?(%Operation{}), do: false
+
+  @doc """
+  Fails an operation that never reported back. A late result still
+  replaces this. `:finished` if a result landed since `op` was read: the
+  check and the update are one statement, so this never overwrites it.
+  """
+  def timed_out(%Operation{} = op, error) do
+    case timed_out(op, error, fn _op -> nil end) do
+      {:ok, op, _} -> {:ok, op}
+      :finished -> :finished
+    end
+  end
+
+  @doc """
+  Like `timed_out/2`, with `apply` run in the same transaction, given the
+  failed operation, so a real result can't land between the failure and
+  its effect on the environment. Returns `{:ok, op, applied}` or
+  `:finished`.
+  """
+  def timed_out(%Operation{id: id} = op, error, apply) do
+    now = DateTime.utc_now()
+
+    {:ok, outcome} =
+      Repo.transact(fn ->
+        {count, _} =
+          from(o in Operation,
+            where: o.id == ^id and o.status in ["queued", "dispatched", "running"]
+          )
+          |> Repo.update_all(
+            set: [
+              status: "failed",
+              error: error,
+              args: Map.put(op.args || %{}, "timed_out", true),
+              finished_at: now,
+              updated_at: now
+            ]
+          )
+
+        if count == 1 do
+          op = get!(id)
+          {:ok, {op, apply.(op)}}
+        else
+          {:ok, :finished}
+        end
+      end)
+
+    case outcome do
+      {op, applied} ->
+        Redactions.delete(id)
+        broadcast(op)
+        {:ok, op, applied}
+
+      :finished ->
+        :finished
+    end
+  end
+
+  # An agent that has put a new release in place reports it before it
+  # restarts into it (once it's idle), so the update isn't done until the
+  # agent comes back on the new version (`Foreman.Agents.Releases`). A real
+  # result also clears Housekeeping's timeout.
+  defp outcome(%Operation{action: "agent.update"} = op, "ok", %{"restart" => true} = result, nil) do
+    args = Map.delete(op.args || %{}, "timed_out")
+
+    [
+      status: "running",
+      result: result,
+      error: nil,
+      finished_at: nil,
+      args: Map.put_new(args, "restart_reported_at", DateTime.to_iso8601(DateTime.utc_now()))
+    ]
+  end
+
+  defp outcome(op, status, result, error) do
+    [
+      status: finished_status(status, error),
+      result: result,
+      error: error,
+      args: Map.delete(op.args || %{}, "timed_out"),
+      finished_at: DateTime.utc_now()
+    ]
   end
 
   # The agent reports an operation it killed for `op.cancel` as the error
@@ -116,8 +243,45 @@ defmodule Foreman.Operations do
   defp finished_status(_status, "cancelled"), do: "cancelled"
   defp finished_status(_status, _error), do: "failed"
 
-  def cancel_queued(%Operation{status: "queued"} = op),
-    do: mark(op, "cancelled", finished_at: DateTime.utc_now())
+  @doc """
+  Cancels a queued operation. `{:error, :not_queued}` if it has left the
+  queue since `op` was read (it was sent, say): the check and the update
+  are one statement, so a cancel can't overwrite a dispatch.
+  """
+  def cancel_queued(%Operation{} = op) do
+    case transition(op, "queued", status: "cancelled", finished_at: DateTime.utc_now()) do
+      {:ok, op} -> {:ok, op}
+      :error -> {:error, :not_queued}
+    end
+  end
+
+  @doc "Fails a queued operation that couldn't be sent. `:error` if it isn't queued any more."
+  def fail_queued(%Operation{} = op, error),
+    do: transition(op, "queued", status: "failed", error: error, finished_at: DateTime.utc_now())
+
+  @doc "Takes a queued operation for sending. `:error` if it isn't queued any more."
+  def claim(%Operation{} = op, fields),
+    do: transition(op, "queued", [status: "dispatched"] ++ fields)
+
+  defp transition(op, from, fields) do
+    query = from(o in Operation, where: o.id == ^op.id and o.status == ^from)
+
+    case Repo.update_all(query, set: fields) do
+      {1, _} -> {:ok, op.id |> get!() |> tap(&broadcast/1)}
+      {0, _} -> :error
+    end
+  end
+
+  @doc "Clears the logs of operations that finished before `cutoff`. Returns how many."
+  def prune_logs(cutoff) do
+    {count, _} =
+      Repo.update_all(
+        from(o in Operation, where: o.finished_at < ^cutoff and not is_nil(o.log)),
+        set: [log: nil]
+      )
+
+    count
+  end
 
   def append_log(op_id, data), do: LogBuffer.append(op_id, data)
 

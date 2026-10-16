@@ -103,7 +103,21 @@ defmodule ForemanWeb.EnvironmentLive.Show do
     end
   end
 
-  def handle_event("select_op", %{"id" => id}, socket), do: {:noreply, watch_op(socket, id)}
+  # Only this environment's operations: the id comes from the client.
+  def handle_event("select_op", %{"id" => id}, socket) do
+    env_id = socket.assigns.env.id
+
+    case Ecto.UUID.cast(id) do
+      {:ok, id} ->
+        case Operations.get(id) do
+          %{environment_id: ^env_id} -> {:noreply, watch_op(socket, id)}
+          _ -> {:noreply, socket}
+        end
+
+      :error ->
+        {:noreply, socket}
+    end
+  end
 
   def handle_event("check_destroy", _params, %{assigns: %{online: false}} = socket) do
     check = %{
@@ -285,8 +299,9 @@ defmodule ForemanWeb.EnvironmentLive.Show do
         </:actions>
       </.header>
 
+      <%!-- Also after a failed stop or secrets write, which leave the state as it was. --%>
       <.callout
-        :if={@env.observed_state == "error" and @env.status_message}
+        :if={@env.status_message && not busy?(@env.observed_state)}
         kind="danger"
         id="env-error"
       >
