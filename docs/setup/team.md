@@ -6,7 +6,7 @@ Start from [personal.md](personal.md); this page covers what differs.
 
 | | |
 |---|---|
-| Database | Postgres. Build with `--build-arg FOREMAN_DB=postgres` and set `DATABASE_URL`. TLS with certificate checks is on by default (`DATABASE_SSL=true`), which Neon requires. |
+| Database | Postgres. Build with `--build-arg FOREMAN_DB=postgres` and set `DATABASE_URL`; the image remembers which database it was built for, so there's no `FOREMAN_DB` to set at runtime (one that disagrees with the build stops it from starting). The database in `DATABASE_URL` must already exist: Foreman runs its migrations on boot but doesn't create it (Neon and RDS make one for you). TLS with certificate checks is on by default (`DATABASE_SSL=true`), which Neon requires. |
 | Names | `FOREMAN_SLUG_STYLE=team` gives `storefront-alice-1`, so developers' environments never collide. |
 | Who signs in | `FOREMAN_ALLOWED_ORG=acme` (active org members) plus `FOREMAN_ADMINS`. The org check needs the app's **Members: read** permission, which the manifest requests. |
 | GitHub App | Create it on the org (enter the org's login on the setup page). Installing it on the org needs an org owner. |
@@ -36,6 +36,11 @@ FOREMAN_AGENT_RELEASE_DIR=/var/lib/foreman/releases
 The instance needs no inbound ports: put it on the tailnet and use
 `tailscale serve` as in the personal setup. GitHub's OAuth callback is a
 browser redirect, so a tailnet host name works.
+
+`GET /healthz` answers `200 ok` when the app is up and the database
+answers, and `503` when it doesn't. It needs no sign-in, so point a
+Docker `HEALTHCHECK`, a systemd watchdog or a load balancer at it, for
+example `curl -fsS http://127.0.0.1:4000/healthz`.
 
 ## Boxes
 

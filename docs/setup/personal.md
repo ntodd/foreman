@@ -5,7 +5,7 @@ the database. Everything is reachable only on your tailnet.
 
 ## What the desktop needs
 
-- Docker Engine with the Compose plugin, v2.24 or newer
+- Docker Engine with the Compose plugin, v2.35 or newer (from Docker's apt repository; Ubuntu's own `docker-compose-v2` package can be older)
 - git, and Node 20+ (for the devcontainer CLI)
 - systemd
 - Tailscale, logged in to your tailnet
@@ -177,6 +177,11 @@ systemd unit (with a rollback unit for failed updates), and waits for
 the agent to enroll. It then deletes the spent token from the agent's
 settings.
 
+Re-running the script on a box that's already enrolled upgrades the
+agent and its units and keeps the box's identity; it doesn't need a
+token. To enroll the box again (after revoking it, say), pass
+`--reenroll` with a new token: the old identity is moved aside.
+
 ## 6. Make an environment
 
 **New environment**: pick a repo and the box. The first build pulls
@@ -199,7 +204,7 @@ tailnet, or open it in VS Code from the environment's page.
 | `FOREMAN_ALLOWED_ORG` | | Active members of this org may sign in |
 | `FOREMAN_SLUG_STYLE` | `personal` | `team` puts the login in environment names |
 | `FOREMAN_TAILSCALE_CLIENT_ID`, `_CLIENT_SECRET` | | Tailscale OAuth client |
-| `FOREMAN_TAILSCALE_TAGS` | `tag:foreman-env` | Tags every environment gets |
+| `FOREMAN_TAILSCALE_TAGS` | (none) | Extra tags every environment gets. `tag:foreman-env` is always applied, and it's the only tag cleanup looks at |
 | `FOREMAN_GITHUB_APP_ID`, `_CLIENT_ID`, `_CLIENT_SECRET`, `_PRIVATE_KEY` (or `_PRIVATE_KEY_FILE`) | | Instead of the manifest flow |
 | `FOREMAN_AGENT_RELEASE_PUBLIC_KEY` | | Verifies agent releases you publish |
 | `FOREMAN_AGENT_RELEASE_DIR` | system temp dir | Where published releases are kept; set it to a persistent path |

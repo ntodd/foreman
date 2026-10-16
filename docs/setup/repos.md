@@ -42,6 +42,15 @@ edit the files in its workspace. By default a box refuses:
 - `env_file`, `secrets`, `configs` or build contexts outside the
   workspace
 - host devices other than `/dev/net/tun`
+- turning seccomp off (`seccomp=unconfined`). The official Go and Rust
+  features ask for it, for debuggers; remove it from the repo's config,
+  or let a box allow it with `FOREMAN_POLICY=seccomp=allow`. That only
+  loosens seccomp, not privileged containers.
+- other `security_opt` settings, joining another container's namespaces
+  or volumes, and named volumes that are really host paths
+
+The check uses Docker Compose's `config --no-env-resolution`, so boxes
+need Compose 2.35 or newer.
 
 Ordinary capabilities such as `NET_ADMIN` or `SYS_PTRACE` (debuggers)
 are fine. Binds that expose the agent's own state, other environments

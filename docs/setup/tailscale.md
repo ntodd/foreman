@@ -164,8 +164,9 @@ grants only add access, so one like that lets everyone back in.
 - **No TUN device:** the feature falls back to userspace networking,
   with a SOCKS5 and HTTP proxy on `localhost:1055`.
 - **Cleanup:** an hourly job removes `tag:foreman-env` devices that
-  don't belong to a live environment. Tagged devices count against the
-  plan.
+  don't belong to a live environment. It never looks at other tags, so
+  laptops or CI machines sharing a repo tag are safe. Tagged devices
+  count against the plan.
 - **Without Tailscale configured,** environments still build and run;
   the feature skips Tailscale, and you connect with `docker exec` on the
   box.

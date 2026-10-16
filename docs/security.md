@@ -28,12 +28,29 @@ gaps" section is the place to start.
 - Sign-in is GitHub only, through the app's OAuth flow with PKCE and a
   `state` check. Who may sign in: `FOREMAN_ADMINS`,
   `FOREMAN_ALLOWED_USERS`, active members of `FOREMAN_ALLOWED_ORG`.
-  Sign-in attempts are rate limited per IP.
+  That holds for admins too: an admin dropped from all three is
+  refused, whatever role their record has. The one exception is a
+  deployment with neither `FOREMAN_ADMINS` nor an org set, where admins
+  are managed in the UI and an existing admin may sign in. Who may sign
+  in is checked again at every GitHub token refresh and every six hours
+  for anyone with a live session; a definite "no" ends their sessions
+  and drops their GitHub tokens (their environments keep running without
+  one), while a GitHub error changes nothing. GitHub answers "not a
+  member" with a 404, which it also gives for an org it can't find, so a
+  404 only counts once the org itself resolves. Someone whose GitHub
+  login has expired can't be checked against the org, so they're signed
+  out and checked when they sign in again. Accounts are matched by GitHub id; a
+  login only matches a record that has no GitHub id yet, so someone who
+  takes a renamed user's old login doesn't get their account.
+  Sign-in attempts are rate limited per client. Behind a loopback proxy
+  (`tailscale serve`) the client is the last `X-Forwarded-For` entry;
+  that header is ignored from any other peer.
 - Sessions: a random 32-byte token in an encrypted, signed, `HttpOnly`,
   `SameSite=Lax` cookie (`Secure` in production); only its SHA-256 is
   stored, so a database leak doesn't leak sessions. Sessions last 30
-  days and die when a user is disabled. The session is renewed at
-  sign-in.
+  days and die when a user is disabled. Disabling a user or changing
+  their role also drops their open pages, so a LiveView can't keep old
+  powers. The session is renewed at sign-in.
 - Every page sends a CSP with no inline scripts or style attributes
   (`script-src 'self'; style-src 'self'`; Oban Web's pages need inline
   styles and get that one exception), `frame-ancestors 'none'`,
@@ -58,8 +75,9 @@ gaps" section is the place to start.
   nonce, signed with the agent's key, in `x-foreman-agent-*` headers.
   The control plane refuses unknown or revoked agents, bad signatures,
   clocks more than 60 seconds off, and nonces it has seen in the last
-  two minutes. Connects are rate limited per IP. Revoking a box deletes
-  its key and drops its socket.
+  two minutes. Refused connects are rate limited per client (600 a
+  minute), so junk from one address can't lock out signed agents.
+  Revoking a box deletes its key and drops its socket.
 - No distributed Erlang anywhere (`RELEASE_DISTRIBUTION=none`): a
   connected Erlang node can run arbitrary code on its peers.
 - A fixed command vocabulary, no generic exec. Every command and event
@@ -97,22 +115,44 @@ to the box it runs on (up to the limits in "Known gaps").
 - `initializeCommand` is dropped from the config the devcontainer CLI
   sees (it would run on the box).
 - Environments run unprivileged. On every start (anything inside can
-  rewrite its own config) the agent checks the merged compose config,
+  rewrite its own config) the agent checks the compose config with every
+  profile enabled and without resolving env files (`docker compose
+  --profile '*' config --no-env-resolution`, hence Compose v2.35+),
   `devcontainer.json`, and what the devcontainer CLI resolves from
-  features, before anything runs. By default it refuses all of these:
+  features and image metadata, before anything runs. `runServices`
+  entries that aren't in the checked compose files are refused. By
+  default it refuses all of these:
   - privileged containers: `privileged: true`, the docker-in-docker
     feature, any feature whose metadata asks for privileged, and
     capabilities that amount to root on the box (`SYS_ADMIN`,
     `SYS_MODULE`, `SYS_RAWIO`, `DAC_READ_SEARCH`, `BPF`, `PERFMON`,
-    `MAC_ADMIN`, `ALL`)
-  - the host's network, PID or IPC namespace
-  - the Docker socket, including through a feature's mounts
+    `MAC_ADMIN`, `ALL`), whether the repo, a feature or the merged
+    configuration asks for them
+  - turning seccomp off (`seccomp=unconfined`, which the official Go and
+    Rust features ask for): its own `seccomp` rule, so a box can allow it
+    without allowing privileged containers
+  - any other `security_opt` / `securityOpt` than `no-new-privileges`
+    (under the privileged rule)
+  - the host's network, PID, IPC, UTS or cgroup namespace,
+    `userns_mode: host`, and joining another container's namespaces or
+    volumes (`container:…`, `volumes_from`); `service:` within the
+    project is fine
+  - the Docker socket, including through a feature's mounts or a bind of
+    a directory that contains it
   - host binds outside the workspace, and host files read through
-    `env_file`, `secrets`, `configs` or build contexts
-  - host devices other than `/dev/net/tun`
+    `env_file`, `secrets`, `configs`, build contexts, Dockerfiles or
+    build `ssh` keys. Paths in the workspace are resolved, so a symlink
+    pointing out of it counts as the host path it points to.
+  - named volumes that are really host paths (`driver_opts` with
+    `o: bind` or a `device`), and volumes from outside the project
+    (`external`, or a `name:` belonging to another project)
+  - host devices other than `/dev/net/tun`, including through
+    `device_cgroup_rules`
 
-  Binds that expose the agent's state, other environments or secrets
-  directories are refused whatever the box allows. A box can loosen a
+  Binds and host files that expose the agent's state, other environments
+  or secrets directories are refused whatever the box allows. A failed
+  `compose config` returns a generic error; its output goes to the
+  redacted operation log, never into the error. A box can loosen a
   rule with `FOREMAN_POLICY` on its agent (for example
   `privileged=allow`). The agent reports its policy when it connects,
   and the control plane shows any box that has loosened one with a red
@@ -126,7 +166,7 @@ to the box it runs on (up to the limits in "Known gaps").
   on the box can't.
 - Secret values are kept out of logs twice: the agent scrubs every value
   a command carried from its output and errors (and drops the CLI's
-  compose-config dumps); the control plane scrubs the environment's
+  compose-config dumps; a crash is reported only by its exception type); the control plane scrubs the environment's
   resolved secrets from every log chunk and error before storing or
   showing it, which covers container logs the agent had no values for.
 - Registry credentials go to a throwaway `DOCKER_CONFIG` for one build,
@@ -162,13 +202,14 @@ These are accepted for now, or need someone to try them:
    `docker exec` command line during lifecycle hooks
    (devcontainers/cli#1317). Any user on the box can read them with
    `ps`. Mount `/proc` with `hidepid=2` on shared boxes.
-4. **Symlink races.** `SafeFS` checks then acts. A process in the
-   environment racing the agent could swap a directory for a symlink
-   between the check and the copy of the feature into
-   `.devcontainer/.foreman`. The content written is fixed (the feature),
-   and the agent runs unprivileged, so the impact is a directory of
-   known files somewhere the agent user can write. `docker compose`
-   itself follows symlinks in compose file paths, after the check.
+4. **Symlink races.** `SafeFS` and the policy check resolve symlinks,
+   then act. A process in the environment racing the agent could swap a
+   directory for a symlink between the check and the copy of the feature
+   into `.devcontainer/.foreman`, or between the policy check and
+   `docker compose up` resolving a bind source. The feature copy is a
+   directory of known files somewhere the agent user can write; a
+   swapped bind source is a real escape, but needs a process already
+   running in the environment to win the race during a start.
 5. **A compromised control plane can run repo code on every box.** It
    can't run arbitrary commands (fixed vocabulary, clone host
    allowlist), but it can create environments from any repo the GitHub
@@ -180,8 +221,10 @@ These are accepted for now, or need someone to try them:
    release signature (updates after that are signature-checked).
 7. **Redaction is best effort.** Values shorter than six characters
    aren't redacted, and an encoded secret (base64, URL-encoded) isn't
-   recognised. Operation logs (up to 1 MB each) are stored and shown to
-   the environment's owner and admins.
+   recognised. Logs are redacted a line at a time, so a value split
+   across two reads is still caught, except inside a single line longer
+   than 64 KiB. Operation logs (up to 1 MB each) are stored for 30 days
+   and shown to the environment's owner and admins.
 8. **First sign-in claims the deployment** when no `FOREMAN_ADMINS` or
    allowlists are set. Set `FOREMAN_ADMINS`.
 9. **The setup token is in the log.** Anyone who can read the log
@@ -195,7 +238,26 @@ These are accepted for now, or need someone to try them:
 12. **Tokens in environments are usable by anything in them.** The
     scoped GitHub token can push to the environment's repo (and its
     extra repos) as the user. That's the point, but a malicious
-    dependency gets the same power.
+    dependency, or a coding agent following injected instructions, gets
+    the same power. Branch protection and rulesets still apply, because
+    the token acts as the user.
+13. **Environments share the box's kernel.** The policy keeps
+    environments unprivileged, but a container escape (a kernel or runc
+    bug) lands on the box: every environment's secrets there and the
+    agent's key, which can ask the control plane for the secrets of
+    every environment placed on that box. The devcontainer itself has
+    `NET_ADMIN` and `NET_RAW` (Tailscale needs them) and usually
+    passwordless sudo, which widens the kernel surface reachable from
+    inside. Keep boxes patched, keep them single-owner, and treat code
+    in an environment (including coding agents) as able to reach
+    anything the box can: there's no egress filtering, and on cloud
+    instances the metadata endpoint is reachable unless blocked.
+14. **No default resource limits.** Without CPU, memory or pids limits
+    on the repo or environment, one runaway process can starve every
+    environment on its box.
+15. **Removed members keep access for up to six hours.** Membership is
+    re-checked periodically, not instantly. Disable someone in Foreman to
+    cut their access at once.
 
 ## Things worth trying
 
