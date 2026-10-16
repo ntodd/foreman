@@ -116,4 +116,25 @@ defmodule ForemanAgent.StatsTest do
     assert {:ok, %{capacity: %{cpus: 4, disk_mb: 0}, environments: envs}} = Stats.collect(ctx())
     assert envs == %{@e1 => %{cpu_percent: 0.0, memory_mb: 0}}
   end
+
+  test "a container with a malformed env label is left out, not the whole report" do
+    stub(DockerMock, :info, fn -> {:ok, %{"NCPU" => 4, "MemTotal" => 1024 * 1024 * 1024}} end)
+    stub(RunnerMock, :run, fn "df", _, _ -> {:ok, %{status: 1, output: ""}} end)
+
+    stray = %{
+      "Id" => "zzz999zzz999",
+      "State" => "running",
+      "Labels" => %{"foreman.env_id" => "test-1", "com.docker.compose.service" => "app"}
+    }
+
+    stub(DockerMock, :list_containers, fn _ ->
+      {:ok, [container("aaa111aaa111", "app", "running"), stray]}
+    end)
+
+    stub(DockerMock, :stats, fn _ -> {:error, {:http, 404, %{}}} end)
+
+    assert {:ok, stats} = Stats.collect(ctx())
+    assert Map.keys(stats.environments) == [@e1]
+    assert {:ok, _} = ForemanProtocol.Event.new("box.stats", stats)
+  end
 end

@@ -10,8 +10,10 @@ defmodule ForemanAgent.SafeFS do
 
   - `resolve/2` and `read/3` follow symlinks only while they stay under
     the root.
-  - `ensure_dir/2` refuses symlinked parents and replaces (never follows) a
-    symlink at the final component.
+  - `ensure_dir/2` refuses symlinked parents that lead out of the root and
+    replaces (never follows) a symlink at the final component.
+  - `real_path/1` says where a path on the box really leads, for checking
+    what Docker will mount.
   - `write_atomic/3` creates a fresh temp file with O_EXCL and renames it
     into place, so a symlink at the destination is replaced, not written
     through.
@@ -79,6 +81,45 @@ defmodule ForemanAgent.SafeFS do
     end
   end
 
+  @doc """
+  The path an absolute `path` really names, with every symlink along it
+  followed (anywhere on the box, unlike `resolve/2`). A part that doesn't
+  exist ends the walk, and the rest is kept as written.
+  """
+  @spec real_path(Path.t()) :: {:ok, Path.t()} | {:error, :too_many_links}
+  def real_path(path) do
+    ["/" | parts] = path |> Path.expand() |> Path.split()
+    real_walk("/", parts, 0)
+  end
+
+  defp real_walk(_cur, _parts, hops) when hops > @max_links, do: {:error, :too_many_links}
+  defp real_walk(cur, [], _hops), do: {:ok, cur}
+  defp real_walk(cur, ["." | rest], hops), do: real_walk(cur, rest, hops)
+  defp real_walk(cur, [".." | rest], hops), do: real_walk(Path.dirname(cur), rest, hops)
+
+  defp real_walk(cur, [part | rest], hops) do
+    candidate = Path.join(cur, part)
+
+    case File.lstat(candidate) do
+      {:ok, %File.Stat{type: :symlink}} ->
+        {:ok, target} = :file.read_link_all(candidate)
+        target = IO.chardata_to_string(target)
+
+        if Path.type(target) == :absolute do
+          ["/" | parts] = Path.split(target)
+          real_walk("/", parts ++ rest, hops + 1)
+        else
+          real_walk(cur, Path.split(target) ++ rest, hops + 1)
+        end
+
+      {:ok, _} ->
+        real_walk(candidate, rest, hops)
+
+      {:error, _} ->
+        {:ok, Path.expand(Path.join([candidate | rest]))}
+    end
+  end
+
   @doc "True when `path` is `root` or below it (both already expanded)."
   def inside?(_path, "/"), do: true
   def inside?(path, root), do: path == root or String.starts_with?(path, root <> "/")
@@ -128,12 +169,23 @@ defmodule ForemanAgent.SafeFS do
 
       case File.lstat(path) do
         {:ok, %File.Stat{type: :directory}} -> {:cont, {:ok, path}}
-        {:ok, %File.Stat{type: :symlink}} -> {:halt, {:error, :symlink_in_path}}
+        {:ok, %File.Stat{type: :symlink}} -> follow_parent(root, path)
         {:ok, %File.Stat{}} -> {:halt, {:error, :enotdir}}
         {:error, :enoent} -> mkdir(path)
         {:error, reason} -> {:halt, {:error, reason}}
       end
     end)
+  end
+
+  # A symlinked parent is fine when it resolves to a directory under the
+  # root (a monorepo's .devcontainer pointing into tools/, say).
+  defp follow_parent(root, path) do
+    with {:ok, target} <- resolve(root, Path.relative_to(path, root)),
+         {:ok, %File.Stat{type: :directory}} <- File.lstat(target) do
+      {:cont, {:ok, target}}
+    else
+      _ -> {:halt, {:error, :symlink_in_path}}
+    end
   end
 
   defp mkdir(path) do
@@ -163,7 +215,8 @@ defmodule ForemanAgent.SafeFS do
   @doc """
   Writes `content` to `path` by creating a new temp file next to it and
   renaming it over the destination. The directory must be one the agent
-  owns.
+  owns. The data is synced before the rename, so a power cut can leave
+  the old file or the new one, never an empty one.
   """
   @spec write_atomic(Path.t(), iodata(), non_neg_integer()) :: :ok | {:error, term()}
   def write_atomic(path, content, mode) do
@@ -182,7 +235,7 @@ defmodule ForemanAgent.SafeFS do
   end
 
   defp write_and_close(io, content) do
-    IO.binwrite(io, content)
+    with :ok <- IO.binwrite(io, content), do: :file.sync(io)
   after
     File.close(io)
   end

@@ -60,6 +60,29 @@ defmodule ForemanAgent.Config do
   def policy_report(%__MODULE__{policy_rules: rules}),
     do: Map.new(rules, fn {rule, action} -> {to_string(rule), to_string(action)} end)
 
+  @doc """
+  Parses `FOREMAN_POLICY` entries (`rule=action`) into policy rules.
+  Raises on a rule or action the protocol doesn't know, so a typo stops
+  the agent rather than leaving a rule at its default unnoticed.
+  """
+  @spec parse_policy([String.t()]) :: %{atom() => atom()}
+  def parse_policy(pairs) do
+    rules = ForemanProtocol.Policy.rules()
+    actions = ForemanProtocol.Policy.actions()
+
+    Map.new(pairs, fn pair ->
+      with [rule, action] <- String.split(pair, "=", parts: 2),
+           true <- rule in rules and action in actions do
+        {String.to_atom(rule), String.to_atom(action)}
+      else
+        _ ->
+          raise ArgumentError,
+                "invalid FOREMAN_POLICY entry #{inspect(pair)}; rules: " <>
+                  "#{Enum.join(rules, ", ")}; actions: #{Enum.join(actions, ", ")}"
+      end
+    end)
+  end
+
   @doc "Paths no environment may ever bind-mount."
   def protected_paths(%__MODULE__{} = c),
     do: [c.data_dir, c.envs_root, c.secrets_root, c.release_root]

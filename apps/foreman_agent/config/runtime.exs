@@ -11,20 +11,9 @@ if config_env() != :test do
   end
 
   # Every rule refuses by default. A box opens one up as an exception, for
-  # example FOREMAN_POLICY="privileged=allow", and the control plane shows
-  # that box with a red alert.
-  rules = ~w(host_bind host_file docker_socket devices privileged host_namespace)
-  actions = ~w(refuse warn allow)
-
-  policy =
-    for pair <- list.("FOREMAN_POLICY", []), into: %{} do
-      with [rule, action] <- String.split(pair, "=", parts: 2),
-           true <- rule in rules and action in actions do
-        {String.to_atom(rule), String.to_atom(action)}
-      else
-        _ -> raise "invalid FOREMAN_POLICY entry #{inspect(pair)}"
-      end
-    end
+  # example FOREMAN_POLICY="seccomp=allow", and the control plane shows
+  # that box with a red alert. The rules are ForemanProtocol.Policy's.
+  policy = ForemanAgent.Config.parse_policy(list.("FOREMAN_POLICY", []))
 
   docker_socket =
     case System.get_env("DOCKER_HOST") do

@@ -516,6 +516,36 @@ defmodule ForemanAgent.EnvTest do
       assert File.read!(Path.join(dir, "secrets.env")) == "b"
       refute File.exists?(Path.join(dir, "notices"))
     end
+
+    test "leaves files it's told to keep", %{ctx: ctx, config: config} do
+      dir = Path.join(config.secrets_root, @env_id)
+      files = %{"secrets.env" => "a", "github-token" => "ghu_old"}
+      assert {:ok, _} = Env.run("env.secrets.write", %{env_id: @env_id, files: files}, ctx)
+
+      assert {:ok, result} =
+               Env.run(
+                 "env.secrets.write",
+                 %{env_id: @env_id, files: %{"secrets.env" => "b"}, keep: ["github-token"]},
+                 ctx
+               )
+
+      assert File.read!(Path.join(dir, "secrets.env")) == "b"
+      assert File.read!(Path.join(dir, "github-token")) == "ghu_old"
+      assert result["kept"] == ["github-token"]
+    end
+
+    test "a kept file that was never written stays absent", %{ctx: ctx, config: config} do
+      dir = Path.join(config.secrets_root, @env_id)
+
+      assert {:ok, _} =
+               Env.run(
+                 "env.secrets.write",
+                 %{env_id: @env_id, files: %{"secrets.env" => "b"}, keep: ["github-token"]},
+                 ctx
+               )
+
+      refute File.exists?(Path.join(dir, "github-token"))
+    end
   end
 
   describe "destroy" do

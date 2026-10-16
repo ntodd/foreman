@@ -15,13 +15,16 @@ defmodule ForemanAgent.Identity do
   def load(data_dir) do
     path = path(data_dir)
 
+    # Anything wrong with the file is an error the connection retries on,
+    # not a crash: crashing here would restart-loop the whole agent.
     case File.read(path) do
       {:ok, json} ->
-        with {:ok, %{"agent_id" => id, "private_key" => key}} <- JSON.decode(json),
-             {:ok, key} <- Base.decode64(key) do
+        with {:ok, %{"agent_id" => id, "private_key" => key}}
+             when is_binary(id) and id != "" and is_binary(key) <- JSON.decode(json),
+             {:ok, key} when byte_size(key) == 32 <- Base.decode64(key) do
           {:ok, %__MODULE__{agent_id: id, private_key: key}}
         else
-          _ -> {:error, "#{path} is unreadable"}
+          _ -> {:error, "#{path} is damaged; re-enroll this box (install.sh --reenroll)"}
         end
 
       {:error, :enoent} ->

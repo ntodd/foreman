@@ -30,8 +30,10 @@ defmodule ForemanAgent.Redactor do
     %__MODULE__{values: Redaction.prepare(files ++ env ++ registry)}
   end
 
+  @doc "Redacts `text`, and replaces any invalid UTF-8 (events are JSON)."
   @spec redact(t(), String.t()) :: String.t()
-  def redact(%__MODULE__{values: values}, text), do: Redaction.redact(values, text)
+  def redact(%__MODULE__{values: values}, text),
+    do: values |> Redaction.redact(text) |> ForemanAgent.Text.scrub()
 
   @doc "Wraps a log function so everything through it is redacted."
   def wrap_log(%__MODULE__{} = r, log), do: fn stream, data -> log.(stream, redact(r, data)) end
