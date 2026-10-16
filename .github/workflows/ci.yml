@@ -163,10 +163,48 @@ jobs:
   images:
     if: github.event_name != 'schedule'
     runs-on: ubuntu-24.04
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: foreman
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 2s
+          --health-timeout 5s
+          --health-retries 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Build the control plane image
         run: docker build -f docker/control-plane.Dockerfile -t foreman .
+      - name: Build the control plane image for Postgres
+        run: docker build -f docker/control-plane.Dockerfile --build-arg FOREMAN_DB=postgres -t foreman:pg .
+      # Both images, started with only what docs/setup says to set, have to
+      # migrate and answer /healthz (which checks the database).
+      - name: Boot both control plane images
+        run: |
+          run() {
+            name=$1 port=$2 image=$3
+            shift 3
+            docker run -d --name "$name" --network host \
+              -e SECRET_KEY_BASE="$(openssl rand -base64 48)" \
+              -e FOREMAN_ENCRYPTION_KEY="$(openssl rand -base64 32)" \
+              -e PHX_HOST=localhost -e PORT="$port" "$@" "$image"
+          }
+          run cp-sqlite 4001 foreman
+          run cp-pg 4002 foreman:pg \
+            -e DATABASE_URL=ecto://postgres:postgres@localhost:5432/foreman -e DATABASE_SSL=false
+
+          for port in 4001 4002; do
+            for _ in $(seq 60); do
+              curl -fsS "http://localhost:$port/healthz" && echo " :$port" && continue 2
+              sleep 1
+            done
+            docker logs cp-sqlite; docker logs cp-pg
+            exit 1
+          done
       - name: Build the box image
         run: docker build -f docker/box.Dockerfile --target box -t foreman-box .
 

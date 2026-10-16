@@ -142,7 +142,10 @@ cp_eval 'E2E.desire_version("0.1.1")'
 box pkill -f beam.smp || true
 wait_for "agent on 0.1.1" 240 sh -c "$compose logs cp | grep -q 'agent box1 joined (0.1.1'"
 box readlink /opt/foreman-agent/current | grep -q 0.1.1 || fail "current isn't 0.1.1"
-box readlink /opt/foreman-agent/previous | grep -q 0.1.0 || fail "previous isn't 0.1.0"
+# Once the new release has joined, the agent clears the rollback state, so
+# a crash much later can't roll it back to a stale release.
+wait_for "rollback state cleared after the join" 60 sh -c \
+  "! $compose exec -T box test -e /opt/foreman-agent/previous && ! $compose exec -T box test -e /opt/foreman-agent/update-pending"
 env_is hello-1 running || fail "environment didn't survive the agent update"
 echo "ok: self-updated, environment still running"
 
