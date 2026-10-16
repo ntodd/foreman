@@ -56,12 +56,14 @@ defmodule Foreman.Repos do
   """
   def upsert_repo(%Owner{} = owner, attrs) do
     full_name = attrs[:full_name] || attrs["full_name"]
+    github_id = attrs[:github_id] || attrs["github_id"]
     by_name = Repo.get_by(GitRepo, full_name: full_name)
+    by_name = if by_name && other_repo?(by_name, github_id), do: free_name(by_name), else: by_name
 
     repo =
-      case by_github_id(attrs[:github_id] || attrs["github_id"]) do
+      case by_github_id(github_id) do
         # Renamed or transferred, unless another row already has the new
-        # name (one created before ids were matched); that one wins.
+        # name (a manual add of it); that one wins.
         %GitRepo{} = repo when is_nil(by_name) or by_name.id == repo.id -> repo
         _ -> by_name || %GitRepo{owner_id: owner.id}
       end
@@ -70,6 +72,28 @@ defmodule Foreman.Repos do
     |> GitRepo.sync_changeset(attrs)
     |> Ecto.Changeset.put_change(:owner_id, owner.id)
     |> Repo.insert_or_update()
+  end
+
+  # A row with the same name but another GitHub id is another repo: the
+  # first one was renamed or deleted and this one took its name. It
+  # mustn't inherit that row's secrets or settings.
+  defp other_repo?(%GitRepo{github_id: nil}, _github_id), do: false
+  defp other_repo?(%GitRepo{}, nil), do: false
+  defp other_repo?(%GitRepo{github_id: id}, github_id), do: id != github_id
+
+  # Moves the old row out of the way (removed, and renamed so the name is
+  # free); if its repo still exists under another name, the next sync
+  # matches it by id and renames it back.
+  defp free_name(%GitRepo{} = repo) do
+    from(r in GitRepo, where: r.id == ^repo.id)
+    |> Repo.update_all(
+      set: [
+        full_name: "#{repo.full_name}#github-#{repo.github_id}",
+        removed_at: DateTime.utc_now()
+      ]
+    )
+
+    nil
   end
 
   defp by_github_id(nil), do: nil

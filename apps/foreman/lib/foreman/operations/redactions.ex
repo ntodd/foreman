@@ -38,6 +38,37 @@ defmodule Foreman.Operations.Redactions do
     Redaction.redact(values(op_id), text)
   end
 
+  @doc """
+  Splits `text` into what can be shown now and its longest tail that is
+  the start of one of the operation's secrets (the rest may be in the next
+  read), which has to wait.
+  """
+  @spec hold_back(String.t(), binary()) :: {binary(), binary()}
+  def hold_back(op_id, text) do
+    size = byte_size(text)
+
+    keep =
+      op_id
+      |> values()
+      |> secret_values()
+      |> Enum.map(fn value -> longest_start(value, text, min(byte_size(value) - 1, size)) end)
+      |> Enum.max(fn -> 0 end)
+
+    {binary_part(text, 0, size - keep), binary_part(text, size - keep, keep)}
+  end
+
+  defp secret_values(%Redaction{values: values}), do: values
+  defp secret_values(values) when is_list(values), do: values
+
+  # The length of the longest tail of `text` that `value` starts with.
+  defp longest_start(_value, _text, 0), do: 0
+
+  defp longest_start(value, text, k) do
+    if binary_part(text, byte_size(text) - k, k) == binary_part(value, 0, k),
+      do: k,
+      else: longest_start(value, text, k - 1)
+  end
+
   def delete(op_id), do: :ets.delete(@table, op_id)
 
   @doc """

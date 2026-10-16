@@ -189,6 +189,31 @@ defmodule Foreman.GitHubTokensAndSyncTest do
       assert Repo.reload!(repo).devcontainer_path == nil
     end
 
+    # A name freed by a rename or delete can be taken by another repo; that
+    # repo mustn't get the first one's row, secrets or settings.
+    test "a different repo taking a known repo's name gets a row of its own" do
+      old = synced_repo(1, "storefront")
+      admin = Foreman.Scope.for_user(user_fixture(role: "admin"))
+
+      {:ok, _} =
+        Foreman.Secrets.put_secret(admin, "repo", old, %{
+          "name" => "DB_PASSWORD",
+          "value" => "old-repo-secret"
+        })
+
+      installation([gh_repo(2, "storefront")])
+      {:ok, _} = GitHub.sync_repos()
+
+      new = Repo.one!(from r in GitRepo, where: r.github_id == 2)
+      refute new.id == old.id
+      assert new.full_name == "acme/storefront"
+      assert new.token_mode == "scoped"
+      assert Repo.reload!(old).removed_at
+
+      env = environment_fixture(repo: new)
+      refute Map.has_key?(Foreman.Secrets.resolve(env), "DB_PASSWORD")
+    end
+
     test "a renamed repo keeps its row and settings" do
       repo = synced_repo(1, "storefront")
       installation([gh_repo(1, "shopfront")])

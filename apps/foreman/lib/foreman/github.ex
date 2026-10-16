@@ -118,7 +118,10 @@ defmodule Foreman.GitHub do
     {pid, monitor} =
       spawn_monitor(fn ->
         Process.put(:"$callers", callers)
-        send(caller, {ref, locked_user_token(user_id, min_life)})
+        {result, rotated?} = locked_user_token(user_id, min_life)
+        # Outside the lock: pushing to environments asks for tokens.
+        if rotated?, do: push_rotated_token(user_id)
+        send(caller, {ref, result})
       end)
 
     receive do
@@ -137,11 +140,19 @@ defmodule Foreman.GitHub do
       user = Accounts.get_user!(user_id)
 
       cond do
-        fresh?(user, min_life) -> {:ok, user.access_token}
-        is_nil(user.refresh_token) -> {:error, :login_expired}
+        fresh?(user, min_life) -> {{:ok, user.access_token}, false}
+        is_nil(user.refresh_token) -> {{:error, :login_expired}, false}
         true -> refresh(user)
       end
     end)
+  end
+
+  # GitHub revokes the old token when it's refreshed, and other
+  # environments of the user may hold it.
+  defp push_rotated_token(user_id) do
+    %{user_id: user_id} |> Foreman.Jobs.PushTokens.new() |> Oban.insert()
+  rescue
+    error -> Logger.error("couldn't queue a token push for #{user_id}: #{inspect(error)}")
   end
 
   defp fresh?(%User{access_token: nil}, _min_life), do: false
@@ -155,13 +166,14 @@ defmodule Foreman.GitHub do
     case client().refresh_user_token(app(), user.refresh_token) do
       {:ok, tokens} ->
         {:ok, user} = Accounts.update_tokens(user, tokens)
-        recheck_access(user)
+        result = recheck_access(user)
+        {result, match?({:ok, _}, result)}
 
       {:error, :bad_refresh_token} ->
-        login_expired(user)
+        {login_expired(user), false}
 
       {:error, reason} ->
-        {:error, reason}
+        {{:error, reason}, false}
     end
   end
 

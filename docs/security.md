@@ -224,8 +224,10 @@ These are accepted for now, or need someone to try them:
 7. **Redaction is best effort.** Values shorter than six characters
    aren't redacted, and an encoded secret (base64, URL-encoded) isn't
    recognised. Logs are redacted a line at a time, so a value split
-   across two reads is still caught, except inside a single line longer
-   than 64 KiB. Operation logs (up to 1 MB each) are stored for 30 days
+   across two reads is still caught. Text that has to go out before its
+   line ends (a prompt, or a line over 64 KiB) holds back any tail that
+   could be the start of a secret, and a tail still held when the
+   operation ends is masked. Operation logs (up to 1 MB each) are stored for 30 days
    and shown to the environment's owner and admins.
 8. **First sign-in claims the deployment** when no `FOREMAN_ADMINS` or
    allowlists are set. Set `FOREMAN_ADMINS`.

@@ -318,7 +318,7 @@ A GitHub App, installed on your account for a personal deployment or on the org 
 - **Repo browsing:**
   - List the installation's repos.
   - Mark the ones that have `.devcontainer/devcontainer.json`, `.devcontainer.json` or `.devcontainer/*/devcontainer.json`.
-  - Cache the results and refresh them by polling. Repos and owners are matched by GitHub id, so renames and transfers keep their settings and secrets; repos that leave the installation are hidden, not deleted. Only a 404 means a repo has no devcontainer: any other error keeps what's stored.
+  - Cache the results and refresh them by polling. Repos and owners are matched by GitHub id, so renames and transfers keep their settings and secrets; a different repo that takes a known repo's old name gets a row of its own, never the old one's secrets. Repos that leave the installation are hidden, not deleted. Only a 404 means a repo has no devcontainer: any other error keeps what's stored.
 
 ### Environment tokens
 
@@ -328,7 +328,7 @@ By default, each environment gets a scoped user token from `POST /applications/{
   - **Repos:** the environment's repo plus any extra repos configured on it.
   - **Permissions:** configured per repo, defaulting to `contents:write`, `pull_requests:write`, `issues:write` and `metadata:read`.
 - **Identity:** the token acts as the user, so commits are pushed and PRs opened as you, not as a bot. On a team that keeps "can't approve your own PR" rules meaningful.
-- **Refresh:** scoped tokens come without a refresh token. An Oban job refreshes the parent token and re-scopes it every few hours, then sends the new file through `env.secrets.write`. An environment is only handed a token with at least five hours left, and the job also catches users whose token would expire before its next run. A refresh runs in its own process, so a closed tab or a crash can't lose the rotated refresh token.
+- **Refresh:** scoped tokens come without a refresh token. An Oban job refreshes the parent token and re-scopes it every few hours, then sends the new file through `env.secrets.write`. An environment is only handed a token with at least five hours left, and the job also catches users whose token would expire before its next run. A refresh runs in its own process, so a closed tab or a crash can't lose the rotated refresh token. Refreshing rotates the user's token (GitHub revokes the old one), so a refresh also queues fresh tokens for every running environment of that user.
 - **GitHub unavailable:** a 5xx, timeout or other GitHub error isn't an expired login. Secrets still go out, without a new token and with a notice; agents on protocol 2 are told to keep the token they have (`keep`), older ones lose it until the retry. The next run of the job retries.
 - **Opt-out:** a per-repo setting gives that repo's environments the user's unscoped token. Use it for repos where you regularly work across other projects.
 - **When refresh fails:** this happens when the refresh token expires (6 months unused) or is revoked.

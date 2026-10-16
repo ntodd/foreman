@@ -37,9 +37,21 @@ defmodule Foreman.Jobs.CheckAccess do
         Accounts.revoke_access(user, "org membership couldn't be checked")
 
       :ask_org ->
-        Foreman.GitHub.check_access(user)
+        case Foreman.GitHub.check_access(user) do
+          # The refresh found the login dead, so the org can't be checked
+          # (unless the check itself already said no and signed them out).
+          {:error, :login_expired} ->
+            if signed_in?(user),
+              do: Accounts.revoke_access(user, "org membership couldn't be checked")
+
+          _ ->
+            :ok
+        end
     end
   end
+
+  defp signed_in?(%User{id: id}),
+    do: Foreman.Repo.exists?(from s in Session, where: s.user_id == ^id)
 
   defp signed_in_users do
     from(u in User,

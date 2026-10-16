@@ -103,6 +103,32 @@ defmodule Foreman.LogBufferRedactionTest do
     assert stored(op) == "done\nlast line without a newline [redacted]"
   end
 
+  # Held text goes out after a pause; the part that could be the start of
+  # a secret mustn't, or a secret split across a slow pair of reads leaks.
+  test "a secret whose halves arrive more than the idle time apart is still scrubbed",
+       %{op: op} do
+    {a, b} = String.split_at(@secret, 20)
+
+    LogBuffer.append(op.id, "connecting to " <> a)
+    first = broadcast_text(op.id, [], 1_500)
+    LogBuffer.append(op.id, b <> " ...\n")
+    LogBuffer.flush(op.id)
+    shown = first <> broadcast_text(op.id, [], 300)
+
+    refute shown =~ a
+    assert shown == "connecting to [redacted] ...\n"
+    assert stored(op) == "connecting to [redacted] ...\n"
+  end
+
+  test "the start of a secret that never finishes isn't shown at the end", %{op: op} do
+    {a, _} = String.split_at(@secret, 20)
+    LogBuffer.append(op.id, "connecting to " <> a)
+    LogBuffer.flush(op.id)
+
+    refute stored(op) =~ a
+    assert stored(op) == "connecting to [redacted]"
+  end
+
   test "a partial line that sits for a while is shown without waiting for a newline",
        %{op: op} do
     LogBuffer.append(op.id, "Password: ")

@@ -48,14 +48,11 @@ defmodule Foreman.Operations.LogBuffer do
     {held, state} = pop_partial(state, op_id)
     {ready, rest} = split_lines(held <> data)
 
-    state = emit(state, op_id, ready)
+    # A line too long to hold goes out, but not a tail that could be the
+    # start of a secret.
+    {ready, rest} = if rest == "", do: hold_back(op_id, ready), else: {ready, rest}
 
-    state =
-      if rest == "",
-        do: state,
-        else: put_in(state.partial[op_id], {rest, now()})
-
-    {:noreply, state}
+    {:noreply, state |> emit(op_id, ready) |> hold(op_id, rest)}
   end
 
   @impl true
@@ -65,7 +62,9 @@ defmodule Foreman.Operations.LogBuffer do
 
   def handle_call({:flush, op_id}, _from, state) do
     {held, state} = pop_partial(state, op_id)
-    state = emit(state, op_id, held)
+    # The start of a secret whose rest never came is still part of it.
+    {shown, cut} = hold_back(op_id, held)
+    state = emit(state, op_id, shown <> if(cut == "", do: "", else: "[redacted]"))
     {chunks, state} = pop_in(state.chunks[op_id])
     if chunks, do: write(op_id, chunks)
     {:reply, :ok, state}
@@ -76,14 +75,26 @@ defmodule Foreman.Operations.LogBuffer do
     cutoff = now() - @hold_partial_ms
     {stale, fresh} = Enum.split_with(state.partial, fn {_, {_, at}} -> at <= cutoff end)
 
+    # A prompt waiting for input is shown, up to anything that could be the
+    # start of a secret, which waits for the next read.
     state =
       Enum.reduce(stale, %{state | partial: Map.new(fresh)}, fn {op_id, {held, _}}, acc ->
-        emit(acc, op_id, held)
+        {shown, kept} = hold_back(op_id, held)
+        acc |> emit(op_id, shown) |> hold(op_id, kept)
       end)
 
     Enum.each(state.chunks, fn {op_id, chunks} -> write(op_id, chunks) end)
     Process.send_after(self(), :flush, @flush_every)
     {:noreply, %{state | chunks: %{}}}
+  end
+
+  defp hold(state, _op_id, ""), do: state
+  defp hold(state, op_id, text), do: put_in(state.partial[op_id], {text, now()})
+
+  defp hold_back(op_id, text) do
+    Redactions.hold_back(op_id, text)
+  rescue
+    _ -> {text, ""}
   end
 
   defp pop_partial(state, op_id) do

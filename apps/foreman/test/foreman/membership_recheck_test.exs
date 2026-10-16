@@ -219,6 +219,33 @@ defmodule Foreman.MembershipRecheckTest do
       assert sessions(user) == 1
     end
 
+    # The refresh finding the login dead is as definite as a "no": the
+    # org can't be checked, so they're signed out now rather than in six
+    # hours.
+    test "signs out someone whose refresh token GitHub rejects", %{user: user} do
+      configure(["root"], [], "acme")
+      expect(ClientMock, :refresh_user_token, fn _, "ghr_old" -> {:error, :bad_refresh_token} end)
+
+      assert :ok = Foreman.Jobs.CheckAccess.perform(%Oban.Job{args: %{}})
+      assert sessions(user) == 0
+    end
+
+    test "someone the check itself refuses is signed out once", %{user: user} do
+      configure(["root"], [], "acme")
+      refreshes()
+      expect(ClientMock, :org_membership, fn _, _ -> {:ok, false} end)
+
+      assert :ok = Foreman.Jobs.CheckAccess.perform(%Oban.Job{args: %{}})
+      assert sessions(user) == 0
+
+      assert Repo.aggregate(
+               from(e in Event,
+                 where: e.action == "user.access_revoked" and e.subject_id == ^user.id
+               ),
+               :count
+             ) == 1
+    end
+
     test "a GitHub error changes nothing", %{user: user} do
       configure(["root"], [], "acme")
       refreshes()
