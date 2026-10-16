@@ -7,7 +7,7 @@
 # CLI and keeps the box's identity (no token needed). To enroll again, for
 # example after the box was revoked, pass --reenroll with a new token.
 #
-# Needs: systemd, Docker Engine with Compose v2.35+, git, and Node 20+
+# Needs: systemd, Docker Engine with Compose v2.24+, git, and Node 20+
 # (for the devcontainer CLI). The agent runs as the `foreman` user, which
 # joins the docker group: that is root-equivalent on this box, so only
 # install it on boxes whose owner you trust with every environment on it.
@@ -50,7 +50,7 @@ command -v npm >/dev/null 2>&1 || fail "Node.js (with npm) is required for the d
 
 compose=$(docker compose version --short 2>/dev/null || true)
 [ -n "$compose" ] || fail "the Docker Compose plugin is required"
-# The agent's policy check needs `config --no-env-resolution` (2.35).
+# The overlay uses the `!reset` tag, reliable from Compose 2.24.
 compose_version=${compose#v}
 compose_major=${compose_version%%.*}
 compose_minor=${compose_version#*.}
@@ -58,8 +58,8 @@ compose_minor=${compose_minor%%.*}
 case "$compose_major$compose_minor" in
   *[!0-9]* | "") fail "couldn't read the Docker Compose version ($compose)" ;;
 esac
-if [ "$compose_major" -lt 2 ] || { [ "$compose_major" -eq 2 ] && [ "$compose_minor" -lt 35 ]; }; then
-  fail "Docker Compose $compose is too old; 2.35 or newer is needed. Install Docker from Docker's apt repository (https://docs.docker.com/engine/install/), which ships a current docker-compose-plugin; Ubuntu's own docker-compose-v2 package can be older"
+if [ "$compose_major" -lt 2 ] || { [ "$compose_major" -eq 2 ] && [ "$compose_minor" -lt 24 ]; }; then
+  fail "Docker Compose $compose is too old; 2.24 or newer is needed. Install Docker from Docker's apt repository (https://docs.docker.com/engine/install/), which ships a current docker-compose-plugin"
 fi
 
 case "$(uname -m)" in

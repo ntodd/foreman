@@ -4,9 +4,12 @@ defmodule ForemanAgent.Integration.ComposePolicyTest do
   compose features that change what it shows: env files (inlined unless
   the agent asks it not to) and profiles (left out unless enabled). Needs
   the Docker CLI with the compose plugin, but no daemon; git and the
-  devcontainer CLI are stubbed.
+  devcontainer CLI are stubbed. Compose versions differ in what they
+  show, so FOREMAN_TEST_COMPOSE can name a standalone compose binary to
+  run instead of the plugin.
 
       mix test --only docker test/integration/compose_policy_test.exs
+      FOREMAN_TEST_COMPOSE=/path/to/docker-compose mix test --only docker ...
   """
   use ExUnit.Case, async: false
 
@@ -71,11 +74,14 @@ defmodule ForemanAgent.Integration.ComposePolicyTest do
           File.write!(Path.join(dest, ".devcontainer/docker-compose.yml"), compose_yaml)
           {:ok, %{status: 0, output: ""}}
 
-        {"docker", ["compose" | _]} ->
+        {"docker", ["compose" | rest]} ->
           env = System.get_env() |> Map.merge(opts[:env] || %{}) |> Map.delete("DOCKER_HOST")
 
           {out, status} =
-            System.cmd("docker", args, env: Enum.to_list(env), stderr_to_stdout: true)
+            case System.get_env("FOREMAN_TEST_COMPOSE") do
+              nil -> System.cmd("docker", args, env: Enum.to_list(env), stderr_to_stdout: true)
+              compose -> System.cmd(compose, rest, env: Enum.to_list(env), stderr_to_stdout: true)
+            end
 
           {:ok, %{status: status, output: out}}
 
@@ -123,6 +129,21 @@ defmodule ForemanAgent.Integration.ComposePolicyTest do
 
     assert {:error, message} = Env.run("env.create", payload(), ctx)
     assert message =~ "env_file #{other}"
+    refute_received :up
+  end
+
+  # Without interpolation compose leaves env_file alone, but then a path
+  # built from variables (which a repo's .env sets) can't be checked.
+  test "an env_file path built from variables is refused", %{ctx: ctx, config: config} do
+    other = Path.join([config.secrets_root, @other_env_id, "secrets.env"])
+
+    stub_tools(
+      @devcontainer,
+      "services:\n  app:\n    image: alpine\n    env_file: ${NOPE:-#{other}}\n"
+    )
+
+    assert {:error, message} = Env.run("env.create", payload(), ctx)
+    assert message =~ "env_file"
     refute_received :up
   end
 

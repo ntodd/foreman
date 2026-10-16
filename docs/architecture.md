@@ -71,7 +71,7 @@ The local agent on the personal desktop is the same binary, pointed at `localhos
 
 **Host prerequisites:**
 - Linux
-- Docker Engine with Compose v2.35+ (the policy check needs `config --no-env-resolution`; older Composes are refused with a message saying so). Ubuntu's own `docker-compose-v2` package can be older than that; install Docker from Docker's apt repository.
+- Docker Engine with Compose v2.24+ (needed for the `!reset` tag)
 - git
 - Node with a pinned `@devcontainers/cli`
 - Tailscale on the host, because the control plane is tailnet-only

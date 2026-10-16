@@ -57,6 +57,35 @@ defmodule ForemanAgent.Env.Policy do
   end
 
   @doc """
+  Checks the env files `compose` (the output of `docker compose config
+  --no-interpolate`) names. With interpolation, Compose 2.x reads every
+  env file and folds it into `environment:`, even with
+  `--no-env-resolution`, so `check/3` never sees them. Without it, a path
+  built from variables (which a repo's `.env` sets) can't be checked, so
+  it's refused.
+  """
+  @spec check_env_files(map(), ctx()) :: {:ok, [String.t()]} | {:error, [String.t()]}
+  def check_env_files(compose, ctx) do
+    verdict(
+      for {service, %{} = svc} <- compose["services"] || %{},
+          entry <- List.wrap(svc["env_file"]),
+          path = env_file_path(entry),
+          is_binary(path),
+          finding <- uninterpolated_env_file(service, path, ctx),
+          do: finding
+    )
+  end
+
+  defp uninterpolated_env_file(service, path, ctx) do
+    if String.contains?(path, "$"),
+      do: [
+        {:refuse,
+         "service '#{service}' names env_file #{path}, which is built from variables; use a plain path"}
+      ],
+      else: host_file_finding("service '#{service}' reads env_file", path, ctx)
+  end
+
+  @doc """
   Checks the output of `devcontainer read-configuration
   --include-merged-configuration`: what each feature asks for, and the
   mounts after features are merged in.

@@ -256,9 +256,12 @@ defmodule ForemanAgent.Env do
 
   # Every profile is checked: the CLI starts the services runServices
   # names, and compose starts a profiled service it's asked for by name.
-  # Env files aren't resolved, so the policy sees (and checks) their
-  # paths rather than their contents.
-  @check_args [profiles: :all, extra: ["--no-env-resolution"]]
+  @check_args [profiles: :all]
+  # Env files are checked first, without interpolation: with it, Compose
+  # 2.x reads each one into `environment:` (whatever the flags), so the
+  # policy would never see the path, and compose would read a host file
+  # before anything refused it.
+  @env_file_args [profiles: :all, extra: ["--no-interpolate"]]
 
   defp prepare(paths, spec, compose_env, ctx) do
     config_dir = config_dir(spec.config_path)
@@ -268,6 +271,7 @@ defmodule ForemanAgent.Env do
          {:ok, rel_files, service} <- compose_spec(config),
          {:ok, compose_files} <- resolve_compose_files(paths.clone, config_dir, rel_files),
          env = compose_env(ctx, spec.slug, compose_env),
+         {:ok, env_warnings} <- check_env_files(ctx, spec.slug, compose_files, env, paths),
          {:ok, base} <- files_config.(compose_files, env),
          services = base |> Map.get("services", %{}) |> Map.keys() |> Enum.sort(),
          :ok <- check_service(service, services),
@@ -275,7 +279,8 @@ defmodule ForemanAgent.Env do
          overlay_path = Path.join(paths.meta, "overlay.yml"),
          :ok <- write_overlay(overlay_path, paths, spec, services, service, ctx.config),
          {:ok, merged} <- files_config.(compose_files ++ [overlay_path], env),
-         {:ok, warnings} <- check_policy(merged, config, paths, ctx.config),
+         {:ok, policy_warnings} <- check_policy(merged, config, paths, ctx.config),
+         warnings = Enum.uniq(env_warnings ++ policy_warnings),
          override_path = Path.join(paths.meta, "devcontainer.json"),
          :ok <- write_override(override_path, config, compose_files, overlay_path),
          :ok <- install_feature(paths.clone, config_dir, ctx) do
@@ -432,6 +437,15 @@ defmodule ForemanAgent.Env do
       Overlay.override_config(config, compose_files: compose_files, overlay_path: overlay_path)
 
     SafeFS.write_atomic(path, JSON.encode!(override), 0o600)
+  end
+
+  defp check_env_files(ctx, slug, compose_files, env, paths) do
+    with {:ok, raw} <- compose_config(ctx, slug, compose_files, env, paths.meta, @env_file_args) do
+      case Policy.check_env_files(raw, policy_ctx(paths, ctx.config)) do
+        {:ok, warnings} -> {:ok, warnings}
+        {:error, refused} -> {:error, refusal(refused)}
+      end
+    end
   end
 
   defp check_policy(merged, devcontainer, paths, config) do
@@ -752,9 +766,7 @@ defmodule ForemanAgent.Env do
       with {:ok, prepared} <- prepare(paths, spec, p.compose_env, ctx),
            files = prepared.compose_files ++ [prepared.overlay_path],
            {:ok, raw} <-
-             compose_config(ctx, spec.slug, files, env, paths.meta,
-               extra: ["--no-interpolate", "--no-env-resolution"]
-             ) do
+             compose_config(ctx, spec.slug, files, env, paths.meta, extra: ["--no-interpolate"]) do
         affected = Affected.services(raw, p.changed)
         restart_affected(affected, paths, spec, prepared, p, ctx, files, env)
       end

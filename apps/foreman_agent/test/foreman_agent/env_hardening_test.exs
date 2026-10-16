@@ -138,17 +138,21 @@ defmodule ForemanAgent.EnvHardeningTest do
   defp app_only, do: fn -> %{"services" => %{"app" => %{}}} end
 
   describe "the compose check" do
-    test "sees every profile and doesn't read env files", %{ctx: ctx} do
+    test "sees every profile, and checks env files before anything reads them", %{ctx: ctx} do
       stub_tools(standard_layout(), app_only())
       assert {:ok, _} = Env.run("env.create", payload(), ctx)
 
       configs = for {"docker", ["compose" | args]} <- runs(), "config" in args, do: args
-      assert length(configs) == 2
+      assert length(configs) == 3
 
       for args <- configs do
         assert ["--profile", "*"] in Enum.chunk_every(args, 2, 1)
-        assert "--no-env-resolution" in args
       end
+
+      # Without interpolation compose leaves env_file paths alone; with it,
+      # Compose 2.x reads them in, whatever the flags.
+      assert "--no-interpolate" in hd(configs)
+      refute Enum.any?(configs, &("--no-env-resolution" in &1))
     end
 
     # The CLI runs `compose up <runServices...> <service>`, and compose

@@ -5,7 +5,7 @@ the database. Everything is reachable only on your tailnet.
 
 ## What the desktop needs
 
-- Docker Engine with the Compose plugin, v2.35 or newer (from Docker's apt repository; Ubuntu's own `docker-compose-v2` package can be older)
+- Docker Engine with the Compose plugin, v2.24 or newer
 - git, and Node 20+ (for the devcontainer CLI)
 - systemd
 - Tailscale, logged in to your tailnet

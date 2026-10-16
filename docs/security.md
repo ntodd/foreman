@@ -116,11 +116,13 @@ to the box it runs on (up to the limits in "Known gaps").
   sees (it would run on the box).
 - Environments run unprivileged. On every start (anything inside can
   rewrite its own config) the agent checks the compose config with every
-  profile enabled and without resolving env files (`docker compose
-  --profile '*' config --no-env-resolution`, hence Compose v2.35+),
+  profile enabled (`docker compose --profile '*' config`),
   `devcontainer.json`, and what the devcontainer CLI resolves from
-  features and image metadata, before anything runs. `runServices`
-  entries that aren't in the checked compose files are refused. By
+  features and image metadata, before anything runs. Env files are
+  checked first, in a pass without interpolation: with it, Compose 2.x
+  reads each env file into `environment:` and the path disappears from
+  the output. An env file path built from variables is refused, and so
+  are `runServices` entries that aren't in the checked compose files. By
   default it refuses all of these:
   - privileged containers: `privileged: true`, the docker-in-docker
     feature, any feature whose metadata asks for privileged, and
