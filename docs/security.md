@@ -184,7 +184,10 @@ to the box it runs on (up to the limits in "Known gaps").
   box (a repo's `.git/config` can name programs to run).
 - Secrets on a box: a tmpfs directory per environment, 0700, files
   0600, owned by the agent user, bind-mounted read-only at
-  `/run/foreman`. On Linux the devcontainer CLI gives the container's
+  `/run/foreman`. Inside the environment, the container's own
+  environment (which can include compose-interpolated secrets) is saved
+  to `/etc/foreman/container.env`, mode 0644, so SSH shells get it; any
+  user in that container can read it. On Linux the devcontainer CLI gives the container's
   user the agent's uid, so the environment reads them and other users
   on the box can't.
 - Secret values are kept out of logs twice: the agent scrubs every value

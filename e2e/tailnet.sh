@@ -71,7 +71,12 @@ if [ ! -x "$devcontainer_cli" ]; then
   npm install --prefix .tools --no-fund --no-audit --silent @devcontainers/cli@0.89.0
 fi
 
-if command -v mise >/dev/null 2>&1; then mix() { mise x -- mix "$@"; }; fi
+if command -v mise >/dev/null 2>&1; then
+  mix() { mise x -- mix "$@"; }
+  mix="mise x -- mix"
+else
+  mix=mix
+fi
 
 rm -rf "$work"
 mkdir -p "$work"
@@ -88,7 +93,9 @@ cleanup() {
   [ -z "$cleaned" ] || return 0
   cleaned=1
   set +e
-  # Each background job runs in its own process group (set -m below), so
+  # The shell reports each job it kills; that's noise here.
+  exec 2>/dev/null
+  # Each background job runs in its own process group (see bg below), so
   # this stops the VMs mix starts under mise too.
   for pid in $pids; do kill -TERM -- "-$pid" 2>/dev/null; done
   if [ -n "$slug" ] && docker compose -p "$slug" ps -q 2>/dev/null | grep -q .; then
@@ -112,31 +119,34 @@ if ls "$dev_db"* >/dev/null 2>&1; then
   echo "moved your dev database to $db_backup; it comes back when this finishes"
 fi
 
-set -m
+# Starts a background job in its own process group and records it.
+bg() {
+  set -m
+  "$@" &
+  pids="$pids $!"
+  set +m
+}
 
 say "fixture repo"
 e2e/make-git-fixture.sh "$work/git" >/dev/null
-(cd "$work/git" && exec python3 -m http.server "$git_port" --bind 127.0.0.1) >"$work/git.log" 2>&1 &
-pids="$pids $!"
+bg sh -c "cd '$work/git' && exec python3 -m http.server $git_port --bind 127.0.0.1 >'$work/git.log' 2>&1"
 
 say "control plane"
 cd apps/foreman
 mix ecto.setup >"$work/setup.log" 2>&1 || fail "mix ecto.setup failed, see $work/setup.log"
 token=$(E2E_ADMIN=e2e mix run ../../e2e/seed.exs 2>/dev/null | sed -n 's/^E2E_JOIN_TOKEN=//p')
 [ -n "$token" ] || fail "the seed didn't print a join token"
-PORT=$port FOREMAN_GIT_BASE_URL=http://127.0.0.1:$git_port mix phx.server >"$work/cp.log" 2>&1 &
-pids="$pids $!"
+bg env PORT=$port FOREMAN_GIT_BASE_URL=http://127.0.0.1:$git_port sh -c "$mix phx.server >'$work/cp.log' 2>&1"
 wait_for "control plane up" 240 curl -fs "http://localhost:$port/healthz"
 
 say "agent"
 cd "$root/apps/foreman_agent"
-FOREMAN_URL=http://localhost:$port FOREMAN_JOIN_TOKEN="$token" \
+bg env FOREMAN_URL=http://localhost:$port FOREMAN_JOIN_TOKEN="$token" \
   FOREMAN_AGENT_DATA_DIR="$work/agent" FOREMAN_ENVS_ROOT="$work/envs" \
   FOREMAN_SECRETS_ROOT="$work/run" FOREMAN_RELEASE_ROOT="$work/opt" \
   FOREMAN_DEVCONTAINER_CLI="$devcontainer_cli" \
   FOREMAN_ALLOWED_GIT_HOSTS=127.0.0.1 FOREMAN_INSECURE_GIT_HOSTS=127.0.0.1 \
-  mix run --no-halt >"$work/agent.log" 2>&1 &
-pids="$pids $!"
+  sh -c "$mix run --no-halt >'$work/agent.log' 2>&1"
 wait_for "agent joined" 180 grep -q "joined (" "$work/cp.log"
 
 cd "$root/apps/foreman"
@@ -159,7 +169,7 @@ ssh_env() {
   ssh -o BatchMode=yes -o ConnectTimeout=15 -o StrictHostKeyChecking=accept-new \
     -o UserKnownHostsFile="$work/known_hosts" "vscode@$slug" "$@"
 }
-expect() {
+expect_output() {
   want=$1
   shift
   out=$("$@") || { echo "$out"; return 1; }
@@ -182,25 +192,32 @@ check "Tailscale runs in userspace mode" sh -c "
   done
   exit 1"
 check "Tailscale SSH lands in the app container as vscode" \
-  expect "repo-ok" ssh_env 'whoami; test -d /workspaces/hello && echo repo-ok'
+  expect_output "repo-ok" ssh_env 'whoami; test -d /workspaces/hello && echo repo-ok'
 check "a login shell over SSH gets Foreman's environment" \
-  expect "FOREMAN_ENV=$slug" ssh_env "bash -lc 'echo FOREMAN_ENV=\$FOREMAN_ENV'"
+  expect_output "FOREMAN_ENV=$slug" ssh_env "bash -lc 'echo FOREMAN_ENV=\$FOREMAN_ENV'"
 check "compose service names still resolve inside" docker exec "$app" getent hosts sidecar
 
-docker exec -d -u vscode "$app" socat TCP-LISTEN:8000,fork,reuseaddr,bind=0.0.0.0 \
-  SYSTEM:'printf "HTTP/1.0 200 OK\r\n\r\nforeman-port-ok\n"'
-docker exec -d -u vscode "$app" socat TCP-LISTEN:8001,fork,reuseaddr,bind=127.0.0.1 \
-  SYSTEM:'printf "HTTP/1.0 200 OK\r\n\r\nforeman-loopback-ok\n"'
+# A tiny web server (perl is in the image): address, port, reply.
+# shellcheck disable=SC2016
+serve() {
+  docker exec -d -u vscode "$app" perl -MIO::Socket::INET -e '
+    $s = IO::Socket::INET->new(LocalAddr => shift, LocalPort => shift, Listen => 5, ReuseAddr => 1)
+      or die "listen: $!";
+    $m = shift;
+    while ($c = $s->accept) { <$c>; print $c "HTTP/1.0 200 OK\r\n\r\n$m\n"; close $c }' "$@"
+}
+serve 0.0.0.0 8000 foreman-port-ok
+serve 127.0.0.1 8001 foreman-loopback-ok
 sleep 2
 check "a port is reachable by name (http://$slug:8000)" \
-  expect "foreman-port-ok" curl -fsS --max-time 15 "http://$slug:8000/"
+  expect_output "foreman-port-ok" curl -fsS --max-time 15 "http://$slug:8000/"
 check "a port is reachable by address (http://$ip:8000)" \
-  expect "foreman-port-ok" curl -fsS --max-time 15 "http://$ip:8000/"
+  expect_output "foreman-port-ok" curl -fsS --max-time 15 "http://$ip:8000/"
 # Userspace Tailscale delivers tailnet connections to 127.0.0.1, so a
 # localhost-only server is reachable too, and the proxy (on 127.0.0.2)
 # must not be.
 check "a server bound to 127.0.0.1 is reachable too" \
-  expect "foreman-loopback-ok" curl -fsS --max-time 15 "http://$ip:8001/"
+  expect_output "foreman-loopback-ok" curl -fsS --max-time 15 "http://$ip:8001/"
 check "the outbound proxy isn't reachable from the tailnet" \
   sh -c "! curl -sS --max-time 10 -o /dev/null http://$ip:1055/"
 

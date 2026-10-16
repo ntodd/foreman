@@ -24,7 +24,7 @@ TS_SHA256_ARM64=f60294374967f3dfd8cf57bbbd474d6cfce32d123e3a8ddeab82a87940daa806
 share=/usr/local/share/foreman
 here=$(cd "$(dirname "$0")" && pwd)
 
-mkdir -p "$share/bin"
+mkdir -p "$share/bin" /etc/foreman
 install -m 0755 "$here/scripts/entrypoint.sh" "$share/entrypoint.sh"
 install -m 0755 "$here/scripts/tailscale-up.sh" "$share/tailscale-up.sh"
 install -m 0755 "$here/scripts/git-credential-foreman" "$share/git-credential-foreman"

@@ -225,6 +225,12 @@ defmodule ForemanAgent.Integration.EnvDockerTest do
     refute listening?(app1, {127, 0, 0, 1}, 1055)
     assert {"hello-1\n", 0} = exec(app1, ["printenv", "TS_HOSTNAME"])
 
+    # Tailscale SSH starts a clean login shell, without the container's
+    # environment; the feature's profile hook brings it back.
+    clean_login = ["env", "-i", "HOME=/home/vscode", "bash", "-lc"]
+    assert {"hello-1\n", 0} = exec(app1, clean_login ++ ["echo $FOREMAN_ENV"])
+    assert {"first value\n", 0} = exec(app1, clean_login ++ ["echo \"$HELLO_SECRET\""])
+
     # The secrets directory is read-only inside the container.
     assert {_, status} = exec(app1, ["touch", "/run/foreman/x"], "root")
     assert status != 0
