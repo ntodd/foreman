@@ -221,10 +221,10 @@ check "a server bound to 127.0.0.1 is reachable too" \
 check "the outbound proxy isn't reachable from the tailnet" \
   sh -c "! curl -sS --max-time 10 -o /dev/null http://$ip:1055/"
 
-echo
-echo "To check VS Code by hand before the environment is destroyed:"
-echo "  code --remote ssh-remote+vscode@$slug /workspaces/hello"
-if [ -t 0 ]; then
+if command -v code >/dev/null 2>&1 && [ -t 0 ]; then
+  echo
+  echo "To check VS Code by hand before the environment is destroyed:"
+  echo "  code --remote ssh-remote+vscode@$slug /workspaces/hello"
   printf "Press Enter to destroy %s and finish... " "$slug"
   read -r _
 fi

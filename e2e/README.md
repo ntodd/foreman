@@ -77,7 +77,7 @@ It needs Tailscale running on this machine, on the same tailnet; an
 OAuth client with the `auth_keys` and `devices` scopes that owns
 `tag:foreman-env`; and a tailnet policy that lets you SSH to
 `tag:foreman-env` as `vscode` (see [docs/setup/tailscale.md](../docs/setup/tailscale.md)).
-Before it destroys the environment it pauses so you can try VS Code.
+If VS Code is installed, it pauses before destroying the environment so you can try it.
 
 ## README screenshots
 
