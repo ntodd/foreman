@@ -33,10 +33,5 @@ if config_env() != :test do
     allowed_git_hosts: list.("FOREMAN_ALLOWED_GIT_HOSTS", ["github.com"]),
     insecure_git_hosts: list.("FOREMAN_INSECURE_GIT_HOSTS", []),
     policy_rules: policy,
-    tun_device:
-      (case System.get_env("FOREMAN_TUN_DEVICE", "auto") do
-         "auto" -> :auto
-         value -> value == "true"
-       end),
     connect: System.get_env("FOREMAN_URL") not in [nil, ""]
 end

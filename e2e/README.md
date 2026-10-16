@@ -28,7 +28,7 @@ FOREMAN_URL=http://localhost:4100 FOREMAN_JOIN_TOKEN=fj_... \
   FOREMAN_SECRETS_ROOT=$R/tmp/e2e/run FOREMAN_RELEASE_ROOT=$R/tmp/e2e/opt \
   FOREMAN_DEVCONTAINER_CLI=$R/.tools/node_modules/.bin/devcontainer \
   FOREMAN_ALLOWED_GIT_HOSTS=127.0.0.1 FOREMAN_INSECURE_GIT_HOSTS=127.0.0.1 \
-  FOREMAN_TUN_DEVICE=true mix run --no-halt &
+  mix run --no-halt &
 
 # The run: sign in, create an environment, wait for it, add a secret,
 # Restart affected, container logs, every page, dark mode, destroy.
@@ -58,6 +58,26 @@ e2e/linux/run.sh --down          # remove the stack and its volumes
 
 It needs `mise` (to sign the update with `mix foreman_agent.sign`) and
 `openssl`.
+
+## On a real tailnet
+
+The other runs don't have a tailnet, so they can't check Tailscale SSH.
+`tailnet.sh` runs a dev control plane with your Tailscale OAuth client
+and a local agent, creates an environment from the fixture repo, and
+checks it from this machine over the tailnet: no `NET_ADMIN` or TUN
+device in the devcontainer, Tailscale SSH into it as `vscode`, its ports
+by name and address, compose DNS untouched, and the device gone after
+destroy. Your dev database is moved aside and put back afterwards.
+
+```sh
+FOREMAN_TAILSCALE_CLIENT_ID=... FOREMAN_TAILSCALE_CLIENT_SECRET=... e2e/tailnet.sh
+```
+
+It needs Tailscale running on this machine, on the same tailnet; an
+OAuth client with the `auth_keys` and `devices` scopes that owns
+`tag:foreman-env`; and a tailnet policy that lets you SSH to
+`tag:foreman-env` as `vscode` (see [docs/setup/tailscale.md](../docs/setup/tailscale.md)).
+Before it destroys the environment it pauses so you can try VS Code.
 
 ## README screenshots
 

@@ -20,7 +20,6 @@ defmodule ForemanAgent.Config do
             allowed_git_hosts: ["github.com"],
             insecure_git_hosts: [],
             policy_rules: %{},
-            tun_device: :auto,
             cleanup_image: "alpine:3.22",
             release_root: "/opt/foreman-agent",
             release_public_key: nil,
@@ -86,12 +85,6 @@ defmodule ForemanAgent.Config do
   @doc "Paths no environment may ever bind-mount."
   def protected_paths(%__MODULE__{} = c),
     do: [c.data_dir, c.envs_root, c.secrets_root, c.release_root]
-
-  def tun_device?(%__MODULE__{tun_device: :auto}) do
-    match?({:ok, %File.Stat{type: :device}}, File.stat("/dev/net/tun"))
-  end
-
-  def tun_device?(%__MODULE__{tun_device: value}), do: value == true
 
   defp default_feature_dir do
     priv = Application.app_dir(:foreman_agent, "priv/feature")

@@ -41,7 +41,8 @@ edit the files in its workspace. By default a box refuses:
   (`../..` from `.devcontainer`, the usual `/workspaces` mount, is fine)
 - `env_file`, `secrets`, `configs` or build contexts outside the
   workspace
-- host devices other than `/dev/net/tun`
+- host devices, including `/dev/net/tun` (Foreman's Tailscale doesn't
+  need it, so remove a repo's own Tailscale setup)
 - turning seccomp off (`seccomp=unconfined`). The official Go and Rust
   features ask for it, for debuggers; remove it from the repo's config,
   or let a box allow it with `FOREMAN_POLICY=seccomp=allow`. That only

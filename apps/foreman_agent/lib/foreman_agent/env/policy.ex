@@ -29,7 +29,6 @@ defmodule ForemanAgent.Env.Policy do
   # Capabilities that are root on the box from inside a container.
   @root_caps ~w(ALL SYS_ADMIN SYS_MODULE SYS_RAWIO DAC_READ_SEARCH BPF PERFMON MAC_ADMIN)
 
-  @allowed_devices ["/dev/net/tun"]
   @docker_sockets ["/run/docker.sock", "/var/run/docker.sock"]
 
   # Namespace settings, and what to call them in a finding.
@@ -548,9 +547,12 @@ defmodule ForemanAgent.Env.Policy do
   defp device_findings(service, svc, ctx) do
     devices =
       for device <- svc["devices"] || [],
-          source = device_source(device),
-          source not in @allowed_devices do
-        rule(ctx, :devices, "service '#{service}' maps host device #{source}")
+          source = device_source(device) do
+        rule(
+          ctx,
+          :devices,
+          "service '#{service}' maps host device #{source}#{device_hint(source)}"
+        )
       end
 
     # With CAP_MKNOD, which is in Docker's default set, a cgroup rule is
@@ -562,6 +564,13 @@ defmodule ForemanAgent.Env.Policy do
 
     devices ++ cgroup_rules
   end
+
+  # Foreman's Tailscale runs in userspace mode, so a TUN device is left
+  # over from a repo's own Tailscale setup.
+  defp device_hint("/dev/net/tun"),
+    do: " (Foreman runs Tailscale without it; remove the repo's own Tailscale setup)"
+
+  defp device_hint(_source), do: ""
 
   defp device_source(%{"source" => source}), do: source
   defp device_source(device) when is_binary(device), do: device |> String.split(":") |> hd()

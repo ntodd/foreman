@@ -39,8 +39,7 @@ defmodule ForemanAgent.Integration.EnvDockerTest do
       allowed_git_hosts: ["127.0.0.1"],
       insecure_git_hosts: ["127.0.0.1"],
       policy_rules: Env.Policy.default_rules(),
-      feature_dir: Path.expand("../../../../features/src/foreman", __DIR__),
-      tun_device: true
+      feature_dir: Path.expand("../../../../features/src/foreman", __DIR__)
     }
 
     File.mkdir_p!(config.envs_root)
@@ -134,6 +133,39 @@ defmodule ForemanAgent.Integration.EnvDockerTest do
     System.cmd("docker", ["exec", "-u", user, container | args], stderr_to_stdout: true)
   end
 
+  # CAP_NET_ADMIN is bit 12 of the container's capability bounding set.
+  defp net_admin?(container) do
+    {status, 0} = exec(container, ["cat", "/proc/1/status"], "root")
+    [hex] = Regex.run(~r/^CapBnd:\s+([0-9a-f]+)$/m, status, capture: :all_but_first)
+    Bitwise.band(String.to_integer(hex, 16), Bitwise.bsl(1, 12)) != 0
+  end
+
+  # /proc/net/tcp lists addresses as little-endian hex, LISTEN is state 0A.
+  defp listening?(container, {a, b, c, d}, port) do
+    {tcp, 0} = exec(container, ["cat", "/proc/net/tcp"], "root")
+    hex = fn n, width -> n |> Integer.to_string(16) |> String.pad_leading(width, "0") end
+    want = Enum.map_join([d, c, b, a], &hex.(&1, 2)) <> ":" <> hex.(port, 4)
+
+    tcp
+    |> String.split("\n", trim: true)
+    |> Enum.any?(fn line ->
+      match?([_, ^want, _, "0A" | _], String.split(line))
+    end)
+  end
+
+  defp tailscale_log(container) do
+    {log, _} = exec(container, ["cat", "/var/log/foreman-tailscale.log"], "root")
+    log
+  end
+
+  defp eventually(fun, tries \\ 30) do
+    cond do
+      fun.() -> true
+      tries == 0 -> false
+      true -> Process.sleep(500) && eventually(fun, tries - 1)
+    end
+  end
+
   test "two copies of a repo run side by side, and the lifecycle works end to end", %{
     config: config,
     base_url: base_url
@@ -181,7 +213,16 @@ defmodule ForemanAgent.Integration.EnvDockerTest do
     assert {"test@example.com\n", 0} = exec(app1, ["git", "config", "user.email"])
     assert {version, 0} = exec(app1, ["tailscale", "version"])
     assert version =~ ~r/^1\.\d+/
-    assert {_, 0} = exec(app1, ["test", "-c", "/dev/net/tun"], "root")
+    # Tailscale runs in userspace mode: no TUN device, no NET_ADMIN.
+    assert {_, status} = exec(app1, ["test", "-e", "/dev/net/tun"], "root")
+    assert status != 0
+    refute net_admin?(app1)
+    assert eventually(fn -> tailscale_log(app1) =~ "userspace networking" end)
+
+    # Tailscale forwards tailnet connections to 127.0.0.1:<port>, so its
+    # outbound proxy listens on 127.0.0.2, out of the tailnet's reach.
+    assert eventually(fn -> listening?(app1, {127, 0, 0, 2}, 1055) end)
+    refute listening?(app1, {127, 0, 0, 1}, 1055)
     assert {"hello-1\n", 0} = exec(app1, ["printenv", "TS_HOSTNAME"])
 
     # The secrets directory is read-only inside the container.

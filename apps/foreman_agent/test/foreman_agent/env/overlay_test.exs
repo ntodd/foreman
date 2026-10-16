@@ -14,7 +14,6 @@ defmodule ForemanAgent.Env.OverlayTest do
         devcontainer_service: "app",
         secrets_dir: "/run/foreman/envs/#{@env_id}",
         tailscale: %{enabled: true, tags: []},
-        tun_device: true,
         limits: %{}
       },
       overrides
@@ -45,23 +44,24 @@ defmodule ForemanAgent.Env.OverlayTest do
       refute db =~ "/run/foreman"
     end
 
-    test "adds the Tailscale state volume, TUN device and hostname when enabled" do
+    test "adds the Tailscale state volume and hostname when enabled" do
       yaml = Overlay.compose(params())
       assert yaml =~ ~s(source: "foreman-tailscale")
       assert yaml =~ ~s(target: "/var/lib/tailscale")
-      assert yaml =~ ~s("/dev/net/tun:/dev/net/tun")
       assert yaml =~ ~s("TS_HOSTNAME": "storefront-2")
       assert yaml =~ ~r/^volumes:\n  "foreman-tailscale": \{\}/m
     end
 
-    test "leaves Tailscale out when disabled or without a TUN device" do
+    # Tailscale runs in userspace mode, so the devcontainer needs neither a
+    # TUN device nor NET_ADMIN.
+    test "never gives the devcontainer the TUN device" do
+      refute Overlay.compose(params()) =~ "/dev/net/tun"
+      refute Overlay.compose(params()) =~ "devices:"
+    end
+
+    test "leaves Tailscale out when disabled" do
       yaml = Overlay.compose(params(%{tailscale: %{enabled: false, tags: []}}))
       refute yaml =~ "tailscale"
-      refute yaml =~ "/dev/net/tun"
-
-      yaml = Overlay.compose(params(%{tun_device: false}))
-      assert yaml =~ "foreman-tailscale"
-      refute yaml =~ "/dev/net/tun"
     end
 
     test "always sets FOREMAN_ENV" do

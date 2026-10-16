@@ -159,10 +159,20 @@ grants only add access, so one like that lets everyone back in.
   A repo that needs them runs `tailscale serve` (in a lifecycle command)
   to get `https://storefront-2.tail1234.ts.net`. Those names land in public
   certificate transparency logs; keep them bland.
-- **DNS:** the feature accepts MagicDNS by default, which forwards other
-  names to Docker's resolver, so compose service names keep working.
-- **No TUN device:** the feature falls back to userspace networking,
-  with a SOCKS5 and HTTP proxy on `localhost:1055`.
+- **Userspace networking:** Tailscale runs without a TUN device or
+  `NET_ADMIN`, and doesn't change the container's routes, firewall or
+  DNS (compose service names resolve as usual). Everything you connect
+  into works normally: Tailscale SSH, an environment's ports, `tailscale
+  serve`. Connections an environment makes out to other tailnet machines
+  go through the proxy on `127.0.0.2:1055`; a repo that needs that sets
+  `ALL_PROXY=socks5h://127.0.0.2:1055` (or
+  `HTTP_PROXY=http://127.0.0.2:1055`) on its devcontainer service.
+- **Localhost is on the tailnet:** Tailscale delivers tailnet
+  connections to `127.0.0.1`, so a server bound only to localhost in an
+  environment (a dev server, a debugger port) is reachable by anyone the
+  ACL lets reach the environment, and sees them as 127.0.0.1. Keep
+  `tag:foreman-env` reachable only by the people who own those
+  environments.
 - **Cleanup:** an hourly job removes `tag:foreman-env` devices that
   don't belong to a live environment. It never looks at other tags, so
   laptops or CI machines sharing a repo tag are safe. Tagged devices

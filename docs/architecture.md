@@ -171,8 +171,6 @@ services:
     volumes:
       - /run/foreman/envs/<env_id>:/run/foreman:ro
       - tailscale-state:/var/lib/tailscale
-    devices:
-      - /dev/net/tun:/dev/net/tun
     environment:
       FOREMAN_ENV: <slug>
       TS_HOSTNAME: <slug>
@@ -191,9 +189,8 @@ A devcontainer feature that ships inside the agent release, so a box always runs
 
 - **Tailscale:**
   - Installs `tailscale` and `tailscaled` from the static tarball, with a checksum check.
-  - Requests the `NET_ADMIN` and `NET_RAW` capabilities.
   - Its `entrypoint` starts tailscaled and runs `tailscale up --ssh --auth-key=file:/run/foreman/ts-authkey --hostname=$TS_HOSTNAME …`.
-  - It falls back to userspace networking when there is no TUN device. This is a port of the current `tailscale-up.sh`.
+  - tailscaled always uses userspace networking, so the devcontainer gets no TUN device and no `NET_ADMIN`, and tailscaled never touches its routes, firewall or DNS. Connections into the environment (Tailscale SSH, its ports, `tailscale serve`) work as usual; connections out to other tailnet machines go through a SOCKS5 and HTTP proxy on `127.0.0.2:1055` (not 127.0.0.1, which tailscaled forwards tailnet connections to). In this mode tailscaled hands connections from the tailnet to `127.0.0.1:<port>`, so servers bound only to localhost are reachable from the tailnet too, and see every tailnet peer as 127.0.0.1.
   - Because it is an entrypoint, it runs on every container start, including `docker restart`. A `postStartCommand` only runs when the devcontainer CLI starts the container.
 - **Secrets hook:** installs `/etc/profile.d/foreman.sh`, which sources `/run/foreman/secrets.env`. A zsh equivalent goes in `/etc/zsh/zprofile`. The hook also prints `/run/foreman/notices` when it isn't empty.
 - **Git:**
@@ -226,7 +223,7 @@ A devcontainer feature that ships inside the agent release, so a box always runs
   - The feature runs `tailscale up --ssh`, so `ssh vscode@storefront-2` works on port 22 with no keys and no sshd.
   - Tailnet ACLs decide who can log in as which local user.
   - SSH rules use `action: accept`, not `check`, so editors and other SSH tools aren't sent to re-authenticate.
-- **DNS:** `--accept-dns` points `resolv.conf` at MagicDNS, which forwards to Docker's resolver. The feature keeps the existing check that compose service names still resolve.
+- **DNS:** untouched. In userspace mode tailscaled doesn't change `resolv.conf`, so Docker's resolver keeps answering compose service names. MagicDNS names resolve for connections made through the proxy.
 - **Cleanup:** an Oban job removes tailnet devices that no longer match a live environment. It only ever touches devices tagged `tag:foreman-env` (always applied to environments; `FOREMAN_TAILSCALE_TAGS` adds to it), and a destroyed environment's cleanup skips its slug if a new environment has taken it.
 
 ### ACLs

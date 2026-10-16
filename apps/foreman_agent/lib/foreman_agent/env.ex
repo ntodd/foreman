@@ -272,7 +272,7 @@ defmodule ForemanAgent.Env do
          :ok <- check_service(service, services),
          :ok <- check_run_services(config["runServices"], services),
          overlay_path = Path.join(paths.meta, "overlay.yml"),
-         :ok <- write_overlay(overlay_path, paths, spec, services, service, ctx.config),
+         :ok <- write_overlay(overlay_path, paths, spec, services, service),
          {:ok, merged} <- files_config.(compose_files ++ [overlay_path], env),
          {:ok, policy_warnings} <- check_policy(merged, config, paths, spec, ctx.config),
          warnings = Enum.uniq(scan_warnings ++ policy_warnings),
@@ -411,7 +411,7 @@ defmodule ForemanAgent.Env do
     end
   end
 
-  defp write_overlay(path, paths, spec, services, service, config) do
+  defp write_overlay(path, paths, spec, services, service) do
     yaml =
       Overlay.compose(%{
         env_id: spec.env_id,
@@ -420,7 +420,6 @@ defmodule ForemanAgent.Env do
         devcontainer_service: service,
         secrets_dir: paths.secrets,
         tailscale: spec.tailscale,
-        tun_device: ForemanAgent.Config.tun_device?(config),
         limits: spec.limits
       })
 

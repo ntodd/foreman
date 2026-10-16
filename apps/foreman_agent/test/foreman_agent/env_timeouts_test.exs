@@ -23,7 +23,6 @@ defmodule ForemanAgent.EnvTimeoutsTest do
       secrets_root: Path.join(tmp, "run"),
       release_root: Path.join(tmp, "opt"),
       policy_rules: Policy.default_rules(),
-      tun_device: true,
       docker_socket: "/var/run/docker.sock"
     }
 

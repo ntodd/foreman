@@ -155,7 +155,7 @@ to the box it runs on (up to the limits in "Known gaps").
   - named volumes that are really host paths (`driver_opts` with
     `o: bind` or a `device`), and volumes from outside the project
     (`external`, or a `name:` belonging to another project)
-  - host devices other than `/dev/net/tun`, including through
+  - host devices, `/dev/net/tun` included, also through
     `device_cgroup_rules` and GPU reservations under `deploy`
   - builds that run privileged, on the host network, or with BuildKit
     entitlements (`security.insecure` is privileged)
@@ -203,6 +203,13 @@ in [setup/tailscale.md](setup/tailscale.md) grants people access to
 environments and grants environments nothing, so code in an environment
 can't reach laptops or other environments. Tailscale SSH replaces sshd;
 no ports are published.
+
+Tailscale runs in userspace mode, without a TUN device or `NET_ADMIN`.
+In that mode it delivers tailnet connections to `127.0.0.1:<port>` in
+the environment, so anything listening on localhost there (a debugger,
+an admin port) is reachable by every peer the ACL lets reach the
+environment. Its outbound proxy listens on 127.0.0.2 for that reason.
+Grant `tag:foreman-env` only to the people whose environments they are.
 
 ## Known gaps
 
@@ -270,10 +277,11 @@ These are accepted for now, or need someone to try them:
     environments unprivileged, but a container escape (a kernel or runc
     bug) lands on the box: every environment's secrets there and the
     agent's key, which can ask the control plane for the secrets of
-    every environment placed on that box. The devcontainer itself has
-    `NET_ADMIN` and `NET_RAW` (Tailscale needs them) and usually
-    passwordless sudo, which widens the kernel surface reachable from
-    inside. Keep boxes patched, keep them single-owner, and treat code
+    every environment placed on that box. Tailscale runs in userspace
+    mode, so Foreman adds no capabilities to the devcontainer, but most
+    devcontainer images give their user passwordless sudo, and a repo
+    can still add ordinary capabilities like `NET_ADMIN` itself. Keep
+    boxes patched, keep them single-owner, and treat code
     in an environment (including coding agents) as able to reach
     anything the box can: there's no egress filtering, and on cloud
     instances the metadata endpoint is reachable unless blocked.

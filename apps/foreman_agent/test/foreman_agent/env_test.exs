@@ -32,7 +32,6 @@ defmodule ForemanAgent.EnvTest do
       release_root: Path.join(tmp, "opt"),
       feature_dir: Path.expand("../../../../features/src/foreman", __DIR__),
       policy_rules: Policy.default_rules(),
-      tun_device: true,
       docker_socket: "/var/run/docker.sock"
     }
 

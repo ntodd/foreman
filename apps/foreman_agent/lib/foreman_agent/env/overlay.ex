@@ -23,7 +23,6 @@ defmodule ForemanAgent.Env.Overlay do
           devcontainer_service: String.t(),
           secrets_dir: Path.t(),
           tailscale: %{enabled: boolean()},
-          tun_device: boolean(),
           limits: map()
         }
 
@@ -90,10 +89,6 @@ defmodule ForemanAgent.Env.Overlay do
           "\n",
           "        target: \"/var/lib/tailscale\"\n"
         ],
-        else: []
-      ),
-      if(tailscale? and params.tun_device,
-        do: ["    devices:\n", "      - \"/dev/net/tun:/dev/net/tun\"\n"],
         else: []
       ),
       limits(params.limits)
