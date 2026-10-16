@@ -139,13 +139,18 @@ defmodule ForemanProtocol.Schema do
     |> Enum.with_index()
     |> Enum.reduce({[], []}, fn {item, i}, {ok, errs} ->
       case cast_value(item, type, p) do
-        {:ok, x} -> {[x | ok], errs}
-        {:error, e} -> {ok, errs ++ Enum.map(e, fn {ep, m} -> {ep, "item #{i} #{m}"} end)}
+        {:ok, x} ->
+          {[x | ok], errs}
+
+        {:error, e} ->
+          # Prepended in reverse and flipped once at the end: appending
+          # here would be quadratic in the number of bad items.
+          {ok, Enum.reduce(e, errs, fn {ep, m}, acc -> [{ep, "item #{i} #{m}"} | acc] end)}
       end
     end)
     |> case do
       {ok, []} -> {:ok, Enum.reverse(ok)}
-      {_, errs} -> {:error, errs}
+      {_, errs} -> {:error, Enum.reverse(errs)}
     end
   end
 
@@ -178,9 +183,12 @@ defmodule ForemanProtocol.Schema do
     end
   end
 
+  # Text goes over a JSON wire, which can't carry bytes that aren't
+  # UTF-8; senders replace them (`String.replace_invalid/1`) first.
   defp cast_value(v, :text, p) when is_binary(v) do
     cond do
       byte_size(v) > @max_text -> err(p, "is too long")
+      not String.valid?(v) -> err(p, "must be UTF-8")
       String.contains?(v, <<0>>) -> err(p, "must not contain NUL bytes")
       true -> {:ok, v}
     end
@@ -228,11 +236,11 @@ defmodule ForemanProtocol.Schema do
     end
   end
 
-  defp cast_value(v, :git_url, p) when is_binary(v), do: cast_url(v, p, ["https", "http"])
-  defp cast_value(v, :https_url, p) when is_binary(v), do: cast_url(v, p, ["https"])
-  defp cast_value(v, :url, p) when is_binary(v), do: cast_url(v, p, ["https", "http"])
-  defp cast_value(v, :git_ref, p) when is_binary(v), do: cast_git_ref(v, p)
-  defp cast_value(v, :relative_path, p) when is_binary(v), do: cast_relative_path(v, p)
+  # URI parsing and charlist conversion raise on bytes that aren't UTF-8.
+  defp cast_value(v, type, p)
+       when type in [:git_url, :https_url, :url, :git_ref, :relative_path] and is_binary(v) do
+    if String.valid?(v), do: cast_utf8(v, type, p), else: err(p, "must be UTF-8")
+  end
 
   defp cast_value(v, :files, p) when is_map(v) do
     allowed = secret_files()
@@ -264,8 +272,8 @@ defmodule ForemanProtocol.Schema do
         name in @reserved_env or String.starts_with?(name, "FOREMAN_") ->
           {:halt, err(p, "contains a reserved variable name: #{name}")}
 
-        not is_binary(value) or String.contains?(value, <<0>>) ->
-          {:halt, err(p, "#{name} must be a string without NUL bytes")}
+        not is_binary(value) or not String.valid?(value) or String.contains?(value, <<0>>) ->
+          {:halt, err(p, "#{name} must be a UTF-8 string without NUL bytes")}
 
         true ->
           {:cont, {:ok, Map.put(acc, name, value)}}
@@ -275,6 +283,12 @@ defmodule ForemanProtocol.Schema do
 
   defp cast_value(_v, type, p) when type in [:files, :env_map], do: err(p, "must be an object")
   defp cast_value(_v, _type, p), do: err(p, "must be a string")
+
+  defp cast_utf8(v, :git_url, p), do: cast_url(v, p, ["https", "http"])
+  defp cast_utf8(v, :https_url, p), do: cast_url(v, p, ["https"])
+  defp cast_utf8(v, :url, p), do: cast_url(v, p, ["https", "http"])
+  defp cast_utf8(v, :git_ref, p), do: cast_git_ref(v, p)
+  defp cast_utf8(v, :relative_path, p), do: cast_relative_path(v, p)
 
   defp match(v, regex, p, msg) when is_binary(v) do
     if Regex.match?(regex, v), do: {:ok, v}, else: err(p, msg)

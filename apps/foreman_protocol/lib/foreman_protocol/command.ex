@@ -57,7 +57,14 @@ defmodule ForemanProtocol.Command do
           compose_env: {:env_map, default: %{}}
         ],
     "env.destroy" => @env,
-    "env.secrets.write" => [env_id: {:uuid, required: true}, files: {:files, required: true}],
+    # `keep`: files to leave as they are rather than delete for being
+    # missing from `files`. Protocol 2, and absent unless set: a protocol 1
+    # agent refuses fields it doesn't know.
+    "env.secrets.write" => [
+      env_id: {:uuid, required: true},
+      files: {:files, required: true},
+      keep: {{:list, {:enum, Schema.secret_files()}}, []}
+    ],
     "env.logs" => @env ++ [service: {:service_name, []}, tail: {:integer, default: 200}],
     "env.git_status" => @env,
     "box.inventory" => [],
