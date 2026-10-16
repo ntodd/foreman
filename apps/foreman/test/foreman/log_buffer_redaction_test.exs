@@ -38,6 +38,10 @@ defmodule Foreman.LogBufferRedactionTest do
     {:ok, cmd} = Command.new("env.logs", %{env_id: env.id, slug: env.slug}, op_id: op.id)
     :ok = Redactions.put(op.id, cmd, env)
     Operations.subscribe(op.id)
+
+    # The buffer is shared and writes on a timer; write this test's text
+    # while its database connection is still around.
+    on_exit(fn -> LogBuffer.flush(op.id) end)
     %{op: op}
   end
 

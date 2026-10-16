@@ -149,8 +149,12 @@ defmodule Foreman.Operations.LogBuffer do
     end
   rescue
     # A write that fails (the operation's environment was just deleted, the
-    # sandbox owner exited in tests) shouldn't take the buffer down.
+    # database busy past its timeout) shouldn't take the buffer down, and
+    # with it every other operation's unwritten log.
     _ -> :ok
+  catch
+    # A connection that goes away mid-query exits rather than raises.
+    :exit, _ -> :ok
   end
 
   # Trimming can split a UTF-8 sequence at the start.
