@@ -26,6 +26,7 @@ here=$(cd "$(dirname "$0")" && pwd)
 
 mkdir -p "$share/bin" /etc/foreman
 install -m 0755 "$here/scripts/entrypoint.sh" "$share/entrypoint.sh"
+install -m 0755 "$here/scripts/save-env" "$share/save-env"
 install -m 0755 "$here/scripts/tailscale-up.sh" "$share/tailscale-up.sh"
 install -m 0755 "$here/scripts/git-credential-foreman" "$share/git-credential-foreman"
 install -m 0755 "$here/scripts/gh" "$share/bin/gh"

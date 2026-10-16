@@ -116,6 +116,13 @@ secrets_dir=$(box sh -c 'ls -d /run/foreman/envs/*')
 [ "$(box stat -c %a "$secrets_dir/secrets.env")" = "600" ] || fail "secrets.env isn't 0600"
 box su -s /bin/sh nobody -c "cat $secrets_dir/secrets.env" 2>/dev/null && fail "another user on the box can read secrets"
 echo "ok: secrets are 0600, unreadable by other box users"
+# Tailscale SSH starts a clean login shell; the saved container environment
+# fills it in, readable only by the devcontainer's user.
+[ "$(box docker exec -u root "$app" stat -c '%u %a' /etc/foreman/container.env)" = "$vscode_uid 600" ] ||
+  fail "the saved container environment isn't 0600 and vscode's"
+box docker exec -u vscode "$app" env -i HOME=/home/vscode bash -lc 'echo "$FOREMAN_ENV"' | grep -qx hello-1 ||
+  fail "a clean login shell doesn't get the container's environment"
+echo "ok: a clean login shell gets the container's environment, from a file only vscode can read"
 
 say "a secret change reaches new shells, and marks the environment pending restart"
 cp_eval 'E2E.secret("hello-1", "SIDECAR_TOKEN", "linux-secret-1")'
