@@ -68,4 +68,20 @@ defmodule ForemanAgent.RedactorTest do
     r = Redactor.new(cmd)
     assert Redactor.redact(r, "anything") == "anything"
   end
+
+  # A compose error can quote a file it was pointed at, and the agent's own
+  # identity file is one it can read.
+  @tag :tmp_dir
+  test "always redacts the agent's own key", %{tmp_dir: tmp} do
+    key = :crypto.strong_rand_bytes(32)
+
+    :ok =
+      ForemanAgent.Identity.save(tmp, %ForemanAgent.Identity{agent_id: "a1", private_key: key})
+
+    {:ok, _} = ForemanAgent.Identity.load(tmp)
+    encoded = Base.encode64(key)
+
+    redacted = Redactor.redact(Redactor.new(create()), ~s(line 1: {"private_key":"#{encoded}"}))
+    refute redacted =~ encoded
+  end
 end

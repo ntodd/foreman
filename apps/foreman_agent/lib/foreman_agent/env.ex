@@ -18,7 +18,7 @@ defmodule ForemanAgent.Env do
       %{config: %Config{}, runner: module, docker: module, log: fn stream, data -> ... end}
   """
 
-  alias ForemanAgent.Env.{Affected, Overlay, Policy}
+  alias ForemanAgent.Env.{Affected, ComposeScan, Overlay, Policy}
   alias ForemanAgent.SafeFS
   alias ForemanProtocol.Jsonc
 
@@ -257,11 +257,6 @@ defmodule ForemanAgent.Env do
   # Every profile is checked: the CLI starts the services runServices
   # names, and compose starts a profiled service it's asked for by name.
   @check_args [profiles: :all]
-  # Env files are checked first, without interpolation: with it, Compose
-  # 2.x reads each one into `environment:` (whatever the flags), so the
-  # policy would never see the path, and compose would read a host file
-  # before anything refused it.
-  @env_file_args [profiles: :all, extra: ["--no-interpolate"]]
 
   defp prepare(paths, spec, compose_env, ctx) do
     config_dir = config_dir(spec.config_path)
@@ -270,8 +265,8 @@ defmodule ForemanAgent.Env do
     with {:ok, config} <- read_devcontainer(paths.clone, spec.config_path),
          {:ok, rel_files, service} <- compose_spec(config),
          {:ok, compose_files} <- resolve_compose_files(paths.clone, config_dir, rel_files),
+         {:ok, scan_warnings} <- scan_compose(paths, compose_files, spec, ctx.config),
          env = compose_env(ctx, spec.slug, compose_env),
-         {:ok, env_warnings} <- check_env_files(ctx, spec.slug, compose_files, env, paths),
          {:ok, base} <- files_config.(compose_files, env),
          services = base |> Map.get("services", %{}) |> Map.keys() |> Enum.sort(),
          :ok <- check_service(service, services),
@@ -279,8 +274,8 @@ defmodule ForemanAgent.Env do
          overlay_path = Path.join(paths.meta, "overlay.yml"),
          :ok <- write_overlay(overlay_path, paths, spec, services, service, ctx.config),
          {:ok, merged} <- files_config.(compose_files ++ [overlay_path], env),
-         {:ok, policy_warnings} <- check_policy(merged, config, paths, ctx.config),
-         warnings = Enum.uniq(env_warnings ++ policy_warnings),
+         {:ok, policy_warnings} <- check_policy(merged, config, paths, spec, ctx.config),
+         warnings = Enum.uniq(scan_warnings ++ policy_warnings),
          override_path = Path.join(paths.meta, "devcontainer.json"),
          :ok <- write_override(override_path, config, compose_files, overlay_path),
          :ok <- install_feature(paths.clone, config_dir, ctx) do
@@ -439,24 +434,29 @@ defmodule ForemanAgent.Env do
     SafeFS.write_atomic(path, JSON.encode!(override), 0o600)
   end
 
-  defp check_env_files(ctx, slug, compose_files, env, paths) do
-    with {:ok, raw} <- compose_config(ctx, slug, compose_files, env, paths.meta, @env_file_args) do
-      case Policy.check_env_files(raw, policy_ctx(paths, ctx.config)) do
+  # Before compose reads anything: compose reads env files, label files
+  # and the files it includes or extends while it parses, folds some of
+  # them in where the path no longer shows, and quotes any it can't parse
+  # in its error. See ForemanAgent.Env.ComposeScan.
+  defp scan_compose(paths, compose_files, spec, config) do
+    with {:ok, facts} <- ComposeScan.scan(paths.clone, compose_files) do
+      case Policy.check_sources(facts, policy_ctx(paths, spec, config)) do
         {:ok, warnings} -> {:ok, warnings}
         {:error, refused} -> {:error, refusal(refused)}
       end
     end
   end
 
-  defp check_policy(merged, devcontainer, paths, config) do
-    case Policy.check(merged, devcontainer, policy_ctx(paths, config)) do
+  defp check_policy(merged, devcontainer, paths, spec, config) do
+    case Policy.check(merged, devcontainer, policy_ctx(paths, spec, config)) do
       {:ok, warnings} -> {:ok, warnings}
       {:error, refused} -> {:error, refusal(refused)}
     end
   end
 
-  defp policy_ctx(paths, config) do
+  defp policy_ctx(paths, spec, config) do
     %{
+      project: spec.slug,
       workspace_root: paths.workspace,
       secrets_dir: paths.secrets,
       protected: ForemanAgent.Config.protected_paths(config),
@@ -515,7 +515,7 @@ defmodule ForemanAgent.Env do
         "--oci-auth-hardening"
       ]
 
-      with {:ok, warnings} <- check_resolved(config_args, env, paths, ctx) do
+      with {:ok, warnings} <- check_resolved(config_args, env, paths, spec, ctx) do
         warnings = Enum.uniq(prepared.warnings ++ warnings)
         up(paths, spec, %{prepared | warnings: warnings}, config_args, env, ctx, opts)
       end
@@ -524,7 +524,7 @@ defmodule ForemanAgent.Env do
 
   # Features can ask for privileges in their own metadata, which only the
   # CLI resolves. Ask it what the devcontainer will get before running it.
-  defp check_resolved(config_args, env, paths, ctx) do
+  defp check_resolved(config_args, env, paths, spec, ctx) do
     args = ["read-configuration", "--include-merged-configuration" | config_args]
 
     with {:ok, %{status: status, output: output}} <-
@@ -553,7 +553,7 @@ defmodule ForemanAgent.Env do
       if status != 0 or is_nil(resolved) do
         {:error, "devcontainer read-configuration failed: #{last_lines(output)}"}
       else
-        case Policy.check_resolved(resolved, policy_ctx(paths, ctx.config)) do
+        case Policy.check_resolved(resolved, policy_ctx(paths, spec, ctx.config)) do
           {:ok, warnings} ->
             Enum.each(warnings, &ctx.log.("info", "Warning: #{&1}\n"))
             {:ok, warnings}

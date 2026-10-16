@@ -291,4 +291,102 @@ defmodule ForemanAgent.Env.PolicyHardeningTest do
                Policy.check_resolved(resolved(%{"capAdd" => ["NET_ADMIN"]}, [foreman]), ctx.ctx)
     end
   end
+
+  describe "the merged config: keys and their values" do
+    test "a build can't run privileged, on the host network, or with entitlements", %{ctx: ctx} do
+      for build <- [
+            %{"context" => ".", "privileged" => true},
+            %{"context" => ".", "network" => "host"},
+            %{"context" => ".", "entitlements" => ["security.insecure"]}
+          ] do
+        assert {:error, [_]} = Policy.check(compose(%{"build" => build}), %{}, ctx)
+      end
+
+      assert {:ok, []} =
+               Policy.check(
+                 compose(%{"build" => %{"context" => ".", "network" => "none"}}),
+                 %{},
+                 ctx
+               )
+    end
+
+    test "an unknown service or top-level key", %{ctx: ctx} do
+      assert {:error, [message]} = Policy.check(compose(%{"runtime" => "runc"}), %{}, ctx)
+      assert message =~ "service 'app' uses runtime"
+
+      assert {:error, [message]} = Policy.check(compose(%{}, %{"models" => %{}}), %{}, ctx)
+      assert message =~ "models"
+
+      assert {:ok, []} =
+               Policy.check(
+                 compose(%{"runtime" => "runc"}),
+                 %{},
+                 loosen(ctx, %{compose_keys: :allow})
+               )
+    end
+
+    test "provider and use_api_socket", %{ctx: ctx} do
+      assert {:error, [message]} =
+               Policy.check(
+                 compose(%{"provider" => %{"type" => "./x"}}),
+                 %{},
+                 loosen(ctx, %{compose_keys: :allow})
+               )
+
+      assert message =~ "provider"
+
+      assert {:error, [message]} = Policy.check(compose(%{"use_api_socket" => true}), %{}, ctx)
+      assert message =~ "Docker socket"
+    end
+
+    test "a GPU reservation is a host device", %{ctx: ctx} do
+      deploy = %{
+        "resources" => %{"reservations" => %{"devices" => [%{"capabilities" => ["gpu"]}]}}
+      }
+
+      assert {:error, [message]} = Policy.check(compose(%{"deploy" => deploy}), %{}, ctx)
+      assert message =~ "device"
+    end
+
+    test "a network from outside the project", %{ctx: ctx} do
+      networks = %{
+        "default" => %{"name" => "s-1_default"},
+        "other" => %{"name" => "s-2_default", "external" => true}
+      }
+
+      assert {:error, [message]} = Policy.check(compose(%{}, %{"networks" => networks}), %{}, ctx)
+      assert message =~ "s-2_default"
+    end
+  end
+
+  describe "devcontainer.json volume mounts" do
+    test "an external volume that isn't this environment's", %{ctx: ctx} do
+      config = %{
+        "mounts" => ["type=volume,source=s-2_foreman-tailscale,target=/stolen,external=true"]
+      }
+
+      assert {:error, [message]} = Policy.check(compose(%{}), config, ctx)
+      assert message =~ "s-2_foreman-tailscale"
+    end
+
+    test "a project volume, or an external one of this environment's, is fine", %{ctx: ctx} do
+      for mount <- [
+            "type=volume,source=node_modules,target=/w/node_modules",
+            %{"type" => "volume", "source" => "s-1_cache", "target" => "/c", "external" => true}
+          ] do
+        assert {:ok, []} = Policy.check(compose(%{}), %{"mounts" => [mount]}, ctx)
+      end
+    end
+
+    test "a feature's external volume, in the resolved config", %{ctx: ctx} do
+      merged = %{
+        "mounts" => [
+          %{"type" => "volume", "source" => "victim", "target" => "/v", "external" => true}
+        ]
+      }
+
+      assert {:error, [_]} =
+               Policy.check_resolved(resolved(merged), Map.put(ctx, :project, "s-1"))
+    end
+  end
 end

@@ -175,7 +175,8 @@ defmodule Foreman.Boxes do
     "host_bind" => "bind mounts from outside the workspace",
     "host_file" => "env files, secrets and build contexts from outside the workspace",
     "devices" => "host devices",
-    "seccomp" => "containers with seccomp turned off (seccomp=unconfined)"
+    "seccomp" => "containers with seccomp turned off (seccomp=unconfined)",
+    "compose_keys" => "compose settings Foreman hasn't reviewed"
   }
 
   @doc """

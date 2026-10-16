@@ -118,12 +118,19 @@ to the box it runs on (up to the limits in "Known gaps").
   rewrite its own config) the agent checks the compose config with every
   profile enabled (`docker compose --profile '*' config`),
   `devcontainer.json`, and what the devcontainer CLI resolves from
-  features and image metadata, before anything runs. Env files are
-  checked first, in a pass without interpolation: with it, Compose 2.x
-  reads each env file into `environment:` and the path disappears from
-  the output. An env file path built from variables is refused, and so
-  are `runServices` entries that aren't in the checked compose files. By
-  default it refuses all of these:
+  features and image metadata, before anything runs. Compose reads some
+  files while it parses (env files, label files, the files a compose
+  file includes or extends, and an include's env files), folds them in
+  where the path no longer shows, and quotes any it can't parse in its
+  error. So before compose runs, the agent reads the repo's compose files
+  itself (with a vendored js-yaml, run by the box's Node: Erlang's yamerl
+  resolves aliases to lists and maps wrongly), follows includes and
+  extends inside the clone, and checks every file compose would read.
+  Merge keys are kept rather than merged, so every value a merge could
+  produce is checked. A path built from variables, a remote include, an
+  unknown YAML tag, or files that expand past a size budget are refused,
+  and so are `runServices` entries that aren't in the checked compose
+  files. By default it refuses all of these:
   - privileged containers: `privileged: true`, the docker-in-docker
     feature, any feature whose metadata asks for privileged, and
     capabilities that amount to root on the box (`SYS_ADMIN`,
@@ -149,12 +156,26 @@ to the box it runs on (up to the limits in "Known gaps").
     `o: bind` or a `device`), and volumes from outside the project
     (`external`, or a `name:` belonging to another project)
   - host devices other than `/dev/net/tun`, including through
-    `device_cgroup_rules`
+    `device_cgroup_rules` and GPU reservations under `deploy`
+  - builds that run privileged, on the host network, or with BuildKit
+    entitlements (`security.insecure` is privileged)
+  - networks from outside the project (`external`, or a fixed `name:`):
+    another environment's network reaches its sidecars
+  - `devcontainer.json` or feature mounts of an `external` volume that
+    isn't this environment's
+  - `use_api_socket` (the Docker socket, under its rule)
+  - any compose key the agent hasn't reviewed (`compose_keys`), at the
+    top level, in a service or in a build: whatever Compose adds next is
+    refused until someone has looked at it. `x-` extension keys are fine.
+
+  `provider` services are refused whatever the box allows: Compose runs a
+  provider's `type` as a program on the box.
 
   Binds and host files that expose the agent's state, other environments
   or secrets directories are refused whatever the box allows. A failed
   `compose config` returns a generic error; its output goes to the
-  redacted operation log, never into the error. A box can loosen a
+  redacted operation log, never into the error, and the agent's own key
+  is redacted from everything it sends. A box can loosen a
   rule with `FOREMAN_POLICY` on its agent (for example
   `privileged=allow`). The agent reports its policy when it connects,
   and the control plane shows any box that has loosened one with a red

@@ -27,7 +27,9 @@ defmodule ForemanAgent.Redactor do
     env = payload |> Map.get(:compose_env, %{}) |> Map.values()
     registry = payload |> Map.get(:registry_auth, []) |> Kernel.||([]) |> Enum.map(& &1.token)
 
-    %__MODULE__{values: Redaction.prepare(files ++ env ++ registry)}
+    agent = ForemanAgent.Identity.secrets()
+
+    %__MODULE__{values: Redaction.prepare(files ++ env ++ registry ++ agent)}
   end
 
   @doc "Redacts `text`, and replaces any invalid UTF-8 (events are JSON)."

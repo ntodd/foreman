@@ -42,7 +42,39 @@ defmodule ForemanAgent.Env.Policy do
     {"userns_mode", "user namespace"}
   ]
 
+  # Keys reviewed for what they let a container or build do. Anything else
+  # (a key Compose adds later, say) falls under the compose_keys rule, so
+  # it's refused until someone has looked at it. `provider` (runs a program
+  # on the box) and `use_api_socket` (the Docker socket) have findings of
+  # their own. x-* extension keys are always fine.
+  @top_level_keys ~w(name version services networks volumes secrets configs include)
+
+  @service_keys ~w(annotations attach blkio_config build cap_add cap_drop cgroup command
+                   configs container_name cpu_count cpu_percent cpu_period cpu_quota
+                   cpu_rt_period cpu_rt_runtime cpu_shares cpus cpuset depends_on deploy develop
+                   device_cgroup_rules devices dns dns_opt dns_search domainname entrypoint
+                   env_file environment expose extends extra_hosts group_add healthcheck
+                   hostname image init ipc label_file labels links logging mac_address mem_limit
+                   mem_reservation mem_swappiness memswap_limit network_mode networks
+                   oom_kill_disable oom_score_adj pid pids_limit platform ports post_start
+                   pre_stop privileged profiles pull_policy read_only restart scale secrets
+                   security_opt shm_size stdin_open stop_grace_period stop_signal storage_opt
+                   sysctls tmpfs tty ulimits user userns_mode uts volumes volumes_from
+                   working_dir)
+
+  @build_keys ~w(context dockerfile dockerfile_inline args ssh cache_from cache_to
+                 additional_contexts extra_hosts labels no_cache pull shm_size target secrets
+                 tags ulimits platforms network privileged entitlements)
+
   def default_rules, do: @default_rules
+
+  @doc "Whether a compose file's top-level `key` has been reviewed."
+  def known_top_level_key?(key), do: key in @top_level_keys or extension?(key)
+
+  @doc "Whether a compose service's `key` has been reviewed."
+  def known_service_key?(key), do: key in @service_keys or extension?(key)
+
+  defp extension?(key), do: is_binary(key) and String.starts_with?(key, "x-")
 
   @type ctx :: %{
           workspace_root: Path.t(),
@@ -53,36 +85,58 @@ defmodule ForemanAgent.Env.Policy do
 
   @spec check(map(), map(), ctx()) :: {:ok, [String.t()]} | {:error, [String.t()]}
   def check(compose, devcontainer, ctx) do
+    ctx = Map.put_new(ctx, :project, compose["name"])
     verdict(compose_findings(compose, ctx) ++ devcontainer_findings(devcontainer, ctx))
   end
 
   @doc """
-  Checks the env files `compose` (the output of `docker compose config
-  --no-interpolate`) names. With interpolation, Compose 2.x reads every
-  env file and folds it into `environment:`, even with
-  `--no-env-resolution`, so `check/3` never sees them. Without it, a path
-  built from variables (which a repo's `.env` sets) can't be checked, so
-  it's refused.
+  Checks what `ForemanAgent.Env.ComposeScan` found in the repo's compose
+  files before compose read them: the files compose would read while it
+  parses, and keys it would meet. A path built from variables (a repo's
+  `.env` sets them) or a remote file can't be checked, so it's refused.
   """
-  @spec check_env_files(map(), ctx()) :: {:ok, [String.t()]} | {:error, [String.t()]}
-  def check_env_files(compose, ctx) do
-    verdict(
-      for {service, %{} = svc} <- compose["services"] || %{},
-          entry <- List.wrap(svc["env_file"]),
-          path = env_file_path(entry),
-          is_binary(path),
-          finding <- uninterpolated_env_file(service, path, ctx),
-          do: finding
+  @spec check_sources([ForemanAgent.Env.ComposeScan.fact()], ctx()) ::
+          {:ok, [String.t()]} | {:error, [String.t()]}
+  def check_sources(facts, ctx), do: verdict(Enum.flat_map(facts, &source_finding(&1, ctx)))
+
+  defp source_finding({:file, what, path}, ctx) do
+    cond do
+      String.contains?(path, "$") ->
+        [{:refuse, "#{what} #{path}, which is built from variables; use a plain path"}]
+
+      String.contains?(path, "://") or String.starts_with?(path, "git@") ->
+        [{:refuse, "#{what} #{path}, a remote file; compose files must come from the repository"}]
+
+      true ->
+        host_file_finding(what, path, ctx)
+    end
+  end
+
+  defp source_finding({:key, where, key}, ctx), do: [unknown_key(where, key, ctx)]
+  defp source_finding({:provider, service}, _ctx), do: [provider(service)]
+  defp source_finding({:api_socket, service}, ctx), do: [api_socket(service, ctx)]
+
+  defp unknown_key(where, key, ctx) do
+    rule(
+      ctx,
+      :compose_keys,
+      "#{where} uses #{key}, which Foreman doesn't know what to make of; " <>
+        "remove it, or allow it on this box with FOREMAN_POLICY=compose_keys=allow"
     )
   end
 
-  defp uninterpolated_env_file(service, path, ctx) do
-    if String.contains?(path, "$"),
-      do: [
-        {:refuse,
-         "service '#{service}' names env_file #{path}, which is built from variables; use a plain path"}
-      ],
-      else: host_file_finding("service '#{service}' reads env_file", path, ctx)
+  # Compose runs a provider service's `type` as a program on the box.
+  defp provider(service),
+    do:
+      {:refuse,
+       "service '#{service}' is a provider service, which runs a program on the box; it can't run in an environment"}
+
+  defp api_socket(service, ctx) do
+    rule(
+      ctx,
+      :docker_socket,
+      "service '#{service}' sets use_api_socket, which gives it the Docker socket: root on the box"
+    )
   end
 
   @doc """
@@ -207,18 +261,70 @@ defmodule ForemanAgent.Env.Policy do
         finding
       end
 
-    services ++ top_level ++ named_volume_findings(compose, ctx)
+    top_keys =
+      for key <- Map.keys(compose),
+          not known_top_level_key?(key),
+          do: unknown_key("the compose config", key, ctx)
+
+    services ++
+      top_level ++
+      named_volume_findings(compose, ctx) ++
+      network_findings(compose, ctx) ++ top_keys
+  end
+
+  # Networks outside the project: another environment's, which its
+  # sidecars (a database, say) are on, or a shared one.
+  defp network_findings(compose, ctx) do
+    project = compose["name"]
+
+    for {key, spec} <- Map.get(compose, "networks") || %{},
+        is_map(spec),
+        name = spec["name"],
+        is_binary(name),
+        not (is_binary(project) and String.starts_with?(name, project <> "_")) do
+      rule(
+        ctx,
+        :host_namespace,
+        "network '#{key}' is the Docker network #{name}, outside this environment"
+      )
+    end
   end
 
   defp service_findings(name, svc, ctx) do
-    Enum.flat_map(svc["volumes"] || [], &volume_finding(name, &1, ctx)) ++
+    key_findings(name, svc, ctx) ++
+      Enum.flat_map(svc["volumes"] || [], &volume_finding(name, &1, ctx)) ++
       env_file_findings(name, svc, ctx) ++
       build_findings(name, svc, ctx) ++
       device_findings(name, svc, ctx) ++
       privilege_findings(name, svc, ctx) ++
       namespace_findings(name, svc, ctx) ++
       volumes_from_findings(name, svc, ctx) ++
-      security_opt_findings("service '#{name}'", svc["security_opt"], ctx)
+      security_opt_findings("service '#{name}'", svc["security_opt"], ctx) ++
+      gpu_findings(name, svc, ctx)
+  end
+
+  defp key_findings(name, svc, ctx) do
+    for key <- Map.keys(svc), finding <- service_key(name, key, svc, ctx), do: finding
+  end
+
+  defp service_key(name, "provider", _svc, _ctx), do: [provider(name)]
+
+  defp service_key(name, "use_api_socket", svc, ctx),
+    do: if(svc["use_api_socket"] in [false, nil], do: [], else: [api_socket(name, ctx)])
+
+  defp service_key(name, key, _svc, ctx) do
+    if known_service_key?(key), do: [], else: [unknown_key("service '#{name}'", key, ctx)]
+  end
+
+  # deploy.resources.reservations.devices: GPUs and other host devices.
+  defp gpu_findings(name, svc, ctx) do
+    case get_in(svc, ["deploy", "resources", "reservations", "devices"]) do
+      devices when is_list(devices) and devices != [] ->
+        [rule(ctx, :devices, "service '#{name}' reserves host devices (#{inspect(devices)})")]
+
+      _ ->
+        []
+    end
   end
 
   defp volume_finding(service, %{"type" => "bind", "source" => source} = vol, ctx) do
@@ -384,10 +490,34 @@ defmodule ForemanAgent.Env.Policy do
         finding
       end
 
-    context_findings ++ file_findings
+    context_findings ++ file_findings ++ build_privileges(service, build, ctx)
   end
 
   defp build_findings(_service, _svc, _ctx), do: []
+
+  # A build's own privileges: its RUN steps on the host network, privileged,
+  # or with BuildKit entitlements (security.insecure is privileged).
+  defp build_privileges(service, build, ctx) do
+    keys =
+      for key <- Map.keys(build),
+          key not in @build_keys and not extension?(key),
+          do: unknown_key("service '#{service}' build", key, ctx)
+
+    [
+      build["privileged"] == true &&
+        rule(ctx, :privileged, "service '#{service}' builds privileged, which is root on the box"),
+      build["network"] == "host" &&
+        rule(ctx, :host_namespace, "service '#{service}' builds on the host network"),
+      List.wrap(build["entitlements"]) != [] &&
+        rule(
+          ctx,
+          :privileged,
+          "service '#{service}' builds with entitlements #{Enum.join(List.wrap(build["entitlements"]), ", ")}"
+        )
+    ]
+    |> Enum.filter(& &1)
+    |> Kernel.++(keys)
+  end
 
   # A Dockerfile can sit outside its context, and ssh keys are read from
   # the host. Both are relative to a local context; with a remote one,
@@ -582,13 +712,34 @@ defmodule ForemanAgent.Env.Policy do
 
   defp mount_findings(config, ctx) do
     for mount <- List.wrap(config["mounts"]),
-        {source, target, type, ro} = parse_mount(mount),
-        type == "bind",
+        {source, target, type, ro, external} = parse_mount(mount),
         is_binary(source),
-        finding <- bind_finding("devcontainer.json", source, target, ro, ctx) do
+        finding <- mount_finding(type, source, target, ro, external, ctx) do
       finding
     end
   end
+
+  defp mount_finding("bind", source, target, ro, _external, ctx),
+    do: bind_finding("devcontainer.json", source, target, ro, ctx)
+
+  # The CLI declares an external mount's volume by its own name, not the
+  # project's, so it can be any volume on the box: another environment's
+  # database or Tailscale identity. Without `external` it's this project's.
+  defp mount_finding("volume", source, _target, _ro, true, ctx) do
+    project = ctx[:project]
+
+    if is_binary(project) and String.starts_with?(source, project <> "_"),
+      do: [],
+      else: [
+        rule(
+          ctx,
+          :host_bind,
+          "devcontainer.json mounts the Docker volume #{source}, which belongs outside this environment"
+        )
+      ]
+  end
+
+  defp mount_finding(_type, _source, _target, _ro, _external, _ctx), do: []
 
   defp privileged_feature(id),
     do: "feature #{id} runs the devcontainer privileged, which is root on the box"
@@ -601,7 +752,10 @@ defmodule ForemanAgent.Env.Policy do
 
   defp cap_name(cap), do: cap |> String.upcase() |> String.replace_prefix("CAP_", "")
 
-  defp parse_mount(%{} = m), do: {m["source"], m["target"], m["type"], m["readonly"] == true}
+  defp parse_mount(%{} = m),
+    do:
+      {m["source"], m["target"], m["type"], m["readonly"] == true,
+       m["external"] in [true, "true"]}
 
   defp parse_mount(m) when is_binary(m) do
     pairs =
@@ -615,10 +769,11 @@ defmodule ForemanAgent.Env.Policy do
       end)
 
     {pairs["source"] || pairs["src"], pairs["target"] || pairs["dst"] || pairs["destination"],
-     pairs["type"], Map.has_key?(pairs, "readonly") or Map.has_key?(pairs, "ro")}
+     pairs["type"], Map.has_key?(pairs, "readonly") or Map.has_key?(pairs, "ro"),
+     pairs["external"] == "true"}
   end
 
-  defp parse_mount(_), do: {nil, nil, nil, false}
+  defp parse_mount(_), do: {nil, nil, nil, false, false}
 
   # -- paths -----------------------------------------------------------------
 

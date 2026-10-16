@@ -48,6 +48,24 @@ edit the files in its workspace. By default a box refuses:
   loosens seccomp, not privileged containers.
 - other `security_opt` settings, joining another container's namespaces
   or volumes, and named volumes that are really host paths
+- env files, label files, and included or extended compose files outside
+  the workspace, or with paths built from variables (`${...}`), and
+  remote includes. Use plain paths inside the repo.
+- networks from outside the project (an `external` network, or one with
+  a fixed `name:`), and `devcontainer.json` mounts of `external` volumes
+  that aren't the environment's own
+- builds with `privileged`, `network: host` or `entitlements`, and GPU
+  reservations (`gpus`, `deploy.resources.reservations.devices`)
+- compose keys Foreman hasn't reviewed, such as `runtime`,
+  `cgroup_parent`, `external_links`, `gpus`, `models` or
+  `use_api_socket`. A box can allow unreviewed keys with
+  `FOREMAN_POLICY=compose_keys=allow`. `x-` extension keys are always
+  fine.
+- `provider` services, whatever the box allows: compose runs a
+  provider's `type` as a program on the box.
+
+The check reads compose files with Node (which the devcontainer CLI needs
+anyway), so a box needs Node on its `PATH`.
 
 Ordinary capabilities such as `NET_ADMIN` or `SYS_PTRACE` (debuggers)
 are fine. Binds that expose the agent's own state, other environments

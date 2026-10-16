@@ -177,11 +177,9 @@ defmodule ForemanAgent.EnvTest do
       clone = Path.join([config.envs_root, @env_id, "workspace", "storefront"])
       meta = Path.join([config.envs_root, @env_id, "meta"])
 
-      [git, env_files, _services, _policy, read_config, up] = runs()
-
-      # Env files are checked before anything interpolates (and reads) them.
-      {"docker", ["compose" | env_file_args], _} = env_files
-      assert "--no-interpolate" in env_file_args
+      # The repo's compose files are read before compose reads anything
+      # (ComposeScan), so compose itself runs twice: services, then policy.
+      [git, _services, _policy, read_config, up] = runs()
 
       {"git", git_args, git_opts} = git
 

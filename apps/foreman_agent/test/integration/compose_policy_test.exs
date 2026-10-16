@@ -61,7 +61,7 @@ defmodule ForemanAgent.Integration.ComposePolicyTest do
   end
 
   # Real `docker compose`; everything else stubbed.
-  defp stub_tools(devcontainer, compose_yaml) do
+  defp stub_tools(devcontainer, compose_yaml, extra \\ %{}) do
     test_pid = self()
 
     stub(RunnerMock, :run, fn command, args, opts ->
@@ -72,9 +72,11 @@ defmodule ForemanAgent.Integration.ComposePolicyTest do
           File.mkdir_p!(Path.join(dest, ".devcontainer"))
           File.write!(Path.join(dest, ".devcontainer/devcontainer.json"), devcontainer)
           File.write!(Path.join(dest, ".devcontainer/docker-compose.yml"), compose_yaml)
+          for {rel, content} <- extra, do: File.write!(Path.join(dest, rel), content)
           {:ok, %{status: 0, output: ""}}
 
         {"docker", ["compose" | rest]} ->
+          send(test_pid, {:compose, rest})
           env = System.get_env() |> Map.merge(opts[:env] || %{}) |> Map.delete("DOCKER_HOST")
 
           {out, status} =
@@ -154,6 +156,56 @@ defmodule ForemanAgent.Integration.ComposePolicyTest do
     assert {:error, message} = Env.run("env.create", payload(), ctx)
     assert message =~ "a protected path"
     refute message <> logged() =~ "QUdFTlRfUFJJVkFURV9LRVk="
+  end
+
+  # Compose reads these while it parses, before its output shows anything
+  # a check of the config could catch, so they're refused before compose
+  # runs at all.
+  test "an include's env_file holding another environment's secrets", %{ctx: ctx, config: config} do
+    other = Path.join([config.secrets_root, @other_env_id, "secrets.env"])
+
+    stub_tools(@devcontainer, "include:\n  - path: inc.yml\n    env_file: #{other}\n", %{
+      ".devcontainer/inc.yml" =>
+        "services:\n  app:\n    image: alpine\n    environment:\n      STOLEN: ${OTHER_DATABASE_URL}\n"
+    })
+
+    assert {:error, message} = Env.run("env.create", payload(), ctx)
+    assert message =~ "env_file #{other}"
+    refute_received {:compose, _}
+    refute_received :up
+  end
+
+  test "a label_file can't quote the agent's key", %{ctx: ctx, config: config} do
+    identity = Path.join(config.data_dir, "identity.json")
+
+    stub_tools(
+      @devcontainer,
+      "services:\n  app:\n    image: alpine\n    label_file: #{identity}\n"
+    )
+
+    assert {:error, message} = Env.run("env.create", payload(), ctx)
+    assert message =~ "label_file"
+    refute message <> logged() =~ "QUdFTlRfUFJJVkFURV9LRVk="
+    refute_received {:compose, _}
+  end
+
+  test "use_api_socket is the Docker socket", %{ctx: ctx} do
+    stub_tools(@devcontainer, "services:\n  app:\n    image: alpine\n    use_api_socket: true\n")
+
+    assert {:error, message} = Env.run("env.create", payload(), ctx)
+    assert message =~ "Docker socket"
+    refute_received :up
+  end
+
+  test "a provider service is refused", %{ctx: ctx} do
+    stub_tools(
+      @devcontainer,
+      "services:\n  app:\n    image: alpine\n  p:\n    provider:\n      type: ./evil\n"
+    )
+
+    assert {:error, message} = Env.run("env.create", payload(), ctx)
+    assert message =~ "provider"
+    refute_received :up
   end
 
   defp logged do
