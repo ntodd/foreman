@@ -25,7 +25,12 @@ defmodule Foreman.GitHub.Client do
   @callback refresh_user_token(app, refresh_token :: String.t()) ::
               {:ok, tokens} | {:error, :bad_refresh_token | term()}
   @callback get_user(token :: String.t()) :: {:ok, map()} | {:error, term()}
-  @callback org_member?(token :: String.t(), org :: String.t()) :: boolean()
+  @doc """
+  Whether the token's user is an active member of `org`. `{:ok, false}`
+  only when GitHub says so; anything else that goes wrong is an error.
+  """
+  @callback org_membership(token :: String.t(), org :: String.t()) ::
+              {:ok, boolean()} | {:error, term()}
   @callback scope_user_token(
               app,
               token :: String.t(),

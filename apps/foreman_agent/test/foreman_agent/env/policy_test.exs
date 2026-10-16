@@ -186,19 +186,23 @@ defmodule ForemanAgent.Env.PolicyTest do
     assert message =~ "/etc"
   end
 
-  test "flags extra devices other than the TUN device" do
+  test "flags host devices" do
     config =
-      compose(%{
-        "app" => %{
-          "devices" => [
-            %{"source" => "/dev/net/tun", "target" => "/dev/net/tun"},
-            %{"source" => "/dev/sda", "target" => "/dev/sda"}
-          ]
-        }
-      })
+      compose(%{"app" => %{"devices" => [%{"source" => "/dev/sda", "target" => "/dev/sda"}]}})
 
     assert {:error, [message]} = Policy.check(config, %{}, ctx())
     assert message =~ "/dev/sda"
+  end
+
+  # Tailscale runs in userspace mode, so a TUN device is only left over
+  # from a repo's own Tailscale setup. Say so, rather than just refusing.
+  test "flags the TUN device, saying Foreman doesn't need it" do
+    config =
+      compose(%{"app" => %{"devices" => ["/dev/net/tun:/dev/net/tun"]}})
+
+    assert {:error, [message]} = Policy.check(config, %{}, ctx())
+    assert message =~ "/dev/net/tun"
+    assert message =~ "Tailscale"
   end
 
   describe "the resolved configuration (features included)" do

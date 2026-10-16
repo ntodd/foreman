@@ -7,16 +7,20 @@ defmodule ForemanWeb.AgentController do
   use ForemanWeb, :controller
 
   alias Foreman.Agents.Releases
-  alias Foreman.Boxes
+  alias Foreman.{Boxes, RateLimit}
+
+  # Failed enrollments count per client (see Foreman.RateLimit).
+  @max_failures 10
+  @window 60_000
 
   def enroll(conn, params) do
-    ip = conn.remote_ip |> :inet.ntoa() |> to_string()
+    key = "enroll-failed:#{ForemanWeb.ClientIP.from_conn(conn)}"
 
-    with {:allow, _} <- Foreman.RateLimit.hit("enroll:#{ip}", 60_000, 10),
-         {:ok, box} <- Boxes.enroll(params["join_token"], params) do
+    with false <- RateLimit.exhausted?(key, @window, @max_failures),
+         {:ok, box} <- count_failure(Boxes.enroll(params["join_token"], params), key) do
       conn |> put_status(:created) |> json(%{agent_id: box.id, box: box.name})
     else
-      {:deny, _} ->
+      true ->
         conn |> put_status(:too_many_requests) |> json(%{error: "too many attempts"})
 
       {:error, :bad_key} ->
@@ -65,6 +69,13 @@ defmodule ForemanWeb.AgentController do
       _ ->
         conn |> put_status(:not_found) |> json(%{error: "no such release"})
     end
+  end
+
+  defp count_failure({:ok, _} = ok, _key), do: ok
+
+  defp count_failure(error, key) do
+    RateLimit.failed(key, @window, @max_failures)
+    error
   end
 
   defp latest_version(target) do

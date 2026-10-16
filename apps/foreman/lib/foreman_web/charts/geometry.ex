@@ -16,8 +16,14 @@ defmodule ForemanWeb.Charts.Geometry do
   def x(at, %{since: since, until: until}) when until > since,
     do: Float.round((at - since) / (until - since) * @width, 1)
 
+  # An empty range has nowhere to put anything but the left edge.
+  def x(_at, _dom), do: 0.0
+
   def y(v, %{ymax: ymax}) when ymax > 0,
     do: Float.round(@height - min(max(v / ymax, 0.0), 1.0) * @height, 1)
+
+  # No scale (a total the box couldn't read): draw on the baseline.
+  def y(_v, _dom), do: @height * 1.0
 
   @doc "Splits points into runs wherever consecutive samples are more than `gap` apart."
   def runs([], _gap), do: []

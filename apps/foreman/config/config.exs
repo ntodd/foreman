@@ -21,6 +21,15 @@ config :foreman, Foreman.Repo,
   migration_foreign_key: [type: :binary_id],
   migration_timestamps: [type: :utc_datetime_usec]
 
+# SQLite: transactions take the write lock when they begin. A deferred
+# one that reads and then writes fails at once ("database busy", which
+# busy_timeout doesn't cover) if anything else wrote in between. Taking
+# the lock up front means writers queue instead, so give them longer than
+# the 2s default before an agent channel gives up and reconnects.
+if database == "sqlite" do
+  config :foreman, Foreman.Repo, default_transaction_mode: :immediate, busy_timeout: 15_000
+end
+
 config :foreman, Oban,
   engine: if(database == "sqlite", do: Oban.Engines.Lite, else: Oban.Engines.Basic),
   notifier: if(database == "sqlite", do: Oban.Notifiers.PG, else: Oban.Notifiers.Postgres),
@@ -32,6 +41,7 @@ config :foreman, Oban,
     {Oban.Plugins.Cron,
      crontab: [
        {"*/30 * * * *", Foreman.Jobs.RefreshTokens},
+       {"41 */6 * * *", Foreman.Jobs.CheckAccess},
        {"*/15 * * * *", Foreman.Jobs.SyncRepos},
        {"7 * * * *", Foreman.Jobs.CleanupTailnet},
        {"*/5 * * * *", Foreman.Jobs.Housekeeping},

@@ -146,7 +146,8 @@ defmodule ForemanWeb.AdminLive.Deployment do
           <.badge :if={not @tailscale} color="amber" dot>Off</.badge>
           <p class="mt-2 text-sm text-ink-2">
             {if @tailscale,
-              do: "Environments join the tailnet tagged #{Enum.join(Tailscale.base_tags(), ", ")}.",
+              do:
+                "Environments join the tailnet tagged #{Enum.join(Enum.uniq([Tailscale.marker_tag() | Tailscale.base_tags()]), ", ")}.",
               else:
                 "Set FOREMAN_TAILSCALE_CLIENT_ID and _SECRET (an OAuth client with auth_keys and devices:core) to join environments to the tailnet."}
           </p>

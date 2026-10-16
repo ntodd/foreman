@@ -26,6 +26,7 @@ defmodule Foreman.Repos.Repo do
     field :manual, :boolean, default: false
     field :devcontainer_path, :string
     field :devcontainer_checked_at, :utc_datetime_usec
+    field :removed_at, :utc_datetime_usec
     field :devcontainer_error, :string
     field :host_requirements, :map
     field :private_registry_refs, {:array, :string}, default: []
@@ -57,7 +58,8 @@ defmodule Foreman.Repos.Repo do
       :devcontainer_checked_at,
       :devcontainer_error,
       :host_requirements,
-      :private_registry_refs
+      :private_registry_refs,
+      :removed_at
     ])
     |> validate_required([:full_name, :name])
     |> validate_format(

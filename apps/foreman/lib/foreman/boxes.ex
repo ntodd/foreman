@@ -174,7 +174,9 @@ defmodule Foreman.Boxes do
     "docker_socket" => "the Docker socket",
     "host_bind" => "bind mounts from outside the workspace",
     "host_file" => "env files, secrets and build contexts from outside the workspace",
-    "devices" => "host devices"
+    "devices" => "host devices",
+    "seccomp" => "containers with seccomp turned off (seccomp=unconfined)",
+    "compose_keys" => "compose settings Foreman hasn't reviewed"
   }
 
   @doc """
@@ -213,7 +215,7 @@ defmodule Foreman.Boxes do
 
   def update_box(%Scope{} = scope, %Box{} = box, attrs) do
     with :ok <- authorize_admin(scope),
-         {:ok, updated} <- box |> Box.settings_changeset(normalize(attrs)) |> Repo.update() do
+         {:ok, updated} <- box |> settings_changeset(normalize(attrs)) |> Repo.update() do
       Audit.log(scope, "box.update", updated)
       broadcast(updated, :updated)
 
@@ -222,6 +224,15 @@ defmodule Foreman.Boxes do
 
       {:ok, updated}
     end
+  end
+
+  # Picking a version again is the way to retry one that failed.
+  defp settings_changeset(box, attrs) do
+    changeset = Box.settings_changeset(box, attrs)
+
+    if Ecto.Changeset.changed?(changeset, :desired_agent_version),
+      do: Ecto.Changeset.put_change(changeset, :failed_agent_version, nil),
+      else: changeset
   end
 
   defp normalize(attrs) do

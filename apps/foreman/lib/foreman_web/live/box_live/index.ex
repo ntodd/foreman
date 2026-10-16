@@ -96,6 +96,33 @@ defmodule ForemanWeb.BoxLive.Index do
      end)}
   end
 
+  # Every box sends stats every 30 seconds, which only changes its
+  # capacity and usage: redraw that box's card, nothing else. The trend
+  # line follows box.metrics above.
+  def handle_info({:box_stats, box_id}, socket) do
+    shown? = Enum.any?(socket.assigns.boxes, &(&1.box.id == box_id))
+
+    case shown? && Boxes.get_box(box_id) do
+      %{} = fresh ->
+        {:noreply,
+         update_card(socket, box_id, fn card ->
+           box = %{card.box | capacity: fresh.capacity, last_seen_at: fresh.last_seen_at}
+           envs = Environments.live_for_box(box_id)
+
+           %{
+             card
+             | box: box,
+               online: Boxes.online?(box_id),
+               summary: Capacity.box_summary(box, envs),
+               count: length(envs)
+           }
+         end)}
+
+      _ ->
+        {:noreply, socket}
+    end
+  end
+
   def handle_info(_message, socket), do: {:noreply, load(socket)}
 
   @impl true

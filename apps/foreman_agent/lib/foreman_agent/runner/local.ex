@@ -1,13 +1,17 @@
 defmodule ForemanAgent.Runner.Local do
   @moduledoc """
-  `ForemanAgent.Runner` on MuonTrap, so cancelling an operation (killing
-  its process) takes the whole child process tree with it.
+  `ForemanAgent.Runner` on MuonTrap.
+
+  Cancelling an operation, or a command running past its `:timeout`, kills
+  the command's whole process tree (`ForemanAgent.Runner.Tree`).
   """
   @behaviour ForemanAgent.Runner
 
-  alias ForemanAgent.Runner.Collector
+  alias ForemanAgent.Runner.{Collector, Tree}
 
   @default_keep 65_536
+  # How long a timed-out command gets to exit after SIGTERM.
+  @grace 5_000
 
   @impl true
   def run(command, args, opts) do
@@ -24,10 +28,58 @@ defmodule ForemanAgent.Runner.Local do
             env: child_env(Keyword.get(opts, :env, %{})),
             stderr_to_stdout: true,
             into: %Collector{keep: keep, on_output: on_output}
-          ] ++ Keyword.take(opts, [:cd, :timeout])
+          ] ++ Keyword.take(opts, [:cd])
 
-        {collector, status} = MuonTrap.cmd(path, args, cmd_opts)
+        {collector, status} =
+          with_timeout(opts[:timeout], fn -> MuonTrap.cmd(path, args, cmd_opts) end)
+
         {:ok, %{status: status, output: Collector.output(collector)}}
+    end
+  end
+
+  # MuonTrap's own timeout only kills the direct child, so a watchdog
+  # takes the tree down instead; the command then returns on its own.
+  defp with_timeout(nil, fun), do: fun.()
+
+  defp with_timeout(timeout, fun) do
+    caller = self()
+    ref = make_ref()
+
+    {watchdog, monitor} =
+      spawn_monitor(fn ->
+        caller_monitor = Process.monitor(caller)
+
+        receive do
+          ^ref -> :ok
+          {:DOWN, ^caller_monitor, _, _, _} -> :ok
+        after
+          timeout ->
+            send(caller, {ref, :timed_out})
+            Tree.terminate(Tree.os_pids(caller), @grace)
+        end
+      end)
+
+    {collector, status} =
+      try do
+        fun.()
+      after
+        send(watchdog, ref)
+      end
+
+    receive do
+      {^ref, :timed_out} ->
+        # Let the watchdog finish off the rest of the tree first.
+        receive do
+          {:DOWN, ^monitor, _, _, _} -> :ok
+        after
+          @grace * 3 -> :ok
+        end
+
+        {collector, :timeout}
+    after
+      0 ->
+        Process.demonitor(monitor, [:flush])
+        {collector, status}
     end
   end
 

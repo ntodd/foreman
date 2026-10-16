@@ -18,7 +18,7 @@ defmodule ForemanAgent.Env do
       %{config: %Config{}, runner: module, docker: module, log: fn stream, data -> ... end}
   """
 
-  alias ForemanAgent.Env.{Affected, Overlay, Policy}
+  alias ForemanAgent.Env.{Affected, ComposeScan, Overlay, Policy}
   alias ForemanAgent.SafeFS
   alias ForemanProtocol.Jsonc
 
@@ -27,6 +27,15 @@ defmodule ForemanAgent.Env do
   @secret_mode 0o600
   @max_config_bytes 1_048_576
   @feature_ref "./.foreman/feature"
+
+  # A hung docker, compose or git would otherwise hold the environment's
+  # queue until the agent restarts. Builds get the longest.
+  @command_timeout :timer.minutes(30)
+  @clone_timeout :timer.minutes(60)
+  # Under the control plane's three-hour cutoff, so the agent's own
+  # message is the one people see.
+  @up_timeout :timer.minutes(165)
+  @logs_timeout :timer.minutes(5)
 
   @type ctx :: %{
           config: ForemanAgent.Config.t(),
@@ -42,7 +51,10 @@ defmodule ForemanAgent.Env do
   def run("env.stop", p, ctx), do: stop(p, ctx)
   def run("env.restart", p, ctx), do: restart(p, ctx)
   def run("env.destroy", p, ctx), do: destroy(p, ctx)
-  def run("env.secrets.write", p, ctx), do: write_secrets(paths(ctx.config, p.env_id), p.files)
+
+  def run("env.secrets.write", p, ctx),
+    do: write_secrets(paths(ctx.config, p.env_id), p.files, Map.get(p, :keep, []))
+
   def run("env.logs", p, ctx), do: logs(p, ctx)
   def run("env.git_status", p, ctx), do: git_status(p, ctx)
 
@@ -126,7 +138,9 @@ defmodule ForemanAgent.Env do
 
   # -- secrets -------------------------------------------------------------
 
-  defp write_secrets(paths, files) do
+  # Files missing from `files` are removed, except those named in `keep`
+  # (a GitHub token the control plane couldn't renew just now).
+  defp write_secrets(paths, files, keep \\ []) do
     with :ok <- ensure_secrets_dir(paths) do
       results =
         for name <- ForemanProtocol.Schema.secret_files() do
@@ -134,16 +148,21 @@ defmodule ForemanAgent.Env do
 
           case Map.fetch(files, name) do
             {:ok, content} -> SafeFS.write_atomic(path, content, @secret_mode)
-            :error -> rm_quiet(path)
+            :error -> remove_unless_kept(path, name in keep)
           end
         end
 
+      kept = keep |> Enum.reject(&Map.has_key?(files, &1)) |> Enum.sort()
+
       case Enum.find(results, &(&1 != :ok)) do
-        nil -> {:ok, %{"files" => files |> Map.keys() |> Enum.sort()}}
+        nil -> {:ok, %{"files" => files |> Map.keys() |> Enum.sort(), "kept" => kept}}
         {:error, reason} -> {:error, "couldn't write secrets: #{inspect(reason)}"}
       end
     end
   end
+
+  defp remove_unless_kept(_path, true), do: :ok
+  defp remove_unless_kept(path, false), do: rm_quiet(path)
 
   defp rm_quiet(path) do
     case File.rm(path) do
@@ -155,35 +174,56 @@ defmodule ForemanAgent.Env do
 
   # -- clone ---------------------------------------------------------------
 
+  # A clone is kept once the environment has come up (it holds the
+  # developer's work). Before that, a retry clones again, so a fix pushed
+  # after a failed create is picked up.
   defp ensure_clone(paths, p, ctx) do
-    if File.dir?(Path.join(paths.clone, ".git")) do
+    if File.dir?(Path.join(paths.clone, ".git")) and File.exists?(spec_path(paths)) do
       :ok
     else
-      File.rm_rf!(paths.clone)
-      helper = write_credential_helper(paths)
+      with :ok <- discard_failed_attempt(paths, p, ctx), do: clone(paths, p, ctx)
+    end
+  end
 
-      args =
-        [
-          "-c",
-          "credential.helper=",
-          "-c",
-          "credential.helper=" <> helper,
-          "-c",
-          "core.hooksPath=/dev/null",
-          "-c",
-          "protocol.allow=never",
-          "-c",
-          "protocol.https.allow=always"
-        ] ++
-          http_protocol(p.clone_url) ++
-          ["clone", "--progress", "--branch", p.branch, "--", p.clone_url, paths.clone]
+  # What an earlier attempt left behind. Its containers mount the old
+  # clone, so they go too; volumes stay. git never runs in the old clone:
+  # anything in the environment could have rewritten its .git/config.
+  defp discard_failed_attempt(paths, p, ctx) do
+    if File.exists?(paths.clone) do
+      ctx.log.("info", "Discarding the clone from an earlier attempt\n")
 
-      ctx.log.("info", "Cloning #{p.repo} (#{p.branch})\n")
-
-      case cmd(ctx, ctx.config.git, args, env: %{}) do
-        {:ok, _} -> :ok
-        {:error, output} -> {:error, "git clone failed: #{last_lines(output)}"}
+      with {:ok, _} <- compose(ctx, p.slug, ["down", "--remove-orphans"]) do
+        remove_in(ctx, paths.workspace, Path.basename(paths.clone))
       end
+    else
+      :ok
+    end
+  end
+
+  defp clone(paths, p, ctx) do
+    helper = write_credential_helper(paths)
+
+    args =
+      [
+        "-c",
+        "credential.helper=",
+        "-c",
+        "credential.helper=" <> helper,
+        "-c",
+        "core.hooksPath=/dev/null",
+        "-c",
+        "protocol.allow=never",
+        "-c",
+        "protocol.https.allow=always"
+      ] ++
+        http_protocol(p.clone_url) ++
+        ["clone", "--progress", "--branch", p.branch, "--", p.clone_url, paths.clone]
+
+    ctx.log.("info", "Cloning #{p.repo} (#{p.branch})\n")
+
+    case cmd(ctx, ctx.config.git, args, env: %{}, label: "git clone", timeout: @clone_timeout) do
+      {:ok, _} -> :ok
+      {:error, output} -> {:error, "git clone failed: #{last_lines(output)}"}
     end
   end
 
@@ -214,21 +254,28 @@ defmodule ForemanAgent.Env do
 
   # -- prepare -------------------------------------------------------------
 
+  # Every profile is checked: the CLI starts the services runServices
+  # names, and compose starts a profiled service it's asked for by name.
+  @check_args [profiles: :all]
+
   defp prepare(paths, spec, compose_env, ctx) do
-    config_dir = Path.dirname(spec.config_path)
+    config_dir = config_dir(spec.config_path)
+    files_config = &compose_config(ctx, spec.slug, &1, &2, paths.meta, @check_args)
 
     with {:ok, config} <- read_devcontainer(paths.clone, spec.config_path),
          {:ok, rel_files, service} <- compose_spec(config),
          {:ok, compose_files} <- resolve_compose_files(paths.clone, config_dir, rel_files),
+         {:ok, scan_warnings} <- scan_compose(paths, compose_files, spec, ctx.config),
          env = compose_env(ctx, spec.slug, compose_env),
-         {:ok, base} <- compose_config(ctx, spec.slug, compose_files, env, paths.meta),
+         {:ok, base} <- files_config.(compose_files, env),
          services = base |> Map.get("services", %{}) |> Map.keys() |> Enum.sort(),
          :ok <- check_service(service, services),
+         :ok <- check_run_services(config["runServices"], services),
          overlay_path = Path.join(paths.meta, "overlay.yml"),
-         :ok <- write_overlay(overlay_path, paths, spec, services, service, ctx.config),
-         {:ok, merged} <-
-           compose_config(ctx, spec.slug, compose_files ++ [overlay_path], env, paths.meta),
-         {:ok, warnings} <- check_policy(merged, config, paths, ctx.config),
+         :ok <- write_overlay(overlay_path, paths, spec, services, service),
+         {:ok, merged} <- files_config.(compose_files ++ [overlay_path], env),
+         {:ok, policy_warnings} <- check_policy(merged, config, paths, spec, ctx.config),
+         warnings = Enum.uniq(scan_warnings ++ policy_warnings),
          override_path = Path.join(paths.meta, "devcontainer.json"),
          :ok <- write_override(override_path, config, compose_files, overlay_path),
          :ok <- install_feature(paths.clone, config_dir, ctx) do
@@ -291,28 +338,68 @@ defmodule ForemanAgent.Env do
     end)
   end
 
+  # The devcontainer.json at the repo root lives in "."; everything is
+  # joined relative to the clone.
+  defp config_dir(config_path) do
+    case Path.dirname(config_path) do
+      "." -> ""
+      dir -> dir
+    end
+  end
+
   defp check_service(service, services) do
     if service in services,
       do: :ok,
       else: {:error, "devcontainer service '#{service}' isn't defined in the compose files"}
   end
 
-  defp compose_config(ctx, slug, files, env, meta, extra \\ []) do
+  defp check_run_services(nil, _services), do: :ok
+
+  defp check_run_services(run_services, services) when is_list(run_services) do
+    case Enum.reject(run_services, &(&1 in services)) do
+      [] ->
+        :ok
+
+      missing ->
+        {:error, "runServices names #{Enum.join(missing, ", ")}, not in the compose files"}
+    end
+  end
+
+  defp check_run_services(_, _services), do: {:error, "runServices must be a list of services"}
+
+  defp compose_config(ctx, slug, files, env, meta, opts) do
     out = Path.join(meta, "compose-config.json")
+    profiles = if opts[:profiles] == :all, do: ["--profile", "*"], else: []
 
     args =
       ["compose", "-p", slug] ++
+        profiles ++
         Enum.flat_map(files, &["-f", &1]) ++
-        ["config"] ++ extra ++ ["--format", "json", "-o", out]
+        ["config"] ++ Keyword.get(opts, :extra, []) ++ ["--format", "json", "-o", out]
 
     result =
-      case cmd(ctx, ctx.config.docker, args, env: env, quiet: true) do
+      case cmd(ctx, ctx.config.docker, args,
+             env: env,
+             quiet: true,
+             label: "docker compose config"
+           ) do
         {:ok, _} -> decode_file(out)
-        {:error, output} -> {:error, "docker compose config failed: #{last_lines(output)}"}
+        {:error, output} -> compose_config_failed(output, ctx)
       end
 
     File.rm(out)
     result
+  end
+
+  # Compose quotes whatever file it fails to parse, and a repo can point it
+  # at any file the agent can read, so the output goes to the operation
+  # log (which is redacted) and never into the error.
+  defp compose_config_failed(output, ctx) do
+    Enum.each(String.split(last_lines(output), "\n"), &ctx.log.("info", &1 <> "\n"))
+
+    if output =~ "unknown flag",
+      do: {:error, "docker compose config failed: this box's Docker Compose is too old"},
+      else: {:error, "docker compose config failed; see the log for compose's output"}
   end
 
   defp decode_file(path) do
@@ -324,7 +411,7 @@ defmodule ForemanAgent.Env do
     end
   end
 
-  defp write_overlay(path, paths, spec, services, service, config) do
+  defp write_overlay(path, paths, spec, services, service) do
     yaml =
       Overlay.compose(%{
         env_id: spec.env_id,
@@ -333,7 +420,6 @@ defmodule ForemanAgent.Env do
         devcontainer_service: service,
         secrets_dir: paths.secrets,
         tailscale: spec.tailscale,
-        tun_device: ForemanAgent.Config.tun_device?(config),
         limits: spec.limits
       })
 
@@ -347,15 +433,29 @@ defmodule ForemanAgent.Env do
     SafeFS.write_atomic(path, JSON.encode!(override), 0o600)
   end
 
-  defp check_policy(merged, devcontainer, paths, config) do
-    case Policy.check(merged, devcontainer, policy_ctx(paths, config)) do
+  # Before compose reads anything: compose reads env files, label files
+  # and the files it includes or extends while it parses, folds some of
+  # them in where the path no longer shows, and quotes any it can't parse
+  # in its error. See ForemanAgent.Env.ComposeScan.
+  defp scan_compose(paths, compose_files, spec, config) do
+    with {:ok, facts} <- ComposeScan.scan(paths.clone, compose_files) do
+      case Policy.check_sources(facts, policy_ctx(paths, spec, config)) do
+        {:ok, warnings} -> {:ok, warnings}
+        {:error, refused} -> {:error, refusal(refused)}
+      end
+    end
+  end
+
+  defp check_policy(merged, devcontainer, paths, spec, config) do
+    case Policy.check(merged, devcontainer, policy_ctx(paths, spec, config)) do
       {:ok, warnings} -> {:ok, warnings}
       {:error, refused} -> {:error, refusal(refused)}
     end
   end
 
-  defp policy_ctx(paths, config) do
+  defp policy_ctx(paths, spec, config) do
     %{
+      project: spec.slug,
       workspace_root: paths.workspace,
       secrets_dir: paths.secrets,
       protected: ForemanAgent.Config.protected_paths(config),
@@ -374,7 +474,8 @@ defmodule ForemanAgent.Env do
         dest = Path.join(dir, "feature")
         File.rm_rf!(dest)
         File.cp_r!(ctx.config.feature_dir, dest)
-        exclude_from_git(clone, "/" <> Path.join(config_dir, ".foreman") <> "/")
+        # dir is where it really is, if the config folder is a symlink.
+        exclude_from_git(clone, "/" <> Path.relative_to(dir, Path.expand(clone)) <> "/")
 
       {:error, reason} ->
         {:error, "couldn't install the Foreman feature: #{inspect(reason)}"}
@@ -413,7 +514,7 @@ defmodule ForemanAgent.Env do
         "--oci-auth-hardening"
       ]
 
-      with {:ok, warnings} <- check_resolved(config_args, env, paths, ctx) do
+      with {:ok, warnings} <- check_resolved(config_args, env, paths, spec, ctx) do
         warnings = Enum.uniq(prepared.warnings ++ warnings)
         up(paths, spec, %{prepared | warnings: warnings}, config_args, env, ctx, opts)
       end
@@ -422,32 +523,43 @@ defmodule ForemanAgent.Env do
 
   # Features can ask for privileges in their own metadata, which only the
   # CLI resolves. Ask it what the devcontainer will get before running it.
-  defp check_resolved(config_args, env, paths, ctx) do
+  defp check_resolved(config_args, env, paths, spec, ctx) do
     args = ["read-configuration", "--include-merged-configuration" | config_args]
 
-    {:ok, %{status: status, output: output}} =
-      run_lines(ctx, ctx.config.devcontainer, args, [env: env, keep: 1_048_576], fn _ -> nil end)
+    with {:ok, %{status: status, output: output}} <-
+           run_tool(
+             ctx,
+             ctx.config.devcontainer,
+             args,
+             [
+               env: env,
+               keep: 1_048_576,
+               timeout: @command_timeout,
+               label: "devcontainer read-configuration"
+             ],
+             fn _ -> nil end
+           ) do
+      resolved =
+        output
+        |> String.split("\n", trim: true)
+        |> Enum.find_value(fn line ->
+          case JSON.decode(line) do
+            {:ok, %{"mergedConfiguration" => _} = resolved} -> resolved
+            _ -> nil
+          end
+        end)
 
-    resolved =
-      output
-      |> String.split("\n", trim: true)
-      |> Enum.find_value(fn line ->
-        case JSON.decode(line) do
-          {:ok, %{"mergedConfiguration" => _} = resolved} -> resolved
-          _ -> nil
+      if status != 0 or is_nil(resolved) do
+        {:error, "devcontainer read-configuration failed: #{last_lines(output)}"}
+      else
+        case Policy.check_resolved(resolved, policy_ctx(paths, spec, ctx.config)) do
+          {:ok, warnings} ->
+            Enum.each(warnings, &ctx.log.("info", "Warning: #{&1}\n"))
+            {:ok, warnings}
+
+          {:error, refused} ->
+            {:error, refusal(refused)}
         end
-      end)
-
-    if status != 0 or is_nil(resolved) do
-      {:error, "devcontainer read-configuration failed: #{last_lines(output)}"}
-    else
-      case Policy.check_resolved(resolved, policy_ctx(paths, ctx.config)) do
-        {:ok, warnings} ->
-          Enum.each(warnings, &ctx.log.("info", "Warning: #{&1}\n"))
-          {:ok, warnings}
-
-        {:error, refused} ->
-          {:error, refusal(refused)}
       end
     end
   end
@@ -466,15 +578,19 @@ defmodule ForemanAgent.Env do
 
     ctx.log.("info", "Starting the devcontainer\n")
 
-    {:ok, %{status: status, output: output}} =
-      run_lines(
-        ctx,
-        ctx.config.devcontainer,
-        args,
-        [env: env, keep: 262_144],
-        &devcontainer_log/1
-      )
+    with {:ok, %{status: status, output: output}} <-
+           run_tool(
+             ctx,
+             ctx.config.devcontainer,
+             args,
+             [env: env, keep: 262_144, timeout: @up_timeout, label: "devcontainer up"],
+             &devcontainer_log/1
+           ) do
+      up_outcome(status, output, spec, prepared)
+    end
+  end
 
+  defp up_outcome(status, output, spec, prepared) do
     case {status, find_outcome(output)} do
       {0, %{"outcome" => "success"} = outcome} ->
         {:ok,
@@ -610,13 +726,13 @@ defmodule ForemanAgent.Env do
       |> Map.put(:remote_user, result["remote_user"])
       |> Map.put(:remote_workspace_folder, result["remote_workspace_folder"])
 
-    SafeFS.write_atomic(Path.join(paths.meta, "spec.term"), :erlang.term_to_binary(saved), 0o600)
+    SafeFS.write_atomic(spec_path(paths), :erlang.term_to_binary(saved), 0o600)
   end
 
-  defp load_spec(config, env_id) do
-    path = Path.join([config.envs_root, env_id, "meta", "spec.term"])
+  defp spec_path(paths), do: Path.join(paths.meta, "spec.term")
 
-    case File.read(path) do
+  defp load_spec(config, env_id) do
+    case File.read(spec_path(paths(config, env_id))) do
       {:ok, binary} -> {:ok, :erlang.binary_to_term(binary, [:safe])}
       {:error, _} -> {:error, "this box has no record of the environment; rebuild it"}
     end
@@ -625,7 +741,10 @@ defmodule ForemanAgent.Env do
   # -- stop / restart ------------------------------------------------------
 
   defp stop(p, ctx) do
-    case cmd(ctx, ctx.config.docker, ["compose", "-p", p.slug, "stop"], env: %{}) do
+    case cmd(ctx, ctx.config.docker, ["compose", "-p", p.slug, "stop"],
+           env: %{},
+           label: "docker compose stop"
+         ) do
       {:ok, _} -> {:ok, %{}}
       {:error, output} -> {:error, "docker compose stop failed: #{last_lines(output)}"}
     end
@@ -646,7 +765,7 @@ defmodule ForemanAgent.Env do
       with {:ok, prepared} <- prepare(paths, spec, p.compose_env, ctx),
            files = prepared.compose_files ++ [prepared.overlay_path],
            {:ok, raw} <-
-             compose_config(ctx, spec.slug, files, env, paths.meta, ["--no-interpolate"]) do
+             compose_config(ctx, spec.slug, files, env, paths.meta, extra: ["--no-interpolate"]) do
         affected = Affected.services(raw, p.changed)
         restart_affected(affected, paths, spec, prepared, p, ctx, files, env)
       end
@@ -674,7 +793,7 @@ defmodule ForemanAgent.Env do
         Enum.flat_map(files, &["-f", &1]) ++
         ["up", "-d", "--no-deps", "--force-recreate"] ++ services
 
-    case cmd(ctx, ctx.config.docker, args, env: env) do
+    case cmd(ctx, ctx.config.docker, args, env: env, label: "docker compose up") do
       {:ok, _} ->
         :ok
 
@@ -684,7 +803,10 @@ defmodule ForemanAgent.Env do
   end
 
   defp compose(ctx, slug, args) do
-    case cmd(ctx, ctx.config.docker, ["compose", "-p", slug | args], env: %{}) do
+    case cmd(ctx, ctx.config.docker, ["compose", "-p", slug | args],
+           env: %{},
+           label: "docker compose #{hd(args)}"
+         ) do
       {:ok, out} -> {:ok, out}
       {:error, output} -> {:error, "docker compose #{hd(args)} failed: #{last_lines(output)}"}
     end
@@ -702,34 +824,34 @@ defmodule ForemanAgent.Env do
     end
   end
 
-  # Files a container created as root can't be removed by the agent's
-  # user; a throwaway container removes what's left.
   defp remove_tree(dir, ctx) do
-    case File.rm_rf(dir) do
-      {:ok, _} ->
+    with :ok <- remove_in(ctx, dir, ["workspace", "meta"]) do
+      case File.rm_rf(dir) do
+        {:ok, _} -> :ok
+        {:error, _, _} -> {:error, "couldn't remove #{dir}"}
+      end
+    end
+  end
+
+  # Removes `names` under `parent`. Files a container created as root
+  # can't be removed by the agent's user; a throwaway container removes
+  # what's left.
+  defp remove_in(ctx, parent, names) do
+    paths = Enum.map(List.wrap(names), &Path.join(parent, &1))
+
+    if Enum.all?(paths, &match?({:ok, _}, File.rm_rf(&1))) do
+      :ok
+    else
+      args =
+        ["run", "--rm", "--network", "none", "-v", "#{parent}:/target", ctx.config.cleanup_image] ++
+          ["rm", "-rf" | Enum.map(List.wrap(names), &("/target/" <> &1))]
+
+      with {:ok, _} <- cmd(ctx, ctx.config.docker, args, env: %{}, label: "cleanup container"),
+           true <- Enum.all?(paths, &match?({:ok, _}, File.rm_rf(&1))) do
         :ok
-
-      {:error, _, _} ->
-        args = [
-          "run",
-          "--rm",
-          "--network",
-          "none",
-          "-v",
-          "#{dir}:/target",
-          ctx.config.cleanup_image,
-          "rm",
-          "-rf",
-          "/target/workspace",
-          "/target/meta"
-        ]
-
-        with {:ok, _} <- cmd(ctx, ctx.config.docker, args, env: %{}),
-             {:ok, _} <- File.rm_rf(dir) do
-          :ok
-        else
-          _ -> {:error, "couldn't remove #{dir}"}
-        end
+      else
+        _ -> {:error, "couldn't remove #{Enum.join(paths, ", ")}"}
+      end
     end
   end
 
@@ -751,9 +873,11 @@ defmodule ForemanAgent.Env do
 
     case ctx.runner.run(ctx.config.docker, args,
            env: base_env(ctx),
-           on_output: &ctx.log.("stdout", &1)
+           on_output: &ctx.log.("stdout", &1),
+           timeout: @logs_timeout
          ) do
       {:ok, %{status: 0}} -> {:ok, %{}}
+      {:ok, %{status: :timeout}} -> {:error, timed_out("docker compose logs", @logs_timeout)}
       {:ok, %{output: output}} -> {:error, "docker compose logs failed: #{last_lines(output)}"}
       {:error, reason} -> {:error, inspect(reason)}
     end
@@ -781,7 +905,8 @@ defmodule ForemanAgent.Env do
       with {:ok, status} <-
              cmd(ctx, ctx.config.docker, exec ++ ["status", "--porcelain=v1", "--branch"],
                env: %{},
-               quiet: true
+               quiet: true,
+               label: "git status"
              ),
            {:ok, unpushed} <-
              cmd(
@@ -789,22 +914,30 @@ defmodule ForemanAgent.Env do
                ctx.config.docker,
                exec ++ ["log", "--branches", "--not", "--remotes", "--oneline"],
                env: %{},
-               quiet: true
+               quiet: true,
+               label: "git log"
              ) do
-        [branch_line | files] = String.split(status, "\n", trim: true)
-
-        {:ok,
-         %{
-           "branch" => branch_name(branch_line),
-           "changed_files" => length(files),
-           "unpushed_commits" => unpushed |> String.split("\n", trim: true) |> length(),
-           "clean" => files == [] and String.trim(unpushed) == ""
-         }}
+        git_summary(String.split(status, "\n", trim: true), unpushed)
       else
         {:error, output} -> {:error, "git status failed: #{last_lines(output)}"}
       end
     end
   end
+
+  # `--branch` always prints the "## " line first; no output at all means
+  # the container went away under the exec.
+  defp git_summary(["## " <> _ = branch_line | files], unpushed) do
+    {:ok,
+     %{
+       "branch" => branch_name(branch_line),
+       "changed_files" => length(files),
+       "unpushed_commits" => unpushed |> String.split("\n", trim: true) |> length(),
+       "clean" => files == [] and String.trim(unpushed) == ""
+     }}
+  end
+
+  defp git_summary(_lines, _unpushed),
+    do: {:error, "git status failed: no output from the container; is it still running?"}
 
   defp branch_name("## " <> rest),
     do: rest |> String.split("...") |> hd() |> String.split(" ") |> hd()
@@ -843,12 +976,30 @@ defmodule ForemanAgent.Env do
   defp cmd(ctx, command, args, opts) do
     env = Map.merge(base_env(ctx), Keyword.get(opts, :env, %{}))
     mapper = if opts[:quiet], do: fn _ -> nil end, else: & &1
+    timeout = Keyword.get(opts, :timeout, @command_timeout)
+    run_opts = [env: env, timeout: timeout, label: opts[:label]]
 
-    case run_lines(ctx, command, args, [env: env], mapper) do
+    case run_tool(ctx, command, args, run_opts, mapper) do
       {:ok, %{status: 0, output: output}} -> {:ok, output}
       {:ok, %{output: output}} -> {:error, output}
-      {:error, {:not_found, command}} -> {:error, "#{command} is not installed on this box"}
-      {:error, reason} -> {:error, inspect(reason)}
+      {:error, message} -> {:error, message}
+    end
+  end
+
+  # run_lines/5, with a tool that couldn't be run as an error message.
+  defp run_tool(ctx, command, args, opts, mapper) do
+    case run_lines(ctx, command, args, opts, mapper) do
+      {:ok, %{status: :timeout}} ->
+        {:error, timed_out(opts[:label] || Path.basename(command), opts[:timeout])}
+
+      {:ok, result} ->
+        {:ok, result}
+
+      {:error, {:not_found, command}} ->
+        {:error, "#{command} is not installed on this box"}
+
+      {:error, reason} ->
+        {:error, "couldn't run #{command}: #{inspect(reason)}"}
     end
   end
 
@@ -874,7 +1025,11 @@ defmodule ForemanAgent.Env do
     end
 
     try do
-      ctx.runner.run(command, args, Keyword.put(opts, :on_output, on_output))
+      ctx.runner.run(
+        command,
+        args,
+        opts |> Keyword.delete(:label) |> Keyword.put(:on_output, on_output)
+      )
     after
       case Process.delete(key) do
         rest when is_binary(rest) and rest != "" -> emit.([rest])
@@ -882,6 +1037,9 @@ defmodule ForemanAgent.Env do
       end
     end
   end
+
+  defp timed_out(label, timeout),
+    do: "#{label} timed out after #{div(timeout || 0, 60_000)} minutes and was stopped"
 
   # Colors and cursor movement from CLIs, which a log view can't use.
   @ansi ~r/\e\[[0-9;?]*[ -\/]*[@-~]|\e\][^\a]*(\a|\e\\)|\r(?!\n)/

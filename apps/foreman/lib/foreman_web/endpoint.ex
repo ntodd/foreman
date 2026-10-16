@@ -47,7 +47,7 @@ defmodule ForemanWeb.Endpoint do
 
   plug :force_ssl
   plug Plug.RequestId
-  plug Plug.Telemetry, event_prefix: [:phoenix, :endpoint]
+  plug Plug.Telemetry, event_prefix: [:phoenix, :endpoint], log: {__MODULE__, :log_level, []}
 
   plug Plug.Parsers,
     parsers: [:urlencoded, :multipart, :json],
@@ -59,6 +59,11 @@ defmodule ForemanWeb.Endpoint do
   plug Plug.Head
   plug :session
   plug ForemanWeb.Router
+
+  @doc false
+  # Health checks run every few seconds; logging each one drowns the log.
+  def log_level(%Plug.Conn{path_info: ["healthz"]}), do: false
+  def log_level(_conn), do: :info
 
   # Redirects to HTTPS unless the request arrived over it (directly, or
   # through `tailscale serve`, which sets X-Forwarded-Proto) or from

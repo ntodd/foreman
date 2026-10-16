@@ -116,6 +116,13 @@ secrets_dir=$(box sh -c 'ls -d /run/foreman/envs/*')
 [ "$(box stat -c %a "$secrets_dir/secrets.env")" = "600" ] || fail "secrets.env isn't 0600"
 box su -s /bin/sh nobody -c "cat $secrets_dir/secrets.env" 2>/dev/null && fail "another user on the box can read secrets"
 echo "ok: secrets are 0600, unreadable by other box users"
+# Tailscale SSH starts a clean login shell; the saved container environment
+# fills it in, readable only by the devcontainer's user.
+[ "$(box docker exec -u root "$app" stat -c '%u %a' /etc/foreman/container.env)" = "$vscode_uid 600" ] ||
+  fail "the saved container environment isn't 0600 and vscode's"
+box docker exec -u vscode "$app" env -i HOME=/home/vscode bash -lc 'echo "$FOREMAN_ENV"' | grep -qx hello-1 ||
+  fail "a clean login shell doesn't get the container's environment"
+echo "ok: a clean login shell gets the container's environment, from a file only vscode can read"
 
 say "a secret change reaches new shells, and marks the environment pending restart"
 cp_eval 'E2E.secret("hello-1", "SIDECAR_TOKEN", "linux-secret-1")'
@@ -142,7 +149,10 @@ cp_eval 'E2E.desire_version("0.1.1")'
 box pkill -f beam.smp || true
 wait_for "agent on 0.1.1" 240 sh -c "$compose logs cp | grep -q 'agent box1 joined (0.1.1'"
 box readlink /opt/foreman-agent/current | grep -q 0.1.1 || fail "current isn't 0.1.1"
-box readlink /opt/foreman-agent/previous | grep -q 0.1.0 || fail "previous isn't 0.1.0"
+# Once the new release has joined, the agent clears the rollback state, so
+# a crash much later can't roll it back to a stale release.
+wait_for "rollback state cleared after the join" 60 sh -c \
+  "! $compose exec -T box test -e /opt/foreman-agent/previous && ! $compose exec -T box test -e /opt/foreman-agent/update-pending"
 env_is hello-1 running || fail "environment didn't survive the agent update"
 echo "ok: self-updated, environment still running"
 

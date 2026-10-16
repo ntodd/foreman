@@ -24,19 +24,25 @@ TS_SHA256_ARM64=f60294374967f3dfd8cf57bbbd474d6cfce32d123e3a8ddeab82a87940daa806
 share=/usr/local/share/foreman
 here=$(cd "$(dirname "$0")" && pwd)
 
-mkdir -p "$share/bin"
+mkdir -p "$share/bin" /etc/foreman
 install -m 0755 "$here/scripts/entrypoint.sh" "$share/entrypoint.sh"
+install -m 0755 "$here/scripts/save-env" "$share/save-env"
 install -m 0755 "$here/scripts/tailscale-up.sh" "$share/tailscale-up.sh"
 install -m 0755 "$here/scripts/git-credential-foreman" "$share/git-credential-foreman"
 install -m 0755 "$here/scripts/gh" "$share/bin/gh"
 install -m 0644 "$here/scripts/profile.sh" "$share/profile.sh"
 
-# Build-time options the entrypoint reads at runtime.
-cat > "$share/options" <<EOF
-FOREMAN_TAILSCALE=$TAILSCALE
-FOREMAN_ACCEPT_DNS=$ACCEPTDNS
-FOREMAN_DNS_CHECK_HOST=$DNSCHECKHOST
-EOF
+# Build-time options the entrypoint reads at runtime. The file is sourced
+# as root on every start, and a repo can set these options itself, so each
+# value is single-quoted.
+quote() {
+  printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"
+}
+{
+  printf 'FOREMAN_TAILSCALE=%s\n' "$(quote "$TAILSCALE")"
+  printf 'FOREMAN_ACCEPT_DNS=%s\n' "$(quote "$ACCEPTDNS")"
+  printf 'FOREMAN_DNS_CHECK_HOST=%s\n' "$(quote "$DNSCHECKHOST")"
+} > "$share/options"
 chmod 0644 "$share/options"
 
 # --- shell hooks ------------------------------------------------------------

@@ -85,9 +85,17 @@ defmodule Foreman.Secrets do
           %Secret{scope: scope_name, scope_key: key}
           |> Map.merge(subject_fields(scope_name, subject))
 
+      # Without repo_ids, a replaced value keeps the secret's repos: a
+      # secret limited to one repo mustn't reach all of them on rotation.
+      attrs =
+        case stringify(attrs) do
+          %{"repo_ids" => ids} = attrs -> %{attrs | "repo_ids" => List.wrap(ids)}
+          attrs -> Map.put(attrs, "repo_ids", if(existing, do: existing.repo_ids, else: []))
+        end
+
       changeset =
         secret
-        |> Secret.changeset(Map.update(stringify(attrs), "repo_ids", [], &List.wrap/1))
+        |> Secret.changeset(attrs)
         |> Ecto.Changeset.put_change(:updated_by_id, Scope.user_id(scope))
 
       with {:ok, saved} <- Foreman.Repo.insert_or_update(changeset) do

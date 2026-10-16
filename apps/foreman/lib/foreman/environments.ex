@@ -174,18 +174,30 @@ defmodule Foreman.Environments do
   The next free slug: `<repo>-<n>` on personal deployments,
   `<repo>-<login>-<n>` on team ones. Destroyed environments free their
   numbers.
+
+  Slugs are unique across every repo (they're tailnet hostnames), so the
+  numbering is shared by everything with the same prefix: two repos
+  called `api` under different owners get `api-1` and `api-2`.
   """
   def next_slug(repo, user) do
     team? = Foreman.Config.slug_style() == :team
     prefix = slug_prefix(repo.name, if(team?, do: user.login))
 
-    query =
-      from e in Environment,
-        where: e.repo_id == ^repo.id and is_nil(e.destroyed_at),
-        select: e.index
+    # The prefix is only [a-z0-9-], so it has no LIKE wildcards in it.
+    used =
+      Repo.all(
+        from e in Environment,
+          where: is_nil(e.destroyed_at) and like(e.slug, ^"#{prefix}-%"),
+          select: e.slug
+      )
+      |> Enum.flat_map(fn slug ->
+        case Integer.parse(String.replace_prefix(slug, prefix <> "-", "")) do
+          {n, ""} -> [n]
+          _ -> []
+        end
+      end)
+      |> MapSet.new()
 
-    query = if team?, do: where(query, [e], e.user_id == ^user.id), else: query
-    used = MapSet.new(Repo.all(query))
     index = Enum.find(Stream.iterate(1, &(&1 + 1)), &(not MapSet.member?(used, &1)))
 
     {"#{prefix}-#{index}", index}
@@ -241,10 +253,16 @@ defmodule Foreman.Environments do
     end
   end
 
-  defp do_cancel(%{status: "queued"} = op, _scope) do
-    op = Operations.cancel_queued(op)
-    apply_result(op)
-    {:ok, op}
+  defp do_cancel(%{status: "queued"} = op, scope) do
+    case Operations.cancel_queued(op) do
+      {:ok, op} ->
+        apply_result(op)
+        {:ok, op}
+
+      # Sent since it was read: stop it on the box instead.
+      {:error, :not_queued} ->
+        do_cancel(Operations.get!(op.id), scope)
+    end
   end
 
   defp do_cancel(%{status: status} = op, scope) when status in ["dispatched", "running"] do
@@ -253,32 +271,125 @@ defmodule Foreman.Environments do
 
   defp do_cancel(_op, _scope), do: {:error, "That operation has already finished."}
 
+  # Actions that start or stop the environment. A newer one replaces a
+  # queued one going the other way, so the last click wins.
+  @opposing %{
+    "start" => ~w(stop),
+    "restart_affected" => ~w(stop),
+    "restart_all" => ~w(stop),
+    "stop" => ~w(start restart_affected restart_all)
+  }
+
   defp action(%Scope{} = scope, %Environment{} = env, action, args \\ %{}) do
     with :ok <- authorize(scope, env),
          :ok <- allowed?(env, action) do
-      desired =
-        case action do
-          :stop -> "stopped"
-          :destroy -> "destroyed"
-          a when a in [:create, :start, :rebuild, :restart_affected, :restart_all] -> "running"
-          _ -> env.desired_state
+      if action == :destroy and box_revoked?(env),
+        do: forget(scope, env),
+        else: queue_action(scope, env, action, args)
+    end
+  end
+
+  defp queue_action(scope, env, action, args) do
+    desired =
+      case action do
+        :stop -> "stopped"
+        :destroy -> "destroyed"
+        a when a in [:create, :start, :rebuild, :restart_affected, :restart_all] -> "running"
+        _ -> env.desired_state
+      end
+
+    # Remembered so cancelling the operation can put the wish back.
+    args =
+      if desired != env.desired_state,
+        do: Map.put(args, "prior_desired", env.desired_state),
+        else: args
+
+    # What the user saw when they clicked. The command adds anything that
+    # changes before it's sent.
+    args =
+      if action == :restart_affected,
+        do: Map.put(args, "changed", env.pending_changes),
+        else: args
+
+    env =
+      if desired != env.desired_state,
+        do: update_env!(env, %{desired_state: desired}),
+        else: env
+
+    name = Atom.to_string(action)
+    supersede(env, name)
+
+    if action == :start, do: enqueue(env, "secrets_write", %{}, scope.user)
+
+    op = enqueue(env, name, args, scope.user)
+    Audit.log(scope, "environment.#{action}", env)
+    {:ok, op}
+  end
+
+  defp supersede(env, "destroy"), do: cancel_queued(env, &(&1 != "destroy"))
+
+  defp supersede(env, action) do
+    case @opposing[action] do
+      nil -> :ok
+      opposing -> cancel_queued(env, &(&1 in opposing))
+    end
+  end
+
+  defp cancel_queued(env, which?) do
+    for op <-
+          Repo.all(
+            from o in Foreman.Operations.Operation,
+              where: o.environment_id == ^env.id and o.status == "queued"
+          ),
+        which?.(op.action) do
+      Operations.cancel_queued(op)
+    end
+
+    :ok
+  end
+
+  defp box_revoked?(env) do
+    case Repo.get(Box, env.box_id) do
+      %Box{revoked_at: nil} -> false
+      _ -> true
+    end
+  end
+
+  # A revoked box can never reconnect, so its environments are marked
+  # destroyed here. Whatever is left on the machine is the admin's to
+  # clean up.
+  defp forget(scope, env) do
+    now = DateTime.utc_now()
+
+    {:ok, env} =
+      Repo.transact(fn ->
+        for op <-
+              Repo.all(
+                from o in Foreman.Operations.Operation,
+                  where:
+                    o.environment_id == ^env.id and
+                      o.status in ["queued", "dispatched", "running"]
+              ) do
+          if op.status == "queued",
+            do: Operations.cancel_queued(op),
+            else: Operations.mark(op, "failed", error: "the box was revoked", finished_at: now)
         end
 
-      env =
-        if desired != env.desired_state,
-          do: update_env!(env, %{desired_state: desired}),
-          else: env
+        {:ok,
+         env
+         |> Environment.state_changeset(%{
+           desired_state: "destroyed",
+           observed_state: "destroyed",
+           destroyed_at: now,
+           status_message: nil
+         })
+         |> Repo.update!()}
+      end)
 
-      args =
-        if action == :restart_affected,
-          do: Map.put(args, "changed", env.pending_changes),
-          else: args
-
-      if action == :start, do: enqueue(env, "secrets_write", %{}, scope.user)
-      op = enqueue(env, Atom.to_string(action), args, scope.user)
-      Audit.log(scope, "environment.#{action}", env)
-      {:ok, op}
-    end
+    %{"slug" => env.slug} |> Foreman.Jobs.CleanupTailnet.new() |> Oban.insert()
+    Audit.log(scope, "environment.forget", env, %{"reason" => "box revoked"})
+    broadcast(env)
+    {:ok, env}
   end
 
   defp authorize(scope, env) do
@@ -336,45 +447,76 @@ defmodule Foreman.Environments do
 
   # -- results -----------------------------------------------------------------------
 
-  @doc "Applies a finished operation's outcome to its environment, then sends the next one."
-  def apply_result(%Foreman.Operations.Operation{environment_id: nil}), do: :ok
+  @up ~w(create rebuild start restart_affected restart_all)
 
+  @doc """
+  Applies a finished operation's outcome to its environment, then sends
+  the next one. For a result from the agent, `Foreman.Agents` records the
+  operation and calls `record_result/1` in one transaction, then
+  `after_result/2`.
+  """
   def apply_result(%Foreman.Operations.Operation{} = op) do
+    {:ok, env} = Repo.transact(fn -> {:ok, record_result(op)} end)
+    after_result(op, env)
+  end
+
+  @doc "Writes a finished operation's outcome to its environment. Returns the environment."
+  def record_result(%Foreman.Operations.Operation{environment_id: nil} = op) do
+    if op.action == "agent.update" and op.status == "failed",
+      do: Agents.Releases.update_failed(op)
+
+    nil
+  end
+
+  def record_result(%Foreman.Operations.Operation{} = op) do
     env = Repo.get!(Environment, op.environment_id)
-    attrs = result_attrs(op, env)
-    env = if attrs == %{}, do: env, else: update_env!(env, attrs)
+
+    case result_attrs(op, env) do
+      attrs when attrs == %{} -> env
+      attrs -> env |> Environment.state_changeset(attrs) |> Repo.update!()
+    end
+  end
+
+  @doc "What follows a recorded result: tell the UI, clean up, send the next operation."
+  def after_result(_op, nil), do: :ok
+
+  def after_result(op, %Environment{} = env) do
+    broadcast(env)
 
     if op.action == "destroy" and op.status == "succeeded" do
       %{"slug" => env.slug} |> Foreman.Jobs.CleanupTailnet.new() |> Oban.insert()
     end
 
+    # Secrets changed while it came up: the files it got are already stale.
+    if op.action in @up and op.status == "succeeded" and env.pending_restart and
+         env.desired_state == "running",
+       do: enqueue(env, "secrets_write", %{}, nil)
+
     Server.kick(env.id)
     :ok
   end
 
-  @up ~w(create rebuild start restart_affected restart_all)
+  defp result_attrs(%{status: "succeeded", action: action} = op, env) when action in @up do
+    result = if is_map(op.result), do: op.result, else: %{}
+    args = op.args || %{}
+    changed = changed_since(args["secret_hashes"], env)
 
-  defp result_attrs(%{status: "succeeded", action: action, result: result} = op, _env)
-       when action in @up do
-    result = result || %{}
-
-    base = %{
+    %{
       observed_state: "running",
       status_message: nil,
       created_once: true,
-      pending_restart: false,
-      pending_changes: []
+      pending_restart: changed != [],
+      pending_changes: changed
     }
-
-    base
-    |> put_if(:applied_secret_hashes, op.args["secret_hashes"])
-    |> put_if(:token_pushed_at, if(op.args["token"], do: DateTime.utc_now()))
-    |> put_if(:remote_user, result["remote_user"])
-    |> put_if(:workspace_folder, result["remote_workspace_folder"])
-    |> put_if(:services, result["services"])
-    |> put_if(:devcontainer_service, result["devcontainer_service"])
-    |> put_if(:warnings, result["warnings"])
-    |> put_if(:host_requirements, result["host_requirements"])
+    |> put_if(:applied_secret_hashes, args["secret_hashes"])
+    |> put_token_pushed(args)
+    # Results carry repo content (devcontainer.json): take only what fits.
+    |> put_if(:remote_user, string(result["remote_user"]))
+    |> put_if(:workspace_folder, string(result["remote_workspace_folder"]))
+    |> put_if(:services, strings(result["services"]))
+    |> put_if(:devcontainer_service, string(result["devcontainer_service"]))
+    |> put_if(:warnings, strings(result["warnings"]))
+    |> put_if(:host_requirements, map(result["host_requirements"]))
     |> then(&if(action in ["create", "rebuild"], do: Map.put(&1, :ts_authkey, nil), else: &1))
   end
 
@@ -384,21 +526,88 @@ defmodule Foreman.Environments do
   defp result_attrs(%{status: "succeeded", action: "destroy"}, _env),
     do: %{observed_state: "destroyed", destroyed_at: DateTime.utc_now(), status_message: nil}
 
-  defp result_attrs(%{status: "succeeded", action: "secrets_write"} = op, _env) do
-    if op.args["token"], do: %{token_pushed_at: DateTime.utc_now()}, else: %{}
+  defp result_attrs(%{status: "succeeded", action: "secrets_write"} = op, _env),
+    do: put_token_pushed(%{}, op.args || %{})
+
+  # Cancelled before it was sent: nothing happened on the box. Only a
+  # first create that never ran leaves anything to show (a Retry).
+  defp result_attrs(%{status: "cancelled", dispatched_at: nil} = op, env) do
+    attrs = revert_desired(op, env)
+
+    if op.action == "create" and not env.created_once,
+      do: Map.merge(attrs, %{observed_state: "error", status_message: "cancelled"}),
+      else: attrs
   end
 
-  defp result_attrs(%{status: status, action: action, error: error}, _env)
+  defp result_attrs(%{status: status, action: action, error: error} = op, env)
        when status in ["failed", "cancelled"] and action in @up do
-    %{observed_state: "error", status_message: error || status}
+    op
+    |> revert_desired(env)
+    |> Map.merge(%{observed_state: "error", status_message: error || status})
   end
 
-  defp result_attrs(%{status: status, action: action, error: error}, _env)
-       when status in ["failed", "cancelled"] and action in ["stop", "destroy", "secrets_write"] do
-    %{status_message: "#{action} failed: #{error || status}"}
+  # The environment is back where it was before the stop or destroy began.
+  # Operations sent by an older control plane didn't record that; those go
+  # back to running (where a stop starts from), not to error, so what the
+  # box reports next still corrects it and reconcile still looks at it.
+  defp result_attrs(%{status: status, action: action, error: error} = op, env)
+       when status in ["failed", "cancelled"] and action in ["stop", "destroy"] do
+    op
+    |> revert_desired(env)
+    |> Map.merge(%{
+      observed_state: (op.args || %{})["prior_state"] || "running",
+      status_message: "#{action} failed: #{error || status}"
+    })
   end
+
+  # The box's files may be out of date: the next token refresh sends them again.
+  defp result_attrs(%{status: status, action: "secrets_write", error: error}, _env)
+       when status in ["failed", "cancelled"],
+       do: %{status_message: "secrets_write failed: #{error || status}", token_pushed_at: nil}
 
   defp result_attrs(_op, _env), do: %{}
+
+  defp changed_since(nil, _env), do: []
+
+  defp changed_since(applied, env),
+    do: Secrets.changed_names(applied, env |> Secrets.resolve() |> Secrets.hashes())
+
+  # A cancelled stop means "keep it running": put back the desired state
+  # the action replaced, unless something since has changed it again.
+  defp revert_desired(%{status: "cancelled", action: action, args: args}, env) do
+    case args do
+      %{"prior_desired" => prior} when is_binary(prior) ->
+        if env.desired_state == desired_for(action), do: %{desired_state: prior}, else: %{}
+
+      _ ->
+        %{}
+    end
+  end
+
+  defp revert_desired(_op, _env), do: %{}
+
+  defp desired_for("stop"), do: "stopped"
+  defp desired_for("destroy"), do: "destroyed"
+  defp desired_for(action) when action in @up, do: "running"
+  defp desired_for(_), do: nil
+
+  defp put_token_pushed(attrs, %{"token" => true}),
+    do: Map.put(attrs, :token_pushed_at, DateTime.utc_now())
+
+  # GitHub couldn't give a token just then: first in line for the next refresh.
+  defp put_token_pushed(attrs, %{"token_retry" => true}),
+    do: Map.put(attrs, :token_pushed_at, nil)
+
+  defp put_token_pushed(attrs, _args), do: attrs
+
+  defp string(v) when is_binary(v), do: v
+  defp string(_), do: nil
+
+  defp strings(v) when is_list(v), do: if(Enum.all?(v, &is_binary/1), do: v)
+  defp strings(_), do: nil
+
+  defp map(v) when is_map(v), do: v
+  defp map(_), do: nil
 
   defp put_if(map, _key, nil), do: map
   defp put_if(map, key, value), do: Map.put(map, key, value)
@@ -471,9 +680,12 @@ defmodule Foreman.Environments do
 
   @doc """
   Compares a box's inventory with what its environments should be, and
-  queues what's needed to match. Environments with an operation in flight
-  are left alone, as are ones in an error state (so a failing start
-  doesn't loop).
+  queues what's needed to match. Environments with a lifecycle operation
+  (create, start, stop and so on) queued or in flight are left to it, as
+  are ones in an error state (so a failing start doesn't loop). Anything
+  else in flight (a secrets write, a logs fetch) doesn't hold it up: the
+  agent only reports its inventory again when it changes, so this may be
+  the one chance to start the environment after a reboot.
   """
   def reconcile_inventory(box_id, inventory) do
     by_id = Map.new(inventory, &{&1.env_id, &1})
@@ -484,7 +696,7 @@ defmodule Foreman.Environments do
     Phoenix.PubSub.broadcast(Foreman.PubSub, "boxes", {:orphans, box_id, orphans})
     :persistent_term.put({__MODULE__, :orphans, box_id}, orphans)
 
-    for env <- envs, not Operations.active?(env.id) do
+    for env <- envs, not lifecycle_active?(env.id) do
       observed = if inv = by_id[env.id], do: inv.state, else: "missing"
 
       env =
@@ -502,9 +714,11 @@ defmodule Foreman.Environments do
 
   defp reconcile(%Environment{observed_state: "error"}, _observed), do: :ok
 
+  # A reboot wipes the secrets tmpfs, so files go first. One already on
+  # its way is built when it's sent, so it'll do.
   defp reconcile(%Environment{desired_state: "running"} = env, "stopped") do
     Logger.info("starting #{env.slug} to match its desired state")
-    enqueue(env, "secrets_write", %{}, nil)
+    unless active_action?(env.id, "secrets_write"), do: enqueue(env, "secrets_write", %{}, nil)
     enqueue(env, "start", %{}, nil)
   end
 
@@ -527,7 +741,7 @@ defmodule Foreman.Environments do
   def observe(box_id, env_id, state) do
     case Repo.get(Environment, env_id) do
       %Environment{box_id: ^box_id, destroyed_at: nil} = env ->
-        unless Operations.active?(env.id) or env.observed_state == state,
+        unless lifecycle_active?(env.id) or env.observed_state == state,
           do: update_env!(env, %{observed_state: state})
 
         :ok
@@ -535,6 +749,26 @@ defmodule Foreman.Environments do
       _ ->
         {:error, :not_yours}
     end
+  end
+
+  @lifecycle ~w(create rebuild start stop destroy restart_affected restart_all)
+
+  defp lifecycle_active?(env_id) do
+    Repo.exists?(
+      from o in Foreman.Operations.Operation,
+        where:
+          o.environment_id == ^env_id and o.action in @lifecycle and
+            o.status in ["queued", "dispatched", "running"]
+    )
+  end
+
+  defp active_action?(env_id, action) do
+    Repo.exists?(
+      from o in Foreman.Operations.Operation,
+        where:
+          o.environment_id == ^env_id and o.action == ^action and
+            o.status in ["queued", "dispatched", "running"]
+    )
   end
 
   # -- helpers ----------------------------------------------------------------------

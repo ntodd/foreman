@@ -24,4 +24,30 @@ defmodule ForemanAgent.ConfigTest do
                "policy" => report
              })
   end
+
+  describe "FOREMAN_POLICY" do
+    test "accepts every rule the protocol knows, seccomp included" do
+      assert Config.parse_policy(["seccomp=allow", "host_bind=warn"]) == %{
+               seccomp: :allow,
+               host_bind: :warn
+             }
+
+      for rule <- ForemanProtocol.Policy.rules() do
+        assert Config.parse_policy(["#{rule}=allow"]) == %{String.to_atom(rule) => :allow}
+      end
+    end
+
+    test "refuses rules and actions it doesn't know, so a typo can't pass silently" do
+      assert_raise ArgumentError, ~r/seccom=allow/, fn ->
+        Config.parse_policy(["seccom=allow"])
+      end
+
+      assert_raise ArgumentError, ~r/maybe/, fn -> Config.parse_policy(["seccomp=maybe"]) end
+    end
+
+    test "a seccomp loosening is reported to the control plane" do
+      config = %Config{policy_rules: Map.merge(Policy.default_rules(), %{seccomp: :allow})}
+      assert Config.policy_report(config)["seccomp"] == "allow"
+    end
+  end
 end

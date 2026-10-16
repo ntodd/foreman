@@ -8,19 +8,25 @@ defmodule ForemanAgent.Ops do
     reconnect, so this is what stops them running twice.
   - **Ordered per environment:** operations on the same environment run one
     at a time, in arrival order. Box commands run straight away.
-  - **Cancellable:** `op.cancel` kills a running operation's process (and,
-    through MuonTrap, its child processes) or drops a queued one.
+  - **Cancellable:** `op.cancel` kills a running operation's process and
+    every process its commands started (`ForemanAgent.Runner.Tree`), or
+    drops a queued one. The environment's next operation waits until the
+    cancelled one's processes are gone.
 
   Each operation runs in its own process and reports `op.accepted`,
   `op.log` and `op.result` events to the sink.
   """
   use GenServer
 
+  alias ForemanAgent.Runner.Tree
+  alias ForemanAgent.Text
   alias ForemanProtocol.{Command, Event}
 
   require Logger
 
   @max_done 500
+  # How long a cancelled operation's commands get to exit after SIGTERM.
+  @cancel_grace 10_000
 
   def start_link(opts) do
     {name, opts} = Keyword.pop(opts, :name, __MODULE__)
@@ -43,6 +49,9 @@ defmodule ForemanAgent.Ops do
        running: %{},
        pids: %{},
        queues: %{},
+       # Cancelled operations whose processes are still being stopped:
+       # reaper pid => queue key. Their queue waits.
+       draining: %{},
        known: MapSet.new(),
        done: %{},
        done_order: :queue.new()
@@ -90,14 +99,26 @@ defmodule ForemanAgent.Ops do
   end
 
   def handle_info({:DOWN, _ref, :process, pid, reason}, state) do
-    case Map.fetch(state.pids, pid) do
-      {:ok, op_id} ->
-        {:noreply, finish(state, op_id, pid, {:error, "operation crashed: #{inspect(reason)}"})}
+    case {Map.fetch(state.pids, pid), Map.pop(state.draining, pid)} do
+      {{:ok, op_id}, _} ->
+        Logger.error("operation #{op_id} crashed: #{Exception.format_exit(reason)}")
+        {:noreply, finish(state, op_id, pid, {:error, crash_message(reason)})}
 
-      :error ->
+      {:error, {nil, _}} ->
         {:noreply, state}
+
+      {:error, {key, draining}} ->
+        {:noreply, maybe_start(%{state | draining: draining}, key)}
     end
   end
+
+  # The reason can carry the command's payload (secrets included), so the
+  # control plane only hears what kind of crash it was. The agent's own
+  # log has the details.
+  defp crash_message({%{__exception__: true} = e, _stack}),
+    do: "operation crashed (#{inspect(e.__struct__)})"
+
+  defp crash_message(_reason), do: "operation crashed"
 
   # Environment commands queue behind each other; everything else gets a
   # queue of its own.
@@ -105,7 +126,9 @@ defmodule ForemanAgent.Ops do
   defp key(%Command{op_id: op_id}), do: {:op, op_id}
 
   defp maybe_start(state, key) do
-    busy? = Enum.any?(state.running, fn {_, r} -> r.key == key end)
+    busy? =
+      Enum.any?(state.running, fn {_, r} -> r.key == key end) or
+        key in Map.values(state.draining)
 
     case {busy?, :queue.out(state.queues[key] || :queue.new())} do
       {true, _} ->
@@ -127,7 +150,7 @@ defmodule ForemanAgent.Ops do
     op_id = cmd.op_id
 
     log = fn stream, data ->
-      case Event.new("op.log", %{op_id: op_id, stream: stream, data: data}) do
+      case Event.new("op.log", %{op_id: op_id, stream: stream, data: Text.scrub(data)}) do
         {:ok, event} -> sink.(event)
         {:error, _} -> :ok
       end
@@ -161,14 +184,37 @@ defmodule ForemanAgent.Ops do
 
   defp cancel(state, target) do
     case Map.fetch(state.running, target) do
-      {:ok, %{pid: pid, ref: ref}} ->
+      {:ok, %{pid: pid, ref: ref, key: key}} ->
         Process.demonitor(ref, [:flush])
-        Process.exit(pid, :kill)
-        finish(state, target, pid, {:error, "cancelled"})
+        draining = Map.put(state.draining, reap(pid), key)
+        finish(%{state | draining: draining}, target, pid, {:error, "cancelled"})
 
       :error ->
         cancel_queued(state, target)
     end
+  end
+
+  # Freezes the operation where it is (so it can't start another command or
+  # report a result), stops every process its commands started, then kills
+  # it. This runs apart from Ops, so a slow shutdown doesn't hold up other
+  # commands.
+  defp reap(pid) do
+    suspended? =
+      try do
+        :erlang.suspend_process(pid)
+      catch
+        :error, :badarg -> false
+      end
+
+    roots = if suspended?, do: Tree.os_pids(pid), else: []
+
+    {reaper, _ref} =
+      spawn_monitor(fn ->
+        Tree.terminate(roots, @cancel_grace)
+        Process.exit(pid, :kill)
+      end)
+
+    reaper
   end
 
   defp cancel_queued(state, target) do
@@ -194,7 +240,7 @@ defmodule ForemanAgent.Ops do
 
   defp result_event(op_id, result) do
     payload =
-      case result do
+      case Text.scrub(result) do
         {:ok, map} when is_map(map) ->
           %{op_id: op_id, status: "ok", result: map}
 

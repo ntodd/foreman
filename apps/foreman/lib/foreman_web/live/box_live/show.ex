@@ -44,6 +44,15 @@ defmodule ForemanWeb.BoxLive.Show do
     |> assign(:fetched_at, series.until)
   end
 
+  # Re-reads the series once a new bucket's worth of samples has arrived:
+  # a 7-day range has 40-minute buckets, so redrawing it every 5 seconds
+  # would re-run a week of aggregates for nothing.
+  defp maybe_load_metrics(socket, now) do
+    if now - socket.assigns.fetched_at >= socket.assigns.series.step,
+      do: load_metrics(socket),
+      else: socket
+  end
+
   defp load(socket) do
     box = Boxes.get_box!(socket.assigns.box.id)
     envs = Environments.live_for_box(box.id)
@@ -120,16 +129,13 @@ defmodule ForemanWeb.BoxLive.Show do
 
   @impl true
   def handle_info({:box_metrics, _box_id, point}, socket) do
-    socket = assign(socket, :latest, point)
-
-    # Redraw once a new bucket's worth of samples has arrived.
-    if point.at - socket.assigns.fetched_at >= socket.assigns.series.step,
-      do: {:noreply, load_metrics(socket)},
-      else: {:noreply, socket}
+    {:noreply, socket |> assign(:latest, point) |> maybe_load_metrics(point.at)}
   end
 
+  # box.stats also stores environment samples; they show up with the next
+  # bucket, like the box's own.
   def handle_info({:box_stats, box_id}, %{assigns: %{box: %{id: box_id}}} = socket),
-    do: {:noreply, socket |> load() |> load_metrics()}
+    do: {:noreply, socket |> load() |> maybe_load_metrics(System.system_time(:second))}
 
   def handle_info({:box_stats, _other}, socket), do: {:noreply, socket}
   def handle_info(_message, socket), do: {:noreply, load(socket)}

@@ -8,7 +8,7 @@ defmodule ForemanProtocol.Policy do
   joins, and the control plane flags any box that has loosened one.
   """
 
-  @rules ~w(host_bind host_file docker_socket devices privileged host_namespace)
+  @rules ~w(host_bind host_file docker_socket devices privileged host_namespace seccomp compose_keys)
   @actions ~w(refuse warn allow)
 
   def rules, do: @rules

@@ -29,6 +29,7 @@ RUN mix deps.get --only prod
 COPY apps/foreman_agent/config config
 RUN mix deps.compile
 COPY apps/foreman_agent/lib lib
+COPY apps/foreman_agent/priv priv
 COPY apps/foreman_agent/rel rel
 RUN mix release && cp _build/prod/foreman_agent-${FOREMAN_AGENT_VERSION}.tar.gz /foreman_agent.tar.gz
 

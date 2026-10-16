@@ -94,6 +94,16 @@ defmodule ForemanAgent.SafeFSTest do
       refute File.exists?(Path.join(outside, ".foreman"))
     end
 
+    test "follows a parent symlink that stays inside the root", %{root: root} do
+      File.rm_rf!(Path.join(root, ".devcontainer"))
+      File.mkdir_p!(Path.join(root, "tools/devcontainer"))
+      File.ln_s!("tools/devcontainer", Path.join(root, ".devcontainer"))
+
+      assert {:ok, dir} = SafeFS.ensure_dir(root, ".devcontainer/.foreman")
+      assert dir == Path.join(Path.expand(root), "tools/devcontainer/.foreman")
+      assert File.dir?(dir)
+    end
+
     test "replaces a regular file in the way", %{root: root} do
       File.write!(Path.join(root, ".devcontainer/.foreman"), "x")
       assert {:ok, dir} = SafeFS.ensure_dir(root, ".devcontainer/.foreman")

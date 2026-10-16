@@ -27,6 +27,10 @@ COPY apps/foreman/rel rel
 RUN mix assets.setup && mix compile && mix assets.deploy && mix release
 
 FROM ${RUNTIME_IMAGE}
+# The database the release was built for. The release itself knows; this
+# is for whoever inspects the image or runs it.
+ARG FOREMAN_DB=sqlite
+ENV FOREMAN_DB=${FOREMAN_DB}
 RUN apt-get update -y && apt-get install -y --no-install-recommends libstdc++6 openssl libncurses6 libsctp1 locales ca-certificates \
   && rm -rf /var/lib/apt/lists/* \
   && sed -i '/en_US.UTF-8/s/^# //g' /etc/locale.gen && locale-gen

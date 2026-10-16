@@ -30,6 +30,12 @@ defmodule ForemanWeb.Router do
     plug :accepts, ["json"]
   end
 
+  # Health checks: no session, no pipeline, and not logged (they come
+  # every few seconds).
+  scope "/", ForemanWeb do
+    get "/healthz", HealthController, :show, log: false
+  end
+
   # Signed-out pages: sign in, and first-run setup.
   scope "/", ForemanWeb do
     pipe_through :browser

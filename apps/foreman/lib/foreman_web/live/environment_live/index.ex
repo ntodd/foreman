@@ -13,37 +13,55 @@ defmodule ForemanWeb.EnvironmentLive.Index do
       Phoenix.PubSub.subscribe(Foreman.PubSub, "boxes")
     end
 
-    {:ok, socket |> assign(:page_title, "Environments") |> load()}
+    {:ok,
+     socket
+     |> assign(:page_title, "Environments")
+     |> assign(:has_repos, Repos.list_repos(with_devcontainer: true) != [])
+     |> load()}
   end
 
   defp load(socket) do
     scope = socket.assigns.current_scope
     envs = Environments.list_environments(scope)
-    boxes = Boxes.usable_boxes(scope)
-    all_envs_by_box = Enum.group_by(envs, & &1.box_id)
-
-    box_cards =
-      for box <- boxes do
-        envs =
-          if Foreman.Scope.admin?(scope),
-            do: Map.get(all_envs_by_box, box.id, []),
-            else: Environments.live_for_box(box.id)
-
-        %{
-          box: box,
-          online: Boxes.online?(box.id),
-          summary: Capacity.box_summary(box, envs),
-          count: length(envs)
-        }
-      end
+    envs_by_box = Enum.group_by(envs, & &1.box_id)
 
     socket
     |> assign(:environments, envs)
-    |> assign(:boxes, box_cards)
-    |> assign(:has_repos, Repos.list_repos(with_devcontainer: true) != [])
+    |> assign(:boxes, Enum.map(Boxes.usable_boxes(scope), &box_card(socket, &1, envs_by_box)))
+  end
+
+  # Admins see every environment, so a box's are already in the list;
+  # members count everyone's on boxes shared with them.
+  defp box_card(socket, box, envs_by_box) do
+    envs =
+      if Foreman.Scope.admin?(socket.assigns.current_scope),
+        do: Map.get(envs_by_box, box.id, []),
+        else: Environments.live_for_box(box.id)
+
+    %{
+      box: box,
+      online: Boxes.online?(box.id),
+      summary: Capacity.box_summary(box, envs),
+      count: length(envs)
+    }
   end
 
   @impl true
+  # Every box sends stats every 30 seconds, which only changes its
+  # capacity and usage: redraw that box's card, nothing else.
+  def handle_info({:box_stats, box_id}, socket) do
+    with i when is_integer(i) <- Enum.find_index(socket.assigns.boxes, &(&1.box.id == box_id)),
+         %{} = fresh <- Boxes.get_box(box_id) do
+      %{box: box} = Enum.at(socket.assigns.boxes, i)
+      box = %{box | capacity: fresh.capacity, last_seen_at: fresh.last_seen_at}
+      envs_by_box = Enum.group_by(socket.assigns.environments, & &1.box_id)
+      card = box_card(socket, box, envs_by_box)
+      {:noreply, assign(socket, :boxes, List.replace_at(socket.assigns.boxes, i, card))}
+    else
+      _ -> {:noreply, socket}
+    end
+  end
+
   def handle_info(_message, socket), do: {:noreply, load(socket)}
 
   @impl true

@@ -16,7 +16,7 @@ defmodule E2E do
 
   def create do
     scope = Scope.for_user(admin())
-    repo = Foreman.Repos.get_repo_by_full_name("acme/hello")
+    repo = Foreman.Repos.get_repo_by_full_name(System.get_env("E2E_REPO", "acme/hello"))
     {:ok, env} = Environments.create_environment(scope, %{"repo_id" => repo.id, "box_id" => box().id})
     IO.puts("ENV=#{env.id} SLUG=#{env.slug}")
   end

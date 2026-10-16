@@ -102,4 +102,26 @@ defmodule ForemanProtocol.EventTest do
   test "rejects unknown event types" do
     assert {:error, {:unknown_type, "op.exec"}} = Event.new("op.exec", %{})
   end
+
+  describe "untrusted text" do
+    test "op.log and op.result refuse bytes that aren't UTF-8, so every accepted event encodes" do
+      split_euro = <<0xE2, 0x82>>
+
+      assert {:error, [{"data", "must be UTF-8"}]} =
+               Event.new("op.log", %{op_id: @op_id, stream: "stdout", data: "€ " <> split_euro})
+
+      assert {:error, [{"error", "must be UTF-8"}]} =
+               Event.new("op.result", %{op_id: @op_id, status: "error", error: <<"bad ", 0xFF>>})
+    end
+
+    test "a list of many bad items is rejected in linear time" do
+      bad = List.duplicate(1, 40_000)
+      {us, result} = :timer.tc(fn -> Event.new("box.inventory", %{environments: bad}) end)
+
+      assert {:error, errors} = result
+      assert length(errors) == 40_000
+      assert {"environments", "item 0 must be an object"} = hd(errors)
+      assert us < 500_000, "rejecting 40k bad items took #{div(us, 1000)} ms"
+    end
+  end
 end

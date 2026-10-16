@@ -16,7 +16,6 @@ log() { echo "tailscale-up: $*"; }
 ts_hostname=${TS_HOSTNAME:-${FOREMAN_ENV:-$(hostname)}}
 authkey_file=/run/foreman/ts-authkey
 accept_dns=${FOREMAN_ACCEPT_DNS:-true}
-dns_check_host=${FOREMAN_DNS_CHECK_HOST:-}
 sock=/var/run/tailscale/tailscaled.sock
 
 mkdir -p /var/lib/tailscale /var/run/tailscale
@@ -36,18 +35,21 @@ backend_state() {
     sed 's/.*"\(.*\)"$/\1/'
 }
 
-# Userspace networking is a fallback, not the default: without a TUN device
-# the tailnet is only reachable through the proxy on localhost:1055.
+# Userspace networking, always: tailscaled needs no TUN device and no
+# NET_ADMIN, and never touches the container's routes, firewall or DNS.
+# Connections into the environment (Tailscale SSH, its ports, `tailscale
+# serve`) work as usual. Connections out to other tailnet machines go
+# through the proxy on 127.0.0.2:1055.
+#
+# Not 127.0.0.1: tailscaled hands connections from the tailnet to
+# 127.0.0.1:<port>, so a proxy there would let any peer the ACL lets in
+# reach the compose network and the box's.
+proxy=127.0.0.2:1055
 start_daemon() {
-  if [ -c /dev/net/tun ]; then
-    set -- --tun=tailscale0
-  else
-    log "no /dev/net/tun; using userspace networking (proxy on localhost:1055)"
-    set -- --tun=userspace-networking --socks5-server=localhost:1055 \
-      --outbound-http-proxy-listen=localhost:1055
-  fi
-
-  nohup tailscaled --state=/var/lib/tailscale/tailscaled.state --socket="$sock" "$@" \
+  log "starting tailscaled with userspace networking (outbound proxy on $proxy)"
+  nohup tailscaled --state=/var/lib/tailscale/tailscaled.state --socket="$sock" \
+    --tun=userspace-networking --socks5-server="$proxy" \
+    --outbound-http-proxy-listen="$proxy" \
     >>/var/log/tailscaled.log 2>&1 &
 
   i=0
@@ -66,14 +68,24 @@ if ! daemon_running; then
   fi
 fi
 
+# A node that has joined before says NoState for a moment after tailscaled
+# starts, while it loads its saved profile; a new one says NeedsLogin at
+# once. Deciding during that moment would log a joined node in again.
 state=$(backend_state)
-if [ "$state" = "Running" ]; then
+i=0
+while [ "$state" = "NoState" ] && [ $i -lt 30 ]; do
+  sleep 0.5
+  i=$((i + 1))
+  state=$(backend_state)
+done
+
+if [ "$state" = "Running" ] || [ "$state" = "Starting" ]; then
   log "already up as $(tailscale --socket="$sock" ip -4 2>/dev/null | head -1)"
   exit 0
 fi
 
 # A node that has joined before only needs `up`; a new one needs the key.
-set -- --hostname="$ts_hostname" --ssh --accept-dns="$accept_dns" --netfilter-mode=off --reset
+set -- --hostname="$ts_hostname" --ssh --accept-dns="$accept_dns" --reset
 if [ "$state" = "NeedsLogin" ] || [ "$state" = "NoState" ]; then
   if [ ! -s "$authkey_file" ]; then
     log "not logged in and no auth key at $authkey_file; Foreman writes one when the environment is created"
@@ -83,25 +95,12 @@ if [ "$state" = "NeedsLogin" ] || [ "$state" = "NoState" ]; then
   set -- "$@" --auth-key="file:$authkey_file"
 fi
 
-# --netfilter-mode=off: tailscaled's default rules drop traffic to
-# 100.64.0.0/10 that it can't carry itself, which includes the host's own
-# tailnet address. This node only needs inbound tailnet traffic, and
-# tailnet ACLs are still enforced by tailscaled either way.
-if ! tailscale --socket="$sock" up "$@"; then
+# Best effort means never hanging the background job either.
+if ! tailscale --socket="$sock" up --timeout=60s "$@"; then
   log "tailscale up failed: expired or revoked auth key, or tags the key's owner can't assign?"
   exit 0
 fi
 
 log "joined as $ts_hostname ($(tailscale --socket="$sock" ip -4 2>/dev/null | head -1))"
-
-# --accept-dns points resolv.conf at MagicDNS, which forwards other names
-# to Docker's resolver. If that ever breaks, compose service names stop
-# resolving with nothing pointing back at Tailscale, so say so here.
-if [ "$accept_dns" = "true" ] && [ -n "$dns_check_host" ]; then
-  if ! getent hosts "$dns_check_host" >/dev/null 2>&1; then
-    log "'$dns_check_host' no longer resolves: MagicDNS is not forwarding to Docker's resolver."
-    log "Set the feature's acceptDns option to false and use tailnet IPs instead."
-  fi
-fi
 
 exit 0

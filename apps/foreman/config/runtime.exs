@@ -56,11 +56,23 @@ if config_env() != :test do
       client_secret: System.get_env("FOREMAN_TAILSCALE_CLIENT_SECRET"),
       tailnet: System.get_env("FOREMAN_TAILSCALE_TAILNET", "-"),
       tags: list.("FOREMAN_TAILSCALE_TAGS")
-    }
+    },
+    tailnet_sweep: System.get_env("FOREMAN_TAILNET_SWEEP", "true") != "false"
 end
 
 if config_env() == :prod do
-  if System.get_env("FOREMAN_DB", "sqlite") == "postgres" do
+  # The release was compiled for one database (config.exs), and its repo
+  # can only talk to that one, so the build decides, not the environment.
+  database = Application.get_env(:foreman, :database, "sqlite")
+
+  runtime_db = System.get_env("FOREMAN_DB", "")
+
+  if runtime_db not in ["", database] do
+    raise "FOREMAN_DB is #{runtime_db}, but this release was built for #{database}; " <>
+            "rebuild it with FOREMAN_DB=#{runtime_db} or unset FOREMAN_DB"
+  end
+
+  if database == "postgres" do
     url = System.get_env("DATABASE_URL") || raise "DATABASE_URL is missing"
     host = URI.parse(url).host
 

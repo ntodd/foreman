@@ -22,7 +22,7 @@ defmodule ForemanWeb.AgentControllerTest do
     assert Repo.get!(Foreman.Boxes.Box, id).hostname == "mona-desktop"
 
     again =
-      post(build_conn(), ~p"/api/agents/enroll", %{"join_token" => token, "public_key" => public})
+      post(again(conn), ~p"/api/agents/enroll", %{"join_token" => token, "public_key" => public})
 
     assert json_response(again, 401)["error"] =~ "used"
   end
@@ -31,7 +31,7 @@ defmodule ForemanWeb.AgentControllerTest do
     assert post(conn, ~p"/api/agents/enroll", %{"join_token" => "fj_nope", "public_key" => "x"})
            |> json_response(401)
 
-    assert post(build_conn(), ~p"/api/agents/enroll", %{
+    assert post(again(conn), ~p"/api/agents/enroll", %{
              "join_token" => token,
              "public_key" => "short"
            })
@@ -59,4 +59,7 @@ defmodule ForemanWeb.AgentControllerTest do
     assert body =~ "FOREMAN_URL=\"http://localhost"
     refute body =~ "__FOREMAN_URL__"
   end
+
+  # A second request from the same client (rate limits are per client).
+  defp again(conn), do: %{build_conn() | remote_ip: conn.remote_ip}
 end

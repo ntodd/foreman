@@ -4,6 +4,8 @@ defmodule ForemanAgent.Stats do
   summed over each environment's running containers.
   """
 
+  require Logger
+
   @spec collect(map()) :: {:ok, map()} | {:error, String.t()}
   def collect(ctx) do
     with {:ok, info} <- ctx.docker.info(),
@@ -27,7 +29,7 @@ defmodule ForemanAgent.Stats do
 
   defp usage(ctx, containers) do
     containers
-    |> Enum.filter(&(&1["Labels"]["foreman.env_id"] && &1["State"] == "running"))
+    |> Enum.filter(&(&1["State"] == "running" and env_label?(&1)))
     |> Task.async_stream(
       fn c -> {c["Labels"]["foreman.env_id"], container_usage(ctx, c["Id"])} end,
       max_concurrency: 8,
@@ -45,6 +47,32 @@ defmodule ForemanAgent.Stats do
     end)
     |> Map.new(fn {k, v} -> {k, %{v | cpu_percent: Float.round(v.cpu_percent * 1.0, 2)}} end)
   end
+
+  # One container with a label that isn't an environment id (made by hand,
+  # say) would make the whole box.stats event invalid. Leave it out, and
+  # say so once.
+  defp env_label?(%{"Id" => id, "Labels" => labels}) do
+    case ForemanProtocol.Schema.cast(%{"id" => labels["foreman.env_id"]},
+           id: {:uuid, required: true}
+         ) do
+      {:ok, _} ->
+        true
+
+      {:error, _} ->
+        if labels["foreman.env_id"] && :persistent_term.get({__MODULE__, :stray, id}, nil) == nil do
+          :persistent_term.put({__MODULE__, :stray, id}, true)
+
+          Logger.warning(
+            "container #{id} has foreman.env_id #{inspect(labels["foreman.env_id"])}, " <>
+              "which isn't an environment id; leaving it out of the stats"
+          )
+        end
+
+        false
+    end
+  end
+
+  defp env_label?(_container), do: false
 
   defp container_usage(ctx, id) do
     case ctx.docker.stats(id) do
@@ -76,7 +104,8 @@ defmodule ForemanAgent.Stats do
 
   @doc "Total and free MB on the filesystem holding the environments."
   def disk(ctx) do
-    case ctx.runner.run("df", ["-Pk", ctx.config.envs_root], env: %{}) do
+    # A hung filesystem (a dead NFS mount) can hang df.
+    case ctx.runner.run("df", ["-Pk", ctx.config.envs_root], env: %{}, timeout: 10_000) do
       {:ok, %{status: 0, output: output}} -> parse_df(output)
       _ -> {0, 0}
     end

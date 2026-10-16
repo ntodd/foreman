@@ -2,6 +2,8 @@ defmodule Foreman.GitHub.Client.Req do
   @moduledoc "`Foreman.GitHub.Client` over HTTPS with Req."
   @behaviour Foreman.GitHub.Client
 
+  require Logger
+
   alias Foreman.GitHub.JWT
 
   @api "https://api.github.com"
@@ -78,10 +80,27 @@ defmodule Foreman.GitHub.Client.Req do
   end
 
   @impl true
-  def org_member?(token, org) do
+  def org_membership(token, org) do
     case Req.get(api(bearer(token)), url: "/user/memberships/orgs/#{URI.encode_www_form(org)}") do
-      {:ok, %{status: 200, body: %{"state" => "active"}}} -> true
-      _ -> false
+      {:ok, %{status: 200, body: %{"state" => state}}} -> {:ok, state == "active"}
+      # GitHub answers 404 when the user isn't a member, but also when the
+      # org can't be seen at all; only the first is an answer.
+      {:ok, %{status: 404}} -> org_exists(token, org)
+      other -> unexpected(other)
+    end
+  end
+
+  defp org_exists(token, org) do
+    case Req.get(api(bearer(token)), url: "/orgs/#{URI.encode_www_form(org)}") do
+      {:ok, %{status: 200}} ->
+        {:ok, false}
+
+      {:ok, %{status: 404}} ->
+        Logger.error("GitHub can't find the org #{org}; is FOREMAN_ALLOWED_ORG right?")
+        {:error, :org_not_found}
+
+      other ->
+        unexpected(other)
     end
   end
 
@@ -131,7 +150,8 @@ defmodule Foreman.GitHub.Client.Req do
 
   @impl true
   def list_branches(token, full_name) do
-    with {:ok, branches} <- paginate(api(bearer(token)), "/repos/#{full_name}/branches", & &1, 3) do
+    with {:ok, branches} <-
+           paginate(api(bearer(token)), "/repos/#{full_name}/branches", & &1, 3, true) do
       {:ok, Enum.map(branches, & &1["name"])}
     end
   end
@@ -238,13 +258,22 @@ defmodule Foreman.GitHub.Client.Req do
     end
   end
 
-  defp paginate(req, url, extract, max_pages \\ 20) do
+  # Reads up to `max_pages` pages. A list that would run past them is an
+  # error unless `truncate` is set: repo sync treats repos missing from
+  # the list as removed, so a silently truncated list would hide repos.
+  defp paginate(req, url, extract, max_pages \\ 50, truncate \\ false) do
     Enum.reduce_while(1..max_pages, {:ok, []}, fn page, {:ok, acc} ->
       case Req.get(req, url: url, params: [per_page: 100, page: page]) do
         {:ok, %{status: 200, body: body}} ->
           items = extract.(body) || []
           acc = acc ++ items
-          if length(items) < 100, do: {:halt, {:ok, acc}}, else: {:cont, {:ok, acc}}
+
+          cond do
+            length(items) < 100 -> {:halt, {:ok, acc}}
+            page < max_pages -> {:cont, {:ok, acc}}
+            truncate -> {:halt, {:ok, acc}}
+            true -> {:halt, {:error, :too_many_pages}}
+          end
 
         other ->
           {:halt, unexpected(other)}

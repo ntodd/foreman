@@ -15,13 +15,17 @@ defmodule ForemanAgent.Identity do
   def load(data_dir) do
     path = path(data_dir)
 
+    # Anything wrong with the file is an error the connection retries on,
+    # not a crash: crashing here would restart-loop the whole agent.
     case File.read(path) do
       {:ok, json} ->
-        with {:ok, %{"agent_id" => id, "private_key" => key}} <- JSON.decode(json),
-             {:ok, key} <- Base.decode64(key) do
+        with {:ok, %{"agent_id" => id, "private_key" => key}}
+             when is_binary(id) and id != "" and is_binary(key) <- JSON.decode(json),
+             {:ok, key} when byte_size(key) == 32 <- Base.decode64(key) do
+          remember(key)
           {:ok, %__MODULE__{agent_id: id, private_key: key}}
         else
-          _ -> {:error, "#{path} is unreadable"}
+          _ -> {:error, "#{path} is damaged; re-enroll this box (install.sh --reenroll)"}
         end
 
       {:error, :enoent} ->
@@ -68,7 +72,18 @@ defmodule ForemanAgent.Identity do
   defp error_message(%{"error" => message}), do: message
   defp error_message(_), do: "no details"
 
+  @doc """
+  The key as the identity file holds it, for `ForemanAgent.Redactor` to
+  scrub from everything the agent sends: a compose error can quote any
+  file the agent can read, this one included.
+  """
+  @spec secrets() :: [String.t()]
+  def secrets, do: :persistent_term.get({__MODULE__, :secrets}, [])
+
+  defp remember(key), do: :persistent_term.put({__MODULE__, :secrets}, [Base.encode64(key)])
+
   def save(data_dir, %__MODULE__{} = identity) do
+    remember(identity.private_key)
     File.mkdir_p!(data_dir)
     File.chmod!(data_dir, 0o700)
 

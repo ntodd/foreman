@@ -37,9 +37,17 @@ defmodule Foreman.Environments.Commands do
       "restart_all" ->
         with_secrets(env, fn s -> command(op, "env.restart", restart(env, "all", [], s)) end)
 
+      # Everything changed since the environment last came up, as of now:
+      # secrets can change between the click and the send.
       "restart_affected" ->
         with_secrets(env, fn s ->
-          command(op, "env.restart", restart(env, "affected", op.args["changed"] || [], s))
+          changed =
+            Secrets.changed_names(env.applied_secret_hashes, s.hashes)
+            |> Enum.concat(op.args["changed"] || [])
+            |> Enum.uniq()
+            |> Enum.sort()
+
+          command(op, "env.restart", restart(env, "affected", changed, s))
         end)
 
       "secrets_write" ->
@@ -75,7 +83,9 @@ defmodule Foreman.Environments.Commands do
   defp up(op, env, type) do
     secrets = secrets(env)
     identity = Accounts.effective_identity(env.user, env.repo)
-    {token, token_notice} = github_token(env)
+    # A build shouldn't wait on GitHub: without a token it goes ahead, and
+    # the token follows with the next refresh.
+    {token, token_notice, token_status} = github_token(env)
 
     with {:ok, ts_key, env} <- tailscale_key(env, op.action) do
       files =
@@ -102,21 +112,40 @@ defmodule Foreman.Environments.Commands do
         |> put_present(:registry_auth, registry_auth(env.repo.owner))
 
       with {:ok, cmd, _} <- command(op, type, payload) do
-        {:ok, cmd, %{"secret_hashes" => secrets.hashes, "token" => token != nil}}
+        {:ok, cmd,
+         %{
+           "secret_hashes" => secrets.hashes,
+           "token" => token != nil,
+           "token_retry" => token_status == :unavailable
+         }}
       end
     end
   end
 
+  # The agent replaces the whole set of files. When GitHub can't give a
+  # new token just now, the files still go (a box after a reboot needs its
+  # secrets more than its token), and an agent on protocol 2 is told to
+  # keep the token it has; one on protocol 1 loses it until the next
+  # refresh, which this puts first in line. (An expired login is
+  # different: that token is dead, and the notice says to sign in again.)
   defp secrets_write(op, env) do
     secrets = secrets(env)
     identity = Accounts.effective_identity(env.user, env.repo)
-    {token, notice} = github_token(env)
-    files = file_set(env, secrets, identity, token, notice)
+    {token, notice, status} = github_token(env)
 
-    with {:ok, cmd, _} <- command(op, "env.secrets.write", %{env_id: env.id, files: files}) do
-      {:ok, cmd, %{"token" => token != nil}}
+    payload =
+      %{env_id: env.id, files: file_set(env, secrets, identity, token, notice)}
+      |> put_present(:keep, keep_token(env, status))
+
+    with {:ok, cmd, _} <- command(op, "env.secrets.write", payload) do
+      {:ok, cmd, %{"token" => token != nil, "token_retry" => status == :unavailable}}
     end
   end
+
+  defp keep_token(%{box: %{protocol_version: v}}, :unavailable) when is_integer(v) and v >= 2,
+    do: ["github-token"]
+
+  defp keep_token(_env, _status), do: nil
 
   defp command(op, type, payload) do
     case Command.new(type, payload, op_id: op.id) do
@@ -165,24 +194,28 @@ defmodule Foreman.Environments.Commands do
     [pending, token_notice] |> Enum.reject(&is_nil/1) |> Enum.join()
   end
 
+  # {token, notice, status}: status is :ok, :expired (sign in again) or
+  # :unavailable (GitHub failed this time; try again later).
   defp github_token(env) do
     if GitHub.configured?() do
       case GitHub.environment_token(env.user, env.repo) do
         {:ok, token} ->
-          {token, nil}
+          {token, nil, :ok}
 
         {:error, :login_expired} ->
           {nil,
-           "Foreman: your GitHub login expired, so git push and gh won't work here. Sign in to Foreman again to fix it.\n"}
+           "Foreman: your GitHub login expired, so git push and gh won't work here. Sign in to Foreman again to fix it.\n",
+           :expired}
 
         {:error, reason} ->
           Logger.warning("couldn't get a GitHub token for #{env.slug}: #{inspect(reason)}")
 
           {nil,
-           "Foreman: couldn't get a GitHub token for this environment. Check its repo's token settings.\n"}
+           "Foreman: couldn't get a GitHub token for this environment just now, so git push and gh won't work yet. Foreman will try again shortly.\n",
+           :unavailable}
       end
     else
-      {nil, nil}
+      {nil, nil, :ok}
     end
   end
 

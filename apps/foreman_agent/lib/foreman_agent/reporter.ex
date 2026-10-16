@@ -28,26 +28,46 @@ defmodule ForemanAgent.Reporter do
     {:ok, %{states: %{}, last: nil, cpu: nil}}
   end
 
+  # Each report is best effort: a failure (Docker restarting, no file
+  # descriptors left for `df`) is logged and skipped. Crashing instead
+  # would restart this process straight into the same failure, and enough
+  # restarts in a row take the whole agent down with it.
   @impl true
   def handle_cast(:report_now, state) do
-    state = %{state | last: nil}
-    {:noreply, state |> inventory() |> tap(fn _ -> stats() end)}
+    state = safely("inventory", state, &inventory(%{&1 | last: nil}))
+    safely("stats", state, &tap(&1, fn _ -> stats() end))
+    {:noreply, state}
   end
 
   @impl true
   def handle_info(:inventory, state) do
     Process.send_after(self(), :inventory, @inventory_every)
-    {:noreply, inventory(state)}
+    {:noreply, safely("inventory", state, &inventory/1)}
   end
 
   def handle_info(:stats, state) do
     Process.send_after(self(), :stats, @stats_every)
-    stats()
-    {:noreply, state}
+    {:noreply, safely("stats", state, &tap(&1, fn _ -> stats() end))}
   end
 
   def handle_info(:metrics, state) do
     Process.send_after(self(), :metrics, @metrics_every)
+    {:noreply, safely("metrics", state, &metrics/1)}
+  end
+
+  defp safely(what, state, fun) do
+    fun.(state)
+  rescue
+    e ->
+      Logger.warning("couldn't report #{what}: #{Exception.message(e)}")
+      state
+  catch
+    kind, reason ->
+      Logger.warning("couldn't report #{what}: #{Exception.format_banner(kind, reason)}")
+      state
+  end
+
+  defp metrics(state) do
     ctx = Handler.ctx(fn _, _ -> :ok end)
 
     source = %{
@@ -59,7 +79,7 @@ defmodule ForemanAgent.Reporter do
     {metrics, cpu} = HostMetrics.sample(source, state.cpu)
     # The first sample has no CPU baseline yet.
     if state.cpu, do: push("box.metrics", metrics)
-    {:noreply, %{state | cpu: cpu}}
+    %{state | cpu: cpu}
   end
 
   defp inventory(state) do

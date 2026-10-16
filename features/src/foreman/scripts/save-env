@@ -1,0 +1,20 @@
+#!/bin/sh
+# Writes the container's environment (serialized by entrypoint.sh, on stdin)
+# to /etc/foreman/container.env, as root.
+#
+# On a Linux box /run/foreman belongs to the agent's uid, which the
+# devcontainer CLI also gives the devcontainer's user, so the file is 0600
+# and theirs: other users in the container can't read what compose put
+# there. Where /run/foreman shows as root's (Docker Desktop's bind mounts),
+# there's no telling who the user is, and the file is 0644.
+set -eu
+
+dir=/etc/foreman
+owner=$(stat -c %u /run/foreman)
+umask 077
+tmp=$(mktemp "$dir/.container.env.XXXXXX")
+trap 'rm -f "$tmp"' EXIT
+cat > "$tmp"
+if [ "$owner" = 0 ]; then chmod 0644 "$tmp"; else chown "$owner" "$tmp"; fi
+mv -f "$tmp" "$dir/container.env"
+trap - EXIT

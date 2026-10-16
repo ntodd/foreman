@@ -3,6 +3,10 @@
 #
 #   curl -fsSL __FOREMAN_URL__/agent/install.sh | sudo sh -s -- --token fj_...
 #
+# Re-running it on an enrolled box updates the agent and the devcontainer
+# CLI and keeps the box's identity (no token needed). To enroll again, for
+# example after the box was revoked, pass --reenroll with a new token.
+#
 # Needs: systemd, Docker Engine with Compose v2.24+, git, and Node 20+
 # (for the devcontainer CLI). The agent runs as the `foreman` user, which
 # joins the docker group: that is root-equivalent on this box, so only
@@ -13,12 +17,15 @@ FOREMAN_URL="__FOREMAN_URL__"
 DEVCONTAINER_CLI_VERSION="0.89.0"
 TOKEN=""
 POLICY=""
+REENROLL=""
+IDENTITY=/var/lib/foreman-agent/identity.json
 
 while [ $# -gt 0 ]; do
   case "$1" in
     --token) TOKEN="$2"; shift 2 ;;
     --policy) POLICY="$2"; shift 2 ;;
     --url) FOREMAN_URL="$2"; shift 2 ;;
+    --reenroll) REENROLL=1; shift ;;
     *) echo "unknown option: $1" >&2; exit 64 ;;
   esac
 done
@@ -26,7 +33,16 @@ done
 fail() { echo "foreman: $*" >&2; exit 1; }
 
 [ "$(id -u)" -eq 0 ] || fail "run this as root (sudo)"
-[ -n "$TOKEN" ] || fail "--token is required (create one on the Boxes page)"
+
+# An existing identity is kept unless --reenroll: a new token would make a
+# new box in Foreman, and this box's environments belong to the old one.
+enroll=1
+if [ -s "$IDENTITY" ] && [ -z "$REENROLL" ]; then
+  enroll=""
+fi
+if [ -n "$enroll" ]; then
+  [ -n "$TOKEN" ] || fail "--token is required (create one on the Boxes page)"
+fi
 command -v systemctl >/dev/null 2>&1 || fail "systemd is required"
 command -v docker >/dev/null 2>&1 || fail "Docker Engine is required"
 command -v git >/dev/null 2>&1 || fail "git is required"
@@ -34,9 +50,17 @@ command -v npm >/dev/null 2>&1 || fail "Node.js (with npm) is required for the d
 
 compose=$(docker compose version --short 2>/dev/null || true)
 [ -n "$compose" ] || fail "the Docker Compose plugin is required"
-case "$compose" in
-  1.* | 2.[0-9].* | 2.1[0-9].* | 2.2[0-3].*) fail "Docker Compose $compose is too old; 2.24 or newer is needed" ;;
+# The overlay uses the `!reset` tag, reliable from Compose 2.24.
+compose_version=${compose#v}
+compose_major=${compose_version%%.*}
+compose_minor=${compose_version#*.}
+compose_minor=${compose_minor%%.*}
+case "$compose_major$compose_minor" in
+  *[!0-9]* | "") fail "couldn't read the Docker Compose version ($compose)" ;;
 esac
+if [ "$compose_major" -lt 2 ] || { [ "$compose_major" -eq 2 ] && [ "$compose_minor" -lt 24 ]; }; then
+  fail "Docker Compose $compose is too old; 2.24 or newer is needed. Install Docker from Docker's apt repository (https://docs.docker.com/engine/install/), which ships a current docker-compose-plugin"
+fi
 
 case "$(uname -m)" in
   x86_64) target=linux-amd64 ;;
@@ -76,17 +100,32 @@ fi
 printf '%s  %s\n' "$sha" "$tmp/agent.tar.gz" | sha256sum -c - >/dev/null || fail "the download doesn't match its digest"
 
 dest="/opt/foreman-agent/releases/$version"
-rm -rf "$dest"
-install -d -o foreman -g foreman "$dest"
-tar -xzf "$tmp/agent.tar.gz" -C "$dest"
-chown -R foreman:foreman "$dest"
+# Unpack beside the release and swap it in: on a re-run the agent may be
+# running from $dest, and deleting it under the running agent breaks it.
+new="$dest.new.$$"
+rm -rf "$new"
+install -d -o foreman -g foreman "$new"
+tar -xzf "$tmp/agent.tar.gz" -C "$new"
+chown -R foreman:foreman "$new"
+rm -rf "$dest.old"
+if [ -d "$dest" ]; then mv "$dest" "$dest.old"; fi
+mv "$new" "$dest"
 ln -sfn "releases/$version" /opt/foreman-agent/current
 chown -h foreman:foreman /opt/foreman-agent/current
+# A fresh install isn't an update waiting to be confirmed.
+rm -f /opt/foreman-agent/previous /opt/foreman-agent/update-pending
+
+if [ -n "$enroll" ] && [ -e "$IDENTITY" ]; then
+  # Keep the old identity aside rather than deleting a key.
+  mv "$IDENTITY" "$IDENTITY.replaced-$(date +%s)"
+fi
 
 umask 077
+join_token=""
+if [ -n "$enroll" ]; then join_token="$TOKEN"; fi
 cat > /etc/foreman-agent/agent.env <<EOF
 FOREMAN_URL=$FOREMAN_URL
-FOREMAN_JOIN_TOKEN=$TOKEN
+FOREMAN_JOIN_TOKEN=$join_token
 FOREMAN_DEVCONTAINER_CLI=/opt/foreman-agent/node/node_modules/.bin/devcontainer
 FOREMAN_POLICY=$POLICY
 HOME=/var/lib/foreman-agent
@@ -123,16 +162,18 @@ ReadWritePaths=/var/lib/foreman-agent /srv/foreman /run/foreman /opt/foreman-age
 WantedBy=multi-user.target
 EOF
 
-# Self-update keeps the version it replaced in `previous`. If the new one
-# keeps failing, switch back to it. A first install has nothing to go back
-# to; the agent's own unit already shows that failure.
+# Self-update keeps the version it replaced in `previous` until the new one
+# joins the control plane. If the new one keeps crashing, switch back to
+# it. (One that runs but never joins rolls itself back.) A first install
+# has nothing to go back to; the agent's own unit already shows that
+# failure.
 cat > /etc/systemd/system/foreman-agent-rollback.service <<'EOF'
 [Unit]
 Description=Roll the Foreman agent back to its previous release
 
 [Service]
 Type=oneshot
-ExecStart=/bin/sh -c 'cd /opt/foreman-agent && if [ -L previous ]; then ln -sfn "$(readlink previous)" current && rm previous && systemctl reset-failed foreman-agent && systemctl start foreman-agent; else echo "no previous release to roll back to"; fi'
+ExecStart=/bin/sh -c 'cd /opt/foreman-agent && if [ -L previous ]; then ln -sfn "$(readlink previous)" current && rm -f previous update-pending && systemctl reset-failed foreman-agent && systemctl start foreman-agent; else echo "no previous release to roll back to"; fi'
 EOF
 
 systemctl daemon-reload
@@ -141,11 +182,18 @@ systemctl enable foreman-agent
 # have hit its start limit) with the old settings and join token.
 systemctl reset-failed foreman-agent 2>/dev/null || true
 systemctl restart foreman-agent
+rm -rf "$dest.old"
+
+if [ -z "$enroll" ]; then
+  echo "foreman: updated; this box keeps its enrollment ($IDENTITY)."
+  echo "foreman: if it was revoked in Foreman, re-run with --reenroll and a new --token."
+  exit 0
+fi
 
 echo "foreman: waiting for the agent to enroll"
 i=0
 while [ $i -lt 30 ]; do
-  if [ -s /var/lib/foreman-agent/identity.json ]; then
+  if [ -s "$IDENTITY" ]; then
     # The join token is spent; don't leave it lying around.
     sed -i '/^FOREMAN_JOIN_TOKEN=/d' /etc/foreman-agent/agent.env
     echo "foreman: enrolled. This box should show as online in Foreman."

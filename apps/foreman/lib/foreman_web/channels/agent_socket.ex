@@ -8,28 +8,41 @@ defmodule ForemanWeb.AgentSocket do
   use Phoenix.Socket
 
   alias Foreman.Agents.NonceCache
+  alias Foreman.RateLimit
   alias ForemanProtocol.Auth
+  alias ForemanWeb.ClientIP
 
   require Logger
 
   channel "agent:*", ForemanWeb.AgentChannel
 
+  # Only refused connects count, per client, so junk can't lock out a
+  # signed agent (agents behind the same proxy are told apart by
+  # ClientIP). A client sending this many bad connects a minute is cut
+  # off before its signatures are even checked.
+  @max_failures 600
+  @window 60_000
+
   @impl true
   def connect(_params, socket, connect_info) do
     headers = Map.new(connect_info[:x_headers] || [], fn {k, v} -> {String.downcase(k), v} end)
-    ip = peer_ip(connect_info)
+    ip = ClientIP.from_connect_info(connect_info)
+    key = "agent-connect-failed:#{ip}"
 
-    with {:allow, _} <- Foreman.RateLimit.hit("agent-connect:#{ip}", 60_000, 60),
+    with false <- RateLimit.exhausted?(key, @window, @max_failures),
          {:ok, %{agent_id: agent_id, nonce: nonce}} <-
            Auth.verify_connect_headers(headers, &Foreman.Boxes.public_key/1),
          :ok <- NonceCache.check(nonce) do
       {:ok, assign(socket, :box_id, agent_id)}
     else
-      {:deny, _} ->
-        Logger.warning("agent connects from #{ip} are rate limited")
+      true ->
+        if RateLimit.failed(key, @window, @max_failures) == :first_over,
+          do: Logger.warning("agent connects from #{ip} are rate limited")
+
         :error
 
       reason ->
+        RateLimit.failed(key, @window, @max_failures)
         Logger.warning("refused an agent connect from #{ip}: #{inspect(reason)}")
         :error
     end
@@ -38,7 +51,4 @@ defmodule ForemanWeb.AgentSocket do
   # Lets Foreman.Boxes.revoke/2 (and re-enrollment) drop the socket.
   @impl true
   def id(socket), do: "agent_socket:#{socket.assigns.box_id}"
-
-  defp peer_ip(%{peer_data: %{address: address}}), do: address |> :inet.ntoa() |> to_string()
-  defp peer_ip(_), do: "unknown"
 end

@@ -64,7 +64,7 @@ An Elixir release running under systemd on each box, as a dedicated `foreman` us
 - It connects out to the control plane over WSS with Slipstream.
 - It uses the Docker Engine API (unix socket) for inventory, start/stop, logs and stats.
 - It shells out to `@devcontainers/cli` only for `up` and builds.
-- It runs child processes under MuonTrap, so cancelling an operation kills the whole process tree.
+- It runs child processes under MuonTrap. Cancelling an operation, or a command running past its timeout, kills the command's whole process tree (found through `/proc`), and the environment's next operation waits until it's gone. Every command has a timeout: three hours for `devcontainer up`, 30 minutes for the rest.
 - It holds no durable state of its own. The control plane owns desired state, and Docker labels on the box record what exists (`foreman.env_id`, `foreman.repo`, `foreman.owner`).
 
 The local agent on the personal desktop is the same binary, pointed at `localhost`. There is no separate local runner.
@@ -112,7 +112,7 @@ Each agent joins topic `agent:<agent_id>`. Commands are a fixed vocabulary; ther
 
 Every command carries an `op_id`. The agent records in-flight `op_id`s, so a command retried after a reconnect is not run twice. Long operations keep running if the socket drops. The agent sends their progress and result once it reconnects.
 
-The agent sends its version and protocol version when it joins. The control plane must accept protocol N and N-1 during rollouts.
+The agent sends its version and protocol version when it joins. The control plane accepts protocol N and N-1, and only sends a protocol-N field to agents that reported N, so upgrade the control plane before the agents (an older control plane refuses newer agents). Protocol 2 added `keep` to `env.secrets.write`. Once boxes run protocol-2 agents, the control plane can't be rolled back past the release that introduced it: an older control plane refuses them at join.
 
 ### Reconciliation
 
@@ -171,8 +171,6 @@ services:
     volumes:
       - /run/foreman/envs/<env_id>:/run/foreman:ro
       - tailscale-state:/var/lib/tailscale
-    devices:
-      - /dev/net/tun:/dev/net/tun
     environment:
       FOREMAN_ENV: <slug>
       TS_HOSTNAME: <slug>
@@ -191,11 +189,11 @@ A devcontainer feature that ships inside the agent release, so a box always runs
 
 - **Tailscale:**
   - Installs `tailscale` and `tailscaled` from the static tarball, with a checksum check.
-  - Requests the `NET_ADMIN` and `NET_RAW` capabilities.
   - Its `entrypoint` starts tailscaled and runs `tailscale up --ssh --auth-key=file:/run/foreman/ts-authkey --hostname=$TS_HOSTNAME …`.
-  - It falls back to userspace networking when there is no TUN device. This is a port of the current `tailscale-up.sh`.
+  - tailscaled always uses userspace networking, so the devcontainer gets no TUN device and no `NET_ADMIN`, and tailscaled never touches its routes, firewall or DNS. Connections into the environment (Tailscale SSH, its ports, `tailscale serve`) work as usual; connections out to other tailnet machines go through a SOCKS5 and HTTP proxy on `127.0.0.2:1055` (not 127.0.0.1, which tailscaled forwards tailnet connections to). In this mode tailscaled hands connections from the tailnet to `127.0.0.1:<port>`, so servers bound only to localhost are reachable from the tailnet too, and see every tailnet peer as 127.0.0.1.
   - Because it is an entrypoint, it runs on every container start, including `docker restart`. A `postStartCommand` only runs when the devcontainer CLI starts the container.
 - **Secrets hook:** installs `/etc/profile.d/foreman.sh`, which sources `/run/foreman/secrets.env`. A zsh equivalent goes in `/etc/zsh/zprofile`. The hook also prints `/run/foreman/notices` when it isn't empty.
+- **Container environment over SSH:** Tailscale SSH (and VS Code over SSH) starts a clean login shell, without the container's environment: compose `environment:`, `containerEnv`, or a `PATH` the image set. The entrypoint saves that environment to `/etc/foreman/container.env` on every start, and the hook loads it before the secrets, so an SSH shell sees what `docker exec` would.
 - **Git:**
   - Installs an `/etc/gitconfig` that includes `/run/foreman/gitconfig`.
   - Installs a git credential helper that reads `/run/foreman/github-token`.
@@ -226,8 +224,8 @@ A devcontainer feature that ships inside the agent release, so a box always runs
   - The feature runs `tailscale up --ssh`, so `ssh vscode@storefront-2` works on port 22 with no keys and no sshd.
   - Tailnet ACLs decide who can log in as which local user.
   - SSH rules use `action: accept`, not `check`, so editors and other SSH tools aren't sent to re-authenticate.
-- **DNS:** `--accept-dns` points `resolv.conf` at MagicDNS, which forwards to Docker's resolver. The feature keeps the existing check that compose service names still resolve.
-- **Cleanup:** an Oban job removes tailnet devices that no longer match a live environment.
+- **DNS:** untouched. In userspace mode tailscaled doesn't change `resolv.conf`, so Docker's resolver keeps answering compose service names. MagicDNS names resolve for connections made through the proxy.
+- **Cleanup:** an Oban job removes tailnet devices that no longer match a live environment. It only ever touches devices tagged `tag:foreman-env` (always applied to environments; `FOREMAN_TAILSCALE_TAGS` adds to it), and a destroyed environment's cleanup skips its slug if a new environment has taken it.
 
 ### ACLs
 
@@ -318,7 +316,7 @@ A GitHub App, installed on your account for a personal deployment or on the org 
 - **Repo browsing:**
   - List the installation's repos.
   - Mark the ones that have `.devcontainer/devcontainer.json`, `.devcontainer.json` or `.devcontainer/*/devcontainer.json`.
-  - Cache the results and refresh them by polling.
+  - Cache the results and refresh them by polling. Repos and owners are matched by GitHub id, so renames and transfers keep their settings and secrets; a different repo that takes a known repo's old name gets a row of its own, never the old one's secrets. Repos that leave the installation are hidden, not deleted. Only a 404 means a repo has no devcontainer: any other error keeps what's stored.
 
 ### Environment tokens
 
@@ -328,7 +326,8 @@ By default, each environment gets a scoped user token from `POST /applications/{
   - **Repos:** the environment's repo plus any extra repos configured on it.
   - **Permissions:** configured per repo, defaulting to `contents:write`, `pull_requests:write`, `issues:write` and `metadata:read`.
 - **Identity:** the token acts as the user, so commits are pushed and PRs opened as you, not as a bot. On a team that keeps "can't approve your own PR" rules meaningful.
-- **Refresh:** scoped tokens come without a refresh token. An Oban job refreshes the parent token and re-scopes it every few hours, then sends the new file through `env.secrets.write`.
+- **Refresh:** scoped tokens come without a refresh token. An Oban job refreshes the parent token and re-scopes it every few hours, then sends the new file through `env.secrets.write`. An environment is only handed a token with at least five hours left, and the job also catches users whose token would expire before its next run. A refresh runs in its own process, so a closed tab or a crash can't lose the rotated refresh token. Refreshing rotates the user's token (GitHub revokes the old one), so a refresh also queues fresh tokens for every running environment of that user.
+- **GitHub unavailable:** a 5xx, timeout or other GitHub error isn't an expired login. Secrets still go out, without a new token and with a notice; agents on protocol 2 are told to keep the token they have (`keep`), older ones lose it until the retry. The next run of the job retries.
 - **Opt-out:** a per-repo setting gives that repo's environments the user's unscoped token. Use it for repos where you regularly work across other projects.
 - **When refresh fails:** this happens when the refresh token expires (6 months unused) or is revoked.
   - Environments keep running. There is no fallback to a bot token.
@@ -458,8 +457,9 @@ Anyone with Docker access on a box can read every secret of every environment on
 1. CI builds the agent release for each target architecture on a tag. It signs it with an ed25519 key that lives only in CI (`mix foreman_agent.sign`; the signature covers the version, target and SHA-256), and attaches the tarballs and signatures to a GitHub release. `scripts/publish-agent-release.sh` registers them with the control plane; the control plane never talks to GitHub for releases.
 2. An admin sets the desired agent version, globally or per box. An agent running a different version receives `agent.update`.
 3. The agent downloads the release from the control plane and verifies the signature against the public key compiled into it.
-4. It unpacks to `/opt/foreman-agent/releases/<version>`, switches the `current` symlink and exits. systemd restarts it on the new version.
-5. If the new version hasn't connected within 60 seconds, a systemd `OnFailure` unit switches the symlink back.
+4. It unpacks to `/opt/foreman-agent/releases/<version>`, switches the `current` symlink (keeping the old target as `previous`) and writes an `update-pending` marker. It exits once nothing else is running and every result has been acknowledged (waiting up to an hour), and systemd restarts it on the new version. An update to the version already installed does nothing, and only one update runs at a time.
+5. When the new version joins the control plane it clears the marker and `previous`. If it crash-loops, a systemd `OnFailure` unit switches the symlink back; if it runs but hasn't joined within five minutes, the agent rolls itself back and exits.
+6. The control plane sends no new update while one is in flight or while the box's environments have operations running. An update counts as done only when the box rejoins on the new version, and as failed ten minutes after it was sent with no answer, or 70 minutes after the agent said it would restart (it can wait an hour for idle). After two failures in a row of the same version on a box, that version isn't sent to it again until an admin picks a version again.
 
 Containers keep running throughout, because the Docker daemon owns them. Erlang hot code upgrades are not used.
 
@@ -607,7 +607,28 @@ the plan above, the build wins.
 - **Dispatch:** the operations table is the queue. A per-environment
   process (started on demand) sends one operation at a time; a
   minute-by-minute sweep catches anything queued from elsewhere.
-  In-flight operations are resent with the same op_id on reconnect.
+  In-flight operations are resent with the same op_id on reconnect, with
+  a fresh secrets write ahead of any start (a reboot clears the tmpfs).
+  - Queued secrets writes go before anything else in an environment's
+    queue. The last click wins: queuing Stop cancels a queued Start and
+    the other way round, and Destroy cancels everything queued.
+  - An operation's result and its effect on the environment are written
+    in one transaction. A failed or cancelled stop or destroy puts the
+    environment back where it was, with the error shown.
+  - Reconcile on join only steps aside for start, stop and create-type
+    operations, so a queued secrets write or log fetch can't leave an
+    environment down after a reboot.
+  - Housekeeping gives up on an operation after three hours (box
+    commands after ten minutes, a `box.gc` after two hours) and sends `op.cancel` to the box; it
+    skips offline boxes, whose work is resent on reconnect. A real result
+    arriving later still wins.
+  - Destroying an environment on a revoked box marks it destroyed without
+    the agent, and audit-logs it.
+  - Logs of operations finished more than 30 days ago are cleared; the
+    rows stay.
+  - On SQLite, transactions start `IMMEDIATE`, so one that reads and then
+    writes waits for other writers instead of failing with "database is
+    locked".
 - **Secrets on the box:** 0600 files in a 0700 tmpfs directory, owned by
   the agent user. On Linux the devcontainer CLI maps the container's
   user to the agent's uid, so the environment can read them.

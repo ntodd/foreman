@@ -207,6 +207,21 @@ defmodule ForemanProtocol.CommandTest do
       assert {:ok, _} = Command.new("agent.update", payload)
       assert {:error, _} = Command.new("agent.update", %{payload | "sha256" => "nothex"})
       assert {:error, _} = Command.new("agent.update", %{payload | "version" => "1.0; rm"})
+
+      assert {:error, _} =
+               Command.new("agent.update", %{payload | "url" => <<"https://h/", 0xFF>>})
+    end
+
+    test "rejects non-UTF-8 input instead of raising on it" do
+      for {field, bad} <- [
+            {"branch", <<"feat", 0xFF>>},
+            {"clone_url", <<"https://github.com/", 0xFF>>},
+            {"dotfiles", %{"repository" => <<"https://github.com/", 0xC3>>}},
+            {"compose_env", %{"NEON_API_KEY" => <<"secret", 0xFF>>}},
+            {"files", %{"secrets.env" => <<"export A='", 0xFF, "'\n">>}}
+          ] do
+        assert {:error, _} = Command.new("env.create", create_payload(%{field => bad})), field
+      end
     end
 
     test "registry auth is optional but must be complete when given" do

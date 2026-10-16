@@ -28,6 +28,9 @@ defmodule ForemanAgent.Outbox do
   def detach(server \\ __MODULE__), do: GenServer.call(server, :detach)
   def ack(server \\ __MODULE__, ack_id), do: GenServer.cast(server, {:ack, ack_id})
 
+  @doc "True when every result has been delivered and acknowledged."
+  def settled?(server \\ __MODULE__), do: GenServer.call(server, :settled?)
+
   @impl true
   def init(opts) do
     {:ok,
@@ -74,6 +77,13 @@ defmodule ForemanAgent.Outbox do
     state = %{state | pending: :queue.new(), logs: 0}
     state = Enum.reduce(pending, state, fn {seq, event}, acc -> deliver(acc, seq, event) end)
     {:reply, :ok, state}
+  end
+
+  def handle_call(:settled?, _from, state) do
+    pending_results? =
+      Enum.any?(:queue.to_list(state.pending), fn {_, e} -> e.type in @reliable end)
+
+    {:reply, state.unacked == %{} and not pending_results?, state}
   end
 
   def handle_call(:detach, _from, state),

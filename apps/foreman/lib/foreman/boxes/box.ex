@@ -15,6 +15,7 @@ defmodule Foreman.Boxes.Box do
     field :agent_version, :string
     field :protocol_version, :integer
     field :desired_agent_version, :string
+    field :failed_agent_version, :string
     field :hostname, :string
     field :os, :string
     field :arch, :string

@@ -1,6 +1,6 @@
 {
   "id": "foreman",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "name": "Foreman",
   "description": "Joins a Foreman environment to the tailnet and wires up the secrets, git identity and GitHub credentials Foreman delivers to /run/foreman.",
   "documentationURL": "https://github.com/ntodd/foreman/tree/main/features/src/foreman",
@@ -13,16 +13,15 @@
     "acceptDns": {
       "type": "boolean",
       "default": true,
-      "description": "Point resolv.conf at MagicDNS (it forwards everything else to Docker's resolver)."
+      "description": "Resolve MagicDNS names for connections made through the local Tailscale proxy (127.0.0.2:1055). The container's own DNS is never changed."
     },
     "dnsCheckHost": {
       "type": "string",
       "default": "",
-      "description": "A compose service name to re-resolve after joining, to catch broken DNS forwarding."
+      "description": "Unused. Tailscale no longer changes the container's DNS, so there's nothing to check."
     }
   },
   "entrypoint": "/usr/local/share/foreman/entrypoint.sh",
-  "capAdd": ["NET_ADMIN", "NET_RAW"],
   "installsAfter": [
     "ghcr.io/devcontainers/features/common-utils",
     "ghcr.io/devcontainers/features/git",

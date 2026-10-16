@@ -13,15 +13,7 @@ defmodule ForemanAgent.MixProject do
       start_permanent: Mix.env() == :prod,
       deps: deps(),
       aliases: aliases(),
-      releases: releases(),
-      # Advisories `mix hex.audit` reports that don't reach the agent.
-      hex: [
-        ignore_advisories: [
-          # Bandit is a test-only dependency (the fake git server); it
-          # isn't in the release.
-          "EEF-CVE-2026-105659"
-        ]
-      ]
+      releases: releases()
     ]
   end
 
@@ -49,7 +41,7 @@ defmodule ForemanAgent.MixProject do
       {:credo, "~> 1.7", only: [:dev, :test], runtime: false},
       {:mox, "~> 1.3", only: :test},
       {:plug, "~> 1.18", only: :test},
-      {:bandit, "~> 1.12", only: :test}
+      {:bandit, "~> 1.13", only: :test}
     ]
   end
 

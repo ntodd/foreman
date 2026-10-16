@@ -20,7 +20,6 @@ defmodule ForemanAgent.Config do
             allowed_git_hosts: ["github.com"],
             insecure_git_hosts: [],
             policy_rules: %{},
-            tun_device: :auto,
             cleanup_image: "alpine:3.22",
             release_root: "/opt/foreman-agent",
             release_public_key: nil,
@@ -60,15 +59,32 @@ defmodule ForemanAgent.Config do
   def policy_report(%__MODULE__{policy_rules: rules}),
     do: Map.new(rules, fn {rule, action} -> {to_string(rule), to_string(action)} end)
 
+  @doc """
+  Parses `FOREMAN_POLICY` entries (`rule=action`) into policy rules.
+  Raises on a rule or action the protocol doesn't know, so a typo stops
+  the agent rather than leaving a rule at its default unnoticed.
+  """
+  @spec parse_policy([String.t()]) :: %{atom() => atom()}
+  def parse_policy(pairs) do
+    rules = ForemanProtocol.Policy.rules()
+    actions = ForemanProtocol.Policy.actions()
+
+    Map.new(pairs, fn pair ->
+      with [rule, action] <- String.split(pair, "=", parts: 2),
+           true <- rule in rules and action in actions do
+        {String.to_atom(rule), String.to_atom(action)}
+      else
+        _ ->
+          raise ArgumentError,
+                "invalid FOREMAN_POLICY entry #{inspect(pair)}; rules: " <>
+                  "#{Enum.join(rules, ", ")}; actions: #{Enum.join(actions, ", ")}"
+      end
+    end)
+  end
+
   @doc "Paths no environment may ever bind-mount."
   def protected_paths(%__MODULE__{} = c),
     do: [c.data_dir, c.envs_root, c.secrets_root, c.release_root]
-
-  def tun_device?(%__MODULE__{tun_device: :auto}) do
-    match?({:ok, %File.Stat{type: :device}}, File.stat("/dev/net/tun"))
-  end
-
-  def tun_device?(%__MODULE__{tun_device: value}), do: value == true
 
   defp default_feature_dir do
     priv = Application.app_dir(:foreman_agent, "priv/feature")

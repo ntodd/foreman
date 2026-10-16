@@ -15,7 +15,8 @@ defmodule Foreman.GitHub do
 
   User tokens last 8 hours; refresh tokens 6 months and are single use.
   Refreshes for a user are serialized so two can't burn the same refresh
-  token.
+  token, and run in their own process so a caller that dies mid-refresh
+  (a closed tab) can't lose the rotated token.
   """
 
   alias Foreman.{Accounts, Repos, Settings}
@@ -25,6 +26,13 @@ defmodule Foreman.GitHub do
   require Logger
 
   @refresh_margin 300
+
+  # Environments get a new token when theirs is four hours old (checked
+  # every 30 minutes), so the one they get has to last longer than that.
+  @environment_token_life 5 * 3600
+
+  @doc false
+  def environment_token_life, do: @environment_token_life
 
   defp client, do: Client.impl()
 
@@ -86,7 +94,7 @@ defmodule Foreman.GitHub do
          {:ok, profile} <- client().get_user(tokens.access_token) do
       org_member? =
         config.allowed_org != nil and
-          client().org_member?(tokens.access_token, config.allowed_org)
+          client().org_membership(tokens.access_token, config.allowed_org) == {:ok, true}
 
       Accounts.sign_in_from_github(profile, tokens, config: config, org_member?: org_member?)
     end
@@ -95,58 +103,157 @@ defmodule Foreman.GitHub do
   # -- user and environment tokens -------------------------------------------------
 
   @doc """
-  A current access token for `user`, refreshing it when it's within five
-  minutes of expiring. `{:error, :login_expired}` means the refresh token
-  is gone or rejected and the user has to sign in again.
+  A current access token for `user`, refreshing it when it has less than
+  `min_life` seconds left (five minutes by default).
+  `{:error, :login_expired}` means the refresh token is gone or rejected
+  and the user has to sign in again.
   """
-  def user_token(%User{id: user_id}) do
+  def user_token(%User{id: user_id}, min_life \\ @refresh_margin) do
+    # GitHub spends the old refresh token as soon as it answers, so the
+    # refresh runs unlinked: if the caller dies, it still stores the new one.
+    callers = [self() | Process.get(:"$callers", [])]
+    ref = make_ref()
+    caller = self()
+
+    {pid, monitor} =
+      spawn_monitor(fn ->
+        Process.put(:"$callers", callers)
+        {result, rotated?} = locked_user_token(user_id, min_life)
+        # Outside the lock: pushing to environments asks for tokens.
+        if rotated?, do: push_rotated_token(user_id)
+        send(caller, {ref, result})
+      end)
+
+    receive do
+      {^ref, result} ->
+        Process.demonitor(monitor, [:flush])
+        result
+
+      {:DOWN, ^monitor, :process, ^pid, reason} ->
+        Logger.error("GitHub token refresh crashed: #{inspect(reason)}")
+        {:error, :refresh_failed}
+    end
+  end
+
+  defp locked_user_token(user_id, min_life) do
     :global.trans({{__MODULE__, :refresh, user_id}, self()}, fn ->
       user = Accounts.get_user!(user_id)
 
       cond do
-        fresh?(user) -> {:ok, user.access_token}
-        is_nil(user.refresh_token) -> {:error, :login_expired}
+        fresh?(user, min_life) -> {{:ok, user.access_token}, false}
+        is_nil(user.refresh_token) -> {{:error, :login_expired}, false}
         true -> refresh(user)
       end
     end)
   end
 
-  defp fresh?(%User{access_token: nil}), do: false
-  defp fresh?(%User{access_token_expires_at: nil}), do: true
+  # GitHub revokes the old token when it's refreshed, and other
+  # environments of the user may hold it.
+  defp push_rotated_token(user_id) do
+    %{user_id: user_id} |> Foreman.Jobs.PushTokens.new() |> Oban.insert()
+  rescue
+    error -> Logger.error("couldn't queue a token push for #{user_id}: #{inspect(error)}")
+  end
 
-  defp fresh?(%User{access_token_expires_at: expires}) do
-    DateTime.diff(expires, DateTime.utc_now()) > @refresh_margin
+  defp fresh?(%User{access_token: nil}, _min_life), do: false
+  defp fresh?(%User{access_token_expires_at: nil}, _min_life), do: true
+
+  defp fresh?(%User{access_token_expires_at: expires}, min_life) do
+    DateTime.diff(expires, DateTime.utc_now()) > min_life
   end
 
   defp refresh(user) do
     case client().refresh_user_token(app(), user.refresh_token) do
       {:ok, tokens} ->
         {:ok, user} = Accounts.update_tokens(user, tokens)
-        {:ok, user.access_token}
+        result = recheck_access(user)
+        {result, match?({:ok, _}, result)}
 
       {:error, :bad_refresh_token} ->
+        {login_expired(user), false}
+
+      {:error, reason} ->
+        {{:error, reason}, false}
+    end
+  end
+
+  @doc """
+  Checks that a signed-in user may still use Foreman, for users who don't
+  refresh a token often enough to be checked that way. A token that needs
+  refreshing is refreshed, which checks; otherwise the current one is used.
+  """
+  def check_access(%User{} = user) do
+    if fresh?(user, @refresh_margin) do
+      recheck_access(user)
+    else
+      user_token(user)
+    end
+  end
+
+  # Who may use Foreman can change after sign-in (someone leaves the org
+  # or an allowlist), so every refresh checks again with the new token.
+  # Only a definite "no" ends their access; a GitHub error changes nothing.
+  defp recheck_access(user) do
+    config = Accounts.login_config()
+
+    verdict =
+      case Accounts.access(user, config) do
+        :ask_org -> org_verdict(user, config.allowed_org)
+        verdict -> verdict
+      end
+
+    if verdict == :denied do
+      Logger.warning("#{user.login} may no longer use Foreman; ending their sessions")
+      :ok = Accounts.revoke_access(user, "no longer allowed at token refresh")
+      {:error, :login_expired}
+    else
+      {:ok, user.access_token}
+    end
+  end
+
+  defp org_verdict(user, org) do
+    case client().org_membership(user.access_token, org) do
+      {:ok, true} ->
+        :allowed
+
+      {:ok, false} ->
+        :denied
+
+      {:error, reason} ->
+        Logger.warning("couldn't check #{user.login}'s membership of #{org}: #{inspect(reason)}")
+        :allowed
+    end
+  end
+
+  defp login_expired(user) do
+    case Accounts.mark_github_login_expired(user) do
+      :ok ->
         Logger.warning(
           "GitHub refresh token for #{user.login} was rejected; they need to sign in again"
         )
 
-        Accounts.mark_github_login_expired(user)
         Phoenix.PubSub.broadcast(Foreman.PubSub, "user:#{user.id}", :github_login_expired)
         {:error, :login_expired}
 
-      {:error, reason} ->
-        {:error, reason}
+      # They signed in again while the refresh was in flight.
+      :stale ->
+        case Accounts.get_user!(user.id) do
+          %User{access_token: token} when is_binary(token) -> {:ok, token}
+          _ -> {:error, :login_expired}
+        end
     end
   end
 
   @doc """
   The GitHub token for an environment of `repo` owned by `user`: scoped to
   the repo (and its extra repos) by default, the user's own token when the
-  repo is set to `broad`.
+  repo is set to `broad`. The token lasts until the environment's next
+  scheduled one.
   """
   def environment_token(%User{} = user, %Repos.Repo{} = repo) do
     repo = Foreman.Repo.preload(repo, :owner)
 
-    with {:ok, token} <- user_token(user) do
+    with {:ok, token} <- user_token(user, @environment_token_life) do
       case repo.token_mode do
         "broad" ->
           {:ok, token}
@@ -173,7 +280,8 @@ defmodule Foreman.GitHub do
 
   @doc """
   Syncs owners and repos from every installation of the app, and checks
-  each repo for a devcontainer.
+  each repo for a devcontainer. Repos no longer in an installation, and
+  those of owners that uninstalled the app, are marked removed.
   """
   def sync_repos do
     app = app()
@@ -194,6 +302,12 @@ defmodule Foreman.GitHub do
           sync_installation(app, owner, installation["id"])
         end
 
+      installed = MapSet.new(installations, & &1["id"])
+
+      for owner <- Repos.list_owners(),
+          owner.installation_id && owner.installation_id not in installed,
+          do: Repos.mark_removed(owner, [])
+
       {:ok, results |> Enum.map(&elem(&1, 1)) |> Enum.sum()}
     end
   end
@@ -202,25 +316,22 @@ defmodule Foreman.GitHub do
     with {:ok, token} <- client().installation_token(app, installation_id),
          {:ok, repos} <- client().list_installation_repos(token) do
       for data <- repos, not data["archived"] do
-        devcontainer = detect_devcontainer(token, data["full_name"], owner.login)
-
         Repos.upsert_repo(
           owner,
-          Map.merge(
-            %{
-              full_name: data["full_name"],
-              name: data["name"],
-              github_id: data["id"],
-              default_branch: data["default_branch"] || "main",
-              private: data["private"],
-              archived: data["archived"] || false,
-              devcontainer_checked_at: DateTime.utc_now()
-            },
-            devcontainer
-          )
+          %{
+            full_name: data["full_name"],
+            name: data["name"],
+            github_id: data["id"],
+            default_branch: data["default_branch"] || "main",
+            private: data["private"],
+            archived: data["archived"] || false,
+            removed_at: nil
+          }
+          |> Map.merge(devcontainer_attrs(token, data["full_name"], owner.login))
         )
       end
 
+      Repos.mark_removed(owner, Enum.map(repos, & &1["id"]))
       {:ok, length(repos)}
     else
       error ->
@@ -229,24 +340,45 @@ defmodule Foreman.GitHub do
     end
   end
 
+  # When GitHub couldn't say (rate limits, outages), the repo keeps what
+  # the last sync found rather than looking like it has no devcontainer.
+  defp devcontainer_attrs(token, full_name, owner_login) do
+    case detect_devcontainer(token, full_name, owner_login) do
+      {:error, reason} ->
+        Logger.warning("couldn't check #{full_name} for a devcontainer: #{inspect(reason)}")
+        %{}
+
+      attrs ->
+        Map.put(attrs, :devcontainer_checked_at, DateTime.utc_now())
+    end
+  end
+
   @config_candidates [".devcontainer/devcontainer.json", ".devcontainer.json"]
 
   @doc """
   Finds a repo's devcontainer config and reads what Foreman needs from it:
   `hostRequirements` and any private registry images or features under
-  the repo's owner on ghcr.io.
+  the repo's owner on ghcr.io. `{:error, reason}` when GitHub failed to
+  answer, as opposed to the repo having no devcontainer.
   """
   def detect_devcontainer(token, full_name, owner_login) do
-    candidates = @config_candidates ++ nested_configs(token, full_name)
+    with {:ok, nested} <- nested_configs(token, full_name),
+         {:ok, found} <- find_config(token, full_name, @config_candidates ++ nested) do
+      devcontainer_fields(found, owner_login)
+    end
+  end
 
-    found =
-      Enum.find_value(candidates, fn path ->
-        case client().get_file(token, full_name, path, nil) do
-          {:ok, content} -> {path, content}
-          {:error, _} -> nil
-        end
-      end)
+  defp find_config(token, full_name, candidates) do
+    Enum.reduce_while(candidates, {:ok, nil}, fn path, acc ->
+      case client().get_file(token, full_name, path, nil) do
+        {:ok, content} -> {:halt, {:ok, {path, content}}}
+        {:error, :not_found} -> {:cont, acc}
+        {:error, reason} -> {:halt, {:error, reason}}
+      end
+    end)
+  end
 
+  defp devcontainer_fields(found, owner_login) do
     case found do
       nil ->
         %{
@@ -281,11 +413,17 @@ defmodule Foreman.GitHub do
   defp nested_configs(token, full_name) do
     case client().list_dir(token, full_name, ".devcontainer") do
       {:ok, entries} ->
-        for %{"type" => "dir", "name" => name} <- entries,
-            do: ".devcontainer/#{name}/devcontainer.json"
+        {:ok,
+         for(
+           %{"type" => "dir", "name" => name} <- entries,
+           do: ".devcontainer/#{name}/devcontainer.json"
+         )}
 
-      {:error, _} ->
-        []
+      {:error, :not_found} ->
+        {:ok, []}
+
+      {:error, reason} ->
+        {:error, reason}
     end
   end
 

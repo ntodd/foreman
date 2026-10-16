@@ -96,5 +96,5 @@ defmodule ForemanWeb.SetupController do
     if Setup.needed?(), do: conn, else: conn |> redirect(to: ~p"/sign-in") |> halt()
   end
 
-  defp remote_ip(conn), do: conn.remote_ip |> :inet.ntoa() |> to_string()
+  defp remote_ip(conn), do: ForemanWeb.ClientIP.from_conn(conn)
 end
