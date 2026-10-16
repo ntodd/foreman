@@ -3,9 +3,24 @@ useDefault = true
 
 # Phoenix generates these for dev and test. Production reads
 # SECRET_KEY_BASE from the environment (config/runtime.exs).
-[allowlist]
+[[allowlists]]
 description = "Generated dev and test secret_key_base"
 condition = "AND"
 paths = ['''^apps/foreman/config/(dev|test)\.exs$''']
 regexTarget = "line"
 regexes = ['''^\s*secret_key_base: "''']
+
+# Fake credentials in tests, matched exactly so a real one still trips the
+# scan: an agent key that's base64 for AGENT_PRIVATE_KEY, and a dummy
+# Stripe-shaped token.
+[[allowlists]]
+description = "Fake credentials in tests"
+regexes = ['''QUdFTlRfUFJJVkFURV9LRVk=''', '''sk_live_0123456789abcdef''']
+
+# A PEM header around random bytes the test generates when it runs.
+[[allowlists]]
+description = "Generated PEM in the redaction test"
+condition = "AND"
+paths = ['''^apps/foreman_protocol/test/foreman_protocol/redaction_test\.exs$''']
+regexTarget = "line"
+regexes = ['''BEGIN PRIVATE KEY''']
