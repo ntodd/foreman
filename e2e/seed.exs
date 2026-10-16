@@ -9,6 +9,7 @@ alias Foreman.{Accounts, Boxes, Repos, Scope}
 
 login = System.get_env("E2E_ADMIN", "dev")
 box_name = System.get_env("E2E_BOX", "local")
+repo_name = System.get_env("E2E_REPO", "acme/hello")
 
 {:ok, admin} =
   Accounts.sign_in_from_github(
@@ -23,9 +24,9 @@ box_name = System.get_env("E2E_BOX", "local")
 scope = Scope.for_user(admin)
 
 repo =
-  case Repos.get_repo_by_full_name("acme/hello") do
+  case Repos.get_repo_by_full_name(repo_name) do
     nil ->
-      {:ok, repo} = Repos.add_repo(scope, "acme/hello", %{devcontainer_path: ".devcontainer/devcontainer.json", host_requirements: %{"cpus" => 2, "memory" => "2gb"}})
+      {:ok, repo} = Repos.add_repo(scope, repo_name, %{devcontainer_path: ".devcontainer/devcontainer.json", host_requirements: %{"cpus" => 2, "memory" => "2gb"}})
       repo
 
     repo ->

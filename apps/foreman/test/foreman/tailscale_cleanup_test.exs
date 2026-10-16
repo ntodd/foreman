@@ -33,6 +33,20 @@ defmodule Foreman.TailscaleCleanupTest do
     end)
   end
 
+  # A control plane that isn't the deployment's (a test run against a real
+  # tailnet) doesn't know the deployment's environments, so its sweep would
+  # take them all.
+  test "the hourly sweep can be turned off" do
+    configure([])
+    Application.put_env(:foreman, :tailnet_sweep, false)
+    on_exit(fn -> Application.delete_env(:foreman, :tailnet_sweep) end)
+    devices([%{"id" => "n1", "hostname" => "someone-else-1", "tags" => ["tag:foreman-env"]}])
+    record_deletes()
+
+    assert :ok = CleanupTailnet.perform(%Oban.Job{args: %{}})
+    refute_received {:deleted, _}
+  end
+
   test "every node gets tag:foreman-env, even when other tags are configured" do
     configure(["tag:dev"])
     repo = repo_fixture(tailscale_tags: ["tag:staging-access"])

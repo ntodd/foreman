@@ -8,7 +8,7 @@ if System.get_env("FOREMAN_DB", "sqlite") == "postgres" do
     show_sensitive_data_on_connection_error: true
 else
   config :foreman, Foreman.Repo,
-    database: Path.expand("../foreman_dev.db", __DIR__),
+    database: System.get_env("FOREMAN_DEV_DATABASE", Path.expand("../foreman_dev.db", __DIR__)),
     pool_size: 5,
     stacktrace: true,
     show_sensitive_data_on_connection_error: true
