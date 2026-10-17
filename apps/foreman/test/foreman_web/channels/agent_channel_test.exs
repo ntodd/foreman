@@ -103,6 +103,20 @@ defmodule ForemanWeb.AgentChannelTest do
       assert Repo.reload!(box).isolation == "container"
     end
 
+    # v0.2.0 speaks protocol 1, and joining is the only way it's sent an update.
+    test "an agent on protocol 1 still joins, so it can be updated", %{box: box} do
+      {:ok, socket} = connect(AgentSocket, %{}, connect_info: signed_connect_info(box))
+
+      assert {:ok, _, _} =
+               subscribe_and_join(
+                 socket,
+                 "agent:#{box.id}",
+                 join_payload(%{"protocol_version" => 1})
+               )
+
+      assert %{protocol_version: 1, isolation: "container"} = Repo.reload!(box)
+    end
+
     test "refuses protocol versions it doesn't speak", %{box: box} do
       {:ok, socket} = connect(AgentSocket, %{}, connect_info: signed_connect_info(box))
 

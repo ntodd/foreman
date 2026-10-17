@@ -14,11 +14,15 @@ defmodule ForemanProtocol.ProtocolV3Test do
     "arch" => "x86_64"
   }
 
-  test "this build speaks protocol 3 and still accepts agents on 2" do
+  # Protocol 3 only adds to the join, and older agents get its default.
+  # So it still takes agents on 1 (v0.2.0): refusing them at join would
+  # leave no way to send them an update.
+  test "this build speaks protocol 3 and still accepts agents on 2 and 1" do
     assert ForemanProtocol.version() == 3
     assert ForemanProtocol.compatible?(3)
     assert ForemanProtocol.compatible?(2)
-    refute ForemanProtocol.compatible?(1)
+    assert ForemanProtocol.compatible?(1)
+    refute ForemanProtocol.compatible?(0)
     refute ForemanProtocol.compatible?(4)
   end
 

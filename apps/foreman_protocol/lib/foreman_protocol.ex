@@ -15,8 +15,14 @@ defmodule ForemanProtocol do
   @doc "The protocol version this build speaks."
   def version, do: @version
 
-  @doc "The control plane accepts the current protocol and the one before it."
-  def compatible?(version) when is_integer(version), do: version in [@version, @version - 1]
+  # The control plane accepts the current protocol and the one before it,
+  # and for now 1 as well: 3 only adds to the join, which defaults for
+  # older agents, and an agent refused at join can't be sent an update.
+  # Raise this with the next version that sends agents something new.
+  @oldest 1
+
+  @doc "Whether the control plane accepts an agent on this protocol version."
+  def compatible?(version) when is_integer(version), do: version in @oldest..@version//1
   def compatible?(_), do: false
 
   @join_spec [
