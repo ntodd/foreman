@@ -1,0 +1,20 @@
+{
+  // Benchmark environment modelled on the Elixir + Postgres devcontainers
+  // Foreman runs: an app container sharing the database's network, Node
+  // from a feature, the workspace bind-mounted from the clone.
+  "name": "vmbench",
+  "dockerComposeFile": ["docker-compose.yml"],
+  "service": "app",
+  "workspaceFolder": "/workspaces/${localWorkspaceFolderBasename}",
+  "remoteUser": "vscode",
+  "features": {
+    "ghcr.io/devcontainers/features/common-utils:2": {
+      "username": "vscode",
+      "userUid": "1000",
+      "userGid": "1000",
+      "installZsh": false,
+      "upgradePackages": false
+    },
+    "ghcr.io/devcontainers/features/node:1": {"version": "22"}
+  }
+}
