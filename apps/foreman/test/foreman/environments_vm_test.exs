@@ -100,6 +100,62 @@ defmodule Foreman.EnvironmentsVmTest do
     end
   end
 
+  # A box whose isolation changed (FOREMAN_ISOLATION, or an agent rolled
+  # back to protocol 2) reports the other kind's environments missing.
+  # Recreating them would lose their workspace and tailnet identity.
+  describe "reconcile" do
+    @vm %{"name" => "fm-x", "cpus" => 4, "memory_mb" => 8192}
+
+    test "doesn't remake a VM's environment as containers", %{user: user} do
+      box = box_fixture(owner_user_id: user.id, name: "desktop")
+      {:ok, _} = Registry.register(Foreman.Registry, {:agent, box.id}, nil)
+      env = environment_fixture(user: user, box: box, isolation: "vm", vm: @vm)
+
+      Environments.reconcile_inventory(box.id, [])
+      refute_received {:dispatch, _}
+
+      env = Repo.reload!(env)
+      assert env.observed_state == "error"
+      assert env.status_message =~ "made in a VM"
+      assert env.status_message =~ "desktop now runs environments as containers"
+
+      # Error is where reconcile leaves things alone, so it stays put.
+      Environments.reconcile_inventory(box.id, [])
+      refute_received {:dispatch, _}
+    end
+
+    test "nor a container environment in a VM", %{user: user, box: box} do
+      env = environment_fixture(user: user, box: box, isolation: "container")
+
+      Environments.reconcile_inventory(box.id, [])
+      refute_received {:dispatch, _}
+
+      env = Repo.reload!(env)
+      assert env.observed_state == "error"
+      assert env.status_message =~ "made as containers"
+      assert env.status_message =~ "now runs environments in VMs"
+    end
+
+    test "counts one that came up before isolation was recorded as containers", %{
+      user: user,
+      box: box
+    } do
+      env = environment_fixture(user: user, box: box)
+
+      Environments.reconcile_inventory(box.id, [])
+      refute_received {:dispatch, _}
+      assert Repo.reload!(env).observed_state == "error"
+    end
+
+    test "still remakes a missing environment that matches its box", %{user: user, box: box} do
+      env = environment_fixture(user: user, box: box, isolation: "vm", vm: @vm)
+
+      Environments.reconcile_inventory(box.id, [])
+      assert_receive {:dispatch, %Command{type: "env.create", payload: %{env_id: id}}}
+      assert id == env.id
+    end
+  end
+
   test "a container box still sends no limits unless some are set", %{scope: scope, user: user} do
     box = box_fixture(owner_user_id: user.id)
     {:ok, _} = Registry.register(Foreman.Registry, {:agent, box.id}, nil)

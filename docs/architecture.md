@@ -118,6 +118,8 @@ The agent sends its version and protocol version when it joins. The control plan
 
 When an agent joins, it reports what's on the box. The control plane compares that with the desired state of each environment (`running`, `stopped` or `destroyed`) and sends the commands needed to match.
 
+A missing environment is recreated, unless it was made under the other isolation: a box that switched `FOREMAN_ISOLATION`, or whose agent rolled back to before protocol 3, can't see the other kind's environments and reports them missing. Those are marked as errors instead, because recreating them would lose their workspace and tailnet identity.
+
 The overlay sets `restart: "no"` on every service, so the agent controls start order after a host reboot. That matters because secrets live on tmpfs, which a reboot clears:
 
 1. The box boots and the agent starts and connects.

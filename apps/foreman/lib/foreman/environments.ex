@@ -8,7 +8,8 @@ defmodule Foreman.Environments do
   back through `apply_result/1`. When a box reconnects (after a reboot,
   say) its inventory is reconciled against each environment's desired
   state: stopped ones that should run get their secrets and a start,
-  missing ones are recreated.
+  missing ones are recreated (unless they were made under the box's
+  other isolation, containers or VMs).
 
   When secrets change, running environments get the new files right away
   (new shells see them), are marked *pending restart*, and the user picks
@@ -746,9 +747,29 @@ defmodule Foreman.Environments do
     enqueue(env, "start", %{}, nil)
   end
 
+  # A box that changed isolation (FOREMAN_ISOLATION, or an agent rolled
+  # back to before protocol 3) can't see the other kind's environments,
+  # so it reports them missing. Remaking one would lose its workspace and
+  # tailnet identity, so it waits for someone to decide.
   defp reconcile(%Environment{desired_state: "running", created_once: true} = env, "missing") do
-    Logger.info("recreating #{env.slug}: it's missing from its box")
-    enqueue(env, "create", %{}, nil)
+    made = env.isolation || "container"
+
+    if made == env.box.isolation do
+      Logger.info("recreating #{env.slug}: it's missing from its box")
+      enqueue(env, "create", %{}, nil)
+    else
+      Logger.warning(
+        "not recreating #{env.slug}: it was made #{made}, its box is now #{env.box.isolation}"
+      )
+
+      update_env!(env, %{
+        observed_state: "error",
+        status_message:
+          "Not recreated: it was made #{made_label(made)}, and #{env.box.name} now runs " <>
+            "environments #{runs_label(env.box.isolation)}. If the box changed by mistake, " <>
+            "change it back and start this; otherwise destroy it and create a new one."
+      })
+    end
   end
 
   defp reconcile(%Environment{desired_state: "stopped"} = env, observed)
@@ -760,6 +781,12 @@ defmodule Foreman.Environments do
     do: enqueue(env, "destroy", %{}, nil)
 
   defp reconcile(_env, _observed), do: :ok
+
+  defp made_label("vm"), do: "in a VM"
+  defp made_label(_), do: "as containers"
+
+  defp runs_label("vm"), do: "in VMs"
+  defp runs_label(_), do: "as containers"
 
   @doc "Records a state change an agent noticed (a container stopped, say)."
   def observe(box_id, env_id, state) do
