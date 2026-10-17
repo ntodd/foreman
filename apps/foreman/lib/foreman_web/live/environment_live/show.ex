@@ -9,6 +9,7 @@ defmodule ForemanWeb.EnvironmentLive.Show do
   import ForemanWeb.ForemanComponents
 
   alias Foreman.{Boxes, Capacity, Environments, Operations}
+  alias Foreman.Environments.Environment
 
   @impl true
   def mount(%{"id" => id}, _session, socket) do
@@ -39,6 +40,7 @@ defmodule ForemanWeb.EnvironmentLive.Show do
     |> assign(:ops, ops)
     |> assign(:in_progress, in_progress(ops))
     |> assign(:online, Boxes.online?(env.box_id))
+    |> assign(:isolation_changed, Environment.isolation_changed?(env))
     |> assign(:provisioned, Capacity.provisioned(env, env.repo))
     |> assign(:usage, Foreman.Capacity.Tracker.latest_usage(env.id))
     |> select_default_op()
@@ -269,7 +271,10 @@ defmodule ForemanWeb.EnvironmentLive.Show do
         <:actions>
           <.state_badge state={@env.observed_state} />
           <.button
-            :if={@env.created_once and @env.observed_state in ~w(stopped error missing partial)}
+            :if={
+              @env.created_once and @env.observed_state in ~w(stopped error missing partial) and
+                not @isolation_changed
+            }
             phx-click="action"
             phx-value-do="start"
             icon="hero-play-mini"
@@ -298,6 +303,7 @@ defmodule ForemanWeb.EnvironmentLive.Show do
             Stop
           </.button>
           <.button
+            :if={not @isolation_changed}
             phx-click="action"
             phx-value-do="rebuild"
             icon="hero-wrench-screwdriver-mini"
@@ -309,6 +315,17 @@ defmodule ForemanWeb.EnvironmentLive.Show do
           <.button phx-click="check_destroy" icon="hero-trash-mini" size="sm" variant="danger_outline">Destroy</.button>
         </:actions>
       </.header>
+
+      <.callout :if={@isolation_changed} kind="danger" id="isolation-changed">
+        <p class="font-medium">{@env.box.name} can't reach this environment</p>
+        <p class="mt-0.5">
+          {Environments.isolation_changed_message(@env)} Foreman won't remake it there: it would come up without its workspace or tailnet identity, and the old one would keep running.
+        </p>
+        <p class="mt-1">
+          Change the box back (<span class="font-mono">FOREMAN_ISOLATION</span>
+          in <span class="font-mono">/etc/foreman-agent/agent.env</span>, or its agent version), then start or destroy it.
+        </p>
+      </.callout>
 
       <%!-- Also after a failed stop or secrets write, which leave the state as it was. --%>
       <.callout

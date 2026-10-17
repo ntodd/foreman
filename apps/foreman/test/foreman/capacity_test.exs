@@ -120,6 +120,62 @@ defmodule Foreman.CapacityTest do
     end
   end
 
+  # A box that changed isolation can't see the other kind's environments,
+  # and they're out of its stats, but what was running is most likely
+  # still running: VMs outlive the agent, and so do containers.
+  describe "after a box changes isolation" do
+    test "what it can't see still counts while it should be running" do
+      repo = repo_fixture()
+      vm = %{"name" => "fm-a", "cpus" => 4, "memory_mb" => 8192}
+
+      made_as =
+        fn isolation, attrs ->
+          struct!(
+            %Environment{
+              id: Ecto.UUID.generate(),
+              repo: repo,
+              created_once: true,
+              observed_state: "missing",
+              isolation: isolation
+            },
+            attrs
+          )
+        end
+
+      container_box = %{vm_box(%{"cpus" => 16, "memory_mb" => 65_536}) | isolation: "container"}
+
+      summary =
+        Capacity.box_summary(container_box, [
+          made_as.("vm", vm: vm),
+          made_as.("vm", vm: vm, desired_state: "stopped")
+        ])
+
+      assert {summary.provisioned_cpus, summary.provisioned_memory_mb} == {4, 8192}
+
+      summary =
+        Capacity.box_summary(vm_box(%{"cpus" => 16, "memory_mb" => 65_536}), [
+          made_as.("container", cpu_limit: 2.0, memory_limit_mb: 4096)
+        ])
+
+      assert {summary.provisioned_cpus, summary.provisioned_memory_mb} == {2.0, 4096}
+    end
+
+    test "containers aren't counted as a VM on a box that now runs VMs" do
+      env = %Environment{
+        id: Ecto.UUID.generate(),
+        box: %Box{isolation: "vm"},
+        created_once: true,
+        isolation: "container",
+        memory_limit_mb: 2048
+      }
+
+      assert %{memory_mb: 2048, source: :limits} = Capacity.provisioned(env, repo_fixture())
+
+      # One from before isolation was recorded was made as containers.
+      assert %{source: :limits} = Capacity.provisioned(%{env | isolation: nil}, repo_fixture())
+    end
+  end
+
   describe "check_placement/4" do
     setup do
       box = box_fixture(capacity: %{"cpus" => 16, "memory_mb" => 32_768})

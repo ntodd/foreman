@@ -281,13 +281,39 @@ defmodule Foreman.Environments do
     "stop" => ~w(start restart_affected restart_all)
   }
 
+  # Actions that work on what's on the box. One whose box changed
+  # isolation since it was made can't take them: the box can't see it, so
+  # a start fails, a rebuild remakes it from nothing (no workspace, no
+  # tailnet key), and a stop or destroy reports success while what's on
+  # the machine keeps running.
+  @on_box ~w(create start stop rebuild destroy restart_affected restart_all git_status)a
+
   defp action(%Scope{} = scope, %Environment{} = env, action, args \\ %{}) do
     with :ok <- authorize(scope, env),
          :ok <- allowed?(env, action) do
-      if action == :destroy and box_revoked?(env),
-        do: forget(scope, env),
-        else: queue_action(scope, env, action, args)
+      # As it is now: its agent may have rejoined since `env` was read.
+      env = %{env | box: Repo.get(Box, env.box_id)}
+
+      cond do
+        action == :destroy and box_revoked?(env) ->
+          forget(scope, env)
+
+        action in @on_box and Environment.isolation_changed?(env) ->
+          {:error, isolation_changed_message(env) <> " Change the box back first."}
+
+        true ->
+          queue_action(scope, env, action, args)
+      end
     end
+  end
+
+  @doc """
+  What changed, for an environment whose box now runs environments the
+  other way from how it was made (`Environment.isolation_changed?/1`).
+  """
+  def isolation_changed_message(%Environment{box: box} = env) do
+    "#{env.slug} was made #{made_label(Environment.made_under(env))}, and #{box.name} now " <>
+      "runs environments #{runs_label(box.isolation)}, so the box can't reach it."
   end
 
   defp queue_action(scope, env, action, args) do
@@ -349,12 +375,8 @@ defmodule Foreman.Environments do
     :ok
   end
 
-  defp box_revoked?(env) do
-    case Repo.get(Box, env.box_id) do
-      %Box{revoked_at: nil} -> false
-      _ -> true
-    end
-  end
+  defp box_revoked?(%Environment{box: %Box{revoked_at: nil}}), do: false
+  defp box_revoked?(_env), do: true
 
   # A revoked box can never reconnect, so its environments are marked
   # destroyed here. Whatever is left on the machine is the admin's to
@@ -730,12 +752,8 @@ defmodule Foreman.Environments do
 
     for env <- envs, not lifecycle_active?(env.id) do
       observed = if inv = by_id[env.id], do: inv.state, else: "missing"
-
-      env =
-        if observed != env.observed_state and env.observed_state != "error",
-          do: update_env!(env, %{observed_state: observed}),
-          else: env
-
+      attrs = inventory_attrs(env, observed)
+      env = if attrs == %{}, do: env, else: update_env!(env, attrs)
       reconcile(env, observed)
     end
 
@@ -743,6 +761,17 @@ defmodule Foreman.Environments do
   end
 
   def orphans(box_id), do: :persistent_term.get({__MODULE__, :orphans, box_id}, [])
+
+  defp inventory_attrs(env, observed) do
+    state? = observed != env.observed_state and env.observed_state != "error"
+    # A box only sees environments of its own kind, so one that came up
+    # before isolation was recorded is its box's kind if the box reports it.
+    isolation? = is_nil(env.isolation) and observed != "missing"
+
+    %{}
+    |> put_if(:observed_state, if(state?, do: observed))
+    |> put_if(:isolation, if(isolation?, do: env.box.isolation))
+  end
 
   defp reconcile(%Environment{observed_state: "error"}, _observed), do: :ok
 
@@ -757,25 +786,14 @@ defmodule Foreman.Environments do
   # A box that changed isolation (FOREMAN_ISOLATION, or an agent rolled
   # back to before protocol 3) can't see the other kind's environments,
   # so it reports them missing. Remaking one would lose its workspace and
-  # tailnet identity, so it waits for someone to decide.
+  # tailnet identity, and leave the old one running. It stays missing, so
+  # once the box changes back it's reconciled like any other.
   defp reconcile(%Environment{desired_state: "running", created_once: true} = env, "missing") do
-    made = env.isolation || "container"
-
-    if made == env.box.isolation do
+    if Environment.isolation_changed?(env) do
+      Logger.warning("not recreating: #{isolation_changed_message(env)}")
+    else
       Logger.info("recreating #{env.slug}: it's missing from its box")
       enqueue(env, "create", %{}, nil)
-    else
-      Logger.warning(
-        "not recreating #{env.slug}: it was made #{made}, its box is now #{env.box.isolation}"
-      )
-
-      update_env!(env, %{
-        observed_state: "error",
-        status_message:
-          "Not recreated: it was made #{made_label(made)}, and #{env.box.name} now runs " <>
-            "environments #{runs_label(env.box.isolation)}. If the box changed by mistake, " <>
-            "change it back and start this; otherwise destroy it and create a new one."
-      })
     end
   end
 

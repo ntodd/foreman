@@ -5,11 +5,15 @@ defmodule Foreman.Capacity do
 
   An environment's *provisioned* size is the first of:
 
-  1. on a box that runs each environment in its own VM, the VM's size
-     (the one recorded when it was made, else the one it'll be sent)
+  1. in a VM, the VM's size (the one recorded when it was made, else on
+     a VM box the one it'll be sent)
   2. its limits (or its repo's default limits)
   3. its repo's `hostRequirements`
   4. its observed usage, averaged over about 15 minutes
+
+  A box counts its running environments, and those made under its
+  other isolation (containers or VMs) that should be running, which it
+  can't see but which most likely still are.
 
   A box is in contention when what's provisioned (or what's observed)
   passes its threshold of capacity. Placement past that is allowed by
@@ -35,8 +39,11 @@ defmodule Foreman.Capacity do
   defp from_vm(%Environment{vm: %{"cpus" => cpus, "memory_mb" => mb}}, _repo),
     do: %{cpus: cpus, memory_mb: mb, source: :vm}
 
-  defp from_vm(%Environment{box: %Box{isolation: "vm"}} = env, repo),
-    do: env |> vm_size(repo) |> Map.put(:source, :vm)
+  # Not one made as containers, though: its box changed, it didn't.
+  defp from_vm(%Environment{box: %Box{isolation: "vm"}} = env, repo) do
+    if Environment.made_under(env) != "container",
+      do: env |> vm_size(repo) |> Map.put(:source, :vm)
+  end
 
   defp from_vm(_env, _repo), do: nil
 
@@ -117,11 +124,20 @@ defmodule Foreman.Capacity do
     cpus = cap["cpus"] || 0
     mem = cap["memory_mb"] || 0
 
-    running =
-      Enum.filter(envs, &(&1.observed_state in ["running", "partial", "starting", "creating"]))
-
     # The box as given, whether or not each environment has it loaded.
-    provisioned = Enum.map(running, &{&1, provisioned(%{&1 | box: box}, &1.repo)})
+    envs = Enum.map(envs, &%{&1 | box: box})
+
+    # One made the other way from the box now is out of the box's sight
+    # and its stats, but if it was running it most likely still is: VMs
+    # and containers both outlive the agent.
+    running =
+      Enum.filter(
+        envs,
+        &(&1.observed_state in ["running", "partial", "starting", "creating"] or
+            (&1.desired_state == "running" and Environment.isolation_changed?(&1)))
+      )
+
+    provisioned = Enum.map(running, &{&1, provisioned(&1, &1.repo)})
     latest = Tracker.latest(box.id)
 
     used_cpus =

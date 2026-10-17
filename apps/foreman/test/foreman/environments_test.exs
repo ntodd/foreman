@@ -325,11 +325,8 @@ defmodule Foreman.EnvironmentsTest do
 
     # A start result's size is what the agent would give a new VM (start
     # carries no limits), not the size of the VM that started.
-    test "a start keeps the VM size recorded when the VM was made", %{
-      user: user,
-      repo: repo,
-      box: box
-    } do
+    test "a start keeps the VM size recorded when the VM was made", %{user: user, repo: repo} do
+      box = box_fixture(owner_user_id: user.id, isolation: "vm")
       connect_agent(box)
       vm = %{"name" => "fm-x", "cpus" => 4, "memory_mb" => 8192}
 
@@ -356,12 +353,14 @@ defmodule Foreman.EnvironmentsTest do
       assert %{isolation: "vm", vm: ^vm} = Repo.reload!(env)
     end
 
+    # An answer without isolation is from an agent that runs containers
+    # (one rolled back while the rebuild waited, say).
     test "a rebuild that comes back as containers forgets the VM", %{
       scope: scope,
       user: user,
-      repo: repo,
-      box: box
+      repo: repo
     } do
+      box = box_fixture(owner_user_id: user.id, isolation: "vm")
       connect_agent(box)
 
       env =
@@ -384,9 +383,9 @@ defmodule Foreman.EnvironmentsTest do
     test "a restart keeps what the environment's isolation was", %{
       scope: scope,
       user: user,
-      repo: repo,
-      box: box
+      repo: repo
     } do
+      box = box_fixture(owner_user_id: user.id, isolation: "vm")
       connect_agent(box)
       vm = %{"name" => "fm-x", "cpus" => 4, "memory_mb" => 8192}
       env = environment_fixture(user: user, repo: repo, box: box, isolation: "vm", vm: vm)

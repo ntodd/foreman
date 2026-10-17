@@ -119,4 +119,27 @@ defmodule Foreman.Environments.Environment do
 
   def live?(%__MODULE__{destroyed_at: nil}), do: true
   def live?(_), do: false
+
+  @doc """
+  The isolation it was made under: what its last create, rebuild or
+  start reported, else containers for one that came up before that was
+  recorded, else nil (it hasn't come up yet).
+  """
+  def made_under(%__MODULE__{isolation: isolation}) when isolation in ["container", "vm"],
+    do: isolation
+
+  def made_under(%__MODULE__{created_once: true}), do: "container"
+  def made_under(_env), do: nil
+
+  @doc """
+  Whether its box (`env.box`) now runs environments the other way from
+  how this one was made. A box finds containers through Docker and VMs
+  through Incus, so it can't see this one at all.
+  """
+  def isolation_changed?(%__MODULE__{box: %Foreman.Boxes.Box{isolation: isolation}} = env) do
+    made = made_under(env)
+    made != nil and made != isolation
+  end
+
+  def isolation_changed?(_env), do: false
 end

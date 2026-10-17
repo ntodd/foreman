@@ -5,6 +5,7 @@ defmodule ForemanWeb.EnvironmentLive.Index do
   import ForemanWeb.ForemanComponents
 
   alias Foreman.{Boxes, Capacity, Environments, Repos}
+  alias Foreman.Environments.Environment
 
   @impl true
   def mount(_params, _session, socket) do
@@ -181,7 +182,10 @@ defmodule ForemanWeb.EnvironmentLive.Index do
 
             <div class="flex items-center gap-1.5">
               <.button
-                :if={env.created_once and env.observed_state in ~w(stopped error missing partial)}
+                :if={
+                  env.created_once and env.observed_state in ~w(stopped error missing partial) and
+                    not Environment.isolation_changed?(env)
+                }
                 size="sm"
                 icon="hero-play-mini"
                 phx-click="start"

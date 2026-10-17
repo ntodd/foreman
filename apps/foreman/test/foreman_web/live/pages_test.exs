@@ -351,6 +351,52 @@ defmodule ForemanWeb.PagesTest do
     end
   end
 
+  test "an environment its box can't reach after changing isolation says so", %{
+    conn: conn,
+    repo: repo,
+    user: user
+  } do
+    box = box_fixture(owner_user_id: user.id, name: "vms", isolation: "vm")
+
+    env =
+      environment_fixture(
+        user: user,
+        repo: repo,
+        box: box,
+        isolation: "container",
+        observed_state: "missing",
+        memory_limit_mb: 2048
+      )
+
+    {:ok, view, _html} = live(conn, ~p"/environments/#{env.id}")
+    assert has_element?(view, "#isolation-changed", "#{env.slug} was made as containers")
+    assert has_element?(view, "#isolation-changed", "vms now runs environments in VMs")
+    assert has_element?(view, "#isolation-changed", "Change the box back")
+    refute has_element?(view, "button[phx-value-do=start]")
+    refute has_element?(view, "button[phx-value-do=rebuild]")
+    refute has_element?(view, "#resources", "Its VM's size")
+
+    {:ok, view, _html} = live(conn, ~p"/")
+    refute has_element?(view, ~s|button[phx-click=start][phx-value-id="#{env.id}"]|)
+
+    # The same environment on a box that still runs containers.
+    plain =
+      environment_fixture(
+        user: user,
+        repo: repo,
+        isolation: "container",
+        observed_state: "missing"
+      )
+
+    {:ok, view, _html} = live(conn, ~p"/")
+    assert has_element?(view, ~s|button[phx-click=start][phx-value-id="#{plain.id}"]|)
+
+    {:ok, view, _html} = live(conn, ~p"/environments/#{plain.id}")
+    refute has_element?(view, "#isolation-changed")
+    assert has_element?(view, "button[phx-value-do=start]")
+    assert has_element?(view, "button[phx-value-do=rebuild]")
+  end
+
   test "an environment in a VM is counted at the VM's size", %{
     conn: conn,
     repo: repo,
