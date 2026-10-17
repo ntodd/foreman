@@ -384,6 +384,7 @@ Foreman never assumes a box has room for everything provisioned on it. By defaul
 - **Default:** no limits. Every container takes what it can get, which is how the desktop works today.
 - **Optional limits:** CPU and memory limits can be set per repo as a default, and per environment as an override. When set, the overlay applies `cpus` and `mem_limit` to the devcontainer service. Per-service limits for sidecars can come later if needed.
 - **`hostRequirements`:** never treated as a limit. A repo that asks for 8 CPUs and 8 GB gets a warning when it's placed on a box that has less. It's also the estimate used for contention when an environment has no limits.
+- **VM boxes:** a box with `FOREMAN_ISOLATION=vm` always sends a size, because every VM has one: the environment's limits, else its repo's, else `hostRequirements`, else `FOREMAN_VM_DEFAULT_CPUS` and `FOREMAN_VM_DEFAULT_MEMORY_MB` (4 and 8192), with CPUs rounded up to whole vCPUs. The size covers the whole compose project, sidecars included.
 
 ### Reporting
 
@@ -395,9 +396,10 @@ The UI shows:
 
 - current usage per environment and per box
 - **provisioned:** for each running environment, the first available of:
-  1. its limits, if set
-  2. its repo's `hostRequirements`, if declared
-  3. its observed usage (a rolling average of `docker stats` over about 15 minutes)
+  1. on a VM box, its VM's size, which the VM holds while it runs however little it uses
+  2. its limits, if set
+  3. its repo's `hostRequirements`, if declared
+  4. its observed usage (a rolling average of `docker stats` over about 15 minutes)
 - a contention badge when provisioned or observed usage passes a threshold of capacity
 
 ### Box policy

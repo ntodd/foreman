@@ -1,6 +1,7 @@
 defmodule Foreman.CapacityTest do
   use Foreman.DataCase
 
+  alias Foreman.Boxes.Box
   alias Foreman.Capacity
   alias Foreman.Capacity.Tracker
   alias Foreman.Environments.Environment
@@ -44,6 +45,78 @@ defmodule Foreman.CapacityTest do
       assert Capacity.parse_size("1.5GB") == 1536
       assert Capacity.parse_size("1tb") == 1_048_576
       assert Capacity.parse_size("lots") == nil
+    end
+  end
+
+  defp vm_box(capacity),
+    do: %Box{id: Ecto.UUID.generate(), name: "vms", isolation: "vm", capacity: capacity}
+
+  describe "on a VM box" do
+    # A VM holds its whole size while it runs, however little it uses.
+    test "an environment counts its VM's size ahead of everything else" do
+      repo = repo_fixture(host_requirements: %{"cpus" => 8, "memory" => "16gb"})
+
+      env = %Environment{
+        id: Ecto.UUID.generate(),
+        cpu_limit: 2.0,
+        vm: %{"name" => "fm-x", "cpus" => 4, "memory_mb" => 6144}
+      }
+
+      assert %{cpus: 4, memory_mb: 6144, source: :vm} = Capacity.provisioned(env, repo)
+    end
+
+    test "before its VM is made, it counts the size the VM will get" do
+      box = %Box{isolation: "vm"}
+      env_id = Ecto.UUID.generate()
+
+      Tracker.record(
+        "box",
+        %{capacity: %{}, environments: %{env_id => %{cpu_percent: 10.0, memory_mb: 512}}},
+        System.system_time(:second)
+      )
+
+      repo = repo_fixture(host_requirements: %{"cpus" => 6, "memory" => "12gb"})
+
+      assert %{cpus: 6, memory_mb: 12_288, source: :vm} =
+               Capacity.provisioned(%Environment{id: env_id, box: box}, repo)
+
+      assert %{cpus: 4, memory_mb: 8192, source: :vm} =
+               Capacity.provisioned(%Environment{id: env_id, box: box}, repo_fixture())
+    end
+
+    test "the box adds up its running VMs" do
+      box = vm_box(%{"cpus" => 16, "memory_mb" => 65_536})
+      repo = repo_fixture()
+
+      envs =
+        for state <- ["running", "running", "stopped"],
+            do: %Environment{id: Ecto.UUID.generate(), observed_state: state, repo: repo}
+
+      summary = Capacity.box_summary(box, envs)
+      assert summary.provisioned_cpus == 8
+      assert summary.provisioned_memory_mb == 16_384
+    end
+
+    test "placement counts the new environment's VM too" do
+      box = vm_box(%{"cpus" => 16, "memory_mb" => 16_384})
+      repo = repo_fixture()
+
+      running = [
+        %Environment{
+          id: Ecto.UUID.generate(),
+          observed_state: "running",
+          repo: repo,
+          vm: %{"name" => "fm-a", "cpus" => 4, "memory_mb" => 8192}
+        }
+      ]
+
+      assert {:contention, message} = Capacity.check_placement(box, running, repo)
+      assert message =~ "past 90%"
+
+      # The same environments in containers, with nothing measured yet, fit.
+      container_box = %{box | isolation: "container"}
+      bare = Enum.map(running, &%{&1 | vm: nil})
+      assert :ok = Capacity.check_placement(container_box, bare, repo)
     end
   end
 

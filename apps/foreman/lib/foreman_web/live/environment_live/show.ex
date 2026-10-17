@@ -385,7 +385,7 @@ defmodule ForemanWeb.EnvironmentLive.Show do
             </dl>
           </.panel>
 
-          <.panel title="Resources">
+          <.panel title="Resources" id="resources">
             <dl class="space-y-2.5">
               <.fact term="CPU limit">{@env.cpu_limit || @env.repo.cpu_limit || "None"}</.fact>
               <.fact term="Memory limit">
@@ -519,6 +519,7 @@ defmodule ForemanWeb.EnvironmentLive.Show do
     """
   end
 
+  defp provisioned_source(:vm), do: "Its VM's size"
   defp provisioned_source(:limits), do: "Its limits"
   defp provisioned_source(:host_requirements), do: "hostRequirements"
   defp provisioned_source(:observed), do: "15-minute average"

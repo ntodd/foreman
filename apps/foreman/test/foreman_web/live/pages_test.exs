@@ -255,6 +255,20 @@ defmodule ForemanWeb.PagesTest do
     refute has_element?(view, "[data-role=policy-alert]")
   end
 
+  test "an environment in a VM is counted at the VM's size", %{
+    conn: conn,
+    repo: repo,
+    user: user
+  } do
+    box = box_fixture(owner_user_id: user.id, name: "vms", isolation: "vm")
+    vm = %{"name" => "fm-x", "cpus" => 4, "memory_mb" => 8192}
+    env = environment_fixture(user: user, repo: repo, box: box, isolation: "vm", vm: vm)
+
+    {:ok, view, _html} = live(conn, ~p"/environments/#{env.id}")
+    assert has_element?(view, "#resources", "4.0 CPUs, 8.0 GiB")
+    assert has_element?(view, "#resources", "Its VM's size")
+  end
+
   test "adding a box shows a one-time install command", %{conn: conn} do
     {:ok, view, _html} = live(conn, ~p"/boxes")
     html = view |> form("#join-token-form", box: %{box_name: "work-box"}) |> render_submit()

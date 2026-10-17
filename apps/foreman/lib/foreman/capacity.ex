@@ -5,9 +5,11 @@ defmodule Foreman.Capacity do
 
   An environment's *provisioned* size is the first of:
 
-  1. its limits (or its repo's default limits)
-  2. its repo's `hostRequirements`
-  3. its observed usage, averaged over about 15 minutes
+  1. on a box that runs each environment in its own VM, the VM's size
+     (the one recorded when it was made, else the one it'll be sent)
+  2. its limits (or its repo's default limits)
+  3. its repo's `hostRequirements`
+  4. its observed usage, averaged over about 15 minutes
 
   A box is in contention when what's provisioned (or what's observed)
   passes its threshold of capacity. Placement past that is allowed by
@@ -18,13 +20,47 @@ defmodule Foreman.Capacity do
   alias Foreman.Capacity.Tracker
   alias Foreman.Environments.Environment
 
-  @doc "Provisioned CPUs and memory (MB) for an environment, and where the numbers came from."
+  @doc """
+  Provisioned CPUs and memory (MB) for an environment, and where the
+  numbers came from. Whether it's on a VM box comes from `env.box`.
+  """
   def provisioned(%Environment{} = env, repo) do
     reqs = env.host_requirements || repo.host_requirements
 
-    from_limits(env, repo, reqs) || from_requirements(reqs) || from_observed(env.id) ||
-      %{cpus: 0, memory_mb: 0, source: :unknown}
+    from_vm(env, repo) || from_limits(env, repo, reqs) || from_requirements(reqs) ||
+      from_observed(env.id) || %{cpus: 0, memory_mb: 0, source: :unknown}
   end
+
+  # A VM holds its whole size while it runs, however little it uses.
+  defp from_vm(%Environment{vm: %{"cpus" => cpus, "memory_mb" => mb}}, _repo),
+    do: %{cpus: cpus, memory_mb: mb, source: :vm}
+
+  defp from_vm(%Environment{box: %Box{isolation: "vm"}} = env, repo),
+    do: env |> vm_size(repo) |> Map.put(:source, :vm)
+
+  defp from_vm(_env, _repo), do: nil
+
+  @doc """
+  The size of the VM an environment on a VM box is made with: its
+  limits, else its repo's, else the repo's hostRequirements, else the
+  deployment's default, for CPUs and memory separately. CPUs round up to
+  whole vCPUs.
+  """
+  def vm_size(%Environment{} = env, repo) do
+    reqs = env.host_requirements || repo.host_requirements
+    default = Foreman.Config.vm_default_size()
+
+    cpus = env.cpu_limit || repo.cpu_limit || positive(req_cpus(reqs)) || default.cpus
+
+    memory_mb =
+      env.memory_limit_mb || repo.memory_limit_mb || positive(req_memory(reqs)) ||
+        default.memory_mb
+
+    %{cpus: ceil(cpus), memory_mb: memory_mb}
+  end
+
+  defp positive(n) when is_number(n) and n > 0, do: n
+  defp positive(_), do: nil
 
   defp from_limits(env, repo, reqs) do
     cpus = env.cpu_limit || repo.cpu_limit
@@ -84,7 +120,8 @@ defmodule Foreman.Capacity do
     running =
       Enum.filter(envs, &(&1.observed_state in ["running", "partial", "starting", "creating"]))
 
-    provisioned = Enum.map(running, &{&1, provisioned(&1, &1.repo)})
+    # The box as given, whether or not each environment has it loaded.
+    provisioned = Enum.map(running, &{&1, provisioned(%{&1 | box: box}, &1.repo)})
     latest = Tracker.latest(box.id)
 
     used_cpus =
@@ -127,6 +164,7 @@ defmodule Foreman.Capacity do
 
     env = %Environment{
       id: "new",
+      box: box,
       cpu_limit: limits[:cpu_limit],
       memory_limit_mb: limits[:memory_limit_mb]
     }
