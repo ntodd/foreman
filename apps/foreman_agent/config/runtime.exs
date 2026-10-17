@@ -38,6 +38,7 @@ if config_env() != :test do
     vm_memory_mb: int.("FOREMAN_VM_MEMORY_MB", 8192),
     vm_disk_gb: int.("FOREMAN_VM_DISK_GB", 64),
     vm_policy_rules: ForemanAgent.Config.parse_policy(list.("FOREMAN_VM_POLICY", [])),
+    vm_registry_auth: System.get_env("FOREMAN_VM_REGISTRY_AUTH") == "allow",
     url: System.get_env("FOREMAN_URL"),
     join_token: System.get_env("FOREMAN_JOIN_TOKEN"),
     data_dir: System.get_env("FOREMAN_AGENT_DATA_DIR", "/var/lib/foreman-agent"),

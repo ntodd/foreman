@@ -106,49 +106,108 @@ defmodule ForemanAgent.Vm.IncusTest do
     assert {:error, "incus query failed: " <> _} = Incus.state(ctx, @name)
   end
 
-  test "lists only Foreman's VMs, with their usage", %{ctx: ctx} do
+  test "lists only Foreman's VMs, with their sizes, from instances without their state",
+       %{ctx: ctx} do
     instances = [
       %{
         "name" => @name,
         "type" => "virtual-machine",
         "status" => "Running",
-        "config" => %{"user.foreman.env_id" => @env_id, "user.foreman.slug" => "storefront-2"},
-        "state" => %{
-          "cpu" => %{"usage" => 12_000_000_000},
-          "memory" => %{"usage" => 1_048_576_000}
+        "config" => %{
+          "user.foreman.env_id" => @env_id,
+          "user.foreman.slug" => "storefront-2",
+          "limits.cpu" => "4",
+          "limits.memory" => "8192MiB"
         }
       },
       %{"name" => "someone-elses", "type" => "container", "status" => "Running", "config" => %{}},
       %{
-        "name" => "fm-stopped",
+        "name" => "fm-ready",
         "type" => "virtual-machine",
-        "status" => "Stopped",
+        "status" => "Ready",
         "config" => %{
           "user.foreman.env_id" => "11111111-1111-4111-8111-111111111111",
-          "user.foreman.slug" => "api-1"
-        },
-        "state" => nil
+          "user.foreman.slug" => "api-1",
+          "limits.memory" => "2GiB"
+        }
       }
     ]
 
-    expect_incus(
-      ["list", "--format", "json"],
-      {:ok, %{status: 0, output: JSON.encode!(instances)}}
-    )
+    # The client's first-run notice comes first on stderr, merged in.
+    notice = "To start your first container, try: incus launch images:ubuntu/22.04\n"
 
-    assert {:ok, [running, stopped]} = Incus.list(ctx)
+    # Without state: what a guest reports about itself (its interfaces,
+    # say) can't grow this past what the runner keeps.
+    expect(RunnerMock, :run, fn "sh",
+                                ["-c", _, "incus", "query", "/1.0/instances?recursion=1"],
+                                opts ->
+      assert opts[:keep] >= 16 * 1024 * 1024
+      {:ok, %{status: 0, output: notice <> JSON.encode!(instances)}}
+    end)
+
+    assert {:ok, [running, ready]} = Incus.list(ctx)
 
     assert running == %{
              name: @name,
              env_id: @env_id,
              slug: "storefront-2",
              status: :running,
-             cpu_ns: 12_000_000_000,
-             memory_bytes: 1_048_576_000
+             cpus: 4,
+             memory_mb: 8192
            }
 
-    assert stopped.status == :stopped
-    assert stopped.cpu_ns == 0
+    # A guest can mark itself Ready through the guest API; it's still running.
+    assert ready.status == :running
+    assert ready.memory_mb == 2048
+    assert ready.cpus == nil
+  end
+
+  test "reads one VM's usage, and a guest that answers too much is an error for that VM only",
+       %{ctx: ctx} do
+    state = %{
+      "status" => "Running",
+      "cpu" => %{"usage" => 12_000_000_000},
+      "memory" => %{"usage" => 1_048_576_000}
+    }
+
+    expect_incus(
+      ["query", "/1.0/instances/#{@name}/state"],
+      {:ok, %{status: 0, output: JSON.encode!(state)}}
+    )
+
+    assert Incus.usage(ctx, @name) ==
+             {:ok, %{cpu_ns: 12_000_000_000, memory_bytes: 1_048_576_000}}
+
+    truncated = String.slice(JSON.encode!(state), 0, 20)
+
+    expect_incus(
+      ["query", "/1.0/instances/#{@name}/state"],
+      {:ok, %{status: 0, output: truncated}}
+    )
+
+    assert {:error, _} = Incus.usage(ctx, @name)
+  end
+
+  test "a VM's size and state come from one query", %{ctx: ctx} do
+    expect_incus(
+      ["query", "/1.0/instances/#{@name}"],
+      {:ok,
+       %{
+         status: 0,
+         output: ~s({"status":"Frozen","config":{"limits.cpu":"2","limits.memory":"4096MiB"}})
+       }}
+    )
+
+    assert Incus.info(ctx, @name) == {:ok, %{status: :other, cpus: 2, memory_mb: 4096}}
+  end
+
+  test "resizes a VM", %{ctx: ctx} do
+    expect_incus(
+      ["config", "set", @name, "limits.cpu=8", "limits.memory=16384MiB"],
+      {:ok, %{status: 0, output: ""}}
+    )
+
+    assert :ok = Incus.resize(ctx, @name, 8, 16_384)
   end
 
   test "starts, stops (forcing after a timeout) and deletes", %{ctx: ctx} do

@@ -22,7 +22,7 @@ defmodule ForemanAgent.Env.Vm do
   them back on start without waiting for the control plane.
   """
 
-  alias ForemanAgent.{Env, Inventory, SafeFS}
+  alias ForemanAgent.{Config, Env, Inventory, SafeFS}
   alias ForemanAgent.Guest.Wire
   alias ForemanAgent.Vm.Incus
 
@@ -57,10 +57,32 @@ defmodule ForemanAgent.Env.Vm do
     with {:ok, _} <- host_secrets(p.env_id, p.files, [], ctx),
          {:ok, size} <- ensure_vm(ctx, name, p, create: true),
          :ok <- ensure_release(ctx, name),
-         {:ok, result} <- guest(ctx, name, type, p, @up_timeout) do
+         {:ok, result} <- guest(ctx, name, type, guest_payload(p, ctx), @up_timeout) do
       {:ok, Map.merge(result, %{"isolation" => "vm", "vm" => size})}
     end
   end
+
+  # The registry credential is the owner's, shared by all its repos. On a
+  # container box it stays in the agent's own directory; a VM is the
+  # environment's, root in it is the environment's, and the credential
+  # would be readable there. So it goes in only where the box says so.
+  defp guest_payload(%{registry_auth: [_ | _] = auths} = p, ctx) do
+    if ctx.config.vm_registry_auth do
+      p
+    else
+      hosts = Enum.map_join(auths, ", ", & &1.host)
+
+      ctx.log.(
+        "info",
+        "not passing the registry credential into the VM (FOREMAN_VM_REGISTRY_AUTH=allow would); " <>
+          "private images from #{hosts} won't pull\n"
+      )
+
+      Map.delete(p, :registry_auth)
+    end
+  end
+
+  defp guest_payload(p, _ctx), do: p
 
   defp start(p, ctx) do
     name = Incus.name(p.env_id)
@@ -91,6 +113,10 @@ defmodule ForemanAgent.Env.Vm do
         ctx.log.("info", "shutting down the VM #{name}\n")
 
         with :ok <- Incus.stop(ctx, name), do: {:ok, %{"vm" => "stopped"}}
+
+      {:ok, :other} ->
+        ctx.log.("info", "the VM #{name} isn't running normally; stopping it by force\n")
+        with :ok <- Incus.stop(ctx, name, force: true), do: {:ok, %{"vm" => "stopped"}}
 
       {:ok, _} ->
         {:ok, %{"vm" => "stopped"}}
@@ -160,36 +186,70 @@ defmodule ForemanAgent.Env.Vm do
 
   # -- the VM -----------------------------------------------------------------
 
+  # Create and rebuild bring the VM to the size asked for; start and
+  # restart use it as it is, and report its real size.
   defp ensure_vm(ctx, name, p, opts) do
-    size = size(ctx.config, Map.get(p, :limits))
+    wanted = size(ctx.config, Map.get(p, :limits))
 
-    with {:ok, state} <- Incus.state(ctx, name),
-         :ok <- bring_up(ctx, name, p, state, size, opts[:create]),
+    with {:ok, info} <- Incus.info(ctx, name),
+         {:ok, size} <- bring_up(ctx, name, p, info, wanted, opts[:create]),
          :ok <- Incus.wait_ready(ctx, name) do
       {:ok, Map.put(size, "name", name)}
     end
   end
 
-  defp bring_up(_ctx, _name, _p, :missing, _size, false),
+  defp bring_up(_ctx, _name, _p, :missing, _wanted, false),
     do: {:error, "this box has no VM for the environment; rebuild it"}
 
-  defp bring_up(ctx, name, p, :missing, size, true) do
-    ctx.log.("info", "creating the VM #{name}: #{size["cpus"]} vCPUs, #{size["memory_mb"]} MB\n")
+  defp bring_up(ctx, name, p, :missing, wanted, true) do
+    ctx.log.(
+      "info",
+      "creating the VM #{name}: #{wanted["cpus"]} vCPUs, #{wanted["memory_mb"]} MB\n"
+    )
 
     with :ok <-
            Incus.create(ctx, name,
              env_id: p.env_id,
              slug: p.slug,
-             cpus: size["cpus"],
-             memory_mb: size["memory_mb"],
+             cpus: wanted["cpus"],
+             memory_mb: wanted["memory_mb"],
              disk_gb: ctx.config.vm_disk_gb
-           ) do
-      boot(ctx, name)
+           ),
+         :ok <- boot(ctx, name) do
+      {:ok, wanted}
     end
   end
 
-  defp bring_up(_ctx, _name, _p, :running, _size, _create), do: :ok
-  defp bring_up(ctx, name, _p, _stopped, _size, _create), do: boot(ctx, name)
+  defp bring_up(ctx, name, _p, info, wanted, true) do
+    if info.cpus == wanted["cpus"] and info.memory_mb == wanted["memory_mb"] do
+      with :ok <- running(ctx, name, info), do: {:ok, wanted}
+    else
+      # A VM's memory can't change while it runs.
+      ctx.log.(
+        "info",
+        "resizing the VM #{name} to #{wanted["cpus"]} vCPUs, #{wanted["memory_mb"]} MB\n"
+      )
+
+      with :ok <- if(info.status == :stopped, do: :ok, else: Incus.stop(ctx, name)),
+           :ok <- Incus.resize(ctx, name, wanted["cpus"], wanted["memory_mb"]),
+           :ok <- boot(ctx, name) do
+        {:ok, wanted}
+      end
+    end
+  end
+
+  defp bring_up(ctx, name, _p, info, wanted, false) do
+    with :ok <- running(ctx, name, info) do
+      {:ok,
+       %{
+         "cpus" => info.cpus || wanted["cpus"],
+         "memory_mb" => info.memory_mb || wanted["memory_mb"]
+       }}
+    end
+  end
+
+  defp running(_ctx, _name, %{status: :running}), do: :ok
+  defp running(ctx, name, _info), do: boot(ctx, name)
 
   defp boot(ctx, name) do
     ctx.log.("info", "starting the VM #{name}\n")
@@ -270,27 +330,40 @@ defmodule ForemanAgent.Env.Vm do
       nil ->
         vsn = :foreman_agent |> Application.spec(:vsn) |> to_string()
 
-        digest =
-          :foreman_agent
-          |> Application.spec(:modules)
-          |> Enum.sort()
-          |> Enum.map(fn mod ->
-            case :code.get_object_code(mod) do
-              {^mod, beam, _} -> :erlang.md5(beam)
-              :error -> ""
-            end
-          end)
-          |> then(&:crypto.hash(:sha256, &1))
-          |> Base.encode16(case: :lower)
-          |> binary_part(0, 12)
+        modules =
+          Application.spec(:foreman_agent, :modules) ++
+            (Application.spec(:foreman_protocol, :modules) || [])
 
-        id = "#{vsn}-#{digest}"
+        id = "#{vsn}-#{release_digest(modules, [Config.get().feature_dir])}"
         :persistent_term.put({__MODULE__, :release_id}, id)
         id
 
       id ->
         id
     end
+  end
+
+  @doc false
+  # The modules' object code and the files under `dirs` (the feature the
+  # guest puts in every environment), hashed together.
+  def release_digest(modules, dirs) do
+    code =
+      for mod <- Enum.sort(modules) do
+        case :code.get_object_code(mod) do
+          {^mod, beam, _} -> :erlang.md5(beam)
+          :error -> Atom.to_string(mod)
+        end
+      end
+
+    files =
+      for dir <- dirs,
+          dir,
+          path <- Enum.sort(Path.wildcard(Path.join(dir, "**"), match_dot: true)),
+          File.regular?(path) do
+        [Path.relative_to(path, dir), :erlang.md5(File.read!(path))]
+      end
+
+    :sha256 |> :crypto.hash([code, files]) |> Base.encode16(case: :lower) |> binary_part(0, 12)
   end
 
   # -- secrets --------------------------------------------------------------
@@ -328,13 +401,17 @@ defmodule ForemanAgent.Env.Vm do
     end
   end
 
+  # Staged on the secrets tmpfs, like the secrets themselves: the request
+  # carries them. A killed operation can't run its `after`, so anything
+  # older than an hour is a leftover and goes.
   defp hand_over(ctx, name, id, remote, request) do
-    dir = Path.join(ctx.config.data_dir, "vm-ops")
+    dir = Path.join(ctx.config.secrets_root, ".vm-ops")
     local = Path.join(dir, id <> ".op")
 
     try do
       with :ok <- File.mkdir_p(dir),
            :ok <- File.chmod(dir, 0o700),
+           :ok <- sweep(dir),
            :ok <- SafeFS.write_atomic(local, request, 0o600) do
         Incus.push(ctx, name, local, remote, uid: @guest_uid, gid: @guest_uid, mode: 0o600)
       else
@@ -347,6 +424,17 @@ defmodule ForemanAgent.Env.Vm do
     after
       File.rm(local)
     end
+  end
+
+  defp sweep(dir) do
+    cutoff = System.os_time(:second) - 3600
+
+    for path <- Path.wildcard(Path.join(dir, "*.op")),
+        {:ok, %File.Stat{mtime: mtime}} <- [File.stat(path, time: :posix)],
+        mtime < cutoff,
+        do: File.rm(path)
+
+    :ok
   end
 
   defp relay(ctx, name, type, remote, id, timeout) do
@@ -518,8 +606,10 @@ defmodule ForemanAgent.Env.Vm do
     )
   end
 
-  defp vm_inventory(_ctx, %{status: status} = vm) when status != :running,
+  defp vm_inventory(_ctx, %{status: :stopped} = vm),
     do: %{env_id: vm.env_id, slug: vm.slug, state: "stopped", containers: []}
+
+  defp vm_inventory(_ctx, %{status: :other} = vm), do: partial(vm)
 
   defp vm_inventory(ctx, vm) do
     filters = URI.encode_www_form(JSON.encode!(%{"label" => ["foreman.env_id=#{vm.env_id}"]}))
@@ -529,36 +619,63 @@ defmodule ForemanAgent.Env.Vm do
     with {:ok, %{status: 0, output: output}} <-
            Incus.exec(ctx, vm.name, argv, timeout: 15_000, keep: 4_000_000),
          {:ok, containers} when is_list(containers) <- JSON.decode(output),
-         [env] <- Enum.filter(Inventory.from_containers(containers), &(&1.env_id == vm.env_id)) do
+         [env] <- Enum.filter(Inventory.from_containers(containers), &(&1.env_id == vm.env_id)),
+         true <- Enum.all?(env.containers, &plausible?/1) do
       # The slug comes from the VM's own config, not from labels the guest
       # could have set.
       %{env | slug: vm.slug}
     else
-      _ -> %{env_id: vm.env_id, slug: vm.slug, state: "partial", containers: []}
+      _ -> partial(vm)
     end
   end
 
+  defp partial(vm), do: %{env_id: vm.env_id, slug: vm.slug, state: "partial", containers: []}
+
+  # The list is the guest's to write. One bad entry would make the whole
+  # box.inventory event invalid, and with it every environment's state.
+  defp plausible?(%{id: id, service: service, state: state}) do
+    Enum.all?([{id, 128}, {service, 255}, {state, 32}], fn {v, max} ->
+      is_binary(v) and byte_size(v) <= max
+    end)
+  end
+
   @doc """
-  Capacity from the host, and usage per environment from the host's view
-  of each VM: CPU time since the last sample and the memory the VM uses.
+  Capacity from the host, and usage per environment: CPU time since the
+  last sample and memory in use, as Incus reports them. For a VM those
+  come from the agent inside it, so they're held to the VM's size.
   """
   @spec stats(map()) :: {:ok, map()} | {:error, String.t()}
   def stats(ctx) do
     with {:ok, vms} <- Incus.list(ctx) do
-      now = System.monotonic_time(:nanosecond)
       {disk_mb, free_mb} = ForemanAgent.Stats.disk(ctx)
+      host_cpus = :erlang.system_info(:logical_processors_available)
+      host_mb = host_memory_mb()
 
       environments =
-        for vm <- vms, vm.status == :running, valid?(vm), into: %{} do
-          {vm.env_id,
-           %{cpu_percent: cpu_percent(vm, now), memory_mb: div(vm.memory_bytes, 1024 * 1024)}}
-        end
+        vms
+        |> Enum.filter(&(&1.status == :running and valid?(&1)))
+        |> Task.async_stream(fn vm -> {vm, Incus.usage(ctx, vm.name)} end,
+          max_concurrency: 8,
+          timeout: 20_000,
+          on_timeout: :kill_task
+        )
+        |> Enum.flat_map(fn
+          {:ok, {vm, {:ok, usage}}} ->
+            now = System.monotonic_time(:nanosecond)
+            cpu = min(cpu_percent(vm, usage.cpu_ns, now), (vm.cpus || host_cpus) * 100.0)
+            memory = min(div(usage.memory_bytes, 1024 * 1024), vm.memory_mb || host_mb)
+            [{vm.env_id, %{cpu_percent: cpu, memory_mb: memory}}]
+
+          _ ->
+            []
+        end)
+        |> Map.new()
 
       {:ok,
        %{
          capacity: %{
-           cpus: :erlang.system_info(:logical_processors_available),
-           memory_mb: host_memory_mb(),
+           cpus: host_cpus,
+           memory_mb: host_mb,
            disk_mb: disk_mb,
            disk_free_mb: free_mb
          },
@@ -567,14 +684,14 @@ defmodule ForemanAgent.Env.Vm do
     end
   end
 
-  defp cpu_percent(vm, now) do
+  defp cpu_percent(vm, cpu_ns, now) do
     key = {__MODULE__, :cpu, vm.name}
     previous = :persistent_term.get(key, nil)
-    :persistent_term.put(key, {vm.cpu_ns, now})
+    :persistent_term.put(key, {cpu_ns, now})
 
     case previous do
-      {ns, at} when now > at and vm.cpu_ns >= ns ->
-        Float.round((vm.cpu_ns - ns) / (now - at) * 100, 2)
+      {ns, at} when now > at and cpu_ns >= ns ->
+        Float.round((cpu_ns - ns) / (now - at) * 100, 2)
 
       _ ->
         0.0

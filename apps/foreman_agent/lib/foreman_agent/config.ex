@@ -36,6 +36,8 @@ defmodule ForemanAgent.Config do
             vm_memory_mb: 8192,
             vm_disk_gb: 64,
             vm_policy_rules: nil,
+            # Whether the owner's registry credential goes into VMs.
+            vm_registry_auth: false,
             # The release pushed into each VM; this running release when unset.
             vm_release_dir: nil
 

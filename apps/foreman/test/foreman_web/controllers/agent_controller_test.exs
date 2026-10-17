@@ -60,6 +60,15 @@ defmodule ForemanWeb.AgentControllerTest do
     refute body =~ "__FOREMAN_URL__"
   end
 
+  test "the install script sets up VM boxes and keeps their settings on a re-run", %{conn: conn} do
+    body = conn |> get(~p"/agent/install.sh") |> response(200)
+    assert body =~ "--isolation"
+    assert body =~ "FOREMAN_ISOLATION="
+    # A re-run without --isolation keeps what the box had.
+    assert body =~ ~S"grep -E '^FOREMAN_(ISOLATION|VM_[A-Z_]+)='"
+    assert body =~ "incus-admin"
+  end
+
   # A second request from the same client (rate limits are per client).
   defp again(conn), do: %{build_conn() | remote_ip: conn.remote_ip}
 end

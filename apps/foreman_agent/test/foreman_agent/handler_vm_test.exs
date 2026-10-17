@@ -65,13 +65,15 @@ defmodule ForemanAgent.HandlerVmTest do
       }
     ]
 
-    incus(fn ["list", "--format", "json"] -> {:ok, %{status: 0, output: JSON.encode!(vms)}} end)
+    incus(fn ["query", "/1.0/instances?recursion=1"] ->
+      {:ok, %{status: 0, output: JSON.encode!(vms)}}
+    end)
 
     assert {:ok, [%{env_id: @env_id, slug: "web-1", state: "stopped"}]} = Handler.inventory()
   end
 
   test "stats come from the VMs, and capacity from the host" do
-    incus(fn ["list", "--format", "json"] -> {:ok, %{status: 0, output: "[]"}} end)
+    incus(fn ["query", "/1.0/instances?recursion=1"] -> {:ok, %{status: 0, output: "[]"}} end)
 
     assert {:ok, %{capacity: %{cpus: cpus}, environments: envs}} =
              Stats.collect(Handler.ctx(fn _, _ -> :ok end))

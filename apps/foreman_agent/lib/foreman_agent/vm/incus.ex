@@ -17,6 +17,8 @@ defmodule ForemanAgent.Vm.Incus do
   # deletes of big disks get longer.
   @timeout :timer.minutes(2)
   @long_timeout :timer.minutes(10)
+  @list_keep 16 * 1024 * 1024
+  @state_keep 1024 * 1024
   @no_stdin ~s(exec "$0" "$@" </dev/null)
 
   @doc "The VM name for an environment."
@@ -46,13 +48,24 @@ defmodule ForemanAgent.Vm.Incus do
     ok(incus(ctx, args, @long_timeout), "incus init")
   end
 
-  @spec state(map(), String.t()) :: {:ok, :running | :stopped | :missing} | {:error, String.t()}
-  def state(ctx, name) do
+  @doc "A VM's state and size, or `:missing`."
+  @spec info(map(), String.t()) :: {:ok, map() | :missing} | {:error, String.t()}
+  def info(ctx, name) do
     case incus(ctx, ["query", "/1.0/instances/#{name}"], @timeout) do
       {:ok, %{status: 0, output: output}} ->
         case output |> json_body() |> JSON.decode() do
-          {:ok, %{"status" => status}} -> {:ok, status(status)}
-          _ -> {:error, "incus query returned #{inspect(String.slice(output, 0, 200))}"}
+          {:ok, %{"status" => status} = instance} ->
+            config = instance["config"] || %{}
+
+            {:ok,
+             %{
+               status: status(status),
+               cpus: parse_cpus(config["limits.cpu"]),
+               memory_mb: parse_memory_mb(config["limits.memory"])
+             }}
+
+          _ ->
+            {:error, "incus query returned #{inspect(String.slice(output, 0, 200))}"}
         end
 
       {:ok, %{status: status, output: output}} when is_integer(status) ->
@@ -65,19 +78,76 @@ defmodule ForemanAgent.Vm.Incus do
     end
   end
 
-  @doc "Foreman's VMs on this box, with each one's CPU time and memory."
+  @spec state(map(), String.t()) ::
+          {:ok, :running | :stopped | :other | :missing} | {:error, String.t()}
+  def state(ctx, name) do
+    with {:ok, info} <- info(ctx, name) do
+      {:ok, if(info == :missing, do: :missing, else: info.status)}
+    end
+  end
+
+  @doc """
+  Foreman's VMs on this box, with each one's size. Instances come without
+  their state: much of a VM's state (its network interfaces, say) is what
+  the guest reports about itself, and a guest could make it big enough to
+  break the listing for every VM. `usage/2` reads one VM's state.
+  """
   @spec list(map()) :: {:ok, [map()]} | {:error, String.t()}
   def list(ctx) do
-    with {:ok, %{status: 0, output: output}} <- incus(ctx, ["list", "--format", "json"], @timeout),
+    with {:ok, %{status: 0, output: output}} <-
+           run(ctx, ["query", "/1.0/instances?recursion=1"], timeout: @timeout, keep: @list_keep),
          {:ok, instances} when is_list(instances) <- output |> json_body() |> JSON.decode() do
       {:ok, Enum.flat_map(instances, &instance/1)}
     else
-      {:ok, %{output: output}} -> {:error, "incus list failed: #{String.trim(output)}"}
-      {:ok, _} -> {:error, "incus list returned something other than a list"}
-      {:error, %JSON.DecodeError{}} -> {:error, "incus list returned invalid JSON"}
-      other -> failure(other, "incus list")
+      {:ok, %{output: output}} -> {:error, "incus query failed: #{String.trim(output)}"}
+      {:ok, _} -> {:error, "incus query returned something other than a list"}
+      {:error, %JSON.DecodeError{}} -> {:error, "incus query returned invalid JSON"}
+      other -> failure(other, "incus query")
     end
   end
+
+  @doc """
+  One VM's CPU time and memory in use. For VMs Incus takes these from the
+  agent inside the guest, so they're the guest's word; callers bound them
+  by the VM's size.
+  """
+  @spec usage(map(), String.t()) :: {:ok, map()} | {:error, String.t()}
+  def usage(ctx, name) do
+    with {:ok, %{status: 0, output: output}} <-
+           run(ctx, ["query", "/1.0/instances/#{name}/state"],
+             timeout: @timeout,
+             keep: @state_keep
+           ),
+         {:ok, %{} = state} <- output |> json_body() |> JSON.decode(),
+         cpu when is_integer(cpu) and cpu >= 0 <- get_in(state, ["cpu", "usage"]) || 0,
+         memory when is_integer(memory) and memory >= 0 <- get_in(state, ["memory", "usage"]) || 0 do
+      {:ok, %{cpu_ns: cpu, memory_bytes: memory}}
+    else
+      _ -> {:error, "couldn't read the state of #{name}"}
+    end
+  end
+
+  @doc "Sets a stopped VM's vCPUs and memory."
+  def resize(ctx, name, cpus, memory_mb) do
+    args = ["config", "set", name, "limits.cpu=#{cpus}", "limits.memory=#{memory_mb}MiB"]
+    ok(incus(ctx, args, @timeout), "incus config set")
+  end
+
+  defp instance(%{"name" => name, "config" => %{"user.foreman.env_id" => env_id} = config} = i)
+       when is_binary(name) and is_binary(env_id) do
+    [
+      %{
+        name: name,
+        env_id: env_id,
+        slug: config["user.foreman.slug"],
+        status: status(i["status"]),
+        cpus: parse_cpus(config["limits.cpu"]),
+        memory_mb: parse_memory_mb(config["limits.memory"])
+      }
+    ]
+  end
+
+  defp instance(_), do: []
 
   # The client prints a notice on its first run (a new HOME), and the
   # runner merges stderr into the output.
@@ -88,32 +158,55 @@ defmodule ForemanAgent.Vm.Incus do
     |> Enum.join("\n")
   end
 
-  defp instance(%{"name" => name, "config" => %{"user.foreman.env_id" => env_id} = config} = i)
-       when is_binary(name) and is_binary(env_id) do
-    state = i["state"] || %{}
-
-    [
-      %{
-        name: name,
-        env_id: env_id,
-        slug: config["user.foreman.slug"],
-        status: status(i["status"]),
-        cpu_ns: get_in(state, ["cpu", "usage"]) || 0,
-        memory_bytes: get_in(state, ["memory", "usage"]) || 0
-      }
-    ]
+  defp parse_cpus(value) when is_binary(value) do
+    case Integer.parse(value) do
+      {n, ""} when n > 0 -> n
+      _ -> nil
+    end
   end
 
-  defp instance(_), do: []
+  defp parse_cpus(_), do: nil
 
-  defp status("Running"), do: :running
+  @units %{
+    "" => 1,
+    "B" => 1,
+    "kB" => 1_000,
+    "MB" => 1_000_000,
+    "GB" => 1_000_000_000,
+    "KiB" => 1024,
+    "MiB" => 1_048_576,
+    "GiB" => 1_073_741_824,
+    "TiB" => 1_099_511_627_776
+  }
+
+  defp parse_memory_mb(value) when is_binary(value) do
+    with {n, unit} when n > 0 <- Integer.parse(value),
+         {:ok, factor} <- Map.fetch(@units, unit) do
+      div(n * factor, 1_048_576)
+    else
+      _ -> nil
+    end
+  end
+
+  defp parse_memory_mb(_), do: nil
+
+  # A guest can mark itself Ready through the guest API; that's a running VM.
+  defp status(status) when status in ["Running", "Ready"], do: :running
   defp status("Stopped"), do: :stopped
   defp status(_), do: :other
 
   def start(ctx, name), do: ok(incus(ctx, ["start", name], @long_timeout), "incus start")
 
-  @doc "Stops cleanly, and forces it when the guest doesn't shut down in time."
-  def stop(ctx, name) do
+  @doc """
+  Stops cleanly, and forces it when the guest doesn't shut down in time.
+  `force: true` skips the clean stop (a frozen VM can't shut itself down).
+  """
+  def stop(ctx, name, opts \\ [])
+
+  def stop(ctx, name, force: true),
+    do: ok(incus(ctx, ["stop", name, "--force"], @long_timeout), "incus stop")
+
+  def stop(ctx, name, _opts) do
     case incus(ctx, ["stop", name, "--timeout", "60"], @long_timeout) do
       {:ok, %{status: 0}} -> :ok
       _ -> ok(incus(ctx, ["stop", name, "--force"], @long_timeout), "incus stop")

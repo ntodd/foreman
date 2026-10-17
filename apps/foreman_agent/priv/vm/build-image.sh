@@ -40,7 +40,16 @@ incus file push "$here/provision.sh" "$vm/root/provision.sh" </dev/null
 incus exec "$vm" -- sh /root/provision.sh </dev/null
 incus exec "$vm" -- rm -f /root/provision.sh </dev/null
 incus stop "$vm" </dev/null
-incus image delete "$alias" >/dev/null 2>&1 || true
-incus publish "$vm" --alias "$alias" </dev/null
+# Published beside the current image and swapped in only once it's there,
+# so a failed publish (a full disk, say) leaves the box with a usable one.
+incus image alias delete "$alias-new" >/dev/null 2>&1 || true
+incus publish "$vm" --alias "$alias-new" </dev/null
+fingerprint() { incus image info "$1" </dev/null 2>/dev/null | awk '/^Fingerprint:/ {print $2}'; }
+new=$(fingerprint "$alias-new")
+old=$(fingerprint "$alias")
+incus image alias delete "$alias-new" </dev/null
+incus image alias delete "$alias" </dev/null >/dev/null 2>&1 || true
+incus image alias create "$alias" "$new" </dev/null
+if [ -n "$old" ] && [ "$old" != "$new" ]; then incus image delete "$old" </dev/null; fi
 incus delete "$vm" </dev/null
-echo "foreman: published $alias"
+echo "foreman: published $alias ($new)"
