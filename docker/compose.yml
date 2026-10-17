@@ -10,9 +10,10 @@
 #   sudo docker compose -f compose.yml pull
 #   sudo docker compose -f compose.yml up -d
 #
-# FOREMAN_IMAGE picks the image, e.g. ghcr.io/ntodd/foreman:0.3.0, or
-# ghcr.io/ntodd/foreman:0.3.0-pg for Postgres. Pin a version to choose
-# when you upgrade; the default follows the newest release.
+# FOREMAN_IMAGE (in a .env beside this file) picks the image, e.g.
+# ghcr.io/ntodd/foreman:0.3.0, or ghcr.io/ntodd/foreman:0.3.0-pg for
+# Postgres. Pin a version to choose when you upgrade; without one it
+# follows the newest release.
 name: foreman
 
 services:

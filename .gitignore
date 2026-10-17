@@ -8,3 +8,4 @@ erl_crash.dump
 # Agents a control plane image carries; the release workflow fills it.
 /docker/agents/*
 !/docker/agents/.keep
+/docker/.env
