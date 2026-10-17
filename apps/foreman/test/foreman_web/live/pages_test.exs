@@ -332,6 +332,10 @@ defmodule ForemanWeb.PagesTest do
     {:ok, view, _html} = live(conn, ~p"/environments/#{env.id}")
     assert has_element?(view, "#resources", "4.0 CPUs, 8.0 GiB")
     assert has_element?(view, "#resources", "Its VM's size")
+
+    {:ok, view, _html} = live(conn, ~p"/boxes/#{box.id}")
+    assert has_element?(view, "#box-env-#{env.id} td", "8.0 GiB")
+    assert has_element?(view, "#box-env-#{env.id} td", "its VM's size")
   end
 
   test "adding a box shows a one-time install command", %{conn: conn} do

@@ -252,7 +252,7 @@ defmodule ForemanWeb.BoxLive.Show do
                 </tr>
               </thead>
               <tbody class="divide-y divide-line">
-                <tr :for={env <- @envs}>
+                <tr :for={env <- @envs} id={"box-env-#{env.id}"}>
                   <td class="px-5 py-2.5">
                     <.link
                       navigate={~p"/environments/#{env.id}"}
@@ -393,6 +393,7 @@ defmodule ForemanWeb.BoxLive.Show do
     """
   end
 
+  defp source(:vm), do: "its VM's size"
   defp source(:limits), do: "limits"
   defp source(:host_requirements), do: "hostRequirements"
   defp source(:observed), do: "observed average"
