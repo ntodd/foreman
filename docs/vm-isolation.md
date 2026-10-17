@@ -146,7 +146,8 @@ the workloads) at the cost of slower faults on fresh memory.
 
 ## Capabilities
 
-`e2e/vmbench/capabilities.sh` and `netcheck.sh`, through the control plane:
+`e2e/vmbench/capabilities.sh` (17 of 17 pass), `netcheck.sh` and
+`reboot.sh`, through the control plane:
 
 | | Container box | VM box |
 |---|---|---|
@@ -158,12 +159,50 @@ the workloads) at the cost of slower faults on fresh memory.
 | Stop gives the memory back | partly (processes stop) | yes (VM shuts down) |
 | Secrets come back after stop and start | yes | yes (from the host's copy) |
 | Destroy removes everything | yes | yes |
-| Reach another environment on the box | no | no (NIC port isolation) |
+| Reach another environment on the box | no | no (NIC port isolation; with it off, the same probe connects) |
 | Reach box services bound to 0.0.0.0 (sshd, a git server) | yes | yes |
 | Reach the control plane bound to loopback | no | no |
 | Reach the internet | yes | yes |
 
-Tailscale and box reboot: see below.
+### Tailscale
+
+A private tailnet (headscale) with a "laptop" node on the box, and the
+feature's own userspace Tailscale in an environment of each kind:
+
+| | Container | VM |
+|---|---|---|
+| Join, MagicDNS names, Tailscale SSH as vscode and root (lands in the app container), ports by name, outbound through the proxy | works | works |
+| Rejoins after `docker restart` without a key | yes | yes (once of five, the laptop took ~3 min to pick up the new disco key; looks like a client race, not the VM) |
+| Path | direct | direct (after 3 DERP pings, cold) |
+| Round trip over the tailnet | 1.4 ms | 2.1 ms |
+| `ssh … true` | 20 ms | 20 ms |
+| iperf3 laptop → env | 5.6 Gbit/s | 2.6 Gbit/s |
+| iperf3 env → laptop | 6.5 Gbit/s | 0.5 Gbit/s (1.0 with the VM's NIC on one queue) |
+| Over DERP | same | same |
+
+SSH and editors feel the same. Bulk transfers out of a VM environment
+are slower here, mostly from the testbed: tailscaled in userspace mode
+across four NAT layers, nested, with packet reordering from the VM NIC's
+multiple queues.
+
+### Box reboot
+
+`reboot.sh`, one environment of each kind running with a secret set,
+then the box restarted:
+
+| | Container | VM |
+|---|---|---|
+| Running again after boot | 13 s | 30 s |
+| `env.start` | 2.9 s | 22.3 s (the VM boots) |
+| Secret back in the environment | yes | yes |
+
+The first try failed for the VM: after the reboot Docker set the
+kernel's FORWARD policy to DROP again, the VM had no route out, and the
+start timed out fetching feature metadata. A box running both needs
+`{"ip-forward-no-drop": true}` in `/etc/docker/daemon.json`; with it,
+the second reboot above came back cleanly. Incus starts no environment VM
+by itself (`boot.autostart=false`): the control plane does, after
+sending its secrets, as it does for containers.
 
 ## Security
 
@@ -211,9 +250,19 @@ What it doesn't change, or adds:
 
 - **SSH and editors**: unchanged; see Tailscale below.
 - **Box setup**: Incus from Zabbly (Ubuntu's 6.0.0 can't start arm64
-  VMs), `incus admin init`, a bridge, the `foreman-env` profile, and
-  `build-image.sh` (80 s). With Docker on the same box, Docker's FORWARD
-  policy drops the bridge's traffic until it's allowed.
+  VMs), `incus admin init`, a bridge, the `foreman-env` profile (port
+  isolation, the metadata ACL), `build-image.sh` (80 s), and
+  `install.sh --isolation vm`. With Docker on the same box (a personal
+  deployment runs the control plane in Docker), Docker's FORWARD policy
+  drops the bridge's traffic after every reboot unless `daemon.json` sets
+  `ip-forward-no-drop`.
+- **Image pitfalls review caught**: the first image gave every VM the
+  same machine id, so every VM got the same DHCP address, and left every
+  root filesystem at 10 GB whatever the disk size. Both are fixed in
+  `provision.sh` and checked (distinct addresses, a 62 GB root on a 64 GB
+  disk). The workload numbers come from one VM at a time; the lifecycle
+  numbers, which have two VMs up at once, came out within 3% when
+  measured again on the fixed image (second environment 105 s).
 - **Debugging**: `incus exec fm-<env_id> -- docker ...` instead of
   `docker ...`; the environment page shows the command.
 - **Reliability seen on the test box**: two of about thirty VM operations
