@@ -291,6 +291,7 @@ defmodule ForemanAgent.Env.Policy do
 
   defp service_findings(name, svc, ctx) do
     key_findings(name, svc, ctx) ++
+      label_findings(name, svc) ++
       Enum.flat_map(svc["volumes"] || [], &volume_finding(name, &1, ctx)) ++
       env_file_findings(name, svc, ctx) ++
       build_findings(name, svc, ctx) ++
@@ -300,6 +301,29 @@ defmodule ForemanAgent.Env.Policy do
       volumes_from_findings(name, svc, ctx) ++
       security_opt_findings("service '#{name}'", svc["security_opt"], ctx) ++
       gpu_findings(name, svc, ctx)
+  end
+
+  # The devcontainer CLI finds a devcontainer's container by its own
+  # labels and reads its metadata from them, so a service that sets them
+  # changes what the policy check is shown. Never allowed.
+  defp label_findings(name, svc) do
+    keys =
+      case svc["labels"] do
+        %{} = labels ->
+          Map.keys(labels)
+
+        labels when is_list(labels) ->
+          Enum.map(labels, &(&1 |> to_string() |> String.split("=", parts: 2) |> hd()))
+
+        _ ->
+          []
+      end
+
+    for key <- keys, String.starts_with?(to_string(key), "devcontainer.") do
+      {:refuse,
+       "service '#{name}' sets the label #{key}, which is the devcontainer CLI's own: " <>
+         "it uses it to find the devcontainer and read what it was built with"}
+    end
   end
 
   defp key_findings(name, svc, ctx) do
