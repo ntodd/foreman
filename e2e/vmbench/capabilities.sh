@@ -65,6 +65,8 @@ cp_eval "Bench.secret(\"$slug\", \"BENCH_SECRET\", \"vm-secret-0123456789\")" >/
 # Changes made through `bin/foreman eval` reach the box on the control
 # plane's next sweep, within a minute.
 for _ in $(seq 90); do grep -q vm-secret-0123456789 "/run/foreman-vm/envs/$id/secrets.env" 2>/dev/null && break; sleep 1; done
+# The host writes its copy first, then the guest its own.
+for _ in $(seq 60); do in_vm_app "$id" grep -q vm-secret-0123456789 /run/foreman/secrets.env 2>/dev/null && break; sleep 1; done
 check "a new secret reaches the environment" in_vm_app "$id" grep -q vm-secret-0123456789 /run/foreman/secrets.env
 check "the host keeps its copy for restarts" grep -q vm-secret-0123456789 "/run/foreman-vm/envs/$id/secrets.env"
 cp_eval "Bench.act(\"$slug\", \"restart_affected\")" >/dev/null
