@@ -11,6 +11,11 @@ defmodule Foreman.Application do
       Foreman.Repo,
       {Ecto.Migrator,
        repos: Application.fetch_env!(:foreman, :ecto_repos), skip: skip_migrations?()},
+      %{
+        id: :register_bundled_agents,
+        start: {Foreman.Agents.Releases, :start_registering_bundled, []},
+        restart: :temporary
+      },
       {Phoenix.PubSub, name: Foreman.PubSub},
       {Registry, keys: :unique, name: Foreman.Registry},
       {Foreman.RateLimit, clean_period: :timer.minutes(1)},

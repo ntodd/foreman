@@ -142,6 +142,10 @@ docker build -q -f docker/box.Dockerfile --target agent-tarball \
   -o "$work/agent-0.1.1" . >/dev/null
 target=linux-$(box dpkg --print-architecture)
 sig=$(cd apps/foreman_agent && FOREMAN_RELEASE_PRIVATE_KEY=$FOREMAN_RELEASE_PRIVATE_KEY mise x -- mix foreman_agent.sign 0.1.1 "$target" "$root/$work/agent-0.1.1/foreman_agent.tar.gz" | tail -1)
+# Pinned to what it runs, so registering 0.1.1 (this image carries no
+# agents, so unpinned boxes follow the newest registered) doesn't start the
+# update before the reconnect below.
+cp_eval 'E2E.desire_version("0.1.0")'
 docker cp "$work/agent-0.1.1/foreman_agent.tar.gz" "$($compose ps -q cp):/tmp/foreman_agent-0.1.1.tar.gz"
 $compose exec -T cp env -u PHX_SERVER /app/bin/foreman eval "Foreman.Release.publish_agent(\"0.1.1\", \"$target\", \"/tmp/foreman_agent-0.1.1.tar.gz\", \"$sig\")" 2>/dev/null | grep published
 cp_eval 'E2E.desire_version("0.1.1")'

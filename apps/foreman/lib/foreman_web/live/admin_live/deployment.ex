@@ -119,7 +119,9 @@ defmodule ForemanWeb.AdminLive.Deployment do
 
       <.header>
         Deployment
-        <:subtitle>How this Foreman is wired up.</:subtitle>
+        <:subtitle>
+          How this Foreman is wired up. Running Foreman {Foreman.Config.version()}.
+        </:subtitle>
       </.header>
 
       <div class="grid gap-4 md:grid-cols-3">
@@ -226,7 +228,9 @@ defmodule ForemanWeb.AdminLive.Deployment do
       </div>
 
       <.panel title="Agent releases" padded={false}>
-        <:subtitle>Signed by CI. Set a box's desired version to roll it out.</:subtitle>
+        <:subtitle>
+          Signed by CI. Boxes follow the newest agent this control plane's image carries (for an image that carries none, the newest one here) unless they're pinned to a version on their page.
+        </:subtitle>
         <ul :if={@releases != []} class="divide-y divide-line">
           <li :for={r <- @releases} class="flex items-center justify-between px-5 py-2.5 text-sm">
             <span class="font-medium text-ink">{r.version}</span>

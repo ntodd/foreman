@@ -1,10 +1,14 @@
 defmodule Foreman.MixProject do
   use Mix.Project
 
+  # CI sets the version for tagged builds, the same as the agents built
+  # with it.
+  @version System.get_env("FOREMAN_VERSION", "0.1.0")
+
   def project do
     [
       app: :foreman,
-      version: "0.1.0",
+      version: @version,
       elixir: "~> 1.20",
       elixirc_paths: elixirc_paths(Mix.env()),
       start_permanent: Mix.env() == :prod,

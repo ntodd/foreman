@@ -38,10 +38,32 @@ all of them); Foreman syncs as soon as you come back.
 The app's credentials (client secret, private key) are stored encrypted
 in the database. To manage them yourself instead, create the app by hand
 and set `FOREMAN_GITHUB_APP_ID`, `FOREMAN_GITHUB_CLIENT_ID`,
-`FOREMAN_GITHUB_CLIENT_SECRET` and `FOREMAN_GITHUB_PRIVATE_KEY` (or
-`FOREMAN_GITHUB_PRIVATE_KEY_FILE`); the environment wins over the
-database. The callback URL is `https://<host>/auth/github/callback`, and
-"Expire user authorization tokens" must be on.
+`FOREMAN_GITHUB_CLIENT_SECRET` and `FOREMAN_GITHUB_PRIVATE_KEY_FILE`;
+the environment wins over the database. The callback URL is
+`https://<host>/auth/github/callback`, and "Expire user authorization
+tokens" must be on.
+
+The private key is a multi-line PEM, which an env file can't hold, so
+give it as a file. The container runs as `foreman` (uid 999), so the
+file has to be readable by that uid, and mounted in. Add the mount to
+`docker/compose.yml`:
+
+```yaml
+    volumes:
+      - foreman-data:/var/lib/foreman
+      - /etc/foreman/github-app.pem:/run/secrets/github-app.pem:ro
+```
+
+```sh
+sudo chown 999 /etc/foreman/github-app.pem && sudo chmod 0400 /etc/foreman/github-app.pem
+# in /etc/foreman/foreman.env
+FOREMAN_GITHUB_PRIVATE_KEY_FILE=/run/secrets/github-app.pem
+```
+
+`FOREMAN_GITHUB_PRIVATE_KEY` takes the PEM itself, which only works
+where the value can span lines (`docker run -e`, or `environment:` in
+compose). The control plane reads the file at boot and won't start if
+it can't.
 
 ## Tokens
 

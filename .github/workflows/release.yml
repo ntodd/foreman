@@ -1,9 +1,16 @@
-name: Agent release
+name: Release
 
-# Pushing a tag like v0.2.0 builds the agent for each target, signs the
-# tarballs and attaches them to a GitHub release. The control plane
-# doesn't fetch from GitHub; scripts/publish-agent-release.sh downloads a
-# release and registers it there.
+# Pushing a tag like v0.3.0 runs CI on it, then builds the agent for each
+# target and signs it, builds the control plane images with those agents
+# inside and pushes them to GHCR, and attaches the agents to a GitHub
+# release:
+#
+#   ghcr.io/<owner>/foreman:0.3.0      and :latest      (SQLite)
+#   ghcr.io/<owner>/foreman:0.3.0-pg   and :latest-pg   (Postgres)
+#
+# A control plane registers the agents its image carries at boot, so
+# upgrading it is a pull and a restart. scripts/publish-agent-release.sh
+# still registers a GitHub release's agents by hand.
 #
 # Needs the FOREMAN_RELEASE_PRIVATE_KEY secret and the
 # FOREMAN_RELEASE_PUBLIC_KEY variable (`mix foreman_agent.sign --keygen`).
@@ -23,14 +30,13 @@ env:
   OTP_VERSION: "29.1.1"
 
 jobs:
-  agent:
+  check:
     runs-on: ubuntu-24.04
-    permissions:
-      contents: write
+    outputs:
+      version: ${{ steps.check.outputs.version }}
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-
       - name: Check the tag and keys
+        id: check
         env:
           PUBLIC_KEY: ${{ vars.FOREMAN_RELEASE_PUBLIC_KEY }}
           HAS_PRIVATE_KEY: ${{ secrets.FOREMAN_RELEASE_PRIVATE_KEY != '' }}
@@ -39,36 +45,66 @@ jobs:
           echo "$version" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$' || { echo "::error::$GITHUB_REF_NAME isn't vX.Y.Z"; exit 1; }
           [ -n "$PUBLIC_KEY" ] || { echo "::error::Set the FOREMAN_RELEASE_PUBLIC_KEY variable"; exit 1; }
           [ "$HAS_PRIVATE_KEY" = true ] || { echo "::error::Set the FOREMAN_RELEASE_PRIVATE_KEY secret"; exit 1; }
-          echo "VERSION=$version" >> "$GITHUB_ENV"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
 
-      # arm64 builds under QEMU; slow, but it needs no arm64 runner.
-      - name: Set up QEMU
-        run: docker run --privileged --rm tonistiigi/binfmt:qemu-v9.2.2 --install arm64
+  # CI doesn't run on tags by itself, and nothing gets published from a
+  # commit that fails it.
+  ci:
+    needs: check
+    uses: ./.github/workflows/ci.yml
+    permissions:
+      contents: read
+      pull-requests: read
 
+  agent:
+    needs: [check, ci]
+    strategy:
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Build the agent
         env:
+          VERSION: ${{ needs.check.outputs.version }}
           PUBLIC_KEY: ${{ vars.FOREMAN_RELEASE_PUBLIC_KEY }}
+          ARCH: ${{ matrix.arch }}
         run: |
-          mkdir -p out
-          for arch in amd64 arm64; do
-            docker buildx build -f docker/box.Dockerfile --target agent-tarball \
-              --platform "linux/$arch" \
-              --build-arg FOREMAN_AGENT_VERSION="$VERSION" \
-              --build-arg FOREMAN_RELEASE_PUBLIC_KEY="$PUBLIC_KEY" \
-              -o "out/$arch" .
-            mv "out/$arch/foreman_agent.tar.gz" "out/foreman_agent-$VERSION-linux-$arch.tar.gz"
-          done
+          docker build -f docker/box.Dockerfile --target agent-tarball \
+            --build-arg FOREMAN_AGENT_VERSION="$VERSION" \
+            --build-arg FOREMAN_RELEASE_PUBLIC_KEY="$PUBLIC_KEY" \
+            -o out .
+          mv out/foreman_agent.tar.gz "out/foreman_agent-$VERSION-linux-$ARCH.tar.gz"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: agent-${{ matrix.arch }}
+          path: out/*.tar.gz
+          if-no-files-found: error
 
+  sign:
+    needs: [check, agent]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: agent-*
+          path: out
+          merge-multiple: true
       - uses: erlef/setup-beam@54075bcc5e249e4758d363f27d099f55d843f124 # v1.24.1
         with:
           elixir-version: ${{ env.ELIXIR_VERSION }}
           otp-version: ${{ env.OTP_VERSION }}
-
       - name: Sign
         working-directory: apps/foreman_agent
         # bash, not the default shell, so a failed sign isn't hidden by the pipe.
         shell: bash
         env:
+          VERSION: ${{ needs.check.outputs.version }}
           FOREMAN_RELEASE_PRIVATE_KEY: ${{ secrets.FOREMAN_RELEASE_PRIVATE_KEY }}
         run: |
           mix deps.get
@@ -79,11 +115,133 @@ jobs:
             mix foreman_agent.sign "$VERSION" "linux-$arch" "$tarball" | tail -n 1 > "$tarball.sig"
             [ -s "$tarball.sig" ]
           done
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: agents
+          path: out/
+          if-no-files-found: error
 
-      - name: Publish the GitHub release
+  # One image per database and architecture, each built on a native
+  # runner; the manifest job combines them into multi-arch tags.
+  image:
+    needs: [check, sign]
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      matrix:
+        db: [sqlite, postgres]
+        arch: [amd64, arm64]
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: agents
+          path: docker/agents
+      - name: Build and push
         env:
+          VERSION: ${{ needs.check.outputs.version }}
+          DB: ${{ matrix.db }}
+          ARCH: ${{ matrix.arch }}
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "$GITHUB_REF_NAME" --verify-tag --title "Agent $VERSION" \
-            --notes "Register on the control plane host with: scripts/publish-agent-release.sh $VERSION" \
-            out/*.tar.gz out/*.sig
+          image=$(echo "ghcr.io/$GITHUB_REPOSITORY" | tr '[:upper:]' '[:lower:]')
+          suffix=""
+          [ "$DB" = postgres ] && suffix=-pg
+          tag="$image:$VERSION$suffix-$ARCH"
+          echo "$GH_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+          docker build -f docker/control-plane.Dockerfile \
+            --build-arg FOREMAN_DB="$DB" \
+            --build-arg FOREMAN_VERSION="$VERSION" \
+            --label org.opencontainers.image.source="https://github.com/$GITHUB_REPOSITORY" \
+            --label org.opencontainers.image.version="$VERSION" \
+            -t "$tag" .
+          docker push "$tag"
+
+  manifest:
+    needs: [check, image]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Tag the multi-arch images
+        # bash, not the default shell, so a failed gh api isn't hidden by the pipe.
+        shell: bash
+        env:
+          VERSION: ${{ needs.check.outputs.version }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          image=$(echo "ghcr.io/$GITHUB_REPOSITORY" | tr '[:upper:]' '[:lower:]')
+          echo "$GH_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+          # :latest only moves to the highest version, so a patch tagged on
+          # an older line doesn't take it back.
+          highest=$(gh api "repos/$GITHUB_REPOSITORY/git/matching-refs/tags/v" --paginate \
+            --jq '.[].ref | ltrimstr("refs/tags/")' | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -n 1)
+          [ -n "$highest" ] || { echo "::error::couldn't list the release tags"; exit 1; }
+          for suffix in "" -pg; do
+            set -- -t "$image:$VERSION$suffix"
+            [ "$highest" = "$GITHUB_REF_NAME" ] && set -- "$@" -t "$image:latest$suffix"
+            docker buildx imagetools create "$@" \
+              "$image:$VERSION$suffix-amd64" "$image:$VERSION$suffix-arm64"
+          done
+
+  release:
+    needs: [check, manifest]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # The previous tag, to say what changed since it.
+          fetch-depth: 0
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: agents
+          path: out
+      - name: Publish the GitHub release
+        env:
+          VERSION: ${{ needs.check.outputs.version }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          image=$(echo "ghcr.io/$GITHUB_REPOSITORY" | tr '[:upper:]' '[:lower:]')
+          protocol_of() { git show "$1:apps/foreman_protocol/lib/foreman_protocol.ex" | sed -n 's/^  @version \([0-9]*\)$/\1/p'; }
+          prev=$(git tag -l 'v*.*.*' | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V |
+            awk -v tag="$GITHUB_REF_NAME" '$0 == tag { print last; exit } { last = $0 }')
+          protocol=$(protocol_of "$GITHUB_REF_NAME")
+
+          # What docs/setup/upgrading.md tells operators to check before
+          # upgrading or rolling back.
+          {
+            echo "Control plane images, with this release's agents inside: \`$image:$VERSION\` (SQLite) and \`$image:$VERSION-pg\` (Postgres)."
+            echo
+            if [ -z "$prev" ]; then
+              echo "Protocol $protocol."
+            elif [ "$(protocol_of "$prev")" = "$protocol" ]; then
+              echo "Protocol $protocol, the same as $prev."
+            else
+              echo "**Protocol $protocol; $prev spoke $(protocol_of "$prev").** Once boxes run these agents, the control plane can't be rolled back to a release older than this one."
+            fi
+            echo
+            migrations=""
+            if [ -n "$prev" ]; then
+              migrations=$(git diff --name-only --diff-filter=A "$prev" "$GITHUB_REF_NAME" -- apps/foreman/priv/repo/migrations | xargs -r -n 1 basename)
+            fi
+            if [ -n "$migrations" ]; then
+              echo "Migrations since $prev (they run on boot; back up first):"
+              for migration in $migrations; do echo "- $migration"; done
+            elif [ -n "$prev" ]; then
+              echo "No migrations since $prev."
+            fi
+            echo
+            echo "To register these agents on a control plane by hand: \`scripts/publish-agent-release.sh $VERSION\`"
+          } > notes.md
+          gh release create "$GITHUB_REF_NAME" --verify-tag --title "Foreman $VERSION" \
+            --notes-file notes.md out/*.tar.gz out/*.sig

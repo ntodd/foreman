@@ -57,17 +57,19 @@ defmodule ForemanWeb.AgentController do
   def release(conn, %{"version" => version, "target" => target}) do
     version = if version == "latest", do: latest_version(target), else: version
 
-    case version && Releases.get(version, target) do
-      %{path: path, sha256: sha, signature: sig, version: v} ->
-        conn
-        |> put_resp_content_type("application/gzip")
-        |> put_resp_header("x-foreman-version", v)
-        |> put_resp_header("x-foreman-sha256", sha)
-        |> put_resp_header("x-foreman-signature", sig)
-        |> send_file(200, path)
-
-      _ ->
-        conn |> put_status(:not_found) |> json(%{error: "no such release"})
+    # A row whose tarball is gone (kept in a temp dir a recreate cleared)
+    # is as good as no release.
+    with v when is_binary(v) <- version,
+         %{path: path} = release <- Releases.get(v, target),
+         true <- File.regular?(path) do
+      conn
+      |> put_resp_content_type("application/gzip")
+      |> put_resp_header("x-foreman-version", release.version)
+      |> put_resp_header("x-foreman-sha256", release.sha256)
+      |> put_resp_header("x-foreman-signature", release.signature)
+      |> send_file(200, path)
+    else
+      _ -> conn |> put_status(:not_found) |> json(%{error: "no such release"})
     end
   end
 
@@ -78,7 +80,7 @@ defmodule ForemanWeb.AgentController do
     error
   end
 
-  defp latest_version(target) do
-    Releases.list() |> Enum.find(&(&1.target == target)) |> then(&(&1 && &1.version))
-  end
+  # What boxes that aren't pinned follow, so a new box doesn't install one
+  # version only to be sent another.
+  defp latest_version(target), do: Releases.fleet_version(target)
 end

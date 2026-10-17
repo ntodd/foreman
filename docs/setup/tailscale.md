@@ -19,16 +19,17 @@ does both with an OAuth client:
    `tag:staging-access`) and, on a team deployment, one
    `tag:foreman-<login>` per developer.
 5. Copy the client ID and secret; the secret is only shown once. Put
-   them in the control plane's env file, without quotes (`--env-file`
-   keeps quotes as part of the value):
+   them in the control plane's env file, without quotes (the file is
+   read as written, so quotes would be part of the value):
 
    ```sh
    FOREMAN_TAILSCALE_CLIENT_ID=...
    FOREMAN_TAILSCALE_CLIENT_SECRET=...
    ```
 
-6. Recreate the container. `docker restart` doesn't reread
-   `--env-file`; only a new container does.
+6. Recreate the container with `sudo docker compose -f
+   docker/compose.yml up -d --force-recreate`. `docker restart` doesn't
+   reread the env file; only a new container does.
 
 To check the client works, ask the API for the tailnet's devices from
 inside the container:
@@ -64,8 +65,12 @@ Then tag it, from the host (an admin owns the tag, so this needs no
 console visit) or under **Machines → ⋯ → Edit ACL tags**:
 
 ```sh
-sudo tailscale set --advertise-tags=tag:foreman
+sudo tailscale up --advertise-tags=tag:foreman
 ```
+
+`tailscale up` wants every setting you'd changed from the default
+repeated; if you leave one out, it prints the full command to run
+instead.
 
 A tagged machine no longer belongs to your user, so rules built on
 `autogroup:self` stop covering it. If you SSH to the host over
@@ -149,8 +154,9 @@ grants only add access, so one like that lets everyone back in.
 - **DNS over HTTPS in the browser** (Firefox's is on in some regions)
   bypasses MagicDNS. Turn it off, or add `ts.net` as an exception.
 - From the host, `curl -sS -o /dev/null -w '%{http_code}\n'
-  https://<host>.<tailnet>.ts.net/setup` should print `200`. If it does,
-  serve and the certificate are fine and the problem is the client side.
+  https://<host>.<tailnet>.ts.net/healthz` should print `200`. If it
+  does, serve and the certificate are fine and the problem is the client
+  side.
 
 ## Notes
 

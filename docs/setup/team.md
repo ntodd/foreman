@@ -6,7 +6,7 @@ Start from [personal.md](personal.md); this page covers what differs.
 
 | | |
 |---|---|
-| Database | Postgres. Build with `--build-arg FOREMAN_DB=postgres` and set `DATABASE_URL`; the image remembers which database it was built for, so there's no `FOREMAN_DB` to set at runtime (one that disagrees with the build stops it from starting). The database in `DATABASE_URL` must already exist: Foreman runs its migrations on boot but doesn't create it (Neon and RDS make one for you). TLS with certificate checks is on by default (`DATABASE_SSL=true`), which Neon requires. |
+| Database | Postgres. Use the `-pg` image (`ghcr.io/<owner>/foreman:0.3.0-pg`, or a build with `--build-arg FOREMAN_DB=postgres`) and set `DATABASE_URL`; the image remembers which database it was built for, so there's no `FOREMAN_DB` to set at runtime (one that disagrees with the build stops it from starting). The database in `DATABASE_URL` must already exist: Foreman runs its migrations on boot but doesn't create it (Neon and RDS make one for you). TLS with certificate checks is on by default (`DATABASE_SSL=true`), which Neon requires. |
 | Names | `FOREMAN_SLUG_STYLE=team` gives `storefront-alice-1`, so developers' environments never collide. |
 | Who signs in | `FOREMAN_ALLOWED_ORG=acme` (active org members) plus `FOREMAN_ADMINS`. The org check needs the app's **Members: read** permission, which the manifest requests. |
 | GitHub App | Create it on the org (enter the org's login on the setup page). Installing it on the org needs an org owner. |
@@ -14,13 +14,15 @@ Start from [personal.md](personal.md); this page covers what differs.
 | Private images | If a repo's devcontainer uses a private image or feature on GHCR, add a registry credential: [ghcr-machine-user.md](ghcr-machine-user.md). |
 
 ```sh
-docker build -f docker/control-plane.Dockerfile --build-arg FOREMAN_DB=postgres -t foreman:pg .
+# docker/.env, beside compose.yml
+FOREMAN_IMAGE=ghcr.io/<owner>/foreman:0.3.0-pg
 ```
 
 ```sh
 # /etc/foreman/foreman.env (0600)
 SECRET_KEY_BASE=...
-FOREMAN_ENCRYPTION_KEY=...             # keep a copy in Secrets Manager
+# Keep a copy of this one in Secrets Manager.
+FOREMAN_ENCRYPTION_KEY=...
 DATABASE_URL=ecto://user:pass@ep-example.us-east-2.aws.neon.tech/foreman
 PHX_HOST=foreman.tail1234.ts.net
 FOREMAN_LISTEN_IP=0.0.0.0
@@ -38,9 +40,12 @@ The instance needs no inbound ports: put it on the tailnet and use
 browser redirect, so a tailnet host name works.
 
 `GET /healthz` answers `200 ok` when the app is up and the database
-answers, and `503` when it doesn't. It needs no sign-in, so point a
-Docker `HEALTHCHECK`, a systemd watchdog or a load balancer at it, for
-example `curl -fsS http://127.0.0.1:4000/healthz`.
+answers, and `503` when it doesn't. The image's `HEALTHCHECK` uses it,
+so `docker compose ps` shows whether the database is reachable. It
+needs no sign-in, so a load balancer or monitor can use it too.
+
+Back up and upgrade as in [upgrading.md](upgrading.md); with Postgres,
+take a snapshot before each upgrade.
 
 ## Boxes
 

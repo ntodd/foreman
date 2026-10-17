@@ -62,7 +62,8 @@ The design, and the decisions behind it, are in
   to warn or refuse.
 - Boxes enroll with a one-time token, survive reboots (the control plane
   restores secrets and restarts environments), and update their agents
-  from signed releases.
+  from signed releases. A release is one tag: control plane images on
+  GHCR that carry the matching agents, which boxes then follow.
 
 An environment right after one of its secrets changed. New shells
 already have the new value; running services keep the old one until you
@@ -105,6 +106,7 @@ The screenshots use made-up data; `e2e/demo.exs` and
 |---|---|
 | Personal (a Linux desktop, SQLite) | [docs/setup/personal.md](docs/setup/personal.md) |
 | Team (EC2 + Postgres/Neon, a box per developer) | [docs/setup/team.md](docs/setup/team.md) |
+| Upgrading, backups and rolling back | [docs/setup/upgrading.md](docs/setup/upgrading.md) |
 | The GitHub App | [docs/setup/github-app.md](docs/setup/github-app.md) |
 | Tailscale | [docs/setup/tailscale.md](docs/setup/tailscale.md) |
 | Private registry (GHCR) credentials | [docs/setup/ghcr-machine-user.md](docs/setup/ghcr-machine-user.md) |

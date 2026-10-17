@@ -117,8 +117,10 @@ Or pin the image to `postgres:17` until you're ready to move.
 Every environment on a box builds through the box's Docker daemon, so a
 second copy of a repo reuses the first one's image layers, and a
 different branch rebuilds from the first layer whose files changed. The
-cache is per box, and the agent's cleanup drops build cache that hasn't
-been used for a week. Rebuild reuses the cache too: it recreates the
+cache is per box and grows until it's pruned: **Prune** on the box's
+page drops build cache that hasn't been used for a week, along with
+dangling images and unused anonymous volumes. Nothing runs it on a
+schedule. Rebuild reuses the cache too: it recreates the
 containers, it doesn't refetch a base image tag that has moved, so pin
 base images rather than relying on `:latest`.
 

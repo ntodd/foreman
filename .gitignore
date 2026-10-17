@@ -4,3 +4,8 @@
 .DS_Store
 erl_crash.dump
 /apps/foreman/priv/static/assets/
+/apps/foreman/priv/agent/releases/
+# Agents a control plane image carries; the release workflow fills it.
+/docker/agents/*
+!/docker/agents/.keep
+/docker/.env

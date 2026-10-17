@@ -27,15 +27,13 @@ defmodule Foreman.Jobs.Dispatch do
       Foreman.Environments.Server.kick(env_id)
     end
 
-    due =
-      Repo.all(
-        from b in Box,
-          where:
-            is_nil(b.revoked_at) and not is_nil(b.desired_agent_version) and
-              (is_nil(b.agent_version) or b.desired_agent_version != b.agent_version)
-      )
-
-    for box <- due, Foreman.Boxes.online?(box.id), do: Foreman.Agents.Releases.maybe_update(box)
+    # Unpinned boxes follow the agent this control plane carries, so after
+    # an upgrade this is what rolls the new agent out to connected boxes.
+    for box <- Repo.all(from b in Box, where: is_nil(b.revoked_at)),
+        Foreman.Boxes.online?(box.id),
+        Foreman.Agents.Releases.target_version(box) not in [nil, box.agent_version] do
+      Foreman.Agents.Releases.maybe_update(box)
+    end
 
     :ok
   end

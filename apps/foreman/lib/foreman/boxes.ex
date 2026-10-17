@@ -226,14 +226,50 @@ defmodule Foreman.Boxes do
     end
   end
 
-  # Picking a version again is the way to retry one that failed.
+  @doc """
+  Sends a box the agent version that failed on it again. After two
+  failures in a row a version isn't sent by itself any more.
+  """
+  def retry_agent_update(%Scope{} = scope, %Box{} = box) do
+    with :ok <- authorize_admin(scope),
+         {:ok, updated} <-
+           box |> Ecto.Changeset.change(failed_agent_version: nil) |> Repo.update() do
+      Foreman.Agents.Releases.forget_failures(updated)
+      Audit.log(scope, "box.retry_agent_update", updated, %{version: box.failed_agent_version})
+      broadcast(updated, :updated)
+      if online?(updated.id), do: Foreman.Agents.Releases.maybe_update(updated)
+      {:ok, updated}
+    end
+  end
+
+  # Picking another version clears one that failed. A pin has to be a
+  # release the box can get: a box pinned to anything else never updates.
   defp settings_changeset(box, attrs) do
     changeset = Box.settings_changeset(box, attrs)
 
-    if Ecto.Changeset.changed?(changeset, :desired_agent_version),
-      do: Ecto.Changeset.put_change(changeset, :failed_agent_version, nil),
-      else: changeset
+    case Ecto.Changeset.fetch_change(changeset, :desired_agent_version) do
+      {:ok, version} ->
+        changeset
+        |> Ecto.Changeset.put_change(:failed_agent_version, nil)
+        |> validate_pin(version, box.arch)
+
+      :error ->
+        changeset
+    end
   end
+
+  defp validate_pin(changeset, version, arch) when is_binary(version) and is_binary(arch) do
+    if Foreman.Agents.Releases.get(version, arch),
+      do: changeset,
+      else:
+        Ecto.Changeset.add_error(
+          changeset,
+          :desired_agent_version,
+          "no release #{version} for #{arch}"
+        )
+  end
+
+  defp validate_pin(changeset, _version, _arch), do: changeset
 
   defp normalize(attrs) do
     attrs = Map.new(attrs, fn {k, v} -> {to_string(k), v} end)

@@ -1,0 +1,38 @@
+# The control plane on its host, from the images the release workflow
+# publishes. Settings go in /etc/foreman/foreman.env (0600, root's; see
+# docs/setup/personal.md), so run compose as root:
+#
+#   sudo docker compose -f compose.yml up -d
+#
+# To upgrade, pull the new image and recreate the container. Migrations
+# run on boot, and the image registers the agents it carries:
+#
+#   sudo docker compose -f compose.yml pull
+#   sudo docker compose -f compose.yml up -d
+#
+# FOREMAN_IMAGE (in a .env beside this file) picks the image, e.g.
+# ghcr.io/ntodd/foreman:0.3.0, or ghcr.io/ntodd/foreman:0.3.0-pg for
+# Postgres. Pin a version to choose when you upgrade; without one it
+# follows the newest release.
+name: foreman
+
+services:
+  foreman:
+    image: ${FOREMAN_IMAGE:-ghcr.io/ntodd/foreman:latest}
+    # The name scripts/publish-agent-release.sh looks for.
+    container_name: foreman
+    restart: unless-stopped
+    # raw: values reach the app as written, the way docker run --env-file
+    # passes them, so a $ in a password isn't expanded (Compose 2.30+).
+    env_file:
+      - path: /etc/foreman/foreman.env
+        format: raw
+    ports:
+      - "127.0.0.1:4000:4000"
+    volumes:
+      - foreman-data:/var/lib/foreman
+
+volumes:
+  foreman-data:
+    # The volume the docker run setup uses, so moving to compose keeps the data.
+    name: foreman-data

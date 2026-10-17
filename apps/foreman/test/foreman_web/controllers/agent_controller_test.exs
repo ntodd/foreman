@@ -60,6 +60,50 @@ defmodule ForemanWeb.AgentControllerTest do
     refute body =~ "__FOREMAN_URL__"
   end
 
+  @tag :tmp_dir
+  test "serves the highest version as latest", %{conn: conn, tmp_dir: tmp} do
+    {public, private} = ForemanProtocol.Auth.generate_keypair()
+    Application.put_env(:foreman, :agent_release_public_key, Base.encode64(public))
+    Application.put_env(:foreman, :agent_release_dir, Path.join(tmp, "releases"))
+
+    on_exit(fn ->
+      Application.delete_env(:foreman, :agent_release_public_key)
+      Application.delete_env(:foreman, :agent_release_dir)
+    end)
+
+    tarball = Path.join(tmp, "agent.tar.gz")
+    File.write!(tarball, "release bytes")
+    sha = :crypto.hash(:sha256, "release bytes") |> Base.encode16(case: :lower)
+
+    for version <- ["0.10.0", "0.9.0"] do
+      sig = ForemanProtocol.Auth.sign_release(version, "linux-amd64", sha, private)
+      {:ok, _} = Foreman.Agents.Releases.register(version, "linux-amd64", tarball, sig)
+    end
+
+    conn = get(conn, ~p"/agent/releases/latest/linux-amd64")
+    assert response(conn, 200) == "release bytes"
+    assert get_resp_header(conn, "x-foreman-version") == ["0.10.0"]
+
+    # What the image carries comes first: new boxes install what the boxes
+    # already there follow.
+    bundle = Path.join(tmp, "bundle")
+    File.mkdir_p!(bundle)
+    File.write!(Path.join(bundle, "foreman_agent-0.9.0-linux-amd64.tar.gz"), "release bytes")
+    Application.put_env(:foreman, :bundled_agent_dir, bundle)
+    on_exit(fn -> Application.delete_env(:foreman, :bundled_agent_dir) end)
+
+    assert build_conn()
+           |> get(~p"/agent/releases/latest/linux-amd64")
+           |> get_resp_header("x-foreman-version") == ["0.9.0"]
+
+    # A release whose tarball is gone (a temp dir cleared by a recreate).
+    File.rm!(Foreman.Agents.Releases.get("0.9.0", "linux-amd64").path)
+
+    assert build_conn()
+           |> get(~p"/agent/releases/0.9.0/linux-amd64")
+           |> json_response(404)
+  end
+
   # A second request from the same client (rate limits are per client).
   defp again(conn), do: %{build_conn() | remote_ip: conn.remote_ip}
 end

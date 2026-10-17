@@ -33,6 +33,12 @@ defmodule ForemanWeb.PagesTest do
     end
   end
 
+  test "the Deployment page says which version is running", %{conn: conn} do
+    {:ok, _view, html} = live(conn, "/admin")
+    assert html =~ "Foreman #{Application.spec(:foreman, :vsn)}"
+    assert Foreman.Config.version() == to_string(Application.spec(:foreman, :vsn))
+  end
+
   test "creating an environment from the form", %{conn: conn, repo: repo, box: box} do
     {:ok, view, _html} = live(conn, ~p"/environments/new")
 

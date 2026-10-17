@@ -5,6 +5,7 @@ defmodule ForemanWeb.BoxLive.Show do
   import ForemanWeb.ForemanComponents
 
   alias Foreman.{Accounts, Agents, Boxes, Capacity, Environments, Metrics, Operations, Scope}
+  alias Foreman.Agents.Releases
 
   @impl true
   def mount(%{"id" => id}, _session, socket) do
@@ -68,6 +69,8 @@ defmodule ForemanWeb.BoxLive.Show do
     )
     |> assign(:orphans, Environments.orphans(box.id))
     |> assign(:form, to_form(form_params(box), as: :box))
+    |> assign(:target_version, Releases.target_version(box))
+    |> assign(:fleet_version, box.arch && Releases.fleet_version(box.arch))
   end
 
   defp form_params(box) do
@@ -108,6 +111,16 @@ defmodule ForemanWeb.BoxLive.Show do
 
       {:error, _} ->
         {:noreply, put_flash(socket, :error, "Only admins can do that.")}
+    end
+  end
+
+  def handle_event("retry_agent_update", _params, socket) do
+    case Boxes.retry_agent_update(socket.assigns.current_scope, socket.assigns.box) do
+      {:ok, box} ->
+        {:noreply, socket |> put_flash(:info, "Sending #{box.name} the agent again.") |> load()}
+
+      {:error, _} ->
+        {:noreply, socket}
     end
   end
 
@@ -157,7 +170,7 @@ defmodule ForemanWeb.BoxLive.Show do
         <:subtitle>
           {@box.hostname || "Never connected"}<span :if={@box.arch}> · {@box.arch}</span><span :if={
             @box.agent_version
-          }> · agent {@box.agent_version}</span>
+          }> · {agent_label(@box, @target_version)}</span>
         </:subtitle>
         <:actions>
           <.badge :if={@summary.contention} color="amber">Contention</.badge>
@@ -166,6 +179,22 @@ defmodule ForemanWeb.BoxLive.Show do
       </.header>
 
       <.box_policy_alert box={@box} />
+
+      <.callout
+        :if={@box.failed_agent_version && @box.failed_agent_version == @target_version}
+        kind="warning"
+        id="agent-update-failed"
+      >
+        <p class="font-medium">
+          Agent {@box.failed_agent_version} didn't come up on this box twice, so it isn't sent again.
+        </p>
+        <p class="mt-0.5">
+          The box went back to {@box.agent_version || "its previous agent"}. Its journal (<code>journalctl -u foreman-agent</code>) says why.
+        </p>
+        <:actions :if={Scope.admin?(@current_scope)}>
+          <.button size="sm" phx-click="retry_agent_update">Retry</.button>
+        </:actions>
+      </.callout>
 
       <section id="usage" class="space-y-3">
         <div class="flex flex-wrap items-center justify-between gap-3">
@@ -358,8 +387,12 @@ defmodule ForemanWeb.BoxLive.Show do
                 </fieldset>
                 <.input
                   field={@form[:desired_agent_version]}
-                  label="Desired agent version"
-                  placeholder="Keep current"
+                  label="Pin the agent version"
+                  placeholder={
+                    if @fleet_version,
+                      do: "Follow this control plane (#{@fleet_version})",
+                      else: "Follow this control plane"
+                  }
                 />
                 <.button type="submit" size="sm">Save</.button>
               </.form>
@@ -393,4 +426,10 @@ defmodule ForemanWeb.BoxLive.Show do
   defp source(:host_requirements), do: "hostRequirements"
   defp source(:observed), do: "observed average"
   defp source(_), do: "not measured yet"
+
+  defp agent_label(box, target) do
+    if target in [nil, box.agent_version, box.failed_agent_version],
+      do: "agent #{box.agent_version}",
+      else: "agent #{box.agent_version}, updating to #{target}"
+  end
 end
