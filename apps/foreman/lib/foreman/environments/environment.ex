@@ -32,6 +32,10 @@ defmodule Foreman.Environments.Environment do
     field :devcontainer_service, :string
     field :warnings, {:array, :string}, default: []
     field :host_requirements, :map
+    # Where it last came up ("container" or "vm") and, in a VM, the VM's
+    # name, cpus and memory_mb. Null until it has come up.
+    field :isolation, :string
+    field :vm, :map
     field :tailscale_device_id, :string
     field :ts_authkey, Foreman.Encrypted.Binary, redact: true
     field :created_once, :boolean, default: false
@@ -100,6 +104,8 @@ defmodule Foreman.Environments.Environment do
       :devcontainer_service,
       :warnings,
       :host_requirements,
+      :isolation,
+      :vm,
       :tailscale_device_id,
       :ts_authkey,
       :created_once,
@@ -108,6 +114,7 @@ defmodule Foreman.Environments.Environment do
     ])
     |> validate_inclusion(:desired_state, @desired)
     |> validate_inclusion(:observed_state, @observed)
+    |> validate_inclusion(:isolation, ~w(container vm))
   end
 
   def live?(%__MODULE__{destroyed_at: nil}), do: true

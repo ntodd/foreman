@@ -159,6 +159,8 @@ defmodule Foreman.Boxes do
         os: join.os,
         arch: join.arch,
         policy: if(join.policy == %{}, do: nil, else: join.policy),
+        # The join defaults it: an agent on protocol 2 only runs containers.
+        isolation: join.isolation,
         last_seen_at: DateTime.utc_now()
       )
       |> Repo.update!()

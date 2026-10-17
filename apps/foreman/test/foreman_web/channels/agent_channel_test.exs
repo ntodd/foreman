@@ -79,6 +79,30 @@ defmodule ForemanWeb.AgentChannelTest do
       assert Repo.reload!(box).policy == nil
     end
 
+    test "records how the box isolates environments", %{box: box} do
+      {:ok, socket} = connect(AgentSocket, %{}, connect_info: signed_connect_info(box))
+
+      assert {:ok, _, _} =
+               subscribe_and_join(socket, "agent:#{box.id}", join_payload(%{"isolation" => "vm"}))
+
+      assert Repo.reload!(box).isolation == "vm"
+    end
+
+    # An agent rolled back to a release before protocol 3 can only run containers.
+    test "an agent on protocol 2 runs containers, whatever the box said before", %{box: box} do
+      box |> Ecto.Changeset.change(isolation: "vm") |> Repo.update!()
+      {:ok, socket} = connect(AgentSocket, %{}, connect_info: signed_connect_info(box))
+
+      assert {:ok, _, _} =
+               subscribe_and_join(
+                 socket,
+                 "agent:#{box.id}",
+                 join_payload(%{"protocol_version" => 2})
+               )
+
+      assert Repo.reload!(box).isolation == "container"
+    end
+
     test "refuses protocol versions it doesn't speak", %{box: box} do
       {:ok, socket} = connect(AgentSocket, %{}, connect_info: signed_connect_info(box))
 

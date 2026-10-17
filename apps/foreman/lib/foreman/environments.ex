@@ -517,6 +517,7 @@ defmodule Foreman.Environments do
     |> put_if(:devcontainer_service, string(result["devcontainer_service"]))
     |> put_if(:warnings, strings(result["warnings"]))
     |> put_if(:host_requirements, map(result["host_requirements"]))
+    |> put_isolation(action, result)
     |> then(&if(action in ["create", "rebuild"], do: Map.put(&1, :ts_authkey, nil), else: &1))
   end
 
@@ -599,6 +600,29 @@ defmodule Foreman.Environments do
     do: Map.put(attrs, :token_pushed_at, nil)
 
   defp put_token_pushed(attrs, _args), do: attrs
+
+  # Create, rebuild and start say where the environment came up: a VM
+  # box's result has "isolation", a container box's doesn't. The VM's
+  # size comes from create and rebuild, which send it; start sends no
+  # limits, so the size in its result is only the agent's default. A
+  # restart's result says neither, and nothing moved.
+  defp put_isolation(attrs, action, result) when action in ~w(create rebuild start) do
+    cond do
+      result["isolation"] != "vm" -> Map.merge(attrs, %{isolation: "container", vm: nil})
+      action == "start" -> Map.put(attrs, :isolation, "vm")
+      true -> Map.merge(attrs, %{isolation: "vm", vm: vm_size(result["vm"])})
+    end
+  end
+
+  defp put_isolation(attrs, _action, _result), do: attrs
+
+  defp vm_size(%{"name" => name, "cpus" => cpus, "memory_mb" => mb})
+       when is_binary(name) and is_integer(cpus) and cpus > 0 and is_integer(mb) and mb > 0 do
+    if name =~ ~r/\A[A-Za-z0-9][A-Za-z0-9-]{0,62}\z/,
+      do: %{"name" => name, "cpus" => cpus, "memory_mb" => mb}
+  end
+
+  defp vm_size(_), do: nil
 
   defp string(v) when is_binary(v), do: v
   defp string(_), do: nil
