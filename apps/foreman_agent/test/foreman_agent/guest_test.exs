@@ -16,7 +16,7 @@ defmodule ForemanAgent.GuestTest do
 
   defp events do
     out = receive_out("")
-    {events, ""} = Wire.feed(Wire.decoder(), out)
+    {events, {:line, ""}} = Wire.feed(Wire.decoder(), out)
     events
   end
 

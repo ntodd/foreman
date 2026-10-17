@@ -530,7 +530,9 @@ defmodule ForemanAgent.Env.Vm do
            Incus.exec(ctx, vm.name, argv, timeout: 15_000, keep: 4_000_000),
          {:ok, containers} when is_list(containers) <- JSON.decode(output),
          [env] <- Enum.filter(Inventory.from_containers(containers), &(&1.env_id == vm.env_id)) do
-      env
+      # The slug comes from the VM's own config, not from labels the guest
+      # could have set.
+      %{env | slug: vm.slug}
     else
       _ -> %{env_id: vm.env_id, slug: vm.slug, state: "partial", containers: []}
     end

@@ -61,4 +61,16 @@ defmodule ForemanAgent.Guest.WireTest do
     assert {:error, :invalid_request} = Wire.decode_request(bad)
     assert {:error, :invalid_request} = Wire.decode_request("garbage")
   end
+
+  test "a guest that never ends its line can't make the host hold it all" do
+    {events, decoder} = Wire.feed(Wire.decoder(), String.duplicate("x", 5_000_000))
+    assert [{:noise, "(a line over " <> _}] = events
+    {more, decoder} = Wire.feed(decoder, String.duplicate("y", 3_000_000))
+    assert more == []
+    assert :erlang.external_size(decoder) < 1_000
+
+    # The rest of that line is dropped; what follows decodes as usual.
+    {events, _} = Wire.feed(decoder, "tail\n" <> Wire.result({:ok, %{}}))
+    assert events == [{:result, {:ok, %{}}}]
+  end
 end

@@ -129,6 +129,20 @@ defmodule ForemanAgent.Env.VmTest do
     {:ok, %{status: 0, output: ""}}
   end
 
+  defp incus(world, ["list", "--format", "json"], _opts, _guest) do
+    vms =
+      for {name, vm} <- Agent.get(world, & &1.vms) do
+        %{
+          "name" => name,
+          "status" => vm.status,
+          "config" => %{"user.foreman.env_id" => @env_id, "user.foreman.slug" => "storefront-2"},
+          "state" => %{"cpu" => %{"usage" => 0}, "memory" => %{"usage" => 0}}
+        }
+      end
+
+    {:ok, %{status: 0, output: JSON.encode!(vms)}}
+  end
+
   defp incus(world, ["file", "push" | rest], _opts, _guest) do
     [local, dest] = Enum.take(rest, -2)
     Agent.update(world, &put_in(&1, [:pushed, dest], File.read!(local)))
@@ -141,6 +155,9 @@ defmodule ForemanAgent.Env.VmTest do
     case argv do
       ["true"] ->
         {:ok, %{status: 0, output: ""}}
+
+      ["curl" | _] ->
+        {:ok, %{status: 0, output: Agent.get(world, &Map.get(&1, :containers, "[]"))}}
 
       ["test", "-x", _] ->
         {:ok, %{status: if(Agent.get(world, & &1.release), do: 0, else: 1), output: ""}}
@@ -361,6 +378,41 @@ defmodule ForemanAgent.Env.VmTest do
       Agent.update(world, &%{&1 | release: true})
       fake_incus(world, fn "env.git_status", _ -> {[], {:ok, %{"dirty" => false}}} end)
       assert {:ok, %{"dirty" => false}} = Vm.run("env.git_status", payload("env.git_status"), ctx)
+    end
+  end
+
+  describe "inventory" do
+    test "a running VM reports its containers' state, under the slug the host gave it",
+         %{ctx: ctx, world: world} do
+      put_vm(world, "Running")
+
+      containers = [
+        %{
+          "Id" => "abc",
+          "State" => "running",
+          # Labels inside the VM are the guest's to set.
+          "Labels" => %{
+            "foreman.env_id" => @env_id,
+            "foreman.slug" => "something-else",
+            "com.docker.compose.service" => "app"
+          }
+        }
+      ]
+
+      Agent.update(world, &Map.put(&1, :containers, JSON.encode!(containers)))
+      fake_incus(world)
+
+      assert {:ok, [%{env_id: @env_id, slug: "storefront-2", state: "running"}]} =
+               Vm.inventory(ctx)
+    end
+
+    test "a running VM that can't say what's in it is partial, never missing",
+         %{ctx: ctx, world: world} do
+      put_vm(world, "Running")
+      Agent.update(world, &Map.put(&1, :containers, "not json"))
+      fake_incus(world)
+
+      assert {:ok, [%{state: "partial"}]} = Vm.inventory(ctx)
     end
   end
 end

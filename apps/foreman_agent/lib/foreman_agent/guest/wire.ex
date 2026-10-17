@@ -56,14 +56,29 @@ defmodule ForemanAgent.Guest.Wire do
 
   defp line(map), do: @marker <> JSON.encode!(map) <> "\n"
 
-  @doc "A decoder for the guest's stdout, fed one chunk at a time."
-  def decoder, do: ""
+  # The longest line kept. Logs arrive in chunks of at most 64 KiB (base64
+  # makes that about 88 KiB), so only a guest misbehaving gets near it.
+  @max_line 4 * 1024 * 1024
 
-  @spec feed(binary(), binary()) :: {[event()], binary()}
-  def feed(buffer, chunk) do
+  @doc "A decoder for the guest's stdout, fed one chunk at a time."
+  def decoder, do: {:line, ""}
+
+  @spec feed(term(), binary()) :: {[event()], term()}
+  def feed({:skip, _}, chunk) do
+    case :binary.split(chunk, "\n") do
+      [_] -> {[], {:skip, ""}}
+      [_, rest] -> feed(decoder(), rest)
+    end
+  end
+
+  def feed({:line, buffer}, chunk) do
     lines = String.split(buffer <> chunk, "\n")
     {complete, [rest]} = Enum.split(lines, -1)
-    {Enum.map(complete, &decode_line/1), rest}
+    events = Enum.map(complete, &decode_line/1)
+
+    if byte_size(rest) > @max_line,
+      do: {events ++ [{:noise, "(a line over #{@max_line} bytes, dropped)"}], {:skip, ""}},
+      else: {events, {:line, rest}}
   end
 
   defp decode_line(@marker <> json = line) do
