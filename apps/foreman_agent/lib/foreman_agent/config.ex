@@ -25,7 +25,19 @@ defmodule ForemanAgent.Config do
             release_public_key: nil,
             feature_dir: nil,
             join_token: nil,
-            connect: true
+            connect: true,
+            # Each environment in its own VM (Incus) rather than containers
+            # on the box's own Docker. See ForemanAgent.Env.Vm.
+            isolation: :container,
+            incus: "incus",
+            vm_image: "foreman-env",
+            vm_profiles: [],
+            vm_cpus: nil,
+            vm_memory_mb: 8192,
+            vm_disk_gb: 64,
+            vm_policy_rules: nil,
+            # The release pushed into each VM; this running release when unset.
+            vm_release_dir: nil
 
   @type t :: %__MODULE__{}
 
@@ -37,7 +49,17 @@ defmodule ForemanAgent.Config do
     |> Map.update!(:policy_rules, &Map.merge(Policy.default_rules(), &1))
     |> Map.put(:release_public_key, decode_key(env[:release_public_key] || @release_public_key))
     |> Map.update!(:feature_dir, &(&1 || default_feature_dir()))
+    |> Map.update!(:vm_policy_rules, &Map.merge(vm_default_rules(), &1 || %{}))
   end
+
+  @doc """
+  The policy inside an environment's own VM. Everything the box's policy
+  refuses would land in that VM, which holds only that environment, so
+  it's all allowed: privileged containers (docker-in-docker), the VM's
+  Docker socket, its devices and namespaces. A box can still tighten any
+  of it with FOREMAN_VM_POLICY.
+  """
+  def vm_default_rules, do: Map.new(Policy.default_rules(), fn {rule, _} -> {rule, :allow} end)
 
   @doc "The loaded config. Loaded on first use and cached."
   @spec get() :: t()
@@ -81,6 +103,14 @@ defmodule ForemanAgent.Config do
       end
     end)
   end
+
+  @doc "Parses `FOREMAN_ISOLATION`: `container` (the default) or `vm`."
+  @spec parse_isolation(String.t() | nil) :: :container | :vm
+  def parse_isolation(value) when value in [nil, "", "container"], do: :container
+  def parse_isolation("vm"), do: :vm
+
+  def parse_isolation(value),
+    do: raise(ArgumentError, "invalid FOREMAN_ISOLATION #{inspect(value)}; use container or vm")
 
   @doc "Paths no environment may ever bind-mount."
   def protected_paths(%__MODULE__{} = c),

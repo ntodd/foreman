@@ -21,7 +21,23 @@ if config_env() != :test do
       _ -> System.get_env("FOREMAN_DOCKER_SOCKET", "/var/run/docker.sock")
     end
 
+  int = fn name, default ->
+    case System.get_env(name) do
+      value when value in [nil, ""] -> default
+      value -> String.to_integer(value)
+    end
+  end
+
   config :foreman_agent,
+    # FOREMAN_ISOLATION=vm runs each environment in its own Incus VM.
+    isolation: ForemanAgent.Config.parse_isolation(System.get_env("FOREMAN_ISOLATION")),
+    incus: System.get_env("FOREMAN_INCUS", "incus"),
+    vm_image: System.get_env("FOREMAN_VM_IMAGE", "foreman-env"),
+    vm_profiles: list.("FOREMAN_VM_PROFILES", []),
+    vm_cpus: int.("FOREMAN_VM_CPUS", nil),
+    vm_memory_mb: int.("FOREMAN_VM_MEMORY_MB", 8192),
+    vm_disk_gb: int.("FOREMAN_VM_DISK_GB", 64),
+    vm_policy_rules: ForemanAgent.Config.parse_policy(list.("FOREMAN_VM_POLICY", [])),
     url: System.get_env("FOREMAN_URL"),
     join_token: System.get_env("FOREMAN_JOIN_TOKEN"),
     data_dir: System.get_env("FOREMAN_AGENT_DATA_DIR", "/var/lib/foreman-agent"),

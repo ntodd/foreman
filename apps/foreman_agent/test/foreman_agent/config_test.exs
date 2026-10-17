@@ -50,4 +50,26 @@ defmodule ForemanAgent.ConfigTest do
       assert Config.policy_report(config)["seccomp"] == "allow"
     end
   end
+
+  describe "FOREMAN_ISOLATION" do
+    test "is containers unless a box asks for VMs" do
+      assert Config.parse_isolation(nil) == :container
+      assert Config.parse_isolation("") == :container
+      assert Config.parse_isolation("container") == :container
+      assert Config.parse_isolation("vm") == :vm
+    end
+
+    test "a typo stops the agent rather than quietly using containers" do
+      assert_raise ArgumentError, ~r/FOREMAN_ISOLATION/, fn -> Config.parse_isolation("vms") end
+    end
+
+    test "inside a VM everything is allowed unless the box tightens it" do
+      config =
+        %Config{vm_policy_rules: %{privileged: :warn}}
+        |> Map.update!(:vm_policy_rules, &Map.merge(Config.vm_default_rules(), &1))
+
+      assert config.vm_policy_rules.privileged == :warn
+      assert config.vm_policy_rules.host_bind == :allow
+    end
+  end
 end
