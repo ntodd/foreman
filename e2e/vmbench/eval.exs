@@ -16,17 +16,19 @@ defmodule Bench do
   def box(name), do: Repo.one!(from b in Boxes.Box, where: b.name == ^name and is_nil(b.revoked_at))
 
   # Prints ENV=<id> SLUG=<slug>.
-  def create(box_name, cpus, memory_mb) do
+  def create(box_name, cpus, memory_mb, repo \\ "acme/vmbench") do
     scope = Scope.for_user(admin())
-    repo = Foreman.Repos.get_repo_by_full_name("acme/vmbench")
+    repo = Foreman.Repos.get_repo_by_full_name(repo)
 
     attrs =
       %{"repo_id" => repo.id, "box_id" => box(box_name).id, "confirm" => "true"}
       |> then(fn a -> if cpus, do: Map.put(a, "cpu_limit", cpus), else: a end)
       |> then(fn a -> if memory_mb, do: Map.put(a, "memory_limit_mb", memory_mb), else: a end)
 
-    {:ok, env} = Environments.create_environment(scope, attrs)
-    IO.puts("ENV=#{env.id} SLUG=#{env.slug}")
+    case Environments.create_environment(scope, attrs) do
+      {:ok, env} -> IO.puts("ENV=#{env.id} SLUG=#{env.slug}")
+      {:error, reason} -> IO.puts("REFUSED #{inspect(reason)}")
+    end
   end
 
   # Prints STATE <observed> <desired> and the last op.

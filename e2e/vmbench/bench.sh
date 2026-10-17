@@ -45,6 +45,8 @@ agent_unit() { # name isolation token
   install -d -m 0755 -o foreman -g foreman "/srv/foreman-$name" "/srv/foreman-$name/envs"
   install -d -m 0711 -o foreman -g foreman "/run/foreman-$name"
   install -d -m 0700 -o foreman -g foreman "/run/foreman-$name/envs"
+  printf 'd /run/foreman-%s 0711 foreman foreman -\nd /run/foreman-%s/envs 0700 foreman foreman -\n' "$name" "$name" \
+    > "/etc/tmpfiles.d/foreman-$name.conf"
   cat > "/etc/foreman-agent/$name.env" <<EOF
 FOREMAN_URL=http://127.0.0.1:4000
 FOREMAN_JOIN_TOKEN=$token
@@ -156,9 +158,9 @@ wait_op() { # slug timeout
 
 last_op_secs() { cp_eval "Bench.ops(\"$1\")" | grep '^OP' | tail -1 | awk '{print $4}'; }
 
-create_env() { # box cpus memory -> prints "id slug"
-  local box=$1 cpus=${2:-nil} memory=${3:-nil} out
-  out=$(cp_eval "Bench.create(\"$box\", $cpus, $memory)" | grep '^ENV=')
+create_env() { # box cpus memory [repo] -> prints "id slug"
+  local box=$1 cpus=${2:-nil} memory=${3:-nil} repo=${4:-acme/vmbench} out
+  out=$(cp_eval "Bench.create(\"$box\", $cpus, $memory, \"$repo\")" | grep '^ENV=')
   echo "$out" | sed 's/ENV=\([^ ]*\) SLUG=\(.*\)/\1 \2/'
 }
 
@@ -265,6 +267,9 @@ down() {
   systemctl stop foreman-agent-ct foreman-agent-vm vmbench-git 2>/dev/null || true
   docker rm -f vmbench-cp >/dev/null 2>&1 || true
 }
+
+# Sourced by capabilities.sh for its helpers.
+[[ "${BASH_SOURCE[0]}" == "$0" ]] || return 0
 
 case "${1:-}" in
   setup) setup ;;

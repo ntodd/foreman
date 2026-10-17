@@ -1,0 +1,6 @@
+services:
+  app:
+    image: mcr.microsoft.com/devcontainers/base:debian
+    command: sleep infinity
+    volumes:
+      - ../..:/workspaces:cached
