@@ -1,6 +1,9 @@
 defmodule Foreman.Config do
   @moduledoc "Deployment settings read from the application environment."
 
+  @doc "The running control plane's version (the release tag for CI-built images)."
+  def version, do: to_string(Application.spec(:foreman, :vsn))
+
   @doc "The control plane's external base URL, e.g. https://foreman.tail1234.ts.net."
   def base_url do
     case Application.get_env(:foreman, :base_url) do

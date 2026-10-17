@@ -44,10 +44,24 @@ defmodule Foreman.RuntimeConfigTest do
 
   test "a release built for SQLite uses DATABASE_PATH" do
     Application.put_env(:foreman, :database, "sqlite")
+    System.delete_env("DATABASE_URL")
 
     repo = read_repo_config()
     assert repo[:database] == "/var/lib/foreman/foreman.db"
     refute repo[:url]
+  end
+
+  # The SQLite image given a team's settings would come up on an empty
+  # database, and its tailnet sweep would delete every environment's device.
+  test "a release built for SQLite refuses a DATABASE_URL" do
+    Application.put_env(:foreman, :database, "sqlite")
+
+    assert_raise RuntimeError, ~r/built for SQLite; use the -pg image/, fn ->
+      read_repo_config()
+    end
+
+    System.put_env("DATABASE_URL", "")
+    assert read_repo_config()[:database] == "/var/lib/foreman/foreman.db"
   end
 
   test "FOREMAN_DB at runtime that disagrees with the build is refused" do

@@ -72,6 +72,14 @@ if config_env() == :prod do
             "rebuild it with FOREMAN_DB=#{runtime_db} or unset FOREMAN_DB"
   end
 
+  # The SQLite image started with a team's settings would come up healthy
+  # on an empty database, and its tailnet sweep would delete every
+  # environment's device.
+  if database == "sqlite" and System.get_env("DATABASE_URL") not in [nil, ""] do
+    raise "DATABASE_URL is set, but this release was built for SQLite; " <>
+            "use the -pg image (or build with FOREMAN_DB=postgres), or unset DATABASE_URL"
+  end
+
   if database == "postgres" do
     url = System.get_env("DATABASE_URL") || raise "DATABASE_URL is missing"
     host = URI.parse(url).host

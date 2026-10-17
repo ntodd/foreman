@@ -119,7 +119,9 @@ defmodule ForemanWeb.AdminLive.Deployment do
 
       <.header>
         Deployment
-        <:subtitle>How this Foreman is wired up.</:subtitle>
+        <:subtitle>
+          How this Foreman is wired up. Running Foreman {Foreman.Config.version()}.
+        </:subtitle>
       </.header>
 
       <div class="grid gap-4 md:grid-cols-3">
