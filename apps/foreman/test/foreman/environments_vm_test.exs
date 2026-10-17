@@ -218,6 +218,31 @@ defmodule Foreman.EnvironmentsVmTest do
       assert {:ok, _} = Environments.rebuild(scope, env)
     end
 
+    test "isn't sent what was queued for it before the box changed", %{user: user, scope: scope} do
+      box = box_fixture(owner_user_id: user.id)
+      env = environment_fixture(user: user, box: box, isolation: "container")
+
+      # Queued while the box is offline, sent once its agent is back.
+      {:ok, _} = Environments.destroy(scope, env)
+      box |> Ecto.Changeset.change(isolation: "vm") |> Repo.update!()
+      {:ok, _} = Registry.register(Foreman.Registry, {:agent, box.id}, nil)
+      Foreman.Environments.Server.kick(env.id)
+
+      refute_received {:dispatch, _}
+      env = Repo.reload!(env)
+      assert env.destroyed_at == nil
+      assert env.status_message =~ "#{env.slug} was made as containers"
+
+      # It's still wanted gone, so it goes once the box can reach it.
+      box |> Repo.reload!() |> Ecto.Changeset.change(isolation: "container") |> Repo.update!()
+
+      Environments.reconcile_inventory(box.id, [
+        %{env_id: env.id, slug: env.slug, state: "running"}
+      ])
+
+      assert_receive {:dispatch, %Command{type: "env.destroy"}}
+    end
+
     test "is still forgotten when its box is revoked", %{user: user, box: box, scope: scope} do
       env = environment_fixture(user: user, box: box, isolation: "container")
       {:ok, _} = Foreman.Boxes.revoke(Scope.for_user(user_fixture(role: "admin")), box)

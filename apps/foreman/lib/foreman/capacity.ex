@@ -12,8 +12,8 @@ defmodule Foreman.Capacity do
   4. its observed usage, averaged over about 15 minutes
 
   A box counts its running environments, and those made under its
-  other isolation (containers or VMs) that should be running, which it
-  can't see but which most likely still are.
+  other isolation (containers or VMs) that weren't stopped, which it
+  can't see but which most likely still run.
 
   A box is in contention when what's provisioned (or what's observed)
   passes its threshold of capacity. Placement past that is allowed by
@@ -127,17 +127,7 @@ defmodule Foreman.Capacity do
     # The box as given, whether or not each environment has it loaded.
     envs = Enum.map(envs, &%{&1 | box: box})
 
-    # One made the other way from the box now is out of the box's sight
-    # and its stats, but if it was running it most likely still is: VMs
-    # and containers both outlive the agent.
-    running =
-      Enum.filter(
-        envs,
-        &(&1.observed_state in ["running", "partial", "starting", "creating"] or
-            (&1.desired_state == "running" and Environment.isolation_changed?(&1)))
-      )
-
-    provisioned = Enum.map(running, &{&1, provisioned(&1, &1.repo)})
+    provisioned = for env <- envs, counted?(env), do: {env, provisioned(env, env.repo)}
     latest = Tracker.latest(box.id)
 
     used_cpus =
@@ -169,6 +159,15 @@ defmodule Foreman.Capacity do
       reported_at: latest && latest.at
     }
   end
+
+  defp counted?(env) when env.observed_state in ["running", "partial", "starting", "creating"],
+    do: true
+
+  # One made the other way from the box now is out of the box's sight
+  # and its stats, but unless it was stopped it most likely still runs
+  # (VMs and containers both outlive the agent), even one wanted gone,
+  # since its destroy can't be sent.
+  defp counted?(env), do: env.desired_state != "stopped" and Environment.isolation_changed?(env)
 
   @doc """
   Whether a new environment of `repo` (with optional limits) fits on the

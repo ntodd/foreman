@@ -142,4 +142,14 @@ defmodule Foreman.Environments.Environment do
   end
 
   def isolation_changed?(_env), do: false
+
+  @doc """
+  The actions that work on what's on its box. A box that changed
+  isolation since the environment was made can't see it, so a start
+  fails, a rebuild remakes it from nothing (no workspace, no tailnet
+  key), and a stop or destroy reports success while what's on the
+  machine keeps running.
+  """
+  def box_actions,
+    do: ~w(create rebuild start stop destroy restart_affected restart_all git_status)
 end

@@ -281,13 +281,6 @@ defmodule Foreman.Environments do
     "stop" => ~w(start restart_affected restart_all)
   }
 
-  # Actions that work on what's on the box. One whose box changed
-  # isolation since it was made can't take them: the box can't see it, so
-  # a start fails, a rebuild remakes it from nothing (no workspace, no
-  # tailnet key), and a stop or destroy reports success while what's on
-  # the machine keeps running.
-  @on_box ~w(create start stop rebuild destroy restart_affected restart_all git_status)a
-
   defp action(%Scope{} = scope, %Environment{} = env, action, args \\ %{}) do
     with :ok <- authorize(scope, env),
          :ok <- allowed?(env, action) do
@@ -298,7 +291,8 @@ defmodule Foreman.Environments do
         action == :destroy and box_revoked?(env) ->
           forget(scope, env)
 
-        action in @on_box and Environment.isolation_changed?(env) ->
+        Atom.to_string(action) in Environment.box_actions() and
+            Environment.isolation_changed?(env) ->
           {:error, isolation_changed_message(env) <> " Change the box back first."}
 
         true ->

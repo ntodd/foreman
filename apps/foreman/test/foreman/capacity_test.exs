@@ -144,13 +144,15 @@ defmodule Foreman.CapacityTest do
 
       container_box = %{vm_box(%{"cpus" => 16, "memory_mb" => 65_536}) | isolation: "container"}
 
+      # One wanted gone whose destroy couldn't be sent is still there too.
       summary =
         Capacity.box_summary(container_box, [
           made_as.("vm", vm: vm),
+          made_as.("vm", vm: vm, desired_state: "destroyed"),
           made_as.("vm", vm: vm, desired_state: "stopped")
         ])
 
-      assert {summary.provisioned_cpus, summary.provisioned_memory_mb} == {4, 8192}
+      assert {summary.provisioned_cpus, summary.provisioned_memory_mb} == {8, 16_384}
 
       summary =
         Capacity.box_summary(vm_box(%{"cpus" => 16, "memory_mb" => 65_536}), [

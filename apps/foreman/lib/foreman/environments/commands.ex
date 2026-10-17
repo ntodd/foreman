@@ -19,6 +19,14 @@ defmodule Foreman.Environments.Commands do
   def build(%Operation{} = op, %Environment{} = env) do
     env = Repo.preload(env, [:user, :box, repo: :owner])
 
+    # Queued, or sent, before its box changed isolation: the box can't
+    # reach it now (Environment.box_actions/0).
+    if op.action in Environment.box_actions() and Environment.isolation_changed?(env),
+      do: {:error, Foreman.Environments.isolation_changed_message(env)},
+      else: command_for(op, env)
+  end
+
+  defp command_for(op, env) do
     case op.action do
       action when action in ["create", "rebuild"] ->
         up(op, env, "env.#{action}")
