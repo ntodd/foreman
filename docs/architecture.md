@@ -112,7 +112,7 @@ Each agent joins topic `agent:<agent_id>`. Commands are a fixed vocabulary; ther
 
 Every command carries an `op_id`. The agent records in-flight `op_id`s, so a command retried after a reconnect is not run twice. Long operations keep running if the socket drops. The agent sends their progress and result once it reconnects.
 
-The agent sends its version and protocol version when it joins. The control plane accepts protocol N and N-1, and only sends a protocol-N field to agents that reported N, so upgrade the control plane before the agents (an older control plane refuses newer agents). Protocol 2 added `keep` to `env.secrets.write`. Once boxes run protocol-2 agents, the control plane can't be rolled back past the release that introduced it: an older control plane refuses them at join.
+The agent sends its version and protocol version when it joins. The control plane accepts protocol N and N-1, and only sends a protocol-N field to agents that reported N, so upgrade the control plane before the agents (an older control plane refuses newer agents). Protocol 2 added `keep` to `env.secrets.write`. Protocol 3 adds `isolation` to the join: `container`, or `vm` for a box that runs each environment in its own VM (`FOREMAN_ISOLATION=vm` on the agent). Agents on protocol 2 join as `container`. A protocol-3 control plane refuses protocol-1 agents, so update those to a protocol-2 release first. Once boxes run agents on a new protocol, the control plane can't be rolled back past the release that introduced it: an older control plane refuses them at join.
 
 ### Reconciliation
 

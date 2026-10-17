@@ -2,7 +2,7 @@ defmodule ForemanAgent.ConnectionTest do
   # Uses the application's Outbox, so not async.
   use ExUnit.Case, async: false
 
-  alias ForemanAgent.{Connection, Outbox}
+  alias ForemanAgent.{Config, Connection, Outbox}
   alias ForemanProtocol.Event
   alias Slipstream.Commands.JoinTopic
 
@@ -33,6 +33,19 @@ defmodule ForemanAgent.ConnectionTest do
       {:ok, _socket} = Connection.handle_topic_close(@topic, :closed, closed_socket())
       assert_receive {:__slipstream_command__, %JoinTopic{payload: payload}}, 5_000
       refute "stale" in payload["in_flight"]
+    end
+  end
+
+  test "the join says how this box isolates environments" do
+    config = Config.get()
+    on_exit(fn -> Config.put(config) end)
+
+    for isolation <- [:container, :vm] do
+      Config.put(%{config | isolation: isolation})
+      {:ok, _socket} = Connection.handle_topic_close(@topic, :closed, closed_socket())
+      assert_receive {:__slipstream_command__, %JoinTopic{payload: payload}}, 5_000
+      assert payload["isolation"] == Atom.to_string(isolation)
+      assert {:ok, %{isolation: _}} = ForemanProtocol.cast_join(payload)
     end
   end
 

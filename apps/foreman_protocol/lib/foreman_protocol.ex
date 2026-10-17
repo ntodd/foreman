@@ -9,7 +9,8 @@ defmodule ForemanProtocol do
   alias ForemanProtocol.Schema
 
   # 2: env.secrets.write can `keep` files; the seccomp policy rule.
-  @version 2
+  # 3: the join says how the box isolates environments.
+  @version 3
 
   @doc "The protocol version this build speaks."
   def version, do: @version
@@ -27,7 +28,10 @@ defmodule ForemanProtocol do
     in_flight: {{:list, :uuid}, default: []},
     policy:
       {{:map_of, {:enum, ForemanProtocol.Policy.rules()},
-        {:enum, ForemanProtocol.Policy.actions()}}, default: %{}}
+        {:enum, ForemanProtocol.Policy.actions()}}, default: %{}},
+    # Containers on the box's own Docker, or each environment in its own
+    # VM. Agents before protocol 3 only ran containers.
+    isolation: {{:enum, ["container", "vm"]}, default: "container"}
   ]
 
   @doc "Validates the payload an agent sends when it joins its topic."

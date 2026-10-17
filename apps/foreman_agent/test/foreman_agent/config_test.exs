@@ -71,5 +71,19 @@ defmodule ForemanAgent.ConfigTest do
       assert config.vm_policy_rules.privileged == :warn
       assert config.vm_policy_rules.host_bind == :allow
     end
+
+    # The box's own policy checks nothing on a VM box: every compose
+    # project runs inside an environment's VM.
+    test "a VM box reports the policy inside its VMs, the one environments get" do
+      config = %Config{
+        isolation: :vm,
+        policy_rules: Policy.default_rules(),
+        vm_policy_rules: Map.put(Config.vm_default_rules(), :privileged, :warn)
+      }
+
+      report = Config.policy_report(config)
+      assert report["privileged"] == "warn"
+      assert report["host_bind"] == "allow"
+    end
   end
 end

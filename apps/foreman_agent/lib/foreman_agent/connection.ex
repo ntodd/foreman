@@ -121,6 +121,8 @@ defmodule ForemanAgent.Connection do
 
   # Built fresh for every join and rejoin: the operations in flight change.
   defp join_payload do
+    config = Config.get()
+
     ForemanProtocol.dump_join(%{
       agent_version: Identity.version(),
       protocol_version: ForemanProtocol.version(),
@@ -128,7 +130,8 @@ defmodule ForemanAgent.Connection do
       os: to_string(elem(:os.type(), 1)),
       arch: Updater.target(),
       in_flight: Ops.in_flight(),
-      policy: Config.policy_report(Config.get())
+      policy: Config.policy_report(config),
+      isolation: Atom.to_string(config.isolation)
     })
   end
 
