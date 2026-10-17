@@ -8,7 +8,7 @@ defmodule Foreman.Environments.Commands do
   secret hashes it applied, whether it carried a token).
   """
 
-  alias Foreman.{Accounts, Config, GitHub, Repo, Secrets, Tailscale}
+  alias Foreman.{Accounts, Capacity, Config, GitHub, Repo, Secrets, Tailscale}
   alias Foreman.Environments.Environment
   alias Foreman.Operations.Operation
   alias ForemanProtocol.Command
@@ -243,11 +243,32 @@ defmodule Foreman.Environments.Commands do
 
   defp tailscale_key(env, _action), do: {:ok, env.ts_authkey, env}
 
+  # A VM gets a size whether or not anything set one, so a VM box is
+  # always sent one: the environment's limits, else its repo's, else the
+  # repo's hostRequirements, else the deployment's default. CPUs round up
+  # to whole vCPUs, so what's sent is the size the VM gets.
+  defp limits(%{box: %{isolation: "vm"}} = env) do
+    reqs = env.host_requirements || env.repo.host_requirements
+    default = Config.vm_default_size()
+
+    cpus =
+      env.cpu_limit || env.repo.cpu_limit || positive(Capacity.req_cpus(reqs)) || default.cpus
+
+    memory_mb =
+      env.memory_limit_mb || env.repo.memory_limit_mb || positive(Capacity.req_memory(reqs)) ||
+        default.memory_mb
+
+    %{cpus: ceil(cpus), memory_mb: memory_mb}
+  end
+
   defp limits(env) do
     %{}
     |> put_present(:cpus, env.cpu_limit || env.repo.cpu_limit)
     |> put_present(:memory_mb, env.memory_limit_mb || env.repo.memory_limit_mb)
   end
+
+  defp positive(n) when is_number(n) and n > 0, do: n
+  defp positive(_), do: nil
 
   defp dotfiles(%{dotfiles_repository: nil}), do: nil
 
