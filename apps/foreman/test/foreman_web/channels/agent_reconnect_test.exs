@@ -304,11 +304,11 @@ defmodule ForemanWeb.AgentReconnectTest do
       _socket = join_box(ctx.box)
       refute_push "command", %{"type" => "agent.update"}
 
-      # Picking the version again tries again.
+      # Changing the box's version (here, unpinning it so it follows the
+      # newest agent, which is the same one) tries again.
       admin = Scope.for_user(user_fixture(role: "admin"))
       box = Boxes.get_box!(ctx.box.id)
-      {:ok, box} = Boxes.update_box(admin, box, %{"desired_agent_version" => "0.1.0"})
-      {:ok, _} = Boxes.update_box(admin, box, %{"desired_agent_version" => "0.2.0"})
+      {:ok, _} = Boxes.update_box(admin, box, %{"desired_agent_version" => ""})
       {"agent.update", _} = next_command()
     end
 
@@ -351,5 +351,134 @@ defmodule ForemanWeb.AgentReconnectTest do
       :ok = Foreman.Jobs.Dispatch.perform(%Oban.Job{})
       {"agent.update", _} = next_command()
     end
+  end
+
+  describe "following the agent the control plane carries" do
+    setup do
+      tmp = Path.join(System.tmp_dir!(), "fr-#{unique()}")
+      bundle = Path.join(tmp, "bundle")
+      File.mkdir_p!(bundle)
+      {public, private} = Auth.generate_keypair()
+      Application.put_env(:foreman, :agent_release_public_key, Base.encode64(public))
+      Application.put_env(:foreman, :agent_release_dir, Path.join(tmp, "releases"))
+      Application.put_env(:foreman, :bundled_agent_dir, bundle)
+
+      on_exit(fn ->
+        Application.delete_env(:foreman, :agent_release_public_key)
+        Application.delete_env(:foreman, :agent_release_dir)
+        Application.delete_env(:foreman, :bundled_agent_dir)
+        File.rm_rf!(tmp)
+      end)
+
+      tarball = Path.join(bundle, "foreman_agent-0.2.0-linux-arm64.tar.gz")
+      File.write!(tarball, "release bytes")
+      sha = :crypto.hash(:sha256, "release bytes") |> Base.encode16(case: :lower)
+      File.write!(tarball <> ".sig", Auth.sign_release("0.2.0", "linux-arm64", sha, private))
+      Foreman.Agents.Releases.register_bundled(bundle)
+      %{bundle: bundle, sha: sha, private: private}
+    end
+
+    test "a box that isn't pinned to a version updates to it", ctx do
+      _socket = join_box(ctx.box)
+      {"agent.update", _} = next_command()
+      assert [%{args: %{"version" => "0.2.0"}}] = updates(ctx.box)
+    end
+
+    test "a pinned box stays on its version", ctx do
+      Repo.update!(Ecto.Changeset.change(ctx.box, desired_agent_version: "0.1.0"))
+      _socket = join_box(ctx.box)
+      refute_push "command", %{"type" => "agent.update"}
+    end
+
+    test "on a control plane that carries no agents, boxes follow the newest registered", ctx do
+      Application.put_env(:foreman, :bundled_agent_dir, Path.join(ctx.bundle, "missing"))
+      _socket = join_box(ctx.box)
+      {"agent.update", _} = next_command()
+      assert [%{args: %{"version" => "0.2.0"}}] = updates(ctx.box)
+    end
+
+    test "boxes follow what the image carries over a newer one registered by hand", ctx do
+      register!(ctx, "0.3.0")
+      _socket = join_box(ctx.box)
+      {"agent.update", _} = next_command()
+      assert [%{args: %{"version" => "0.2.0"}}] = updates(ctx.box)
+    end
+
+    test "boxes that are already connected get it from the minutely check", ctx do
+      Repo.delete_all(Foreman.Agents.Release)
+      _socket = join_box(ctx.box)
+      refute_push "command", %{"type" => "agent.update"}
+
+      Foreman.Agents.Releases.register_bundled(ctx.bundle)
+      :ok = Foreman.Jobs.Dispatch.perform(%Oban.Job{})
+      {"agent.update", _} = next_command()
+    end
+
+    test "getting onto a version clears an older one that failed", ctx do
+      Repo.update!(Ecto.Changeset.change(ctx.box, failed_agent_version: "0.1.5"))
+      socket = join_box(ctx.box)
+      {"agent.update", _} = next_command()
+      drop(socket)
+
+      _socket = join_box(ctx.box, %{"agent_version" => "0.2.0"})
+      assert [%{status: "succeeded"}] = updates(ctx.box)
+      assert Repo.reload!(ctx.box).failed_agent_version == nil
+    end
+
+    test "a version that failed is sent again when an admin retries it", ctx do
+      Repo.update!(Ecto.Changeset.change(ctx.box, failed_agent_version: "0.2.0"))
+      _socket = join_box(ctx.box)
+      refute_push "command", %{"type" => "agent.update"}
+
+      admin = Scope.for_user(user_fixture(role: "admin"))
+      assert {:error, :unauthorized} = Boxes.retry_agent_update(ctx.scope, ctx.box)
+      assert {:ok, box} = Boxes.retry_agent_update(admin, Boxes.get_box!(ctx.box.id))
+      assert box.failed_agent_version == nil
+      {"agent.update", _} = next_command()
+    end
+
+    test "a retried version gets two more tries, like a new one", ctx do
+      fail_update = fn ->
+        socket = join_box(ctx.box)
+        {"agent.update", id} = next_command()
+        send_event(socket, "op.result", %{op_id: id, status: "error", error: "download failed"})
+        drop(socket)
+      end
+
+      fail_update.()
+      fail_update.()
+      assert Repo.reload!(ctx.box).failed_agent_version == "0.2.0"
+
+      admin = Scope.for_user(user_fixture(role: "admin"))
+      {:ok, _} = Boxes.retry_agent_update(admin, Boxes.get_box!(ctx.box.id))
+
+      # Once could still be bad luck.
+      fail_update.()
+      assert Repo.reload!(ctx.box).failed_agent_version == nil
+      fail_update.()
+      assert Repo.reload!(ctx.box).failed_agent_version == "0.2.0"
+    end
+
+    test "a box can only be pinned to a version registered for its architecture", ctx do
+      admin = Scope.for_user(user_fixture(role: "admin"))
+      _socket = join_box(ctx.box)
+      box = Boxes.get_box!(ctx.box.id)
+
+      assert {:error, changeset} =
+               Boxes.update_box(admin, box, %{"desired_agent_version" => "0.9.0"})
+
+      assert %{desired_agent_version: ["no release 0.9.0 for linux-arm64"]} =
+               Foreman.DataCase.errors_on(changeset)
+
+      assert {:ok, _} = Boxes.update_box(admin, box, %{"desired_agent_version" => "0.2.0"})
+    end
+  end
+
+  defp register!(ctx, version) do
+    tarball = Path.join(Path.dirname(ctx.bundle), "agent-#{version}.tar.gz")
+    File.write!(tarball, "release bytes")
+    sig = Auth.sign_release(version, "linux-arm64", ctx.sha, ctx.private)
+    {:ok, release} = Foreman.Agents.Releases.register(version, "linux-arm64", tarball, sig)
+    release
   end
 end

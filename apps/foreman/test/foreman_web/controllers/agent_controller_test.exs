@@ -84,6 +84,18 @@ defmodule ForemanWeb.AgentControllerTest do
     assert response(conn, 200) == "release bytes"
     assert get_resp_header(conn, "x-foreman-version") == ["0.10.0"]
 
+    # What the image carries comes first: new boxes install what the boxes
+    # already there follow.
+    bundle = Path.join(tmp, "bundle")
+    File.mkdir_p!(bundle)
+    File.write!(Path.join(bundle, "foreman_agent-0.9.0-linux-amd64.tar.gz"), "release bytes")
+    Application.put_env(:foreman, :bundled_agent_dir, bundle)
+    on_exit(fn -> Application.delete_env(:foreman, :bundled_agent_dir) end)
+
+    assert build_conn()
+           |> get(~p"/agent/releases/latest/linux-amd64")
+           |> get_resp_header("x-foreman-version") == ["0.9.0"]
+
     # A release whose tarball is gone (a temp dir cleared by a recreate).
     File.rm!(Foreman.Agents.Releases.get("0.9.0", "linux-amd64").path)
 

@@ -80,10 +80,7 @@ defmodule ForemanWeb.AgentController do
     error
   end
 
-  defp latest_version(target) do
-    case Releases.latest(target) do
-      %{version: version} -> version
-      nil -> nil
-    end
-  end
+  # What boxes that aren't pinned follow, so a new box doesn't install one
+  # version only to be sent another.
+  defp latest_version(target), do: Releases.fleet_version(target)
 end

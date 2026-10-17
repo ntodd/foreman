@@ -240,6 +240,73 @@ defmodule Foreman.Agents.ReleasesTest do
     end
   end
 
+  describe "bundled_version/1" do
+    setup do
+      on_exit(fn -> Application.delete_env(:foreman, :bundled_agent_dir) end)
+    end
+
+    test "is the highest version the image carries and registered for the target", ctx do
+      dir =
+        bundle(ctx, [
+          {"0.3.0", "linux-arm64"},
+          {"0.10.0", "linux-arm64"},
+          {"0.11.0", "linux-amd64"}
+        ])
+
+      Releases.register_bundled(dir)
+      Application.put_env(:foreman, :bundled_agent_dir, dir)
+
+      assert Releases.bundled_version("linux-arm64") == "0.10.0"
+      assert Releases.bundled_version("darwin-arm64") == nil
+    end
+
+    test "passes over a bundled tarball that didn't register", ctx do
+      dir = bundle(ctx, [{"0.3.0", "linux-arm64"}, {"0.4.0", "linux-arm64"}])
+      File.write!(Path.join(dir, "foreman_agent-0.4.0-linux-arm64.tar.gz.sig"), "bm9wZQ==")
+      Releases.register_bundled(dir)
+      Application.put_env(:foreman, :bundled_agent_dir, dir)
+
+      assert Releases.bundled_version("linux-arm64") == "0.3.0"
+    end
+
+    test "fleet_version/1 is what the image carries, or else the newest registered", ctx do
+      dir = bundle(ctx, [{"0.3.0", "linux-arm64"}])
+      Releases.register_bundled(dir)
+      register!(ctx, "0.4.0", "linux-arm64")
+      register!(ctx, "0.4.0", "linux-amd64")
+      Application.put_env(:foreman, :bundled_agent_dir, dir)
+
+      assert Releases.fleet_version("linux-arm64") == "0.3.0"
+      assert Releases.fleet_version("linux-amd64") == "0.4.0"
+      assert Releases.fleet_version("darwin-arm64") == nil
+    end
+
+    test "fleet_version/1 doesn't fall back while the image's own agents aren't registered",
+         ctx do
+      # Before registration at boot, or when it fails (a wrong release key):
+      # boxes stay where they are rather than following some other release.
+      dir = bundle(ctx, [{"0.3.0", "linux-arm64"}])
+      register!(ctx, "0.4.0", "linux-arm64")
+      Application.put_env(:foreman, :bundled_agent_dir, dir)
+
+      assert Releases.fleet_version("linux-arm64") == nil
+    end
+
+    test "passes over a bundled release whose stored tarball is gone", ctx do
+      dir = bundle(ctx, [{"0.3.0", "linux-arm64"}])
+      [{_, {:ok, release}}] = Releases.register_bundled(dir)
+      Application.put_env(:foreman, :bundled_agent_dir, dir)
+      File.rm!(release.path)
+
+      assert Releases.bundled_version("linux-arm64") == nil
+    end
+
+    test "is nil when the image carries no agents", %{tmp_dir: tmp} do
+      Application.put_env(:foreman, :bundled_agent_dir, Path.join(tmp, "missing"))
+      assert Releases.bundled_version("linux-arm64") == nil
+    end
+  end
+
   defp register!(ctx, version, target) do
     {:ok, release} = Releases.register(version, target, ctx.tarball, sign(ctx, version, target))
     release

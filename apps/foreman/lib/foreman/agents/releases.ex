@@ -27,19 +27,78 @@ defmodule Foreman.Agents.Releases do
   over prereleases unless there's nothing else.
   """
   def latest(target) do
-    # register/4's pattern lets through a few strings Version can't parse
-    # ("01.2.3"); those never count as latest, and nor does a release
-    # whose tarball is gone (kept in a temp dir that a recreate cleared).
-    {pre, stable} =
+    # A release whose tarball is gone (kept in a temp dir that a recreate
+    # cleared) never counts.
+    releases =
+      Repo.all(from r in Release, where: r.target == ^target)
+      |> Enum.filter(&File.regular?(&1.path))
+
+    case releases |> Enum.map(& &1.version) |> highest() do
+      nil -> nil
+      version -> Enum.find(releases, &(&1.version == version))
+    end
+  end
+
+  @doc """
+  The newest agent this control plane's image carries for the target,
+  once it's registered. Boxes that aren't pinned to a version follow it.
+  """
+  def bundled_version(target) do
+    registered =
       for release <- Repo.all(from r in Release, where: r.target == ^target),
           File.regular?(release.path),
-          {:ok, version} <- [Version.parse(release.version)] do
-        {version, release}
+          do: release.version
+
+    for {_file, version, ^target} <- bundled_files(bundled_dir()), version in registered do
+      version
+    end
+    |> highest()
+  end
+
+  @doc """
+  The version a box should run: the one it's pinned to, or else the
+  newest agent the control plane carries for its architecture. Nil when
+  neither applies, which leaves the box on what it runs.
+  """
+  def target_version(%Box{desired_agent_version: pinned}) when is_binary(pinned), do: pinned
+  def target_version(%Box{arch: arch}) when is_binary(arch), do: fleet_version(arch)
+  def target_version(%Box{}), do: nil
+
+  @doc """
+  The agent version this control plane gives boxes for the target: the
+  newest its image carries, or, for an image that carries none for the
+  target (one built by hand), the newest registered. New boxes install
+  it, and boxes that aren't pinned follow it, so the two always agree.
+
+  Nil while the image's own agents aren't registered (at boot, or when
+  registration fails), so boxes stay where they are rather than follow
+  some other release.
+  """
+  def fleet_version(target) do
+    cond do
+      Enum.any?(bundled_files(bundled_dir()), &match?({_, _, ^target}, &1)) ->
+        bundled_version(target)
+
+      release = latest(target) ->
+        release.version
+
+      true ->
+        nil
+    end
+  end
+
+  # The highest version, passing over prereleases unless there's nothing
+  # else. register/4's pattern lets through a few strings Version can't
+  # parse ("01.2.3"); those never count.
+  defp highest(versions) do
+    {pre, stable} =
+      for version <- versions, {:ok, parsed} <- [Version.parse(version)] do
+        {parsed, version}
       end
-      |> Enum.split_with(fn {version, _} -> version.pre != [] end)
+      |> Enum.split_with(fn {parsed, _} -> parsed.pre != [] end)
 
     case Enum.max_by(if(stable == [], do: pre, else: stable), &elem(&1, 0), Version, fn -> nil end) do
-      {_, release} -> release
+      {_, version} -> version
       nil -> nil
     end
   end
@@ -144,14 +203,7 @@ defmodule Foreman.Agents.Releases do
   register.
   """
   def register_bundled do
-    dir =
-      Application.get_env(
-        :foreman,
-        :bundled_agent_dir,
-        Application.app_dir(:foreman, "priv/agent/releases")
-      )
-
-    for {file, result} <- register_bundled(dir) do
+    for {file, result} <- register_bundled(bundled_dir()) do
       case {Regex.run(@bundled, file), result} do
         {[_, version, target], {:ok, _}} ->
           Logger.info("bundled agent #{version} for #{target} is registered")
@@ -177,14 +229,28 @@ defmodule Foreman.Agents.Releases do
       :ignore
   end
 
+  def register_bundled(dir) do
+    for {file, version, target} <- bundled_files(dir) do
+      {file, register_file(Path.join(dir, file), version, target)}
+    end
+  end
+
+  defp bundled_dir do
+    Application.get_env(
+      :foreman,
+      :bundled_agent_dir,
+      Application.app_dir(:foreman, "priv/agent/releases")
+    )
+  end
+
   # sobelow_skip ["Traversal.FileModule"]
   # The directory is the image's own (or the operator's); names are
   # matched against @bundled, and register/4 checks them again.
-  def register_bundled(dir) when is_binary(dir) do
+  defp bundled_files(dir) when is_binary(dir) do
     case File.ls(dir) do
       {:ok, files} ->
         for file <- Enum.sort(files), [_, version, target] <- [Regex.run(@bundled, file)] do
-          {file, register_file(Path.join(dir, file), version, target)}
+          {file, version, target}
         end
 
       {:error, _} ->
@@ -192,7 +258,7 @@ defmodule Foreman.Agents.Releases do
     end
   end
 
-  def register_bundled(nil), do: []
+  defp bundled_files(nil), do: []
 
   # sobelow_skip ["Traversal.FileModule"]
   # One entry that can't be registered (unreadable, or a storage dir that
@@ -228,10 +294,11 @@ defmodule Foreman.Agents.Releases do
   @restart_grace_seconds 70 * 60
 
   @doc """
-  Sends agent.update to a box whose desired version differs from what it
-  runs. Not while an update is still under way, not while the box's
-  environments have operations running (the agent restarts), and not for
-  a version that already failed on this box.
+  Sends agent.update to a box whose target version (see
+  `target_version/1`) differs from what it runs. Not while an update is
+  still under way, not while the box's environments have operations
+  running (the agent restarts), and not for a version that already failed
+  on this box.
   """
   def maybe_update(%Box{} = box) do
     # The Dispatch cron and an agent joining can both get here at once;
@@ -244,7 +311,7 @@ defmodule Foreman.Agents.Releases do
   defp fresh(box), do: Foreman.Repo.reload(box) || box
 
   defp send_update(box) do
-    with version when is_binary(version) <- box.desired_agent_version,
+    with version when is_binary(version) <- target_version(box),
          true <- version != box.agent_version,
          true <- version != box.failed_agent_version,
          false <- updating?(box),
@@ -294,7 +361,10 @@ defmodule Foreman.Agents.Releases do
             finished_at: DateTime.utc_now()
           )
 
-          box
+          # A version that failed earlier is behind the box now.
+          if box.failed_agent_version in [nil, version],
+            do: box,
+            else: box |> Ecto.Changeset.change(failed_agent_version: nil) |> Repo.update!()
 
         overdue?(op) ->
           op =
@@ -328,9 +398,9 @@ defmodule Foreman.Agents.Releases do
 
   @doc """
   Records an update that failed on its box. Once the same version has
-  failed twice in a row there, it isn't sent again until an admin picks a
-  version again; one failure might be bad luck (a download cut short,
-  the network down while the new release started).
+  failed twice in a row there, it isn't sent again until an admin
+  retries it or picks another version; one failure might be bad luck (a
+  download cut short, the network down while the new release started).
   """
   def update_failed(%Operation{action: "agent.update", box_id: box_id} = op, box \\ nil) do
     box = box || Repo.get!(Box, box_id)
@@ -354,9 +424,29 @@ defmodule Foreman.Agents.Releases do
     )
     |> Repo.all()
     |> case do
-      [{"failed", %{"version" => ^version}}, {"failed", %{"version" => ^version}}] -> true
-      _ -> false
+      [{"failed", %{"version" => ^version} = a}, {"failed", %{"version" => ^version} = b}]
+      when not is_map_key(a, "retried") and not is_map_key(b, "retried") ->
+        true
+
+      _ ->
+        false
     end
+  end
+
+  @doc """
+  Sets aside the box's failed updates, so a version an admin retries gets
+  its two tries again.
+  """
+  def forget_failures(%Box{} = box) do
+    from(o in Operation,
+      where: o.box_id == ^box.id and o.action == "agent.update" and o.status == "failed"
+    )
+    |> Repo.all()
+    |> Enum.each(fn op ->
+      op
+      |> Ecto.Changeset.change(args: Map.put(op.args || %{}, "retried", true))
+      |> Repo.update!()
+    end)
   end
 
   defp active_updates(box) do
