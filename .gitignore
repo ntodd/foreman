@@ -4,3 +4,4 @@
 .DS_Store
 erl_crash.dump
 /apps/foreman/priv/static/assets/
+/apps/foreman/priv/agent/releases/
