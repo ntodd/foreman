@@ -52,6 +52,25 @@ defmodule ForemanWeb.BoxMetricsTest do
     assert has_element?(view, "#load-chart", "4 cores")
   end
 
+  # The hook positions the time labels. LiveView only tells a hook about a
+  # patch when the hooked element itself differs from the new render, so
+  # labels outside it lose their positions on the next live sample.
+  test "each chart's time labels sit in a hooked element of their own", %{
+    conn: conn,
+    box: box
+  } do
+    now = System.system_time(:second)
+    for i <- 0..11, do: Metrics.insert_box!(box.id, sample(now - 3600 + i * 300))
+
+    {:ok, view, _html} = live(conn, ~p"/boxes/#{box.id}")
+
+    for id <- ~w(cpu-chart memory-chart disk-chart load-chart) do
+      assert has_element?(view, "##{id} time[data-tick]")
+      refute has_element?(view, "##{id} :not([phx-hook]) > time[data-tick]")
+      assert has_element?(view, "##{id}-ticks[phx-hook] > time[data-tick]")
+    end
+  end
+
   test "charts use no inline styles, which production's CSP blocks", %{
     conn: conn,
     box: box,
