@@ -5,6 +5,7 @@ defmodule ForemanWeb.EnvironmentLive.Index do
   import ForemanWeb.ForemanComponents
 
   alias Foreman.{Boxes, Capacity, Environments, Repos}
+  alias Foreman.Environments.Environment
 
   @impl true
   def mount(_params, _session, socket) do
@@ -102,10 +103,7 @@ defmodule ForemanWeb.EnvironmentLive.Index do
           id={"box-card-#{card.box.id}"}
           class={[
             "group rounded-xl border bg-raised p-4 shadow-xs transition-shadow hover:shadow-raised",
-            if(Foreman.Boxes.policy_exceptions(card.box) == [],
-              do: "border-line",
-              else: "border-danger/50 ring-1 ring-danger/30"
-            )
+            box_card_border(card.box)
           ]}
         >
           <div class="mb-3 flex items-center justify-between gap-2">
@@ -114,6 +112,7 @@ defmodule ForemanWeb.EnvironmentLive.Index do
               <span class="truncate text-sm font-semibold text-ink">{card.box.name}</span>
             </div>
             <div class="flex items-center gap-1.5">
+              <.box_isolation_badge box={card.box} size="sm" />
               <.box_policy_badge box={card.box} />
               <.badge :if={card.summary.contention} color="amber" size="sm">Contention</.badge>
               <.box_status online={card.online} />
@@ -178,12 +177,15 @@ defmodule ForemanWeb.EnvironmentLive.Index do
               :if={env.observed_state == "running" and env.remote_user}
               class="command hidden text-xs text-ink-2 md:block"
             >
-              ssh {env.remote_user}@{env.slug}
+              ssh {shell_arg(env.remote_user)}@{env.slug}
             </code>
 
             <div class="flex items-center gap-1.5">
               <.button
-                :if={env.created_once and env.observed_state in ~w(stopped error missing partial)}
+                :if={
+                  env.created_once and env.observed_state in ~w(stopped error missing partial) and
+                    not Environment.isolation_changed?(env)
+                }
                 size="sm"
                 icon="hero-play-mini"
                 phx-click="start"

@@ -5,9 +5,15 @@ defmodule Foreman.Capacity do
 
   An environment's *provisioned* size is the first of:
 
-  1. its limits (or its repo's default limits)
-  2. its repo's `hostRequirements`
-  3. its observed usage, averaged over about 15 minutes
+  1. in a VM, the VM's size (the one recorded when it was made, else on
+     a VM box the one it'll be sent)
+  2. its limits (or its repo's default limits)
+  3. its repo's `hostRequirements`
+  4. its observed usage, averaged over about 15 minutes
+
+  A box counts its running environments, and those made under its
+  other isolation (containers or VMs) that weren't stopped, which it
+  can't see but which most likely still run.
 
   A box is in contention when what's provisioned (or what's observed)
   passes its threshold of capacity. Placement past that is allowed by
@@ -18,13 +24,50 @@ defmodule Foreman.Capacity do
   alias Foreman.Capacity.Tracker
   alias Foreman.Environments.Environment
 
-  @doc "Provisioned CPUs and memory (MB) for an environment, and where the numbers came from."
+  @doc """
+  Provisioned CPUs and memory (MB) for an environment, and where the
+  numbers came from. Whether it's on a VM box comes from `env.box`.
+  """
   def provisioned(%Environment{} = env, repo) do
     reqs = env.host_requirements || repo.host_requirements
 
-    from_limits(env, repo, reqs) || from_requirements(reqs) || from_observed(env.id) ||
-      %{cpus: 0, memory_mb: 0, source: :unknown}
+    from_vm(env, repo) || from_limits(env, repo, reqs) || from_requirements(reqs) ||
+      from_observed(env.id) || %{cpus: 0, memory_mb: 0, source: :unknown}
   end
+
+  # A VM holds its whole size while it runs, however little it uses.
+  defp from_vm(%Environment{vm: %{"cpus" => cpus, "memory_mb" => mb}}, _repo),
+    do: %{cpus: cpus, memory_mb: mb, source: :vm}
+
+  # Not one made as containers, though: its box changed, it didn't.
+  defp from_vm(%Environment{box: %Box{isolation: "vm"}} = env, repo) do
+    if Environment.made_under(env) != "container",
+      do: env |> vm_size(repo) |> Map.put(:source, :vm)
+  end
+
+  defp from_vm(_env, _repo), do: nil
+
+  @doc """
+  The size of the VM an environment on a VM box is made with: its
+  limits, else its repo's, else the repo's hostRequirements, else the
+  deployment's default, for CPUs and memory separately. CPUs round up to
+  whole vCPUs.
+  """
+  def vm_size(%Environment{} = env, repo) do
+    reqs = env.host_requirements || repo.host_requirements
+    default = Foreman.Config.vm_default_size()
+
+    cpus = env.cpu_limit || repo.cpu_limit || positive(req_cpus(reqs)) || default.cpus
+
+    memory_mb =
+      env.memory_limit_mb || repo.memory_limit_mb || positive(req_memory(reqs)) ||
+        default.memory_mb
+
+    %{cpus: ceil(cpus), memory_mb: memory_mb}
+  end
+
+  defp positive(n) when is_number(n) and n > 0, do: n
+  defp positive(_), do: nil
 
   defp from_limits(env, repo, reqs) do
     cpus = env.cpu_limit || repo.cpu_limit
@@ -81,10 +124,10 @@ defmodule Foreman.Capacity do
     cpus = cap["cpus"] || 0
     mem = cap["memory_mb"] || 0
 
-    running =
-      Enum.filter(envs, &(&1.observed_state in ["running", "partial", "starting", "creating"]))
+    # The box as given, whether or not each environment has it loaded.
+    envs = Enum.map(envs, &%{&1 | box: box})
 
-    provisioned = Enum.map(running, &{&1, provisioned(&1, &1.repo)})
+    provisioned = for env <- envs, counted?(env), do: {env, provisioned(env, env.repo)}
     latest = Tracker.latest(box.id)
 
     used_cpus =
@@ -117,6 +160,15 @@ defmodule Foreman.Capacity do
     }
   end
 
+  defp counted?(env) when env.observed_state in ["running", "partial", "starting", "creating"],
+    do: true
+
+  # One made the other way from the box now is out of the box's sight
+  # and its stats, but unless it was stopped it most likely still runs
+  # (VMs and containers both outlive the agent), even one wanted gone,
+  # since its destroy can't be sent.
+  defp counted?(env), do: env.desired_state != "stopped" and Environment.isolation_changed?(env)
+
   @doc """
   Whether a new environment of `repo` (with optional limits) fits on the
   box, under the box's policy: `:ok`, `{:warn, message}` or
@@ -127,6 +179,7 @@ defmodule Foreman.Capacity do
 
     env = %Environment{
       id: "new",
+      box: box,
       cpu_limit: limits[:cpu_limit],
       memory_limit_mb: limits[:memory_limit_mb]
     }

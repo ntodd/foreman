@@ -32,6 +32,10 @@ defmodule Foreman.Environments.Environment do
     field :devcontainer_service, :string
     field :warnings, {:array, :string}, default: []
     field :host_requirements, :map
+    # Where it last came up ("container" or "vm") and, in a VM, the VM's
+    # name, cpus and memory_mb. Null until it has come up.
+    field :isolation, :string
+    field :vm, :map
     field :tailscale_device_id, :string
     field :ts_authkey, Foreman.Encrypted.Binary, redact: true
     field :created_once, :boolean, default: false
@@ -100,6 +104,8 @@ defmodule Foreman.Environments.Environment do
       :devcontainer_service,
       :warnings,
       :host_requirements,
+      :isolation,
+      :vm,
       :tailscale_device_id,
       :ts_authkey,
       :created_once,
@@ -108,8 +114,42 @@ defmodule Foreman.Environments.Environment do
     ])
     |> validate_inclusion(:desired_state, @desired)
     |> validate_inclusion(:observed_state, @observed)
+    |> validate_inclusion(:isolation, ~w(container vm))
   end
 
   def live?(%__MODULE__{destroyed_at: nil}), do: true
   def live?(_), do: false
+
+  @doc """
+  The isolation it was made under: what its last create, rebuild or
+  start reported, else containers for one that came up before that was
+  recorded, else nil (it hasn't come up yet).
+  """
+  def made_under(%__MODULE__{isolation: isolation}) when isolation in ["container", "vm"],
+    do: isolation
+
+  def made_under(%__MODULE__{created_once: true}), do: "container"
+  def made_under(_env), do: nil
+
+  @doc """
+  Whether its box (`env.box`) now runs environments the other way from
+  how this one was made. A box finds containers through Docker and VMs
+  through Incus, so it can't see this one at all.
+  """
+  def isolation_changed?(%__MODULE__{box: %Foreman.Boxes.Box{isolation: isolation}} = env) do
+    made = made_under(env)
+    made != nil and made != isolation
+  end
+
+  def isolation_changed?(_env), do: false
+
+  @doc """
+  The actions that work on what's on its box. A box that changed
+  isolation since the environment was made can't see it, so a start
+  fails, a rebuild remakes it from nothing (no workspace, no tailnet
+  key), and a stop or destroy reports success while what's on the
+  machine keeps running.
+  """
+  def box_actions,
+    do: ~w(create rebuild start stop destroy restart_affected restart_all git_status)
 end

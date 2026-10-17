@@ -112,11 +112,13 @@ Each agent joins topic `agent:<agent_id>`. Commands are a fixed vocabulary; ther
 
 Every command carries an `op_id`. The agent records in-flight `op_id`s, so a command retried after a reconnect is not run twice. Long operations keep running if the socket drops. The agent sends their progress and result once it reconnects.
 
-The agent sends its version and protocol version when it joins. The control plane accepts protocol N and N-1, and only sends a protocol-N field to agents that reported N, so upgrade the control plane before the agents (an older control plane refuses newer agents). Protocol 2 added `keep` to `env.secrets.write`. Once boxes run protocol-2 agents, the control plane can't be rolled back past the release that introduced it: an older control plane refuses them at join.
+The agent sends its version and protocol version when it joins. The control plane accepts protocol N and N-1, and only sends a protocol-N field to agents that reported N, so upgrade the control plane before the agents (an older control plane refuses newer agents). Protocol 2 added `keep` to `env.secrets.write`. Protocol 3 adds `isolation` to the join: `container`, or `vm` for a box that runs each environment in its own VM (`FOREMAN_ISOLATION=vm` on the agent). Agents before protocol 3 join as `container`. Because protocol 3 only adds to the join, it also still accepts protocol 1 (v0.2.0): an agent refused at join can't be sent an update, so dropping it would leave those boxes needing a reinstall by hand. Once boxes run agents on a new protocol, the control plane can't be rolled back past the release that introduced it: an older control plane refuses them at join.
 
 ### Reconciliation
 
 When an agent joins, it reports what's on the box. The control plane compares that with the desired state of each environment (`running`, `stopped` or `destroyed`) and sends the commands needed to match.
+
+A missing environment is recreated, unless it was made under the other isolation: a box that switched `FOREMAN_ISOLATION`, or whose agent rolled back to before protocol 3, can't see the other kind's environments and reports them missing. Recreating one would lose its workspace and tailnet identity and leave the old one running, so it's left missing. Until the box changes back, Foreman won't start, stop, rebuild or destroy it, since each would miss what's actually on the machine, and it still counts toward the box's capacity unless it was stopped. Once the box changes back, it's reconciled like any other environment.
 
 The overlay sets `restart: "no"` on every service, so the agent controls start order after a host reboot. That matters because secrets live on tmpfs, which a reboot clears:
 
@@ -384,6 +386,7 @@ Foreman never assumes a box has room for everything provisioned on it. By defaul
 - **Default:** no limits. Every container takes what it can get, which is how the desktop works today.
 - **Optional limits:** CPU and memory limits can be set per repo as a default, and per environment as an override. When set, the overlay applies `cpus` and `mem_limit` to the devcontainer service. Per-service limits for sidecars can come later if needed.
 - **`hostRequirements`:** never treated as a limit. A repo that asks for 8 CPUs and 8 GB gets a warning when it's placed on a box that has less. It's also the estimate used for contention when an environment has no limits.
+- **VM boxes:** a box with `FOREMAN_ISOLATION=vm` always sends a size, because every VM has one: the environment's limits, else its repo's, else `hostRequirements`, else `FOREMAN_VM_DEFAULT_CPUS` and `FOREMAN_VM_DEFAULT_MEMORY_MB` (4 and 8192), with CPUs rounded up to whole vCPUs. The size covers the whole compose project, sidecars included.
 
 ### Reporting
 
@@ -395,9 +398,10 @@ The UI shows:
 
 - current usage per environment and per box
 - **provisioned:** for each running environment, the first available of:
-  1. its limits, if set
-  2. its repo's `hostRequirements`, if declared
-  3. its observed usage (a rolling average of `docker stats` over about 15 minutes)
+  1. on a VM box, its VM's size, which the VM holds while it runs however little it uses
+  2. its limits, if set
+  3. its repo's `hostRequirements`, if declared
+  4. its observed usage (a rolling average of `docker stats` over about 15 minutes)
 - a contention badge when provisioned or observed usage passes a threshold of capacity
 
 ### Box policy
@@ -433,6 +437,8 @@ Environments run unprivileged. The agent refuses privileged containers by defaul
 
 **When a repo really needs Docker inside:** its box opts in with `FOREMAN_POLICY=privileged=allow`, and the control plane shows that box with a red alert. The blast radius is that box, so it should be a box with nothing else on it: its own VM, or later a per-developer Incus container.
 
+A box with `FOREMAN_ISOLATION=vm` runs each environment in its own VM, and inside those VMs everything is allowed unless `FOREMAN_VM_POLICY` refuses it. Its agent reports that policy, and the control plane shows it as an amber warning with a "VM per environment" badge: privileged code there is root in one environment's VM, which holds that environment's secrets but not the others' or the agent's key. The VM doesn't stop everything, and the box page says so whatever the policy: a VM shares the box's network, so it can reach the box's LAN, the other environments' VMs on the same Incus bridge, and the cloud's metadata service (instance user-data, and credentials where IMDSv1 is on), and a hypervisor bug would reach the box.
+
 **Deferred until boxes are actually shared:** run one Incus system container per developer per box, with `security.nesting=true` and its own dockerd, and a Foreman agent inside it.
 - The control plane sees each of these as a separate box, so no app code changes.
 - The isolation boundary then matches the trust boundary, which is the developer.
@@ -450,7 +456,7 @@ Environments run unprivileged. The agent refuses privileged containers by defaul
 
 ### Secrets exposure on a box
 
-Anyone with Docker access on a box can read every secret of every environment on it. On a team, that is a reason to keep boxes single-owner and to treat any access grant to another developer as a trust decision.
+Anyone with Docker access on a box can read every secret of every environment on it. On a VM box environments can't read each other's, but anyone with root or incus access on the box still can, through `incus exec` or the host's tmpfs copy of each environment's secrets. On a team, that is a reason to keep boxes single-owner and to treat any access grant to another developer as a trust decision.
 
 ## Agent self-update
 

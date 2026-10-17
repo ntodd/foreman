@@ -9,13 +9,20 @@ defmodule ForemanProtocol do
   alias ForemanProtocol.Schema
 
   # 2: env.secrets.write can `keep` files; the seccomp policy rule.
-  @version 2
+  # 3: the join says how the box isolates environments.
+  @version 3
 
   @doc "The protocol version this build speaks."
   def version, do: @version
 
-  @doc "The control plane accepts the current protocol and the one before it."
-  def compatible?(version) when is_integer(version), do: version in [@version, @version - 1]
+  # The control plane accepts the current protocol and the one before it,
+  # and for now 1 as well: 3 only adds to the join, which defaults for
+  # older agents, and an agent refused at join can't be sent an update.
+  # Raise this with the next version that sends agents something new.
+  @oldest 1
+
+  @doc "Whether the control plane accepts an agent on this protocol version."
+  def compatible?(version) when is_integer(version), do: version in @oldest..@version//1
   def compatible?(_), do: false
 
   @join_spec [
@@ -27,7 +34,10 @@ defmodule ForemanProtocol do
     in_flight: {{:list, :uuid}, default: []},
     policy:
       {{:map_of, {:enum, ForemanProtocol.Policy.rules()},
-        {:enum, ForemanProtocol.Policy.actions()}}, default: %{}}
+        {:enum, ForemanProtocol.Policy.actions()}}, default: %{}},
+    # Containers on the box's own Docker, or each environment in its own
+    # VM. Agents before protocol 3 only ran containers.
+    isolation: {{:enum, ["container", "vm"]}, default: "container"}
   ]
 
   @doc "Validates the payload an agent sends when it joins its topic."

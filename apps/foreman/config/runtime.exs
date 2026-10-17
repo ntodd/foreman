@@ -7,6 +7,21 @@ list = fn name ->
   name |> System.get_env("") |> String.split(",", trim: true) |> Enum.map(&String.trim/1)
 end
 
+# nil when unset or empty. A value that isn't a whole number above zero
+# stops the release rather than leaving the default in place unnoticed.
+positive_integer = fn name ->
+  case System.get_env(name, "") do
+    "" ->
+      nil
+
+    value ->
+      case Integer.parse(value) do
+        {n, ""} when n > 0 -> n
+        _ -> raise "#{name} must be a whole number above zero, got #{inspect(value)}"
+      end
+  end
+end
+
 if System.get_env("PHX_SERVER") do
   config :foreman, ForemanWeb.Endpoint, server: true
 end
@@ -58,6 +73,14 @@ if config_env() != :test do
       tags: list.("FOREMAN_TAILSCALE_TAGS")
     },
     tailnet_sweep: System.get_env("FOREMAN_TAILNET_SWEEP", "true") != "false"
+
+  # The VM size for environments on VM boxes that nothing else sizes;
+  # config.exs has the defaults.
+  if cpus = positive_integer.("FOREMAN_VM_DEFAULT_CPUS"),
+    do: config(:foreman, vm_default_cpus: cpus)
+
+  if memory_mb = positive_integer.("FOREMAN_VM_DEFAULT_MEMORY_MB"),
+    do: config(:foreman, vm_default_memory_mb: memory_mb)
 end
 
 if config_env() == :prod do

@@ -7,6 +7,11 @@
 # CLI and keeps the box's identity (no token needed). To enroll again, for
 # example after the box was revoked, pass --reenroll with a new token.
 #
+# --isolation vm runs each environment in its own Incus VM (Incus set up,
+# and the environment image built, beforehand: see the agent's priv/vm).
+# A re-run without --isolation keeps the box's current isolation and its
+# FOREMAN_VM_* settings.
+#
 # Needs: systemd, Docker Engine with Compose v2.24+, git, and Node 20+
 # (for the devcontainer CLI). The agent runs as the `foreman` user, which
 # joins the docker group: that is root-equivalent on this box, so only
@@ -18,6 +23,7 @@ DEVCONTAINER_CLI_VERSION="0.89.0"
 TOKEN=""
 POLICY=""
 REENROLL=""
+ISOLATION=""
 IDENTITY=/var/lib/foreman-agent/identity.json
 
 while [ $# -gt 0 ]; do
@@ -26,6 +32,7 @@ while [ $# -gt 0 ]; do
     --policy) POLICY="$2"; shift 2 ;;
     --url) FOREMAN_URL="$2"; shift 2 ;;
     --reenroll) REENROLL=1; shift ;;
+    --isolation) ISOLATION="$2"; shift 2 ;;
     *) echo "unknown option: $1" >&2; exit 64 ;;
   esac
 done
@@ -47,6 +54,25 @@ command -v systemctl >/dev/null 2>&1 || fail "systemd is required"
 command -v docker >/dev/null 2>&1 || fail "Docker Engine is required"
 command -v git >/dev/null 2>&1 || fail "git is required"
 command -v npm >/dev/null 2>&1 || fail "Node.js (with npm) is required for the devcontainer CLI"
+
+# What the box ran before: its isolation and VM settings survive a re-run.
+kept=""
+if [ -f /etc/foreman-agent/agent.env ]; then
+  kept=$(grep -E '^FOREMAN_(ISOLATION|VM_[A-Z_]+)=' /etc/foreman-agent/agent.env || true)
+fi
+case "$ISOLATION" in
+  "") ;;
+  container | vm)
+    kept=$(printf '%s\n' "$kept" | grep -v '^FOREMAN_ISOLATION=' || true)
+    kept=$(printf 'FOREMAN_ISOLATION=%s\n%s' "$ISOLATION" "$kept")
+    ;;
+  *) fail "--isolation is container or vm" ;;
+esac
+vm_box=""
+if printf '%s\n' "$kept" | grep -qx 'FOREMAN_ISOLATION=vm'; then
+  vm_box=1
+  command -v incus >/dev/null 2>&1 || fail "--isolation vm needs Incus (and the foreman-env image)"
+fi
 
 compose=$(docker compose version --short 2>/dev/null || true)
 [ -n "$compose" ] || fail "the Docker Compose plugin is required"
@@ -71,6 +97,8 @@ esac
 echo "foreman: creating the foreman user"
 id foreman >/dev/null 2>&1 || useradd --system --home-dir /var/lib/foreman-agent --shell /usr/sbin/nologin foreman
 usermod -aG docker foreman
+# incus-admin is root-equivalent, like docker; the agent needs it to run VMs.
+if [ -n "$vm_box" ]; then usermod -aG incus-admin foreman; fi
 
 install -d -m 0700 -o foreman -g foreman /var/lib/foreman-agent
 install -d -m 0755 -o foreman -g foreman /srv/foreman /srv/foreman/envs
@@ -131,6 +159,7 @@ FOREMAN_POLICY=$POLICY
 HOME=/var/lib/foreman-agent
 RELEASE_TMP=/var/lib/foreman-agent/tmp
 EOF
+if [ -n "$kept" ]; then printf '%s\n' "$kept" >> /etc/foreman-agent/agent.env; fi
 chgrp foreman /etc/foreman-agent/agent.env
 chmod 0640 /etc/foreman-agent/agent.env
 umask 022

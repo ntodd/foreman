@@ -45,7 +45,10 @@ defmodule ForemanAgent.Handler do
     end
   end
 
-  def handle(%Command{type: "box.gc"}, log), do: gc(ctx(log))
+  def handle(%Command{type: "box.gc"}, log) do
+    ctx = ctx(log)
+    if ctx.config.isolation == :vm, do: Env.Vm.gc(ctx), else: gc(ctx)
+  end
 
   def handle(%Command{type: "agent.update", payload: payload} = cmd, log) do
     with {:ok, result} <- Updater.run(payload, Config.get(), log) do
@@ -96,7 +99,9 @@ defmodule ForemanAgent.Handler do
   # A crash comes back as an error the caller redacts: the exception's
   # message can hold anything the command carried.
   defp run_env(type, payload, ctx, redactor) do
-    Env.run(type, payload, ctx)
+    if ctx.config.isolation == :vm,
+      do: Env.Vm.run(type, payload, ctx),
+      else: Env.run(type, payload, ctx)
   rescue
     e ->
       Logger.error(Redactor.redact(redactor, Exception.format(:error, e, __STACKTRACE__)))
@@ -108,6 +113,12 @@ defmodule ForemanAgent.Handler do
   end
 
   def inventory do
+    if Config.get().isolation == :vm,
+      do: Env.Vm.inventory(ctx(fn _, _ -> :ok end)),
+      else: docker_inventory()
+  end
+
+  defp docker_inventory do
     case Docker.list_containers(["foreman.env_id"]) do
       {:ok, containers} -> {:ok, Inventory.from_containers(containers)}
       {:error, reason} -> {:error, "couldn't list containers: #{inspect(reason)}"}

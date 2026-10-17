@@ -1,0 +1,13 @@
+{
+  // A devcontainer that needs Docker inside it, the way several of the
+  // repos moving off Codespaces do: the official docker-in-docker
+  // feature, which runs the container privileged.
+  "name": "dind",
+  "dockerComposeFile": ["docker-compose.yml"],
+  "service": "app",
+  "workspaceFolder": "/workspaces/${localWorkspaceFolderBasename}",
+  "remoteUser": "vscode",
+  "features": {
+    "ghcr.io/devcontainers/features/docker-in-docker:2": {"moby": false}
+  }
+}

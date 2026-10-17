@@ -76,6 +76,7 @@ defmodule Foreman.Fixtures do
           }),
         capacity_policy: Map.get(attrs, :capacity_policy, "allow"),
         policy: Map.get(attrs, :policy, ForemanProtocol.Policy.defaults()),
+        isolation: Map.get(attrs, :isolation, "container"),
         agent_version: "0.1.0",
         protocol_version: 1
       }
@@ -102,7 +103,13 @@ defmodule Foreman.Fixtures do
       observed_state: Map.get(attrs, :observed_state, "running"),
       created_once: Map.get(attrs, :created_once, true),
       devcontainer_service: "app",
-      services: ["app", "db"]
+      services: ["app", "db"],
+      remote_user: Map.get(attrs, :remote_user),
+      workspace_folder: Map.get(attrs, :workspace_folder),
+      cpu_limit: Map.get(attrs, :cpu_limit),
+      memory_limit_mb: Map.get(attrs, :memory_limit_mb),
+      isolation: Map.get(attrs, :isolation),
+      vm: Map.get(attrs, :vm)
     }
     |> Repo.insert!()
   end

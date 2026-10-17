@@ -83,13 +83,15 @@ defmodule ForemanAgent.Runner.Local do
     end
   end
 
+  # FOREMAN_GUEST_OP is set only in a VM's guest runner (ForemanAgent.Guest):
+  # every command an operation starts carries it, so the host can find
+  # and kill them all when it cancels the operation.
   @base ~w(PATH HOME LANG LC_ALL TZ DOCKER_HOST SSL_CERT_FILE SSL_CERT_DIR
-           HTTPS_PROXY HTTP_PROXY NO_PROXY https_proxy http_proxy no_proxy)
+           HTTPS_PROXY HTTP_PROXY NO_PROXY https_proxy http_proxy no_proxy FOREMAN_GUEST_OP)
 
   @doc false
   # Unsets everything inherited except a small base, then applies `env`.
-  def child_env(env) do
-    inherited = System.get_env()
+  def child_env(env, inherited \\ System.get_env()) do
     unset = for {k, _} <- inherited, k not in @base, not Map.has_key?(env, k), do: {k, nil}
 
     base = %{

@@ -160,12 +160,14 @@ defmodule ForemanWeb.BoxLive.Show do
           }> · agent {@box.agent_version}</span>
         </:subtitle>
         <:actions>
+          <.box_isolation_badge box={@box} />
           <.badge :if={@summary.contention} color="amber">Contention</.badge>
           <.box_status online={@online} revoked={@box.revoked_at != nil} />
         </:actions>
       </.header>
 
       <.box_policy_alert box={@box} />
+      <.box_isolation_note box={@box} />
 
       <section id="usage" class="space-y-3">
         <div class="flex flex-wrap items-center justify-between gap-3">
@@ -191,7 +193,10 @@ defmodule ForemanWeb.BoxLive.Show do
         <div class="min-w-0 space-y-6">
           <.panel title="Capacity">
             <:subtitle>
-              Provisioned counts each running environment's limits, else its hostRequirements, else its 15-minute average.
+              {if @box.isolation == "vm",
+                do: "Provisioned counts each running environment's VM at its full size.",
+                else:
+                  "Provisioned counts each running environment's limits, else its hostRequirements, else its 15-minute average."}
             </:subtitle>
             <div class="grid gap-4 sm:grid-cols-2">
               <.capacity_bar
@@ -248,7 +253,7 @@ defmodule ForemanWeb.BoxLive.Show do
                 </tr>
               </thead>
               <tbody class="divide-y divide-line">
-                <tr :for={env <- @envs}>
+                <tr :for={env <- @envs} id={"box-env-#{env.id}"}>
                   <td class="px-5 py-2.5">
                     <.link
                       navigate={~p"/environments/#{env.id}"}
@@ -352,8 +357,11 @@ defmodule ForemanWeb.BoxLive.Show do
                   >
                     Nobody else has signed in yet.
                   </p>
-                  <p class="mt-1.5 text-xs text-ink-3">
-                    People it's shared with can run environments here. Anyone with Docker on a box can read every environment's secrets on it.
+                  <p id="sharing-note" class="mt-1.5 text-xs text-ink-3">
+                    People it's shared with can run environments here. {if @box.isolation == "vm",
+                      do:
+                        "Environments here can't read each other's secrets, but anyone with root or incus access on the box can read every environment's.",
+                      else: "Anyone with Docker on a box can read every environment's secrets on it."}
                   </p>
                 </fieldset>
                 <.input
@@ -389,6 +397,7 @@ defmodule ForemanWeb.BoxLive.Show do
     """
   end
 
+  defp source(:vm), do: "its VM's size"
   defp source(:limits), do: "limits"
   defp source(:host_requirements), do: "hostRequirements"
   defp source(:observed), do: "observed average"

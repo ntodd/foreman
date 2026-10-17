@@ -9,6 +9,7 @@ defmodule ForemanWeb.EnvironmentLive.Show do
   import ForemanWeb.ForemanComponents
 
   alias Foreman.{Boxes, Capacity, Environments, Operations}
+  alias Foreman.Environments.Environment
 
   @impl true
   def mount(%{"id" => id}, _session, socket) do
@@ -39,6 +40,7 @@ defmodule ForemanWeb.EnvironmentLive.Show do
     |> assign(:ops, ops)
     |> assign(:in_progress, in_progress(ops))
     |> assign(:online, Boxes.online?(env.box_id))
+    |> assign(:isolation_changed, Environment.isolation_changed?(env))
     |> assign(:provisioned, Capacity.provisioned(env, env.repo))
     |> assign(:usage, Foreman.Capacity.Tracker.latest_usage(env.id))
     |> select_default_op()
@@ -231,6 +233,17 @@ defmodule ForemanWeb.EnvironmentLive.Show do
     {:vscode, "//vscode-remote/ssh-remote+#{env.remote_user}@#{env.slug}#{env.workspace_folder}"}
   end
 
+  # In a VM the containers are on the VM's Docker, not the box's, so the
+  # same docker exec runs inside the VM. The VM is named after the
+  # environment's id (the agent's Vm.Incus.name/1).
+  defp exec_command(env) do
+    docker =
+      "docker exec -it -u #{shell_arg(env.remote_user)} -w #{shell_arg(env.workspace_folder)} " <>
+        "#{shell_arg("#{env.slug}-#{env.devcontainer_service}-1")} bash -l"
+
+    if env.isolation == "vm", do: "incus exec fm-#{env.id} -- " <> docker, else: docker
+  end
+
   @impl true
   def render(assigns) do
     ~H"""
@@ -258,7 +271,10 @@ defmodule ForemanWeb.EnvironmentLive.Show do
         <:actions>
           <.state_badge state={@env.observed_state} />
           <.button
-            :if={@env.created_once and @env.observed_state in ~w(stopped error missing partial)}
+            :if={
+              @env.created_once and @env.observed_state in ~w(stopped error missing partial) and
+                not @isolation_changed
+            }
             phx-click="action"
             phx-value-do="start"
             icon="hero-play-mini"
@@ -287,6 +303,7 @@ defmodule ForemanWeb.EnvironmentLive.Show do
             Stop
           </.button>
           <.button
+            :if={not @isolation_changed}
             phx-click="action"
             phx-value-do="rebuild"
             icon="hero-wrench-screwdriver-mini"
@@ -298,6 +315,17 @@ defmodule ForemanWeb.EnvironmentLive.Show do
           <.button phx-click="check_destroy" icon="hero-trash-mini" size="sm" variant="danger_outline">Destroy</.button>
         </:actions>
       </.header>
+
+      <.callout :if={@isolation_changed} kind="danger" id="isolation-changed">
+        <p class="font-medium">{@env.box.name} can't reach this environment</p>
+        <p class="mt-0.5">
+          {Environments.isolation_changed_message(@env)} Foreman won't remake it there: it would come up without its workspace or tailnet identity, and the old one would keep running.
+        </p>
+        <p class="mt-1">
+          Change the box back (<span class="font-mono">FOREMAN_ISOLATION</span>
+          in <span class="font-mono">/etc/foreman-agent/agent.env</span>, or its agent version), then start or destroy it.
+        </p>
+      </.callout>
 
       <%!-- Also after a failed stop or secrets write, which leave the state as it was. --%>
       <.callout
@@ -333,12 +361,12 @@ defmodule ForemanWeb.EnvironmentLive.Show do
                 :if={tailscale?()}
                 id="ssh-command"
                 label="SSH (Tailscale SSH, no keys needed)"
-                command={"ssh #{@env.remote_user}@#{@env.slug}"}
+                command={"ssh #{shell_arg(@env.remote_user)}@#{@env.slug}"}
               />
               <.command
                 id="exec-command"
                 label="On the box"
-                command={"docker exec -it -u #{@env.remote_user} -w #{@env.workspace_folder} #{@env.slug}-#{@env.devcontainer_service}-1 bash -l"}
+                command={exec_command(@env)}
               />
               <div :if={tailscale?()} class="flex flex-wrap items-center gap-2">
                 <.button href={vscode_url(@env)} size="sm" icon="hero-code-bracket-square-mini">Open in VS Code</.button>
@@ -385,7 +413,7 @@ defmodule ForemanWeb.EnvironmentLive.Show do
             </dl>
           </.panel>
 
-          <.panel title="Resources">
+          <.panel title="Resources" id="resources">
             <dl class="space-y-2.5">
               <.fact term="CPU limit">{@env.cpu_limit || @env.repo.cpu_limit || "None"}</.fact>
               <.fact term="Memory limit">
@@ -519,6 +547,7 @@ defmodule ForemanWeb.EnvironmentLive.Show do
     """
   end
 
+  defp provisioned_source(:vm), do: "Its VM's size"
   defp provisioned_source(:limits), do: "Its limits"
   defp provisioned_source(:host_requirements), do: "hostRequirements"
   defp provisioned_source(:observed), do: "15-minute average"

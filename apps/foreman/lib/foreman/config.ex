@@ -26,4 +26,12 @@ defmodule Foreman.Config do
     do:
       Application.get_env(:foreman, :git_base_url, "https://github.com")
       |> String.trim_trailing("/")
+
+  @doc "The VM size for an environment on a VM box that nothing else sizes."
+  def vm_default_size do
+    %{
+      cpus: Application.get_env(:foreman, :vm_default_cpus, 4),
+      memory_mb: Application.get_env(:foreman, :vm_default_memory_mb, 8192)
+    }
+  end
 end

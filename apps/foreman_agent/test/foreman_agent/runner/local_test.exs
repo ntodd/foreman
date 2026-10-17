@@ -99,4 +99,12 @@ defmodule ForemanAgent.Runner.LocalTest do
       100 -> Enum.reverse(acc)
     end
   end
+
+  test "a guest operation's id reaches every command it runs, so a cancel can find them all" do
+    env =
+      Local.child_env(%{}, %{"FOREMAN_GUEST_OP" => "op123", "FOREMAN_JOIN_TOKEN" => "fj_secret"})
+
+    assert {"FOREMAN_GUEST_OP", nil} not in env
+    assert {"FOREMAN_JOIN_TOKEN", nil} in env
+  end
 end

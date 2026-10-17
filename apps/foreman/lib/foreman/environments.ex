@@ -8,7 +8,8 @@ defmodule Foreman.Environments do
   back through `apply_result/1`. When a box reconnects (after a reboot,
   say) its inventory is reconciled against each environment's desired
   state: stopped ones that should run get their secrets and a start,
-  missing ones are recreated.
+  missing ones are recreated (unless they were made under the box's
+  other isolation, containers or VMs).
 
   When secrets change, running environments get the new files right away
   (new shells see them), are marked *pending restart*, and the user picks
@@ -283,10 +284,30 @@ defmodule Foreman.Environments do
   defp action(%Scope{} = scope, %Environment{} = env, action, args \\ %{}) do
     with :ok <- authorize(scope, env),
          :ok <- allowed?(env, action) do
-      if action == :destroy and box_revoked?(env),
-        do: forget(scope, env),
-        else: queue_action(scope, env, action, args)
+      # As it is now: its agent may have rejoined since `env` was read.
+      env = %{env | box: Repo.get(Box, env.box_id)}
+
+      cond do
+        action == :destroy and box_revoked?(env) ->
+          forget(scope, env)
+
+        Atom.to_string(action) in Environment.box_actions() and
+            Environment.isolation_changed?(env) ->
+          {:error, isolation_changed_message(env) <> " Change the box back first."}
+
+        true ->
+          queue_action(scope, env, action, args)
+      end
     end
+  end
+
+  @doc """
+  What changed, for an environment whose box now runs environments the
+  other way from how it was made (`Environment.isolation_changed?/1`).
+  """
+  def isolation_changed_message(%Environment{box: box} = env) do
+    "#{env.slug} was made #{made_label(Environment.made_under(env))}, and #{box.name} now " <>
+      "runs environments #{runs_label(box.isolation)}, so the box can't reach it."
   end
 
   defp queue_action(scope, env, action, args) do
@@ -348,12 +369,8 @@ defmodule Foreman.Environments do
     :ok
   end
 
-  defp box_revoked?(env) do
-    case Repo.get(Box, env.box_id) do
-      %Box{revoked_at: nil} -> false
-      _ -> true
-    end
-  end
+  defp box_revoked?(%Environment{box: %Box{revoked_at: nil}}), do: false
+  defp box_revoked?(_env), do: true
 
   # A revoked box can never reconnect, so its environments are marked
   # destroyed here. Whatever is left on the machine is the admin's to
@@ -511,12 +528,13 @@ defmodule Foreman.Environments do
     |> put_if(:applied_secret_hashes, args["secret_hashes"])
     |> put_token_pushed(args)
     # Results carry repo content (devcontainer.json): take only what fits.
-    |> put_if(:remote_user, string(result["remote_user"]))
-    |> put_if(:workspace_folder, string(result["remote_workspace_folder"]))
+    |> put_if(:remote_user, user_name(result["remote_user"]))
+    |> put_if(:workspace_folder, folder(result["remote_workspace_folder"]))
     |> put_if(:services, strings(result["services"]))
-    |> put_if(:devcontainer_service, string(result["devcontainer_service"]))
+    |> put_if(:devcontainer_service, service_name(result["devcontainer_service"]))
     |> put_if(:warnings, strings(result["warnings"]))
     |> put_if(:host_requirements, map(result["host_requirements"]))
+    |> put_isolation(action, result)
     |> then(&if(action in ["create", "rebuild"], do: Map.put(&1, :ts_authkey, nil), else: &1))
   end
 
@@ -600,8 +618,38 @@ defmodule Foreman.Environments do
 
   defp put_token_pushed(attrs, _args), do: attrs
 
-  defp string(v) when is_binary(v), do: v
-  defp string(_), do: nil
+  # Create, rebuild and start say where the environment came up: a VM
+  # box's result has "isolation", a container box's doesn't. The VM's
+  # size comes from create and rebuild, which send it; start sends no
+  # limits, so the size in its result is only the agent's default. A
+  # restart's result says neither, and nothing moved.
+  defp put_isolation(attrs, action, result) when action in ~w(create rebuild start) do
+    cond do
+      result["isolation"] != "vm" -> Map.merge(attrs, %{isolation: "container", vm: nil})
+      action == "start" -> Map.put(attrs, :isolation, "vm")
+      true -> Map.merge(attrs, %{isolation: "vm", vm: vm_size(result["vm"])})
+    end
+  end
+
+  defp put_isolation(attrs, _action, _result), do: attrs
+
+  defp vm_size(%{"name" => name, "cpus" => cpus, "memory_mb" => mb})
+       when is_binary(name) and is_integer(cpus) and cpus > 0 and is_integer(mb) and mb > 0 do
+    if name =~ ~r/\A[A-Za-z0-9][A-Za-z0-9-]{0,62}\z/,
+      do: %{"name" => name, "cpus" => cpus, "memory_mb" => mb}
+  end
+
+  defp vm_size(_), do: nil
+
+  # These go into the connect commands people paste into a shell (and on
+  # a VM box they come from inside the VM), so only plain names and
+  # absolute paths are kept.
+  defp user_name(v), do: matching(v, ~r/\A[A-Za-z0-9_][A-Za-z0-9._-]{0,31}\z/)
+  defp folder(v), do: matching(v, ~r/\A\/[A-Za-z0-9._@+\/-]{0,254}\z/)
+  defp service_name(v), do: matching(v, ~r/\A[A-Za-z0-9._-]{1,63}\z/)
+
+  defp matching(v, pattern) when is_binary(v), do: if(v =~ pattern, do: v)
+  defp matching(_v, _pattern), do: nil
 
   defp strings(v) when is_list(v), do: if(Enum.all?(v, &is_binary/1), do: v)
   defp strings(_), do: nil
@@ -698,12 +746,8 @@ defmodule Foreman.Environments do
 
     for env <- envs, not lifecycle_active?(env.id) do
       observed = if inv = by_id[env.id], do: inv.state, else: "missing"
-
-      env =
-        if observed != env.observed_state and env.observed_state != "error",
-          do: update_env!(env, %{observed_state: observed}),
-          else: env
-
+      attrs = inventory_attrs(env, observed)
+      env = if attrs == %{}, do: env, else: update_env!(env, attrs)
       reconcile(env, observed)
     end
 
@@ -711,6 +755,17 @@ defmodule Foreman.Environments do
   end
 
   def orphans(box_id), do: :persistent_term.get({__MODULE__, :orphans, box_id}, [])
+
+  defp inventory_attrs(env, observed) do
+    state? = observed != env.observed_state and env.observed_state != "error"
+    # A box only sees environments of its own kind, so one that came up
+    # before isolation was recorded is its box's kind if the box reports it.
+    isolation? = is_nil(env.isolation) and observed != "missing"
+
+    %{}
+    |> put_if(:observed_state, if(state?, do: observed))
+    |> put_if(:isolation, if(isolation?, do: env.box.isolation))
+  end
 
   defp reconcile(%Environment{observed_state: "error"}, _observed), do: :ok
 
@@ -722,9 +777,18 @@ defmodule Foreman.Environments do
     enqueue(env, "start", %{}, nil)
   end
 
+  # A box that changed isolation (FOREMAN_ISOLATION, or an agent rolled
+  # back to before protocol 3) can't see the other kind's environments,
+  # so it reports them missing. Remaking one would lose its workspace and
+  # tailnet identity, and leave the old one running. It stays missing, so
+  # once the box changes back it's reconciled like any other.
   defp reconcile(%Environment{desired_state: "running", created_once: true} = env, "missing") do
-    Logger.info("recreating #{env.slug}: it's missing from its box")
-    enqueue(env, "create", %{}, nil)
+    if Environment.isolation_changed?(env) do
+      Logger.warning("not recreating: #{isolation_changed_message(env)}")
+    else
+      Logger.info("recreating #{env.slug}: it's missing from its box")
+      enqueue(env, "create", %{}, nil)
+    end
   end
 
   defp reconcile(%Environment{desired_state: "stopped"} = env, observed)
@@ -736,6 +800,12 @@ defmodule Foreman.Environments do
     do: enqueue(env, "destroy", %{}, nil)
 
   defp reconcile(_env, _observed), do: :ok
+
+  defp made_label("vm"), do: "in a VM"
+  defp made_label(_), do: "as containers"
+
+  defp runs_label("vm"), do: "in VMs"
+  defp runs_label(_), do: "as containers"
 
   @doc "Records a state change an agent noticed (a container stopped, say)."
   def observe(box_id, env_id, state) do

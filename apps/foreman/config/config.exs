@@ -54,6 +54,12 @@ config :foreman, Oban,
 # <repo>-<login>-<n> so developers' environments never collide.
 config :foreman, :slug_style, :personal
 
+# The size of an environment's VM, on a box that runs each environment in
+# its own VM, when neither the environment nor its repo has limits and
+# the repo declares no hostRequirements. FOREMAN_VM_DEFAULT_CPUS and
+# FOREMAN_VM_DEFAULT_MEMORY_MB override them (runtime.exs).
+config :foreman, vm_default_cpus: 4, vm_default_memory_mb: 8192
+
 config :foreman, ForemanWeb.Endpoint,
   url: [host: "localhost"],
   adapter: Bandit.PhoenixAdapter,

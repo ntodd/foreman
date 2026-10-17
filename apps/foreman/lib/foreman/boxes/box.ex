@@ -23,6 +23,8 @@ defmodule Foreman.Boxes.Box do
     field :capacity_policy, :string, default: "allow"
     field :contention_threshold, :float, default: 0.9
     field :policy, :map
+    # Reported by the agent on join, so it's not a setting: "container" or "vm".
+    field :isolation, :string, default: "container"
     field :last_seen_at, :utc_datetime_usec
     field :revoked_at, :utc_datetime_usec
     timestamps()

@@ -8,7 +8,7 @@ defmodule Foreman.Environments.Commands do
   secret hashes it applied, whether it carried a token).
   """
 
-  alias Foreman.{Accounts, Config, GitHub, Repo, Secrets, Tailscale}
+  alias Foreman.{Accounts, Capacity, Config, GitHub, Repo, Secrets, Tailscale}
   alias Foreman.Environments.Environment
   alias Foreman.Operations.Operation
   alias ForemanProtocol.Command
@@ -19,6 +19,14 @@ defmodule Foreman.Environments.Commands do
   def build(%Operation{} = op, %Environment{} = env) do
     env = Repo.preload(env, [:user, :box, repo: :owner])
 
+    # Queued, or sent, before its box changed isolation: the box can't
+    # reach it now (Environment.box_actions/0).
+    if op.action in Environment.box_actions() and Environment.isolation_changed?(env),
+      do: {:error, Foreman.Environments.isolation_changed_message(env)},
+      else: command_for(op, env)
+  end
+
+  defp command_for(op, env) do
     case op.action do
       action when action in ["create", "rebuild"] ->
         up(op, env, "env.#{action}")
@@ -242,6 +250,10 @@ defmodule Foreman.Environments.Commands do
   end
 
   defp tailscale_key(env, _action), do: {:ok, env.ts_authkey, env}
+
+  # A VM gets a size whether or not anything set one, so a VM box is
+  # always sent one, the same size capacity counts it at.
+  defp limits(%{box: %{isolation: "vm"}} = env), do: Capacity.vm_size(env, env.repo)
 
   defp limits(env) do
     %{}

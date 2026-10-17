@@ -4,9 +4,13 @@ defmodule ForemanAgent.Stats do
   summed over each environment's running containers.
   """
 
+  alias ForemanAgent.Env
+
   require Logger
 
   @spec collect(map()) :: {:ok, map()} | {:error, String.t()}
+  def collect(%{config: %{isolation: :vm}} = ctx), do: Env.Vm.stats(ctx)
+
   def collect(ctx) do
     with {:ok, info} <- ctx.docker.info(),
          {:ok, containers} <- ctx.docker.list_containers(["foreman.env_id"]) do
