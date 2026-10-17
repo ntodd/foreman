@@ -149,6 +149,9 @@ defmodule ForemanWeb.Charts do
       </div>
 
       <div
+        id={"#{@id}-ticks"}
+        phx-hook=".ChartTicks"
+        data-span={@until - @since}
         class="relative mx-5 mb-3 mt-1.5 h-4 text-[11px] tabular-nums text-ink-3"
         aria-hidden="true"
       >
@@ -192,13 +195,8 @@ defmodule ForemanWeb.Charts do
           for (const s of this.data) for (const p of s.points) all.add(p[0])
           this.times = [...all].sort((a, b) => a - b)
           this.gap = Number(this.el.dataset.gap)
-          const figure = this.el.closest("figure")
           // Positions are set from script: the CSP allows no inline style
           // attributes, but styles set through the DOM are fine.
-          for (const tick of figure.querySelectorAll("[data-tick]")) {
-            tick.textContent = time(Number(tick.dataset.tick), this.until - this.since)
-            tick.style.left = tick.dataset.left + "%"
-          }
           for (const label of this.el.querySelectorAll("[data-top]")) {
             label.style.top = `calc(${label.dataset.top}% - 1.1rem)`
           }
@@ -275,6 +273,27 @@ defmodule ForemanWeb.Charts do
           this.index = null
           this.crosshair.classList.add("hidden")
           this.tooltip.classList.add("hidden")
+        }
+      }
+    </script>
+    <script :type={Phoenix.LiveView.ColocatedHook} name=".ChartTicks">
+      // Places a chart's time labels and shows them in the reader's time
+      // zone. They get a hook of their own because LiveView only calls
+      // updated() when the hooked element differs from the new render, and
+      // every live sample resets the labels' text and position.
+      const time = (at, span) => new Intl.DateTimeFormat(undefined,
+        span > 86400 ? {weekday: "short", hour: "numeric", minute: "2-digit"}
+                     : {hour: "numeric", minute: "2-digit"}).format(new Date(at * 1000))
+
+      export default {
+        mounted() { this.place() },
+        updated() { this.place() },
+        place() {
+          const span = Number(this.el.dataset.span)
+          for (const tick of this.el.querySelectorAll("[data-tick]")) {
+            tick.textContent = time(Number(tick.dataset.tick), span)
+            tick.style.left = tick.dataset.left + "%"
+          }
         }
       }
     </script>

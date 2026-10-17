@@ -65,7 +65,8 @@ defmodule ForemanWeb.Router do
   scope "/", ForemanWeb do
     pipe_through [:browser, :signed_in]
 
-    live_session :signed_in, on_mount: [{ForemanWeb.UserAuth, :require_user}] do
+    live_session :signed_in,
+      on_mount: [{ForemanWeb.StaleAssets, :reload}, {ForemanWeb.UserAuth, :require_user}] do
       live "/", EnvironmentLive.Index, :index
       live "/environments/new", EnvironmentLive.New, :new
       live "/environments/:id", EnvironmentLive.Show, :show
@@ -82,7 +83,11 @@ defmodule ForemanWeb.Router do
     pipe_through [:browser, :admin]
 
     live_session :admin,
-      on_mount: [{ForemanWeb.UserAuth, :require_user}, {ForemanWeb.UserAuth, :require_admin}] do
+      on_mount: [
+        {ForemanWeb.StaleAssets, :reload},
+        {ForemanWeb.UserAuth, :require_user},
+        {ForemanWeb.UserAuth, :require_admin}
+      ] do
       live "/", AdminLive.Deployment, :index
       live "/users", AdminLive.Users, :index
       live "/audit", AdminLive.Audit, :index
