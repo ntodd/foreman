@@ -60,9 +60,31 @@ defmodule ForemanWeb.ForemanComponents do
 
   def box_isolation_badge(assigns) do
     ~H"""
-    <.badge :if={@box.isolation == "vm"} color="sky" size={@size} data-role="isolation">
+    <.badge
+      :if={@box.isolation == "vm"}
+      color="sky"
+      size={@size}
+      data-role="isolation"
+      title="Each environment runs in its own VM. VMs still reach the box's network, each other and any cloud metadata service."
+    >
       VM per environment
     </.badge>
+    """
+  end
+
+  @doc """
+  The box page's note on a VM box: what a VM keeps in, and what it
+  doesn't, whatever the policy inside it.
+  """
+  attr :box, :map, required: true
+
+  def box_isolation_note(assigns) do
+    ~H"""
+    <.callout :if={@box.isolation == "vm"} id="box-vm-note" icon="hero-cube-transparent-mini">
+      <p>
+        Each environment runs in its own VM, with its own kernel and Docker, so code that gets out of a container lands in that VM, which holds only that environment's secrets. The VM still has the box's network: it can reach the box's LAN, the other environments' VMs on the same bridge, and the cloud's metadata service if the box has one. A bug in the hypervisor would reach the box itself.
+      </p>
+    </.callout>
     """
   end
 
@@ -109,11 +131,15 @@ defmodule ForemanWeb.ForemanComponents do
   def box_policy_alert(assigns) do
     exceptions = Foreman.Boxes.policy_exceptions(assigns.box)
 
+    privileged = Enum.any?(exceptions, &(&1.rule == "privileged"))
+
     assigns =
       assigns
       |> assign(:exceptions, exceptions)
-      |> assign(:privileged, Enum.any?(exceptions, &(&1.rule == "privileged")))
+      |> assign(:privileged, privileged)
       |> assign(:vm, assigns.box.isolation == "vm")
+      # A rule to name in "for example ...=refuse": one that's relaxed.
+      |> assign(:example, if(privileged, do: "privileged", else: List.first(exceptions)[:rule]))
 
     ~H"""
     <.callout
@@ -127,7 +153,10 @@ defmodule ForemanWeb.ForemanComponents do
         Privileged code is root on the box: it can read every environment's secrets, the agent's key and anything else on the machine. Only allow it on a box that holds nothing else you care about.
       </p>
       <p :if={@vm} class="mt-1">
-        The rules below apply inside each environment's own VM, not on the box. Privileged code is root in that VM: it can read that environment's secrets, but not other environments' or the agent's key. The VM can still reach the box's network.
+        The rules below apply inside each environment's own VM, not on the box.
+        <span :if={@privileged}>
+          Privileged code is root in its VM: it can read that environment's secrets and reach whatever the VM can, but other environments' secrets and the agent's key are outside it.
+        </span>
       </p>
       <ul class="mt-2 list-disc space-y-0.5 pl-5">
         <li :for={e <- @exceptions}>
@@ -142,7 +171,7 @@ defmodule ForemanWeb.ForemanComponents do
       <p :if={@vm} class="mt-2 text-xs">
         VMs allow everything unless <span class="font-mono">FOREMAN_VM_POLICY</span>
         in <span class="font-mono">/etc/foreman-agent/agent.env</span>
-        on the box refuses it (for example <span class="font-mono">privileged=refuse</span>). Restart the agent after changing it.
+        on the box refuses it (for example <span class="font-mono">{@example}=refuse</span>). Restart the agent after changing it.
       </p>
     </.callout>
     """

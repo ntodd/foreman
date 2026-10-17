@@ -311,7 +311,9 @@ defmodule ForemanWeb.PagesTest do
       assert has_element?(view, "#box-policy-alert[class*=bg-warning-soft]")
       refute has_element?(view, "#box-policy-alert", "root on the box")
       assert has_element?(view, "#box-policy-alert", "inside each environment's own VM")
+      assert has_element?(view, "#box-policy-alert", "Privileged code is root in its VM")
       assert has_element?(view, "#box-policy-alert", "FOREMAN_VM_POLICY")
+      assert has_element?(view, "#box-policy-alert", "privileged=refuse")
 
       {:ok, view, _html} = live(conn, ~p"/boxes")
       assert has_element?(view, "#box-#{vms.id} [data-role=policy-alert]", "Privileged in VMs")
@@ -326,6 +328,57 @@ defmodule ForemanWeb.PagesTest do
              )
 
       refute has_element?(view, "#box-card-#{vms.id}[class*=ring-danger]")
+    end
+
+    # What a VM doesn't stop, whatever its policy says.
+    test "says what the VM doesn't keep in, even with nothing relaxed", %{
+      conn: conn,
+      user: user
+    } do
+      strict =
+        box_fixture(
+          owner_user_id: user.id,
+          isolation: "vm",
+          policy: ForemanProtocol.Policy.defaults()
+        )
+
+      {:ok, view, _html} = live(conn, ~p"/boxes/#{strict.id}")
+      refute has_element?(view, "#box-policy-alert")
+      assert has_element?(view, "#box-vm-note", "its own VM")
+      assert has_element?(view, "#box-vm-note", "the box's network")
+      assert has_element?(view, "#box-vm-note", "the other environments' VMs")
+      assert has_element?(view, "#box-vm-note", "metadata service")
+      assert has_element?(view, "#box-vm-note", "hypervisor")
+
+      {:ok, view, _html} = live(conn, ~p"/boxes")
+      assert has_element?(view, "#box-#{strict.id} [data-role=isolation][title*=metadata]")
+    end
+
+    test "with privileged refused in its VMs, doesn't talk about privileged code", %{
+      conn: conn,
+      user: user
+    } do
+      policy =
+        ForemanProtocol.Policy.defaults()
+        |> Map.new(fn {rule, _} -> {rule, "allow"} end)
+        |> Map.put("privileged", "refuse")
+
+      box = box_fixture(owner_user_id: user.id, isolation: "vm", policy: policy)
+
+      {:ok, view, _html} = live(conn, ~p"/boxes/#{box.id}")
+
+      assert has_element?(
+               view,
+               "#box-policy-alert",
+               "Each environment's VM accepts more than the default"
+             )
+
+      assert has_element?(view, "#box-policy-alert", "inside each environment's own VM")
+      refute has_element?(view, "#box-policy-alert", "Privileged code")
+      refute has_element?(view, "#box-policy-alert", "privileged=refuse")
+
+      {:ok, view, _html} = live(conn, ~p"/boxes")
+      assert has_element?(view, "#box-#{box.id} [data-role=policy-alert]", "Relaxed in VMs")
     end
 
     test "connects to an environment through its VM", %{

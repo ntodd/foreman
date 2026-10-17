@@ -167,6 +167,7 @@ defmodule ForemanWeb.BoxLive.Show do
       </.header>
 
       <.box_policy_alert box={@box} />
+      <.box_isolation_note box={@box} />
 
       <section id="usage" class="space-y-3">
         <div class="flex flex-wrap items-center justify-between gap-3">
