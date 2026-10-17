@@ -231,6 +231,17 @@ defmodule ForemanWeb.EnvironmentLive.Show do
     {:vscode, "//vscode-remote/ssh-remote+#{env.remote_user}@#{env.slug}#{env.workspace_folder}"}
   end
 
+  # In a VM the containers are on the VM's Docker, not the box's, so the
+  # same docker exec runs inside the VM. The VM is named after the
+  # environment's id (the agent's Vm.Incus.name/1).
+  defp exec_command(env) do
+    docker =
+      "docker exec -it -u #{env.remote_user} -w #{env.workspace_folder} " <>
+        "#{env.slug}-#{env.devcontainer_service}-1 bash -l"
+
+    if env.isolation == "vm", do: "incus exec fm-#{env.id} -- " <> docker, else: docker
+  end
+
   @impl true
   def render(assigns) do
     ~H"""
@@ -338,7 +349,7 @@ defmodule ForemanWeb.EnvironmentLive.Show do
               <.command
                 id="exec-command"
                 label="On the box"
-                command={"docker exec -it -u #{@env.remote_user} -w #{@env.workspace_folder} #{@env.slug}-#{@env.devcontainer_service}-1 bash -l"}
+                command={exec_command(@env)}
               />
               <div :if={tailscale?()} class="flex flex-wrap items-center gap-2">
                 <.button href={vscode_url(@env)} size="sm" icon="hero-code-bracket-square-mini">Open in VS Code</.button>

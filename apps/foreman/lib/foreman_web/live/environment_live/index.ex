@@ -102,10 +102,7 @@ defmodule ForemanWeb.EnvironmentLive.Index do
           id={"box-card-#{card.box.id}"}
           class={[
             "group rounded-xl border bg-raised p-4 shadow-xs transition-shadow hover:shadow-raised",
-            if(Foreman.Boxes.policy_exceptions(card.box) == [],
-              do: "border-line",
-              else: "border-danger/50 ring-1 ring-danger/30"
-            )
+            box_card_border(card.box)
           ]}
         >
           <div class="mb-3 flex items-center justify-between gap-2">
@@ -114,6 +111,7 @@ defmodule ForemanWeb.EnvironmentLive.Index do
               <span class="truncate text-sm font-semibold text-ink">{card.box.name}</span>
             </div>
             <div class="flex items-center gap-1.5">
+              <.box_isolation_badge box={card.box} size="sm" />
               <.box_policy_badge box={card.box} />
               <.badge :if={card.summary.contention} color="amber" size="sm">Contention</.badge>
               <.box_status online={card.online} />

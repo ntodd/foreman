@@ -437,6 +437,8 @@ Environments run unprivileged. The agent refuses privileged containers by defaul
 
 **When a repo really needs Docker inside:** its box opts in with `FOREMAN_POLICY=privileged=allow`, and the control plane shows that box with a red alert. The blast radius is that box, so it should be a box with nothing else on it: its own VM, or later a per-developer Incus container.
 
+A box with `FOREMAN_ISOLATION=vm` runs each environment in its own VM, and inside those VMs everything is allowed unless `FOREMAN_VM_POLICY` refuses it. Its agent reports that policy, and the control plane shows it as an amber warning with a "VM per environment" badge: privileged code there is root in one environment's VM, which holds that environment's secrets but not the others' or the agent's key.
+
 **Deferred until boxes are actually shared:** run one Incus system container per developer per box, with `security.nesting=true` and its own dockerd, and a Foreman agent inside it.
 - The control plane sees each of these as a separate box, so no app code changes.
 - The isolation boundary then matches the trust boundary, which is the developer.

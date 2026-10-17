@@ -54,22 +54,53 @@ defmodule ForemanWeb.ForemanComponents do
     """
   end
 
+  @doc "The chip on a box that runs each environment in its own VM."
+  attr :box, :map, required: true
+  attr :size, :string, default: "md"
+
+  def box_isolation_badge(assigns) do
+    ~H"""
+    <.badge :if={@box.isolation == "vm"} color="sky" size={@size} data-role="isolation">
+      VM per environment
+    </.badge>
+    """
+  end
+
   @doc """
   The chip on a box card when the box's agent accepts more than the
-  default policy. Privileged is called out by name.
+  default policy. Privileged is called out by name. Red where it reaches
+  the box; amber on a VM box, where it stays inside each environment's VM.
   """
   attr :box, :map, required: true
 
   def box_policy_badge(assigns) do
-    assigns = assign(assigns, :exceptions, Foreman.Boxes.policy_exceptions(assigns.box))
+    exceptions = Foreman.Boxes.policy_exceptions(assigns.box)
+    privileged = Enum.any?(exceptions, &(&1.rule == "privileged"))
+    vm = assigns.box.isolation == "vm"
+
+    assigns =
+      assigns
+      |> assign(:exceptions, exceptions)
+      |> assign(:color, if(vm, do: "amber", else: "rose"))
+      |> assign(:label, policy_badge_label(privileged, vm))
 
     ~H"""
-    <.badge :if={@exceptions != []} color="rose" size="sm" data-role="policy-alert">
-      {if Enum.any?(@exceptions, &(&1.rule == "privileged")),
-        do: "Privileged allowed",
-        else: "Policy relaxed"}
+    <.badge :if={@exceptions != []} color={@color} size="sm" data-role="policy-alert">
+      {@label}
     </.badge>
     """
+  end
+
+  defp policy_badge_label(true, false), do: "Privileged allowed"
+  defp policy_badge_label(false, false), do: "Policy relaxed"
+  defp policy_badge_label(true, true), do: "Privileged in VMs"
+  defp policy_badge_label(false, true), do: "Relaxed in VMs"
+
+  @doc "Card classes that call out a box whose policy exceptions reach the whole box."
+  def box_card_border(box) do
+    if Foreman.Boxes.policy_severity(box) == :danger,
+      do: "border-danger/50 ring-1 ring-danger/30",
+      else: "border-line"
   end
 
   @doc "The box page's alert for a box that accepts more than the default policy."
@@ -82,30 +113,45 @@ defmodule ForemanWeb.ForemanComponents do
       assigns
       |> assign(:exceptions, exceptions)
       |> assign(:privileged, Enum.any?(exceptions, &(&1.rule == "privileged")))
+      |> assign(:vm, assigns.box.isolation == "vm")
 
     ~H"""
-    <.callout :if={@exceptions != []} kind="danger" id="box-policy-alert" class="border-2">
-      <p class="text-[15px] font-semibold">
-        {if @privileged,
-          do: "Environments on this box can run privileged",
-          else: "This box accepts more than the default policy"}
-      </p>
-      <p :if={@privileged} class="mt-1">
+    <.callout
+      :if={@exceptions != []}
+      kind={if @vm, do: "warning", else: "danger"}
+      id="box-policy-alert"
+      class="border-2"
+    >
+      <p class="text-[15px] font-semibold">{policy_alert_title(@privileged, @vm)}</p>
+      <p :if={@privileged and not @vm} class="mt-1">
         Privileged code is root on the box: it can read every environment's secrets, the agent's key and anything else on the machine. Only allow it on a box that holds nothing else you care about.
+      </p>
+      <p :if={@vm} class="mt-1">
+        The rules below apply inside each environment's own VM, not on the box. Privileged code is root in that VM: it can read that environment's secrets, but not other environments' or the agent's key. The VM can still reach the box's network.
       </p>
       <ul class="mt-2 list-disc space-y-0.5 pl-5">
         <li :for={e <- @exceptions}>
           {if e.action == "allow", do: "Allowed", else: "Allowed with a warning"}: {e.label}
         </li>
       </ul>
-      <p class="mt-2 text-xs">
+      <p :if={not @vm} class="mt-2 text-xs">
         Set by <span class="font-mono">FOREMAN_POLICY</span>
         in <span class="font-mono">/etc/foreman-agent/agent.env</span>
         on the box. Remove it and restart the agent to refuse these again.
       </p>
+      <p :if={@vm} class="mt-2 text-xs">
+        VMs allow everything unless <span class="font-mono">FOREMAN_VM_POLICY</span>
+        in <span class="font-mono">/etc/foreman-agent/agent.env</span>
+        on the box refuses it (for example <span class="font-mono">privileged=refuse</span>). Restart the agent after changing it.
+      </p>
     </.callout>
     """
   end
+
+  defp policy_alert_title(true, false), do: "Environments on this box can run privileged"
+  defp policy_alert_title(false, false), do: "This box accepts more than the default policy"
+  defp policy_alert_title(true, true), do: "Environments can run privileged in their own VMs"
+  defp policy_alert_title(false, true), do: "Each environment's VM accepts more than the default"
 
   @doc "A labelled capacity bar: used (or provisioned) of total."
   attr :label, :string, required: true

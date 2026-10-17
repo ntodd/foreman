@@ -150,10 +150,7 @@ defmodule ForemanWeb.BoxLive.Index do
           id={"box-#{card.box.id}"}
           class={[
             "rounded-xl border bg-raised p-5 shadow-xs transition-shadow hover:shadow-raised",
-            if(Foreman.Boxes.policy_exceptions(card.box) == [],
-              do: "border-line",
-              else: "border-danger/50 ring-1 ring-danger/30"
-            )
+            box_card_border(card.box)
           ]}
         >
           <div class="mb-4 flex items-start justify-between gap-3">
@@ -166,6 +163,7 @@ defmodule ForemanWeb.BoxLive.Index do
               </p>
             </div>
             <div class="flex items-center gap-1.5">
+              <.box_isolation_badge box={card.box} size="sm" />
               <.box_policy_badge box={card.box} />
               <.badge :if={card.summary.contention} color="amber" size="sm">Contention</.badge>
               <.box_status online={card.online} />

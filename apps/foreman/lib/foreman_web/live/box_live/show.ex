@@ -160,6 +160,7 @@ defmodule ForemanWeb.BoxLive.Show do
           }> · agent {@box.agent_version}</span>
         </:subtitle>
         <:actions>
+          <.box_isolation_badge box={@box} />
           <.badge :if={@summary.contention} color="amber">Contention</.badge>
           <.box_status online={@online} revoked={@box.revoked_at != nil} />
         </:actions>
@@ -191,7 +192,10 @@ defmodule ForemanWeb.BoxLive.Show do
         <div class="min-w-0 space-y-6">
           <.panel title="Capacity">
             <:subtitle>
-              Provisioned counts each running environment's limits, else its hostRequirements, else its 15-minute average.
+              {if @box.isolation == "vm",
+                do: "Provisioned counts each running environment's VM at its full size.",
+                else:
+                  "Provisioned counts each running environment's limits, else its hostRequirements, else its 15-minute average."}
             </:subtitle>
             <div class="grid gap-4 sm:grid-cols-2">
               <.capacity_bar

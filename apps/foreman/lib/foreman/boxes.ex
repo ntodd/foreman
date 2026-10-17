@@ -195,6 +195,20 @@ defmodule Foreman.Boxes do
 
   def policy_exceptions(%Box{}), do: []
 
+  @doc """
+  How far a box's policy exceptions reach. `:danger` where environments
+  share the box's Docker, so privileged means root on the box; `:warning`
+  on a VM box, where they apply inside each environment's own VM; `:none`
+  without exceptions.
+  """
+  def policy_severity(%Box{} = box) do
+    cond do
+      policy_exceptions(box) == [] -> :none
+      box.isolation == "vm" -> :warning
+      true -> :danger
+    end
+  end
+
   def agent_left(box_id) do
     if box = get_box(box_id) do
       box |> Ecto.Changeset.change(last_seen_at: DateTime.utc_now()) |> Repo.update!()
