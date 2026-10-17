@@ -357,8 +357,11 @@ defmodule ForemanWeb.BoxLive.Show do
                   >
                     Nobody else has signed in yet.
                   </p>
-                  <p class="mt-1.5 text-xs text-ink-3">
-                    People it's shared with can run environments here. Anyone with Docker on a box can read every environment's secrets on it.
+                  <p id="sharing-note" class="mt-1.5 text-xs text-ink-3">
+                    People it's shared with can run environments here. {if @box.isolation == "vm",
+                      do:
+                        "Environments here can't read each other's secrets, but anyone with root or incus access on the box can read every environment's.",
+                      else: "Anyone with Docker on a box can read every environment's secrets on it."}
                   </p>
                 </fieldset>
                 <.input

@@ -456,7 +456,7 @@ A box with `FOREMAN_ISOLATION=vm` runs each environment in its own VM, and insid
 
 ### Secrets exposure on a box
 
-Anyone with Docker access on a box can read every secret of every environment on it. On a team, that is a reason to keep boxes single-owner and to treat any access grant to another developer as a trust decision.
+Anyone with Docker access on a box can read every secret of every environment on it. On a VM box environments can't read each other's, but anyone with root or incus access on the box still can, through `incus exec` or the host's tmpfs copy of each environment's secrets. On a team, that is a reason to keep boxes single-owner and to treat any access grant to another developer as a trust decision.
 
 ## Agent self-update
 

@@ -381,6 +381,17 @@ defmodule ForemanWeb.PagesTest do
       assert has_element?(view, "#box-#{box.id} [data-role=policy-alert]", "Relaxed in VMs")
     end
 
+    test "says who can read its environments' secrets", %{conn: conn, vms: vms, box: box} do
+      {:ok, view, _html} = live(conn, ~p"/boxes/#{vms.id}")
+      assert has_element?(view, "#sharing-note", "can't read each other's secrets")
+      assert has_element?(view, "#sharing-note", "root or incus access on the box")
+      refute has_element?(view, "#sharing-note", "Docker")
+
+      {:ok, view, _html} = live(conn, ~p"/boxes/#{box.id}")
+      assert has_element?(view, "#sharing-note", "Anyone with Docker on a box")
+      refute has_element?(view, "#box-vm-note")
+    end
+
     test "connects to an environment through its VM", %{
       conn: conn,
       repo: repo,
