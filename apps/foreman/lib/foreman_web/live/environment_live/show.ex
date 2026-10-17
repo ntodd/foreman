@@ -236,8 +236,8 @@ defmodule ForemanWeb.EnvironmentLive.Show do
   # environment's id (the agent's Vm.Incus.name/1).
   defp exec_command(env) do
     docker =
-      "docker exec -it -u #{env.remote_user} -w #{env.workspace_folder} " <>
-        "#{env.slug}-#{env.devcontainer_service}-1 bash -l"
+      "docker exec -it -u #{shell_arg(env.remote_user)} -w #{shell_arg(env.workspace_folder)} " <>
+        "#{shell_arg("#{env.slug}-#{env.devcontainer_service}-1")} bash -l"
 
     if env.isolation == "vm", do: "incus exec fm-#{env.id} -- " <> docker, else: docker
   end
@@ -344,7 +344,7 @@ defmodule ForemanWeb.EnvironmentLive.Show do
                 :if={tailscale?()}
                 id="ssh-command"
                 label="SSH (Tailscale SSH, no keys needed)"
-                command={"ssh #{@env.remote_user}@#{@env.slug}"}
+                command={"ssh #{shell_arg(@env.remote_user)}@#{@env.slug}"}
               />
               <.command
                 id="exec-command"

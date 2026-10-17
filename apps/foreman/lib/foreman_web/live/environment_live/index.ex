@@ -176,7 +176,7 @@ defmodule ForemanWeb.EnvironmentLive.Index do
               :if={env.observed_state == "running" and env.remote_user}
               class="command hidden text-xs text-ink-2 md:block"
             >
-              ssh {env.remote_user}@{env.slug}
+              ssh {shell_arg(env.remote_user)}@{env.slug}
             </code>
 
             <div class="flex items-center gap-1.5">

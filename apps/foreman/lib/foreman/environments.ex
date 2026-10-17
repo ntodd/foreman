@@ -512,10 +512,10 @@ defmodule Foreman.Environments do
     |> put_if(:applied_secret_hashes, args["secret_hashes"])
     |> put_token_pushed(args)
     # Results carry repo content (devcontainer.json): take only what fits.
-    |> put_if(:remote_user, string(result["remote_user"]))
-    |> put_if(:workspace_folder, string(result["remote_workspace_folder"]))
+    |> put_if(:remote_user, user_name(result["remote_user"]))
+    |> put_if(:workspace_folder, folder(result["remote_workspace_folder"]))
     |> put_if(:services, strings(result["services"]))
-    |> put_if(:devcontainer_service, string(result["devcontainer_service"]))
+    |> put_if(:devcontainer_service, service_name(result["devcontainer_service"]))
     |> put_if(:warnings, strings(result["warnings"]))
     |> put_if(:host_requirements, map(result["host_requirements"]))
     |> put_isolation(action, result)
@@ -625,8 +625,15 @@ defmodule Foreman.Environments do
 
   defp vm_size(_), do: nil
 
-  defp string(v) when is_binary(v), do: v
-  defp string(_), do: nil
+  # These go into the connect commands people paste into a shell (and on
+  # a VM box they come from inside the VM), so only plain names and
+  # absolute paths are kept.
+  defp user_name(v), do: matching(v, ~r/\A[A-Za-z0-9_][A-Za-z0-9._-]{0,31}\z/)
+  defp folder(v), do: matching(v, ~r/\A\/[A-Za-z0-9._@+\/-]{0,254}\z/)
+  defp service_name(v), do: matching(v, ~r/\A[A-Za-z0-9._-]{1,63}\z/)
+
+  defp matching(v, pattern) when is_binary(v), do: if(v =~ pattern, do: v)
+  defp matching(_v, _pattern), do: nil
 
   defp strings(v) when is_list(v), do: if(Enum.all?(v, &is_binary/1), do: v)
   defp strings(_), do: nil

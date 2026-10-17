@@ -211,6 +211,19 @@ defmodule ForemanWeb.ForemanComponents do
   def gib(mb) when is_number(mb), do: :erlang.float_to_binary(mb / 1024, decimals: 1)
   def gib(_), do: "0"
 
+  @doc """
+  One word of a shell command, single-quoted unless it's plain. Results
+  are checked before they're stored, but rows from before that weren't,
+  and connect commands get pasted into a shell.
+  """
+  def shell_arg(value) do
+    value = to_string(value)
+
+    if value =~ ~r/\A[A-Za-z0-9._\/@%+=:,-]+\z/,
+      do: value,
+      else: "'" <> String.replace(value, "'", ~S('"'"')) <> "'"
+  end
+
   @doc "A shell command with a copy button."
   attr :id, :string, required: true
   attr :command, :string, required: true
