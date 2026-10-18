@@ -1068,24 +1068,49 @@ defmodule ForemanAgent.Env do
   end
 
   # What the operation log shows for lines of a command's output: each
-  # line through `mapper` (nil drops it), without colors or cursor
-  # movement. Lines that were only cursor movement go, and so do spinner
-  # frames that redraw the one before (clack and ora print one every
-  # 80 ms). `last` is the kept spinner line's text, carried across chunks.
+  # line through `mapper` (nil drops it), split into the lines it shows,
+  # without colors or cursor movement. Lines that were only cursor
+  # movement go, and so do spinner frames that redraw the one before
+  # (clack and ora print one every 80 ms). `last` is the kept spinner
+  # line's text, carried across chunks.
   defp log_lines(lines, mapper, last) do
     Enum.flat_map_reduce(lines, last, fn line, last ->
-      with text when is_binary(text) <- mapper.(strip_ansi(line)),
-           clean = strip_ansi(text),
-           false <- blank?(clean) and not blank?(text) do
-        case spinner_text(clean) do
-          nil -> {[clean], nil}
-          ^last -> {[], last}
-          frame -> {[clean], frame}
-        end
-      else
+      case mapper.(line) do
+        text when is_binary(text) -> text |> shown_lines() |> Enum.flat_map_reduce(last, &frame/2)
         _ -> {[], last}
       end
     end)
+  end
+
+  defp shown_lines(text) do
+    lines = String.split(text, "\n")
+    if String.ends_with?(text, "\n"), do: Enum.drop(lines, -1), else: lines
+  end
+
+  defp frame(line, last) do
+    clean = line |> redrawn() |> strip_ansi()
+
+    if blank?(clean) and String.contains?(line, ["\e", "\r"]) do
+      {[], last}
+    else
+      case spinner_text(clean) do
+        nil -> {[clean], nil}
+        ^last -> {[], last}
+        spinner -> {[clean], spinner}
+      end
+    end
+  end
+
+  # What's left on a line a CLI keeps redrawing (a progress count, a
+  # spinner): the last text written after a return to the first column.
+  # A return on its own erases nothing; an erase after it clears the line.
+  @column_one ~r/\r|\e\[[01]?G/
+  @erase ~r/\e\[[02]?[JK]/
+  defp redrawn(line) do
+    @column_one
+    |> Regex.split(line)
+    |> Enum.reverse()
+    |> Enum.find("", &(not blank?(strip_ansi(&1)) or Regex.match?(@erase, &1)))
   end
 
   defp blank?(text), do: String.trim(text) == ""
@@ -1104,7 +1129,7 @@ defmodule ForemanAgent.Env do
     do: "#{label} timed out after #{div(timeout || 0, 60_000)} minutes and was stopped"
 
   # Colors and cursor movement from CLIs, which a log view can't use.
-  @ansi ~r/\e\[[0-9;?]*[ -\/]*[@-~]|\e\][^\a]*(\a|\e\\)|\r(?!\n)/
+  @ansi ~r/\e\[[0-9;?]*[ -\/]*[@-~]|\e\][^\a\e]*(\a|\e\\)|\r(?!\n)/
   defp strip_ansi(text), do: Regex.replace(@ansi, text, "")
 
   # The end of a command's output as the operation log shows it.
@@ -1112,7 +1137,6 @@ defmodule ForemanAgent.Env do
     {texts, _} = log_lines(String.split(output, "\n"), mapper, nil)
 
     texts
-    |> Enum.flat_map(&String.split(&1, "\n"))
     |> Enum.reject(&blank?/1)
     |> Enum.take(-15)
     |> Enum.join("\n")

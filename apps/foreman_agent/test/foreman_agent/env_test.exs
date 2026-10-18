@@ -419,6 +419,68 @@ defmodule ForemanAgent.EnvTest do
       refute "\n" in logged
     end
 
+    test "collapses spinner frames that arrive in one log entry", %{ctx: ctx} do
+      frames =
+        for i <- 0..19, do: "#{Enum.at(~w(◐ ◓ ◑ ◒), rem(i, 4))}  Cloning repository…\n"
+
+      stub_tools(outcome: {:exit, 1, raw_log([Enum.join(["Source: repo\n" | frames])])})
+
+      assert {:error, message} = Env.run("env.create", payload(), ctx)
+      assert message =~ "Source: repo"
+      assert length(String.split(message, "Cloning repository")) == 2
+    end
+
+    test "shows only the last of frames redrawn on one line", %{ctx: ctx} do
+      redraws =
+        Enum.map_join(0..19, fn i ->
+          "\e[1G\e[J#{Enum.at(~w(◐ ◓ ◑ ◒), rem(i, 4))}  Cloning repository…"
+        end)
+
+      lines = ["Source: repo\n" <> redraws, "\r", "\e[1G\e[J◐  Cloning repository…."]
+      stub_tools(outcome: {:exit, 1, raw_log(lines)})
+
+      assert {:error, message} = Env.run("env.create", payload(), ctx)
+      assert message =~ "Source: repo\n◒  Cloning repository…"
+      assert length(String.split(message, "Cloning repository")) == 2
+
+      logged = logged()
+      assert Enum.count(logged, &(&1 =~ "Cloning repository")) == 1
+      refute "\n" in logged
+    end
+
+    test "cleans up a tool's own spinner, cursor movement and links", %{ctx: ctx} do
+      output =
+        Enum.join([
+          "Cloning into '/w'...\n",
+          "Receiving objects:  50% (1/2)\rReceiving objects: 100% (2/2), done.\n",
+          "⠋ Resolving deltas\n",
+          "\e[1D\n",
+          "\e[0K\n",
+          "⠙ Resolving deltas\n",
+          "remote: Repository not found.\r\r\n",
+          "remote: Check the URL.\e[1G\n",
+          "fatal: \e]8;;https://example.com/help\e\\authentication failed\e]8;;\e\\\n"
+        ])
+
+      stub(RunnerMock, :run, fn "git", _args, run_opts ->
+        run_opts[:on_output].(output)
+        {:ok, %{status: 128, output: output}}
+      end)
+
+      assert {:error, message} = Env.run("env.create", payload(), ctx)
+      assert message =~ "fatal: authentication failed"
+      assert length(String.split(message, "Resolving deltas")) == 2
+
+      logged = logged()
+      assert Enum.count(logged, &(&1 =~ "Resolving deltas")) == 1
+      assert "fatal: authentication failed\n" in logged
+      assert "Receiving objects: 100% (2/2), done.\n" in logged
+      assert "remote: Repository not found.\n" in logged
+      assert "remote: Check the URL.\n" in logged
+      refute Enum.any?(logged, &(&1 =~ "50%"))
+      refute "\n" in logged
+    end
+
     test "is idempotent: a retried create reuses the clone", %{ctx: ctx} do
       stub_tools()
       assert {:ok, _} = Env.run("env.create", payload(), ctx)
