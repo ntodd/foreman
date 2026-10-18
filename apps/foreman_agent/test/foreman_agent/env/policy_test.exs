@@ -266,6 +266,27 @@ defmodule ForemanAgent.Env.PolicyTest do
       assert message =~ "Docker socket"
     end
 
+    test "says when a refused feature is one the user added, not the repo's" do
+      ref = "ghcr.io/mona/features/root:1"
+
+      config =
+        resolved([
+          {ref, %{"id" => "root", "privileged" => true, "capAdd" => ["SYS_ADMIN"]}},
+          {"ghcr.io/acme/features/caps:1", %{"id" => "caps", "capAdd" => ["SYS_MODULE"]}}
+        ])
+
+      ctx = Map.put(ctx(), :user_features, [ref])
+      assert {:error, messages} = Policy.check_resolved(config, ctx)
+
+      assert [privileged, caps] = Enum.filter(messages, &(&1 =~ ref))
+      assert privileged =~ "your feature #{ref} (from your Foreman settings)"
+      assert caps =~ "your feature #{ref} (from your Foreman settings)"
+
+      assert [repo] = Enum.filter(messages, &(&1 =~ "caps:1"))
+      assert repo =~ "feature ghcr.io/acme/features/caps:1"
+      refute repo =~ "your feature"
+    end
+
     test "still refuses privileged when it can't tell where it came from" do
       assert {:error, [message]} =
                Policy.check_resolved(resolved([], %{"privileged" => true}), ctx())

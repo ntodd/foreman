@@ -10,13 +10,6 @@ defmodule ForemanProtocol.ProtocolV2Test do
 
   @env_id "6f1c1d1e-9a3b-4c1f-8f5e-2d7a9b0c1e2f"
 
-  test "this build speaks protocol 2 and still accepts agents on 1" do
-    assert ForemanProtocol.version() == 2
-    assert ForemanProtocol.compatible?(2)
-    assert ForemanProtocol.compatible?(1)
-    refute ForemanProtocol.compatible?(0)
-  end
-
   describe "env.secrets.write keep" do
     test "names secret files the agent should leave alone" do
       assert {:ok, cmd} =

@@ -79,7 +79,8 @@ defmodule ForemanAgent.Env.Policy do
           workspace_root: Path.t(),
           secrets_dir: Path.t(),
           protected: [Path.t()],
-          rules: map()
+          rules: map(),
+          user_features: [String.t()]
         }
 
   @spec check(map(), map(), ctx()) :: {:ok, [String.t()]} | {:error, [String.t()]}
@@ -166,18 +167,26 @@ defmodule ForemanAgent.Env.Policy do
 
   defp feature_findings({id, feature}, ctx) do
     caps = root_caps(feature["capAdd"])
+    owner = feature_owner(id, ctx)
 
     [
-      feature["privileged"] == true && rule(ctx, :privileged, privileged_feature(id)),
+      feature["privileged"] == true && rule(ctx, :privileged, privileged_feature(owner)),
       caps != [] &&
         rule(
           ctx,
           :privileged,
-          "feature #{id} adds #{Enum.join(caps, ", ")}, which is root on the box"
+          "#{owner} adds #{Enum.join(caps, ", ")}, which is root on the box"
         )
     ]
     |> Enum.filter(& &1)
-    |> Kernel.++(security_opt_findings("feature #{id}", feature["securityOpt"], ctx))
+    |> Kernel.++(security_opt_findings(owner, feature["securityOpt"], ctx))
+  end
+
+  # A feature the user added themselves isn't the repo's doing, so say so.
+  defp feature_owner(id, ctx) do
+    if id in Map.get(ctx, :user_features, []),
+      do: "your feature #{id} (from your Foreman settings)",
+      else: "feature #{id}"
   end
 
   # Privileged in the merged config that no feature or devcontainer.json
@@ -688,7 +697,7 @@ defmodule ForemanAgent.Env.Policy do
     features =
       for {id, _opts} <- config["features"] || %{},
           String.contains?(id, "docker-in-docker") do
-        rule(ctx, :privileged, privileged_feature(id))
+        rule(ctx, :privileged, privileged_feature("feature #{id}"))
       end
 
     privileged =
@@ -750,8 +759,8 @@ defmodule ForemanAgent.Env.Policy do
 
   defp mount_finding(_type, _source, _target, _ro, _external, _ctx), do: []
 
-  defp privileged_feature(id),
-    do: "feature #{id} runs the devcontainer privileged, which is root on the box"
+  defp privileged_feature(owner),
+    do: "#{owner} runs the devcontainer privileged, which is root on the box"
 
   defp root_caps(caps) when is_list(caps) do
     Enum.filter(caps, &(is_binary(&1) and cap_name(&1) in @root_caps))

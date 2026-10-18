@@ -9,7 +9,8 @@ defmodule ForemanProtocol do
   alias ForemanProtocol.Schema
 
   # 2: env.secrets.write can `keep` files; the seccomp policy rule.
-  @version 2
+  # 3: env.create and env.rebuild can carry a user's own `features`.
+  @version 3
 
   @doc "The protocol version this build speaks."
   def version, do: @version

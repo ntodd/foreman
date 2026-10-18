@@ -390,6 +390,27 @@ defmodule ForemanAgent.Integration.EnvDockerTest do
     assert containers(env_id) == %{}
   end
 
+  # The CLI reports a feature passed with --additional-features under the
+  # ref it was given, which is how a refusal tells the user's own apart.
+  test "the policy names a user's own feature it refuses", %{
+    config: config,
+    base_url: base_url
+  } do
+    env_id = "66666666-6666-4666-8666-666666666666"
+    ref = "ghcr.io/devcontainers/features/docker-in-docker:2"
+
+    payload =
+      create_payload(env_id, "hello-9", base_url, %{
+        "tailscale" => %{"enabled" => false},
+        "features" => %{ref => %{}}
+      })
+
+    assert {:error, message} = Env.run("env.create", payload, ctx(config))
+    assert message =~ "your feature #{ref} (from your Foreman settings)"
+    assert message =~ "privileged"
+    assert containers(env_id) == %{}
+  end
+
   test "the policy refuses a compose file rewritten from inside the environment", %{
     config: config,
     base_url: base_url
