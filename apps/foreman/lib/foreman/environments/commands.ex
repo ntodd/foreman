@@ -83,6 +83,7 @@ defmodule Foreman.Environments.Commands do
   defp up(op, env, type) do
     secrets = secrets(env)
     identity = Accounts.effective_identity(env.user, env.repo)
+    features = features(env)
     # A build shouldn't wait on GitHub: without a token it goes ahead, and
     # the token follows with the next refresh.
     {token, token_notice, token_status} = github_token(env)
@@ -109,6 +110,7 @@ defmodule Foreman.Environments.Commands do
           }
         })
         |> put_present(:dotfiles, dotfiles(identity))
+        |> put_present(:features, features)
         |> put_present(:registry_auth, registry_auth(env.repo.owner))
 
       with {:ok, cmd, _} <- command(op, type, payload) do
@@ -259,6 +261,13 @@ defmodule Foreman.Environments.Commands do
     )
   end
 
+  # Protocol 3. An older agent would refuse the whole command, so its
+  # environments build without them until it updates.
+  defp features(%{box: %{protocol_version: v}} = env) when is_integer(v) and v >= 3,
+    do: Accounts.effective_features(env.user, env.repo)
+
+  defp features(_env), do: %{}
+
   defp registry_auth(%{registry_token: token} = owner) when is_binary(token) do
     [%{host: owner.registry_host || "ghcr.io", username: owner.registry_username, token: token}]
   end
@@ -267,5 +276,6 @@ defmodule Foreman.Environments.Commands do
 
   defp put_present(map, _key, nil), do: map
   defp put_present(map, _key, ""), do: map
+  defp put_present(map, _key, value) when value == %{}, do: map
   defp put_present(map, key, value), do: Map.put(map, key, value)
 end

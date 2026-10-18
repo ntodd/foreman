@@ -230,6 +230,34 @@ defmodule Foreman.Accounts do
     end
   end
 
+  @doc """
+  Replaces the devcontainer features that go on all the user's
+  environments. The audit log records which refs changed, not their
+  options, which can hold anything.
+  """
+  def update_features(%Scope{user: user}, features) do
+    changeset = User.features_changeset(user, features)
+
+    with {:ok, updated} <- Repo.update(changeset) do
+      if changeset.changes != %{} do
+        Audit.log(user, "user.features", updated, feature_changes(user, updated))
+      end
+
+      {:ok, updated}
+    end
+  end
+
+  defp feature_changes(%{devcontainer_features: old}, %{devcontainer_features: new}) do
+    old = old || %{}
+
+    %{
+      "added" => new |> Map.keys() |> Enum.reject(&Map.has_key?(old, &1)) |> Enum.sort(),
+      "removed" => old |> Map.keys() |> Enum.reject(&Map.has_key?(new, &1)) |> Enum.sort(),
+      "changed" =>
+        for({ref, opts} <- new, Map.has_key?(old, ref), old[ref] != opts, do: ref) |> Enum.sort()
+    }
+  end
+
   def change_preferences(%User{} = user, attrs \\ %{}),
     do: User.preferences_changeset(user, attrs)
 
@@ -345,6 +373,22 @@ defmodule Foreman.Accounts do
         into: %{} do
       {field, blank_to_nil(Map.get(setting, field)) || blank_to_nil(Map.get(user, field))}
     end
+  end
+
+  @doc """
+  The user's own devcontainer features for an environment of `repo`: all
+  of them, less the ones they've turned off for the repo.
+  """
+  def effective_features(%User{} = user, repo) do
+    disabled =
+      case get_repo_setting(user, repo) do
+        %RepoSetting{disabled_features: disabled} -> disabled || []
+        nil -> []
+      end
+
+    Map.reject(user.devcontainer_features || %{}, fn {ref, _} ->
+      ForemanProtocol.Feature.base(ref) in disabled
+    end)
   end
 
   defp blank_to_nil(""), do: nil

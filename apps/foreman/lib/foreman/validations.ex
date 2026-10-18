@@ -2,6 +2,10 @@ defmodule Foreman.Validations do
   @moduledoc "Changeset validations shared by several schemas."
   import Ecto.Changeset
 
+  alias ForemanProtocol.{Feature, Schema}
+
+  @max_features 30
+
   @doc """
   Git name and email end up in a gitconfig file, so they can't contain
   newlines, brackets or quotes that would let a value add config of its own.
@@ -26,6 +30,54 @@ defmodule Foreman.Validations do
     )
     |> validate_length(:dotfiles_install_command, max: 500)
     |> validate_format(:dotfiles_install_command, ~r/\A[^\n\r\0]*\z/, message: "must be one line")
+  end
+
+  @doc """
+  A user's own devcontainer features: OCI refs (no local paths or
+  tarballs), each listed once, none with the Foreman feature's id, and
+  options the agent would take.
+  """
+  def validate_features(changeset, field) do
+    validate_change(changeset, field, fn ^field, features ->
+      errors =
+        if map_size(features) > @max_features,
+          do: ["can't list more than #{@max_features} features"],
+          else: Enum.flat_map(features, &feature_errors/1) ++ duplicate_features(features)
+
+      Enum.map(errors, &{field, &1})
+    end)
+  end
+
+  defp feature_errors({ref, options}) do
+    cond do
+      not Feature.valid_ref?(ref) ->
+        ["#{ref} isn't a feature ref like ghcr.io/owner/features/name:1"]
+
+      Feature.id(ref) == Feature.foreman_id() ->
+        ["#{ref} uses the id of Foreman's own feature"]
+
+      true ->
+        case Schema.cast(%{"options" => options},
+               options: {Feature.options_type(), required: true}
+             ) do
+          {:ok, _} -> []
+          {:error, errors} -> Enum.map(errors, fn {path, msg} -> "#{ref}: #{path} #{msg}" end)
+        end
+    end
+  end
+
+  defp duplicate_features(features) do
+    for {base, [_, _ | _]} <- Enum.group_by(Map.keys(features), &Feature.base/1),
+        do: "lists #{base} twice"
+  end
+
+  @doc "Feature refs without a tag or digest."
+  def validate_feature_bases(changeset, field) do
+    validate_change(changeset, field, fn ^field, bases ->
+      for base <- bases,
+          not (Feature.valid_ref?(base) and Feature.base(base) == base),
+          do: {field, "#{base} isn't a feature ref without a version"}
+    end)
   end
 
   @doc "Environment variable names for secrets."
