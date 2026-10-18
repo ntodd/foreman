@@ -1,0 +1,5 @@
+{
+  "TCP": {"8443": {"HTTPS": true}},
+  "Web": {"dev.osiris-delta.ts.net:8443": {"Handlers": {"/": {"Proxy": "http://127.0.0.1:4100"}}}},
+  "AllowFunnel": {"dev.osiris-delta.ts.net:8443": true}
+}

@@ -39,9 +39,19 @@ The app's credentials (client secret, private key) are stored encrypted
 in the database. To manage them yourself instead, create the app by hand
 and set `FOREMAN_GITHUB_APP_ID`, `FOREMAN_GITHUB_CLIENT_ID`,
 `FOREMAN_GITHUB_CLIENT_SECRET` and `FOREMAN_GITHUB_PRIVATE_KEY_FILE`;
-the environment wins over the database. The callback URL is
-`https://<host>/auth/github/callback`, and "Expire user authorization
-tokens" must be on.
+the environment wins over the database. Give it what the manifest
+would (`<base>` is `FOREMAN_BASE_URL`, such as
+`https://dev.example.ts.net:8443`, with the port if serve isn't on 443):
+
+- Homepage URL `<base>`, callback URL `<base>/auth/github/callback`,
+  setup URL `<base>/setup/github/installed`
+- "Expire user authorization tokens" on
+- Webhook inactive, no events
+- The permissions in the table above
+- Installable only on this account
+
+The installer (`--github-app manual`) prints these filled in, installs
+the key and adds the mount below for you.
 
 The private key is a multi-line PEM, which an env file can't hold, so
 give it as a file. The container runs as `foreman` (uid 999), so the
@@ -53,6 +63,10 @@ file has to be readable by that uid, and mounted in. Add the mount to
       - foreman-data:/var/lib/foreman
       - /etc/foreman/github-app.pem:/run/secrets/github-app.pem:ro
 ```
+
+On a host that's also a box, `ls -l` may show uid 999 as the agent's
+`foreman` user: `useradd --system` took the same number on the host.
+That's expected; `/etc/foreman` is root's (0700) either way.
 
 ```sh
 sudo chown 999 /etc/foreman/github-app.pem && sudo chmod 0400 /etc/foreman/github-app.pem

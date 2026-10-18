@@ -6,6 +6,8 @@
 # Re-running it on an enrolled box updates the agent and the devcontainer
 # CLI and keeps the box's identity (no token needed). To enroll again, for
 # example after the box was revoked, pass --reenroll with a new token.
+# The token can also come from FOREMAN_JOIN_TOKEN in the environment,
+# which other users can't read the way they can read arguments in ps.
 #
 # Needs: systemd, Docker Engine with Compose v2.24+, git, and Node 20+
 # (for the devcontainer CLI). The agent runs as the `foreman` user, which
@@ -15,7 +17,7 @@ set -eu
 
 FOREMAN_URL="__FOREMAN_URL__"
 DEVCONTAINER_CLI_VERSION="0.89.0"
-TOKEN=""
+TOKEN="${FOREMAN_JOIN_TOKEN:-}"
 POLICY=""
 REENROLL=""
 IDENTITY=/var/lib/foreman-agent/identity.json
@@ -41,7 +43,7 @@ if [ -s "$IDENTITY" ] && [ -z "$REENROLL" ]; then
   enroll=""
 fi
 if [ -n "$enroll" ]; then
-  [ -n "$TOKEN" ] || fail "--token is required (create one on the Boxes page)"
+  [ -n "$TOKEN" ] || fail "--token (or FOREMAN_JOIN_TOKEN) is required (create one on the Boxes page)"
 fi
 command -v systemctl >/dev/null 2>&1 || fail "systemd is required"
 command -v docker >/dev/null 2>&1 || fail "Docker Engine is required"

@@ -1,0 +1,2 @@
+19:28:39.700 [warning] bundled agent 0.3.0 for linux-amd64 wasn't registered: no agent release key configured (FOREMAN_AGENT_RELEASE_PUBLIC_KEY)
+19:28:39.701 [warning] bundled agent 0.3.0 for linux-arm64 wasn't registered: no agent release key configured (FOREMAN_AGENT_RELEASE_PUBLIC_KEY)

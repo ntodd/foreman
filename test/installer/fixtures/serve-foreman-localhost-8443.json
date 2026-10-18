@@ -1,0 +1,4 @@
+{
+  "TCP": {"8443": {"HTTPS": true}},
+  "Web": {"dev.osiris-delta.ts.net:8443": {"Handlers": {"/": {"Proxy": "http://localhost:4100"}}}}
+}

@@ -1,0 +1,2 @@
+{"TCP": {"2222": {"TCPForward": "127.0.0.1:22"}},
+ "Foreground": {"50a4395f48e3f995": {"TCP": {"8443": {"HTTPS": true}}, "Web": {"dev.osiris-delta.ts.net:8443": {"Handlers": {"/": {"Proxy": "http://127.0.0.1:5000"}}}}, "AllowFunnel": {"dev.osiris-delta.ts.net:8443": true}}}}

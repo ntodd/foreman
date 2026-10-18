@@ -1,0 +1,61 @@
+#!/usr/bin/env bash
+# Just enough of the tailscale CLI for the installer: status --json,
+# serve status [--json], and serve --bg --https=PORT TARGET, which nginx
+# carries out with the test certificate. State is in /var/lib/fake-tailscale.
+set -euo pipefail
+dir=/var/lib/fake-tailscale
+fqdn=$(cat "$dir/fqdn")
+echo "tailscale $*" >> "$dir/calls.log"
+
+status_json() {
+  jq -n --arg dns "$fqdn." --arg host "${fqdn%%.*}" --argjson tags "$(cat "$dir/tags.json")" '{
+    BackendState: "Running",
+    Self: ({HostName: $host, DNSName: $dns, CapMap: {"https": null}} + (if ($tags | length) > 0 then {Tags: $tags} else {} end)),
+    CurrentTailnet: {Name: "e2e@example.com", MagicDNSSuffix: "example.ts.net", MagicDNSEnabled: true},
+    CertDomains: [($dns | rtrimstr("."))]
+  }'
+}
+
+nginx_for() { # PORT TARGET
+  cat > "/etc/nginx/conf.d/serve-$1.conf" <<CONF
+server {
+  listen $1 ssl;
+  server_name $fqdn;
+  ssl_certificate /etc/fake-tailscale/host.crt;
+  ssl_certificate_key /etc/fake-tailscale/host.key;
+  location / {
+    proxy_pass $2;
+    proxy_http_version 1.1;
+    proxy_set_header Host \$http_host;
+    proxy_set_header X-Forwarded-Proto https;
+    proxy_set_header X-Forwarded-For \$remote_addr;
+    proxy_set_header Upgrade \$http_upgrade;
+    proxy_set_header Connection "upgrade";
+    proxy_read_timeout 1h;
+  }
+}
+CONF
+  systemctl reload-or-restart nginx
+}
+
+case "${1:-} ${2:-}" in
+  "status --json") status_json ;;
+  "serve status")
+    if [ "${3:-}" = --json ]; then cat "$dir/serve.json"; exit 0; fi
+    jq -r --arg fqdn "$fqdn" '(.AllowFunnel // {}) as $f | (.Web // {}) | to_entries[] |
+      (.key | split(":") | last) as $p |
+      "https://\($fqdn)\(if $p == "443" then "" else ":" + $p end) (\(if $f[.key] then "Funnel on" else "tailnet only" end))\n|-- / proxy \(.value.Handlers["/"].Proxy)\n"' "$dir/serve.json" ;;
+  "serve --bg")
+    port=${3#--https=}
+    target=$4
+    tmp=$(mktemp)
+    jq --arg hp "$fqdn:$port" --arg p "$port" --arg t "$target" \
+      '.TCP[$p] = {HTTPS: true} | .Web[$hp] = {Handlers: {"/": {Proxy: $t}}} | del(.AllowFunnel[$hp])' \
+      "$dir/serve.json" > "$tmp"
+    mv "$tmp" "$dir/serve.json"
+    nginx_for "$port" "$target"
+    echo "Available within your tailnet:"
+    echo "https://$fqdn:$port/"
+    ;;
+  *) echo "fake tailscale: unsupported: $*" >&2; exit 1 ;;
+esac

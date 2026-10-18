@@ -12,6 +12,10 @@ name: Release
 # upgrading it is a pull and a restart. scripts/publish-agent-release.sh
 # still registers a GitHub release's agents by hand.
 #
+# The release also gets install-control-plane.sh with this version, the
+# image and the release public key baked in, which installs (or upgrades
+# to) this release on a personal host.
+#
 # Needs the FOREMAN_RELEASE_PRIVATE_KEY secret and the
 # FOREMAN_RELEASE_PUBLIC_KEY variable (`mix foreman_agent.sign --keygen`).
 
@@ -35,6 +39,7 @@ jobs:
     outputs:
       version: ${{ steps.check.outputs.version }}
     steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Check the tag and keys
         id: check
         env:
@@ -45,6 +50,11 @@ jobs:
           echo "$version" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$' || { echo "::error::$GITHUB_REF_NAME isn't vX.Y.Z"; exit 1; }
           [ -n "$PUBLIC_KEY" ] || { echo "::error::Set the FOREMAN_RELEASE_PUBLIC_KEY variable"; exit 1; }
           [ "$HAS_PRIVATE_KEY" = true ] || { echo "::error::Set the FOREMAN_RELEASE_PRIVATE_KEY secret"; exit 1; }
+          # The release job renders the installer after the images are
+          # pushed; a key it would refuse should stop the release here.
+          image=$(echo "ghcr.io/$GITHUB_REPOSITORY" | tr '[:upper:]' '[:lower:]')
+          scripts/render-control-plane-installer.sh "$version" "$image" "$PUBLIC_KEY" >/dev/null ||
+            { echo "::error::FOREMAN_RELEASE_PUBLIC_KEY can't be baked into the installer (see above)"; exit 1; }
           echo "version=$version" >> "$GITHUB_OUTPUT"
 
   # CI doesn't run on tags by itself, and nothing gets published from a
@@ -170,9 +180,13 @@ jobs:
     permissions:
       contents: read
       packages: write
+    outputs:
+      latest: ${{ steps.tag.outputs.latest }}
     steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Tag the multi-arch images
-        # bash, not the default shell, so a failed gh api isn't hidden by the pipe.
+        id: tag
+        # bash, not the default shell, so a failed gh call isn't hidden by the pipe.
         shell: bash
         env:
           VERSION: ${{ needs.check.outputs.version }}
@@ -180,14 +194,17 @@ jobs:
         run: |
           image=$(echo "ghcr.io/$GITHUB_REPOSITORY" | tr '[:upper:]' '[:lower:]')
           echo "$GH_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
-          # :latest only moves to the highest version, so a patch tagged on
-          # an older line doesn't take it back.
-          highest=$(gh api "repos/$GITHUB_REPOSITORY/git/matching-refs/tags/v" --paginate \
-            --jq '.[].ref | ltrimstr("refs/tags/")' | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -n 1)
-          [ -n "$highest" ] || { echo "::error::couldn't list the release tags"; exit 1; }
+          # :latest (and GitHub's Latest release, in the release job) only
+          # move to a version at or above every published release, so a
+          # patch tagged on an older line doesn't take them back. Tags
+          # whose release failed don't count.
+          published=$(gh release list -R "$GITHUB_REPOSITORY" --exclude-drafts --exclude-pre-releases \
+            --limit 1000 --json tagName --jq '.[].tagName')
+          latest=$(printf '%s\n' "$published" | scripts/release-is-latest.sh "$GITHUB_REF_NAME")
+          echo "latest=$latest" >> "$GITHUB_OUTPUT"
           for suffix in "" -pg; do
             set -- -t "$image:$VERSION$suffix"
-            [ "$highest" = "$GITHUB_REF_NAME" ] && set -- "$@" -t "$image:latest$suffix"
+            [ "$latest" = true ] && set -- "$@" -t "$image:latest$suffix"
             docker buildx imagetools create "$@" \
               "$image:$VERSION$suffix-amd64" "$image:$VERSION$suffix-arm64"
           done
@@ -209,9 +226,12 @@ jobs:
       - name: Publish the GitHub release
         env:
           VERSION: ${{ needs.check.outputs.version }}
+          PUBLIC_KEY: ${{ vars.FOREMAN_RELEASE_PUBLIC_KEY }}
+          LATEST: ${{ needs.manifest.outputs.latest }}
           GH_TOKEN: ${{ github.token }}
         run: |
           image=$(echo "ghcr.io/$GITHUB_REPOSITORY" | tr '[:upper:]' '[:lower:]')
+          scripts/render-control-plane-installer.sh "$VERSION" "$image" "$PUBLIC_KEY" > out/install-control-plane.sh
           protocol_of() { git show "$1:apps/foreman_protocol/lib/foreman_protocol.ex" | sed -n 's/^  @version \([0-9]*\)$/\1/p'; }
           prev=$(git tag -l 'v*.*.*' | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V |
             awk -v tag="$GITHUB_REF_NAME" '$0 == tag { print last; exit } { last = $0 }')
@@ -241,7 +261,13 @@ jobs:
               echo "No migrations since $prev."
             fi
             echo
+            echo "To install or upgrade a personal control plane (SQLite, one host) to this release: \`gh release download $GITHUB_REF_NAME -R $GITHUB_REPOSITORY -p install-control-plane.sh -O - | sudo bash\`"
+            echo
             echo "To register these agents on a control plane by hand: \`scripts/publish-agent-release.sh $VERSION\`"
           } > notes.md
-          gh release create "$GITHUB_REF_NAME" --verify-tag --title "Foreman $VERSION" \
-            --notes-file notes.md out/*.tar.gz out/*.sig
+          # GitHub's Latest release follows :latest, decided in the manifest
+          # job: the docs fetch the installer from it, and a patch on an
+          # older line would hand out that line's installer.
+          case "$LATEST" in true | false) ;; *) echo "::error::the manifest job didn't say whether this is the latest release"; exit 1 ;; esac
+          gh release create "$GITHUB_REF_NAME" --verify-tag --latest="$LATEST" --title "Foreman $VERSION" \
+            --notes-file notes.md out/*.tar.gz out/*.sig out/install-control-plane.sh

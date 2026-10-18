@@ -1,0 +1,6 @@
+{
+  "BackendState": "NeedsLogin",
+  "Self": {"HostName": "dev", "DNSName": ""},
+  "CurrentTailnet": null,
+  "CertDomains": null
+}

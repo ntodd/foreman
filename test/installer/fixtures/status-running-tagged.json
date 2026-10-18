@@ -1,0 +1,18 @@
+{
+  "Version": "1.104.1-t9a522a978",
+  "BackendState": "Running",
+  "TailscaleIPs": ["100.101.102.103", "fd7a:115c:a1e0::1"],
+  "Self": {
+    "HostName": "dev",
+    "DNSName": "dev.osiris-delta.ts.net.",
+    "OS": "linux",
+    "UserID": 123,
+    "TailscaleIPs": ["100.101.102.103", "fd7a:115c:a1e0::1"],
+    "Tags": ["tag:foreman"],
+    "Online": true,
+    "CapMap": {"https": null, "funnel": null, "https://tailscale.com/cap/funnel-ports?ports=443,8443,10000": null}
+  },
+  "MagicDNSSuffix": "osiris-delta.ts.net",
+  "CurrentTailnet": {"Name": "nate@example.com", "MagicDNSSuffix": "osiris-delta.ts.net", "MagicDNSEnabled": true},
+  "CertDomains": ["dev.osiris-delta.ts.net"]
+}
