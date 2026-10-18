@@ -231,6 +231,17 @@ defmodule ForemanAgent.Env.PolicyGpuTest do
       assert {:ok, []} = Policy.check_docker(info, ctx(%{devices: :allow}))
     end
 
+    # Docker reserves runc, but io.containerd.runc.v2 can be redefined,
+    # with NVIDIA's binary in options that /info may leave out.
+    test "so is io.containerd.runc.v2 without a binary" do
+      info = %{
+        "DefaultRuntime" => "io.containerd.runc.v2",
+        "Runtimes" => %{"io.containerd.runc.v2" => %{"runtimeType" => "io.containerd.runc.v2"}}
+      }
+
+      assert {:error, [_]} = Policy.check_docker(info, ctx())
+    end
+
     test "Docker's own runc, under either name, and other runtimes with a binary are fine" do
       for {default, runtimes} <- [
             {"runc", %{"runc" => %{"path" => "runc"}}},

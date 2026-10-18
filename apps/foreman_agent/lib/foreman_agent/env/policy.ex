@@ -461,10 +461,9 @@ defmodule ForemanAgent.Env.Policy do
 
   def check_docker(_info, _ctx), do: {:error, ["couldn't tell what Docker's default runtime is"]}
 
-  @runc ~w(runc io.containerd.runc.v2)
-
   # :nvidia, :unknown (Docker doesn't say what it runs) or :other. With no
-  # runtimes to look in, only the name can tell.
+  # runtimes to look in, only the name can tell. Docker reserves the name
+  # runc; io.containerd.runc.v2 can be redefined, so it needs a binary.
   defp runtime_kind(name, runtimes) do
     spec = if is_map(runtimes), do: runtimes[name], else: nil
     spec = if is_map(spec), do: spec, else: %{}
@@ -472,7 +471,7 @@ defmodule ForemanAgent.Env.Policy do
 
     cond do
       Enum.any?([name | binaries], &nvidia_runtime?/1) -> :nvidia
-      name in @runc or binaries != [] or not is_map(runtimes) -> :other
+      name == "runc" or binaries != [] or not is_map(runtimes) -> :other
       true -> :unknown
     end
   end

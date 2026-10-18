@@ -134,7 +134,10 @@ These stay under the `devices` rule, so `gpu=allow` doesn't cover them:
 
 `hostRequirements.gpu` in `devcontainer.json` is ignored: the agent runs
 the devcontainer CLI with `--gpu-availability none`, so only the
-reservations in the compose file reach a container.
+reservations in the compose file reach a container. Agents before this
+let the CLI add a GPU for `hostRequirements.gpu`, and a container made
+that way keeps it across starts and restarts, so rebuild environments
+on a GPU box after upgrading its agent.
 
 Environments on a box share its GPUs. Foreman doesn't limit their GPU
 memory or keep one environment's work off another's GPU, so one that
