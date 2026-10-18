@@ -52,7 +52,7 @@ defmodule ForemanAgent.Env.Policy do
                    configs container_name cpu_count cpu_percent cpu_period cpu_quota
                    cpu_rt_period cpu_rt_runtime cpu_shares cpus cpuset depends_on deploy develop
                    device_cgroup_rules devices dns dns_opt dns_search domainname entrypoint
-                   env_file environment expose extends extra_hosts group_add healthcheck
+                   env_file environment expose extends extra_hosts gpus group_add healthcheck
                    hostname image init ipc label_file labels links logging mac_address mem_limit
                    mem_reservation mem_swappiness memswap_limit network_mode networks
                    oom_kill_disable oom_score_adj pid pids_limit platform ports post_start
@@ -60,6 +60,14 @@ defmodule ForemanAgent.Env.Policy do
                    security_opt shm_size stdin_open stop_grace_period stop_signal storage_opt
                    sysctls tmpfs tty ulimits user userns_mode uts volumes volumes_from
                    working_dir)
+
+  # NVIDIA driver capabilities a GPU reservation may ask for: CUDA,
+  # 32-bit libraries, nvidia-smi and NVENC/NVDEC. graphics and display
+  # (OpenGL and Vulkan, the display's modeset device) stay host devices.
+  @gpu_driver_caps ~w(compute compat32 utility video)
+  # Capabilities that only pick the driver.
+  @gpu_selectors ~w(gpu nvidia)
+  @max_gpus 64
 
   @build_keys ~w(context dockerfile dockerfile_inline args ssh cache_from cache_to
                  additional_contexts extra_hosts labels no_cache pull shm_size target secrets
@@ -308,7 +316,8 @@ defmodule ForemanAgent.Env.Policy do
       namespace_findings(name, svc, ctx) ++
       volumes_from_findings(name, svc, ctx) ++
       security_opt_findings("service '#{name}'", svc["security_opt"], ctx) ++
-      gpu_findings(name, svc, ctx)
+      gpu_findings(name, svc, ctx) ++
+      runtime_findings(name, svc, ctx)
   end
 
   defp key_findings(name, svc, ctx) do
@@ -324,16 +333,145 @@ defmodule ForemanAgent.Env.Policy do
     if known_service_key?(key), do: [], else: [unknown_key("service '#{name}'", key, ctx)]
   end
 
-  # deploy.resources.reservations.devices: GPUs and other host devices.
+  # Device requests: deploy.resources.reservations.devices, and the gpus
+  # key (compose adds the gpu capability to each of its entries). Only
+  # NVIDIA GPUs with the driver capabilities listed are the gpu rule's;
+  # anything else (another driver, CDI names, options) is a host device.
   defp gpu_findings(name, svc, ctx) do
-    case get_in(svc, ["deploy", "resources", "reservations", "devices"]) do
-      devices when is_list(devices) and devices != [] ->
-        [rule(ctx, :devices, "service '#{name}' reserves host devices (#{inspect(devices)})")]
+    Enum.map(device_requests(svc), &device_request_finding(name, &1, ctx))
+  end
+
+  @doc "Whether a merged compose config asks for GPUs in any of its services."
+  def requests_gpus?(compose) do
+    compose
+    |> Map.get("services")
+    |> Kernel.||(%{})
+    |> Map.values()
+    |> Enum.any?(fn svc -> Enum.any?(device_requests(svc || %{}), &gpu_request?/1) end)
+  end
+
+  defp device_requests(svc) do
+    reserved =
+      case get_in(svc, ["deploy", "resources", "reservations", "devices"]) do
+        devices when is_list(devices) -> devices
+        _ -> []
+      end
+
+    gpus =
+      case svc["gpus"] do
+        nil -> []
+        gpus when is_list(gpus) -> Enum.map(gpus, &implicit_gpu/1)
+        other -> [other]
+      end
+
+    reserved ++ gpus
+  end
+
+  defp implicit_gpu(%{} = request),
+    do: Map.update(request, "capabilities", ["gpu"], &if(is_list(&1), do: ["gpu" | &1], else: &1))
+
+  defp implicit_gpu(other), do: other
+
+  defp gpu_request?(%{"driver" => "nvidia"}), do: true
+  defp gpu_request?(%{"capabilities" => caps}) when is_list(caps), do: "gpu" in caps
+  defp gpu_request?(_), do: false
+
+  defp device_request_finding(service, request, ctx) do
+    if nvidia_gpus?(request) do
+      caps = request["capabilities"] -- @gpu_selectors
+
+      rule(
+        ctx,
+        :gpu,
+        "service '#{service}' reserves NVIDIA GPUs (#{Enum.join(caps, ", ")}), which every " <>
+          "environment on this box would share; allow it on this box with FOREMAN_POLICY=gpu=allow"
+      )
+    else
+      rule(
+        ctx,
+        :devices,
+        "service '#{service}' reserves host devices (#{inspect(request)}). A GPU reservation " <>
+          "needs driver: nvidia and the driver capabilities it uses, from " <>
+          "#{Enum.join(@gpu_driver_caps, ", ")}"
+      )
+    end
+  end
+
+  # The legacy NVIDIA device request Docker hands to the toolkit's hook.
+  # At least one driver capability has to be listed: without one Docker
+  # leaves NVIDIA_DRIVER_CAPABILITIES to the image, which can ask for
+  # all of them.
+  defp nvidia_gpus?(%{"driver" => "nvidia", "capabilities" => caps} = request)
+       when is_list(caps) do
+    Map.keys(request) -- ~w(driver count device_ids capabilities options) == [] and
+      request["options"] in [nil, %{}] and
+      Enum.all?(caps, &(&1 in @gpu_selectors or &1 in @gpu_driver_caps)) and
+      Enum.any?(caps, &(&1 in @gpu_driver_caps)) and
+      gpu_selection?(request["count"], request["device_ids"])
+  end
+
+  defp nvidia_gpus?(_request), do: false
+
+  defp gpu_selection?(count, ids) when ids in [nil, []],
+    do: count in [nil, -1, "all"] or (is_integer(count) and count in 1..@max_gpus)
+
+  defp gpu_selection?(nil, ids) when is_list(ids), do: Enum.all?(ids, &gpu_id?/1)
+  defp gpu_selection?(_count, _ids), do: false
+
+  # An index, or a GPU or MIG UUID.
+  defp gpu_id?(id), do: is_binary(id) and id =~ ~r/\A(\d+|(GPU|MIG)-[0-9A-Fa-f-]+)\z/
+
+  # The nvidia runtime hands GPUs to whatever the image's environment
+  # asks for (NVIDIA_VISIBLE_DEVICES and NVIDIA_DRIVER_CAPABILITIES),
+  # without a reservation. runtime is under compose_keys too; this holds
+  # on a box that allows unreviewed keys.
+  defp runtime_findings(name, svc, ctx) do
+    case svc["runtime"] do
+      runtime when is_binary(runtime) ->
+        if nvidia_runtime?(runtime),
+          do: [
+            rule(
+              ctx,
+              :devices,
+              "service '#{name}' uses the nvidia runtime, which gives the image whichever GPUs " <>
+                "and driver capabilities its environment asks for; reserve GPUs under deploy instead"
+            )
+          ],
+          else: []
 
       _ ->
         []
     end
   end
+
+  defp nvidia_runtime?(name), do: String.contains?(String.downcase(name), "nvidia")
+
+  @doc """
+  Checks the box's Docker, from its `/info`. With NVIDIA's runtime as
+  the default, any image can get GPUs through its environment (CUDA
+  images set NVIDIA_VISIBLE_DEVICES), with whatever driver capabilities
+  it asks for, so that's a host device for every environment.
+  """
+  @spec check_docker(map(), ctx()) :: {:ok, [String.t()]} | {:error, [String.t()]}
+  def check_docker(%{"DefaultRuntime" => default} = info, ctx) when is_binary(default) do
+    path = get_in(info, ["Runtimes", default, "path"])
+
+    if nvidia_runtime?(default) or (is_binary(path) and nvidia_runtime?(path)) do
+      verdict([
+        rule(
+          ctx,
+          :devices,
+          "Docker's default runtime on this box is #{default}, NVIDIA's, so any image can ask " <>
+            "for GPUs and driver capabilities through its environment; make runc the default " <>
+            "(nvidia-ctk runtime configure without --set-as-default) and reserve GPUs under deploy"
+        )
+      ])
+    else
+      {:ok, []}
+    end
+  end
+
+  def check_docker(_info, _ctx), do: {:error, ["couldn't tell what Docker's default runtime is"]}
 
   defp volume_finding(service, %{"type" => "bind", "source" => source} = vol, ctx) do
     bind_finding("service '#{service}'", source, vol["target"], vol["read_only"] == true, ctx)

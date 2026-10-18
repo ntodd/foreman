@@ -175,6 +175,8 @@ defmodule Foreman.Boxes do
     "host_bind" => "bind mounts from outside the workspace",
     "host_file" => "env files, secrets and build contexts from outside the workspace",
     "devices" => "host devices",
+    "gpu" =>
+      "NVIDIA GPUs. Environments on this box share them, and Foreman doesn't limit or isolate GPU memory between them",
     "seccomp" => "containers with seccomp turned off (seccomp=unconfined)",
     "compose_keys" => "compose settings Foreman hasn't reviewed"
   }

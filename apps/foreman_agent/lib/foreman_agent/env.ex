@@ -403,7 +403,8 @@ defmodule ForemanAgent.Env do
          :ok <- write_overlay(overlay_path, paths, spec, services, service),
          {:ok, merged} <- files_config.(compose_files ++ [overlay_path], env),
          {:ok, policy_warnings} <- check_policy(merged, config, paths, spec, ctx.config),
-         warnings = Enum.uniq(scan_warnings ++ policy_warnings),
+         {:ok, docker_warnings} <- check_docker(paths, spec, ctx),
+         warnings = Enum.uniq(scan_warnings ++ policy_warnings ++ docker_warnings),
          override_path = Path.join(paths.meta, "devcontainer.json"),
          :ok <- write_override(override_path, config, compose_files, overlay_path),
          :ok <- install_feature(paths.clone, config_dir, ctx) do
@@ -418,6 +419,7 @@ defmodule ForemanAgent.Env do
          services: services,
          devcontainer_service: service,
          features: features,
+         gpus: Policy.requests_gpus?(merged),
          warnings: warnings
        }}
     end
@@ -612,6 +614,22 @@ defmodule ForemanAgent.Env do
     end
   end
 
+  # The box's Docker can hand out GPUs without a reservation; see
+  # Policy.check_docker/2. Without /info there's no telling, so it's
+  # refused.
+  defp check_docker(paths, spec, ctx) do
+    case ctx.docker.info() do
+      {:ok, info} ->
+        case Policy.check_docker(info, policy_ctx(paths, spec, ctx.config)) do
+          {:ok, warnings} -> {:ok, warnings}
+          {:error, refused} -> {:error, refusal(refused)}
+        end
+
+      {:error, reason} ->
+        {:error, "couldn't check Docker's default runtime on this box: #{inspect(reason)}"}
+    end
+  end
+
   defp policy_ctx(paths, spec, config) do
     %{
       project: spec.slug,
@@ -732,7 +750,11 @@ defmodule ForemanAgent.Env do
         [
           "--id-label",
           "foreman.env_id=#{spec.env_id}",
-          "--skip-post-attach"
+          "--skip-post-attach",
+          # hostRequirements.gpu (the repo's or an image's) would have the
+          # CLI reserve GPUs after the policy has checked compose.
+          "--gpu-availability",
+          "none"
         ] ++
         lockfile_args(paths.clone, spec.config_path) ++
         dotfiles_args(Map.get(spec, :dotfiles)) ++
@@ -768,15 +790,17 @@ defmodule ForemanAgent.Env do
          }}
 
       {_, %{"message" => message} = outcome} ->
-        {:error, "devcontainer up failed: #{message}#{describe(outcome)}"}
+        {:error,
+         "devcontainer up failed: #{gpu_hint(output, prepared)}#{message}#{describe(outcome)}"}
 
       {status, nil} ->
         {:error,
-         "#{exited("devcontainer up", status)} without reporting a result. " <>
+         "#{gpu_hint(output, prepared)}#{exited("devcontainer up", status)} without reporting a result. " <>
            output_below(last_lines(output, &devcontainer_log/1))}
 
       {_, _} ->
-        {:error, "devcontainer up failed: #{last_lines(output, &devcontainer_log/1)}"}
+        {:error,
+         "devcontainer up failed: #{gpu_hint(output, prepared)}#{last_lines(output, &devcontainer_log/1)}"}
     end
   end
 
@@ -800,6 +824,18 @@ defmodule ForemanAgent.Env do
 
   defp output_below(""), do: "It printed nothing."
   defp output_below(tail), do: "Its last output is below.\n" <> tail
+
+  # Docker's error when no device driver it knows takes the request,
+  # which for an NVIDIA GPU means the toolkit's hook isn't installed.
+  defp gpu_hint(output, %{gpus: true}) do
+    if output =~ "could not select device driver",
+      do:
+        "Docker has no driver for this environment's GPUs; the box needs the NVIDIA driver and " <>
+          "the NVIDIA Container Toolkit (nvidia-container-toolkit). ",
+      else: ""
+  end
+
+  defp gpu_hint(_output, _prepared), do: ""
 
   # The CLI writes devcontainer-lock.json next to the config. Keep that
   # behaviour for repos that commit one; otherwise it'd leave an untracked
@@ -964,7 +1000,7 @@ defmodule ForemanAgent.Env do
     service = prepared.devcontainer_service
     sidecars = affected -- [service]
 
-    with :ok <- recreate(ctx, spec.slug, files, env, sidecars),
+    with :ok <- recreate(ctx, spec.slug, files, env, sidecars, prepared),
          {:ok, _} <- compose(ctx, spec.slug, ["stop", service]),
          # Recreating the devcontainer itself means the CLI has to do it,
          # since it owns the image and labels.
@@ -973,9 +1009,9 @@ defmodule ForemanAgent.Env do
     end
   end
 
-  defp recreate(_ctx, _slug, _files, _env, []), do: :ok
+  defp recreate(_ctx, _slug, _files, _env, [], _prepared), do: :ok
 
-  defp recreate(ctx, slug, files, env, services) do
+  defp recreate(ctx, slug, files, env, services, prepared) do
     args =
       ["compose", "-p", slug] ++
         Enum.flat_map(files, &["-f", &1]) ++
@@ -986,7 +1022,8 @@ defmodule ForemanAgent.Env do
         :ok
 
       {:error, output} ->
-        {:error, "recreating #{Enum.join(services, ", ")} failed: #{last_lines(output)}"}
+        {:error,
+         "recreating #{Enum.join(services, ", ")} failed: #{gpu_hint(output, prepared)}#{last_lines(output)}"}
     end
   end
 

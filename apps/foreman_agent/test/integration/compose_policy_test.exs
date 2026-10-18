@@ -25,6 +25,12 @@ defmodule ForemanAgent.Integration.ComposePolicyTest do
 
   setup :verify_on_exit!
 
+  # A box whose default Docker runtime is runc.
+  setup do
+    stub(DockerMock, :info, fn -> {:ok, %{"DefaultRuntime" => "runc"}} end)
+    :ok
+  end
+
   setup %{tmp_dir: tmp} do
     config = %Config{
       data_dir: Path.join(tmp, "data"),
@@ -186,6 +192,43 @@ defmodule ForemanAgent.Integration.ComposePolicyTest do
     assert message =~ "label_file"
     refute message <> logged() =~ "QUdFTlRfUFJJVkFURV9LRVk="
     refute_received {:compose, _}
+  end
+
+  @pinch """
+  services:
+    app:
+      image: alpine
+      deploy:
+        resources:
+          reservations:
+            devices:
+              - driver: nvidia
+                count: all
+                capabilities: [gpu, compute, video, utility]
+  """
+
+  test "an NVIDIA GPU reservation is the gpu rule's", %{ctx: ctx, config: config} do
+    stub_tools(@devcontainer, @pinch)
+
+    assert {:error, message} = Env.run("env.create", payload(), ctx)
+    assert message =~ "FOREMAN_POLICY=gpu=allow"
+    refute_received :up
+
+    ctx = put_in(ctx.config.policy_rules, Map.put(config.policy_rules, :gpu, :allow))
+    assert {:ok, _} = Env.run("env.create", payload(), ctx)
+    assert_received :up
+  end
+
+  test "gpus: all leaves the capabilities to the image, so gpu=allow doesn't cover it", %{
+    ctx: ctx,
+    config: config
+  } do
+    stub_tools(@devcontainer, "services:\n  app:\n    image: alpine\n    gpus: all\n")
+    ctx = put_in(ctx.config.policy_rules, Map.put(config.policy_rules, :gpu, :allow))
+
+    assert {:error, message} = Env.run("env.create", payload(), ctx)
+    assert message =~ "host devices"
+    refute_received :up
   end
 
   test "use_api_socket is the Docker socket", %{ctx: ctx} do
