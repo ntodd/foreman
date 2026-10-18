@@ -926,7 +926,7 @@ drop_origin() {
   local IFS=,
   for item in $existing; do
     item=$(trim "$item")
-    [ -n "$item" ] && [ "$item" != "$origin" ] || continue
+    if [ -z "$item" ] || [ "$item" = "$origin" ]; then continue; fi
     out=${out:+$out,}$item
   done
   printf '%s\n' "$out"
@@ -1062,7 +1062,7 @@ confirm_image_change() {
   to=$(image_version "$image")
   # An upgrade only when the target is newer than every image it replaces.
   for c in "$running" "$pinned"; do
-    [ -n "$c" ] && [ "$c" != "$image" ] || continue
+    if [ -z "$c" ] || [ "$c" = "$image" ]; then continue; fi
     [ -n "$from" ] || from=$c
     v=$(image_version "$c")
     if [ -z "$v" ] || [ -z "$to" ] || [ "$(version_cmp "$to" "$v")" != 1 ]; then verb=Switch; fi

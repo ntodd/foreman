@@ -14,8 +14,10 @@ export LC_ALL
 [ $# -eq 1 ] || { echo "usage: $0 TAG < published-tags" >&2; exit 64; }
 tag=$1
 semver='^v[0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*$'
-printf '%s\n' "$tag" | grep -q "$semver" && [ "$(printf '%s\n' "$tag" | wc -l)" -eq 1 ] ||
-  { echo "release-is-latest: $tag isn't vX.Y.Z" >&2; exit 1; }
+if ! printf '%s\n' "$tag" | grep -q "$semver" || [ "$(printf '%s\n' "$tag" | wc -l)" -ne 1 ]; then
+  echo "release-is-latest: $tag isn't vX.Y.Z" >&2
+  exit 1
+fi
 
 highest=$({ cat; printf '%s\n' "$tag"; } | grep "$semver" | sed 's/^v//' |
   sort -t. -k1,1n -k2,2n -k3,3n | tail -n 1)

@@ -175,7 +175,8 @@ jobs:
           shellcheck scripts/install-control-plane.sh test/installer/e2e/fake-tailscale
           shellcheck -s sh scripts/render-control-plane-installer.sh scripts/release-is-latest.sh test/installer/e2e/run.sh
       - name: Install bats
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends bats
+        # jq is on the runner image already; the installer needs it, so say so.
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends bats jq
       - name: Test the installer
         run: bats test/installer
 
