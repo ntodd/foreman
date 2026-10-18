@@ -118,14 +118,15 @@ to the box it runs on (up to the limits in "Known gaps").
   rewrite its own config) the agent checks the compose config with every
   profile enabled (`docker compose --profile '*' config`),
   `devcontainer.json`, and what the devcontainer CLI resolves from
-  features and image metadata, before anything runs. Compose reads some
-  files while it parses (env files, label files, the files a compose
-  file includes or extends, and an include's env files), folds them in
-  where the path no longer shows, and quotes any it can't parse in its
-  error. So before compose runs, the agent reads the repo's compose files
-  itself (with a vendored js-yaml, run by the box's Node: Erlang's yamerl
-  resolves aliases to lists and maps wrongly), follows includes and
-  extends inside the clone, and checks every file compose would read.
+  features (the repo's and the user's own) and image metadata, before
+  anything runs. Compose reads some files while it parses (env files,
+  label files, the files a compose file includes or extends, and an
+  include's env files), folds them in where the path no longer shows,
+  and quotes any it can't parse in its error. So before compose runs,
+  the agent reads the repo's compose files itself (with a vendored
+  js-yaml, run by the box's Node: Erlang's yamerl resolves aliases to
+  lists and maps wrongly), follows includes and extends inside the
+  clone, and checks every file compose would read.
   Merge keys are kept rather than merged, so every value a merge could
   produce is checked. A path built from variables, a remote include, an
   unknown YAML tag, or files that expand past a size budget are refused,
@@ -310,6 +311,10 @@ These are accepted for now, or need someone to try them:
   interpolation into bind sources, long-syntax binds).
 - Inject into git config through identity fields, branch names, repo
   names or dotfiles settings.
+- Get past the policy or the Foreman feature with a user's own
+  devcontainer features: a ref that isn't an OCI ref, one with the
+  Foreman feature's id, options the agent passes on, or getting them
+  into another user's environments.
 - Cross-user access as a member: another user's environments, secrets,
   boxes, or admin pages and Oban Web.
 - Sign-in: the OAuth state and PKCE, open redirects in `return_to`, the

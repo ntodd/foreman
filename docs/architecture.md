@@ -112,7 +112,7 @@ Each agent joins topic `agent:<agent_id>`. Commands are a fixed vocabulary; ther
 
 Every command carries an `op_id`. The agent records in-flight `op_id`s, so a command retried after a reconnect is not run twice. Long operations keep running if the socket drops. The agent sends their progress and result once it reconnects.
 
-The agent sends its version and protocol version when it joins. The control plane accepts protocol N and N-1, and only sends a protocol-N field to agents that reported N, so upgrade the control plane before the agents (an older control plane refuses newer agents). Protocol 2 added `keep` to `env.secrets.write`. Once boxes run protocol-2 agents, the control plane can't be rolled back past the release that introduced it: an older control plane refuses them at join.
+The agent sends its version and protocol version when it joins. The control plane accepts protocol N and N-1, and only sends a protocol-N field to agents that reported N, so upgrade the control plane before the agents (an older control plane refuses newer agents). Protocol 2 added `keep` to `env.secrets.write`. Protocol 3 added `features` (a user's own devcontainer features) to `env.create` and `env.rebuild`; an environment on an older agent builds without them. Once boxes run protocol-2 agents, the control plane can't be rolled back past the release that introduced it: an older control plane refuses them at join.
 
 ### Reconciliation
 
@@ -154,7 +154,7 @@ As a result, environments don't come back after a reboot until the control plane
      --workspace-folder <clone> \
      --override-config <override> \
      --id-label foreman.env_id=<id> \
-     --additional-features '{"./.foreman/feature": {"tailscale": true}}' \
+     --additional-features '{"./.foreman/feature": {"tailscale": true}, <user's own features>}' \
      [--dotfiles-repository <user's dotfiles repo>]
    ```
 
@@ -375,6 +375,19 @@ This replaces the per-repo `git config` and dotfiles steps in `postCreateCommand
 
 If commits need signing, store an SSH signing key as a user secret.
 
+### Your own devcontainer features
+
+Each user can keep a list of devcontainer features that go on every environment they create, in any repo, without putting them in a shared `devcontainer.json`. Settings takes them in the shape of devcontainer.json's `features` object: an OCI ref and its options.
+
+- **Private:** only that user's environments get them, and only they see them in their settings. Admins see everyone's on the People page, since a feature runs code in the environment.
+- **Per repo:** each repo's page has a box per feature; unticking one leaves it out of the user's environments of that repo. The opt-out is by ref without a version, so moving from `:1` to `:2` keeps it off.
+- **Delivery:** the command carries them as `features`. The agent adds them to the `--additional-features` it passes for the Foreman feature, so `read-configuration` resolves them and the policy checks them like the repo's. A refusal names them as "your feature … (from your Foreman settings)".
+- **Conflicts:** a feature the repo's devcontainer.json already declares, at any version, is skipped (the operation log says so) and the repo's copy installs. Nothing can use the Foreman feature's id.
+- **Refs:** OCI refs only. A local path would resolve against the repo's devcontainer folder, and a tarball URL skips the registry. Tags are accepted and aren't locked: a user feature has no lock file, so each rebuild gets what the tag points to then.
+- **Registries:** a build's registry credentials are the repo owner's. A private user feature only pulls if those credentials can read it.
+- **When it applies:** on the next rebuild, like dotfiles.
+- **Audit:** `user.features` records the refs added, removed and changed, never their options.
+
 ## Capacity and resource limits
 
 Foreman never assumes a box has room for everything provisioned on it. By default it reports contention and lets you decide.
@@ -482,8 +495,8 @@ What a repo needs to work well under Foreman:
 
 ## Data model (sketch)
 
-- `users`: GitHub id and login, encrypted user and refresh tokens, role, and default git identity and dotfiles.
-- `user_repo_settings`: user, repo, and optional git name, git email, dotfiles repo and dotfiles install command. Unset fields fall back to the user's defaults.
+- `users`: GitHub id and login, encrypted user and refresh tokens, role, default git identity and dotfiles, and their own devcontainer features (ref => options).
+- `user_repo_settings`: user, repo, and optional git name, git email, dotfiles repo and dotfiles install command. Unset fields fall back to the user's defaults. Also the user's features turned off for the repo, by ref without a version.
 - `owners`: GitHub org or user account, plus installation id.
 - `repos`:
   - owner, full name, default branch, devcontainer path

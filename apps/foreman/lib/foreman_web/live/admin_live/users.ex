@@ -1,5 +1,8 @@
 defmodule ForemanWeb.AdminLive.Users do
-  @moduledoc "People who've signed in: roles and access."
+  @moduledoc """
+  People who've signed in: roles and access, and the devcontainer features
+  each adds to their own environments (a feature runs code in them).
+  """
   use ForemanWeb, :live_view
 
   alias Foreman.Accounts
@@ -61,6 +64,14 @@ defmodule ForemanWeb.AdminLive.Users do
                 {user.name}<span :if={user.github_login_expired}> · GitHub login expired</span><span :if={
                   user.disabled_at
                 }> · disabled</span>
+              </p>
+              <p
+                :for={{ref, options} <- Enum.sort(user.devcontainer_features || %{})}
+                class="flex flex-wrap gap-x-1.5 font-mono text-xs text-ink-3"
+                title="Devcontainer feature"
+              >
+                <span class="break-all">{ref}</span>
+                <span :if={options != %{}} class="break-all">{JSON.encode!(options)}</span>
               </p>
             </div>
             <.badge :if={user.role == "admin"} color="brand" size="sm">Admin</.badge>
