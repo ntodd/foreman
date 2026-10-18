@@ -608,10 +608,36 @@ defmodule ForemanAgent.Env do
       {_, %{"message" => message} = outcome} ->
         {:error, "devcontainer up failed: #{message}#{describe(outcome)}"}
 
+      {status, nil} ->
+        {:error,
+         "#{exited("devcontainer up", status)} without reporting a result. " <>
+           output_below(last_lines(output, &devcontainer_log/1))}
+
       {_, _} ->
-        {:error, "devcontainer up failed: #{last_lines(output)}"}
+        {:error, "devcontainer up failed: #{last_lines(output, &devcontainer_log/1)}"}
     end
   end
+
+  @signals %{
+    1 => "SIGHUP",
+    2 => "SIGINT",
+    6 => "SIGABRT",
+    9 => "SIGKILL",
+    11 => "SIGSEGV",
+    13 => "SIGPIPE",
+    15 => "SIGTERM"
+  }
+
+  # MuonTrap reports a command killed by a signal as 128 + the signal.
+  defp exited(label, status) do
+    case @signals[status - 128] do
+      nil -> "#{label} exited with status #{status}"
+      signal -> "#{label} was killed by #{signal} (status #{status})"
+    end
+  end
+
+  defp output_below(""), do: "It printed nothing."
+  defp output_below(tail), do: "Its last output is below.\n" <> tail
 
   # The CLI writes devcontainer-lock.json next to the config. Keep that
   # behaviour for repos that commit one; otherwise it'd leave an untracked
@@ -1007,12 +1033,13 @@ defmodule ForemanAgent.Env do
   # through `mapper` (nil drops it) to the operation log.
   defp run_lines(ctx, command, args, opts, mapper) do
     key = {__MODULE__, :pending, make_ref()}
+    spinner = {__MODULE__, :spinner, make_ref()}
 
     emit = fn lines ->
-      for line <- lines,
-          text = mapper.(strip_ansi(line)),
-          is_binary(text),
-          text = strip_ansi(text) do
+      {texts, last} = log_lines(lines, mapper, Process.get(spinner))
+      Process.put(spinner, last)
+
+      for text <- texts do
         ctx.log.("info", if(String.ends_with?(text, "\n"), do: text, else: text <> "\n"))
       end
     end
@@ -1035,6 +1062,41 @@ defmodule ForemanAgent.Env do
         rest when is_binary(rest) and rest != "" -> emit.([rest])
         _ -> :ok
       end
+
+      Process.delete(spinner)
+    end
+  end
+
+  # What the operation log shows for lines of a command's output: each
+  # line through `mapper` (nil drops it), without colors or cursor
+  # movement. Lines that were only cursor movement go, and so do spinner
+  # frames that redraw the one before (clack and ora print one every
+  # 80 ms). `last` is the kept spinner line's text, carried across chunks.
+  defp log_lines(lines, mapper, last) do
+    Enum.flat_map_reduce(lines, last, fn line, last ->
+      with text when is_binary(text) <- mapper.(strip_ansi(line)),
+           clean = strip_ansi(text),
+           false <- blank?(clean) and not blank?(text) do
+        case spinner_text(clean) do
+          nil -> {[clean], nil}
+          ^last -> {[], last}
+          frame -> {[clean], frame}
+        end
+      else
+        _ -> {[], last}
+      end
+    end)
+  end
+
+  defp blank?(text), do: String.trim(text) == ""
+
+  # A line that starts with a spinner frame, as the text after it with any
+  # animated trailing dots left off.
+  @spinner ~r/^\s*[\x{2800}-\x{28FF}◐◓◑◒◴◷◶◵◰◳◲◱◢◣◤◥◜◠◝◞◡◟▖▘▝▗✶✷✸✹✺]+\s+(.*?)[.…]*\s*$/u
+  defp spinner_text(text) do
+    case Regex.run(@spinner, text) do
+      [_, rest] -> rest
+      nil -> nil
     end
   end
 
@@ -1045,7 +1107,14 @@ defmodule ForemanAgent.Env do
   @ansi ~r/\e\[[0-9;?]*[ -\/]*[@-~]|\e\][^\a]*(\a|\e\\)|\r(?!\n)/
   defp strip_ansi(text), do: Regex.replace(@ansi, text, "")
 
-  defp last_lines(output) do
-    output |> String.split("\n", trim: true) |> Enum.take(-15) |> Enum.join("\n")
+  # The end of a command's output as the operation log shows it.
+  defp last_lines(output, mapper \\ & &1) do
+    {texts, _} = log_lines(String.split(output, "\n"), mapper, nil)
+
+    texts
+    |> Enum.flat_map(&String.split(&1, "\n"))
+    |> Enum.reject(&blank?/1)
+    |> Enum.take(-15)
+    |> Enum.join("\n")
   end
 end

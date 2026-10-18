@@ -136,6 +136,12 @@ defmodule ForemanAgent.EnvTest do
                  output:
                    ~s({"outcome":"error","message":"build failed","description":"An error occurred"}\n)
                }}
+
+            # The CLI exits without writing an outcome line: what it printed
+            # streams to the log, and the runner keeps the same bytes.
+            {:exit, status, stream} ->
+              run_opts[:on_output].(stream)
+              {:ok, %{status: status, output: stream}}
           end
 
         other ->
@@ -146,6 +152,21 @@ defmodule ForemanAgent.EnvTest do
 
   defp runs do
     receive_all([])
+  end
+
+  # Everything the operation logged so far, in order.
+  defp logged do
+    receive do
+      {:log, "info", text} -> [text | logged()]
+    after
+      0 -> []
+    end
+  end
+
+  # The devcontainer CLI's --log-format json output for lines a lifecycle
+  # command printed.
+  defp raw_log(lines) do
+    Enum.map_join(lines, &(JSON.encode!(%{"type" => "raw", "level" => 3, "text" => &1}) <> "\n"))
   end
 
   defp receive_all(acc) do
@@ -347,6 +368,52 @@ defmodule ForemanAgent.EnvTest do
       stub_tools(outcome: :error)
       assert {:error, message} = Env.run("env.create", payload(), ctx)
       assert message =~ "build failed"
+    end
+
+    test "says when devcontainer up exits without reporting a result", %{ctx: ctx} do
+      stub_tools(outcome: {:exit, 1, raw_log(["Running postCreateCommand"])})
+
+      assert {:error, message} = Env.run("env.create", payload(), ctx)
+
+      assert message =~
+               "devcontainer up exited with status 1 without reporting a result. " <>
+                 "Its last output is below."
+
+      assert message =~ "Running postCreateCommand"
+      refute message =~ ~s("type":)
+    end
+
+    test "names the signal that stopped devcontainer up", %{ctx: ctx} do
+      stub_tools(outcome: {:exit, 137, raw_log(["Running postCreateCommand"])})
+
+      assert {:error, message} = Env.run("env.create", payload(), ctx)
+
+      assert message =~
+               "devcontainer up was killed by SIGKILL (status 137) without reporting a result"
+    end
+
+    test "collapses spinner frames and cursor redraws in the log and the error", %{ctx: ctx} do
+      frames =
+        for i <- 0..39 do
+          glyph = Enum.at(~w(◐ ◓ ◑ ◒), rem(i, 4))
+          dots = String.duplicate(".", div(i, 10))
+          "\e[1G\e[J#{glyph}  Cloning repository…#{dots}"
+        end
+
+      lines =
+        ["◇  Source: https://github.com/stablyai/orca.git"] ++
+          Enum.take(frames, 20) ++ ["\e[1D", "\e[0K"] ++ Enum.drop(frames, 20)
+
+      stub_tools(outcome: {:exit, 1, raw_log(lines)})
+
+      assert {:error, message} = Env.run("env.create", payload(), ctx)
+      assert message =~ "Source: https://github.com/stablyai/orca.git"
+      assert length(String.split(message, "Cloning repository")) == 2
+
+      logged = logged()
+      assert Enum.count(logged, &(&1 =~ "Cloning repository")) == 1
+      assert "◐  Cloning repository…\n" in logged
+      refute "\n" in logged
     end
 
     test "is idempotent: a retried create reuses the clone", %{ctx: ctx} do
