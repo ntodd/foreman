@@ -122,21 +122,7 @@ defmodule ForemanAgent.EnvTest do
             ~s({"type":"raw","level":3,"timestamp":1,"text":"\\u001b[1m\\u001b[31mColored\\u001b[39m\\u001b[22m\\n"}\n)
           )
 
-          case outcome do
-            :success ->
-              result =
-                ~s({"outcome":"success","containerId":"abc123","composeProjectName":"storefront-2","remoteUser":"vscode","remoteWorkspaceFolder":"/workspaces/storefront"}\n)
-
-              {:ok, %{status: 0, output: result}}
-
-            :error ->
-              {:ok,
-               %{
-                 status: 1,
-                 output:
-                   ~s({"outcome":"error","message":"build failed","description":"An error occurred"}\n)
-               }}
-          end
+          up_result(outcome, run_opts)
 
         other ->
           flunk("unexpected command: #{inspect(other)}")
@@ -144,8 +130,46 @@ defmodule ForemanAgent.EnvTest do
     end)
   end
 
+  defp up_result(:success, _run_opts) do
+    result =
+      ~s({"outcome":"success","containerId":"abc123","composeProjectName":"storefront-2","remoteUser":"vscode","remoteWorkspaceFolder":"/workspaces/storefront"}\n)
+
+    {:ok, %{status: 0, output: result}}
+  end
+
+  defp up_result(:error, _run_opts) do
+    {:ok,
+     %{
+       status: 1,
+       output:
+         ~s({"outcome":"error","message":"build failed","description":"An error occurred"}\n)
+     }}
+  end
+
+  # The CLI exits without writing an outcome line: what it printed streams
+  # to the log, and the runner keeps the same bytes.
+  defp up_result({:exit, status, stream}, run_opts) do
+    run_opts[:on_output].(stream)
+    {:ok, %{status: status, output: stream}}
+  end
+
   defp runs do
     receive_all([])
+  end
+
+  # Everything the operation logged so far, in order.
+  defp logged do
+    receive do
+      {:log, "info", text} -> [text | logged()]
+    after
+      0 -> []
+    end
+  end
+
+  # The devcontainer CLI's --log-format json output for lines a lifecycle
+  # command printed.
+  defp raw_log(lines) do
+    Enum.map_join(lines, &(JSON.encode!(%{"type" => "raw", "level" => 3, "text" => &1}) <> "\n"))
   end
 
   defp receive_all(acc) do
@@ -347,6 +371,114 @@ defmodule ForemanAgent.EnvTest do
       stub_tools(outcome: :error)
       assert {:error, message} = Env.run("env.create", payload(), ctx)
       assert message =~ "build failed"
+    end
+
+    test "says when devcontainer up exits without reporting a result", %{ctx: ctx} do
+      stub_tools(outcome: {:exit, 1, raw_log(["Running postCreateCommand"])})
+
+      assert {:error, message} = Env.run("env.create", payload(), ctx)
+
+      assert message =~
+               "devcontainer up exited with status 1 without reporting a result. " <>
+                 "Its last output is below."
+
+      assert message =~ "Running postCreateCommand"
+      refute message =~ ~s("type":)
+    end
+
+    test "names the signal that stopped devcontainer up", %{ctx: ctx} do
+      stub_tools(outcome: {:exit, 137, raw_log(["Running postCreateCommand"])})
+
+      assert {:error, message} = Env.run("env.create", payload(), ctx)
+
+      assert message =~
+               "devcontainer up was killed by SIGKILL (status 137) without reporting a result"
+    end
+
+    test "collapses spinner frames and cursor redraws in the log and the error", %{ctx: ctx} do
+      frames =
+        for i <- 0..39 do
+          glyph = Enum.at(~w(◐ ◓ ◑ ◒), rem(i, 4))
+          dots = String.duplicate(".", div(i, 10))
+          "\e[1G\e[J#{glyph}  Cloning repository…#{dots}"
+        end
+
+      lines =
+        ["◇  Source: https://github.com/stablyai/orca.git"] ++
+          Enum.take(frames, 20) ++ ["\e[1D", "\e[0K"] ++ Enum.drop(frames, 20)
+
+      stub_tools(outcome: {:exit, 1, raw_log(lines)})
+
+      assert {:error, message} = Env.run("env.create", payload(), ctx)
+      assert message =~ "Source: https://github.com/stablyai/orca.git"
+      assert length(String.split(message, "Cloning repository")) == 2
+
+      logged = logged()
+      assert Enum.count(logged, &(&1 =~ "Cloning repository")) == 1
+      assert "◐  Cloning repository…\n" in logged
+      refute "\n" in logged
+    end
+
+    test "collapses spinner frames that arrive in one log entry", %{ctx: ctx} do
+      frames =
+        for i <- 0..19, do: "#{Enum.at(~w(◐ ◓ ◑ ◒), rem(i, 4))}  Cloning repository…\n"
+
+      stub_tools(outcome: {:exit, 1, raw_log([Enum.join(["Source: repo\n" | frames])])})
+
+      assert {:error, message} = Env.run("env.create", payload(), ctx)
+      assert message =~ "Source: repo"
+      assert length(String.split(message, "Cloning repository")) == 2
+    end
+
+    test "shows only the last of frames redrawn on one line", %{ctx: ctx} do
+      redraws =
+        Enum.map_join(0..19, fn i ->
+          "\e[1G\e[J#{Enum.at(~w(◐ ◓ ◑ ◒), rem(i, 4))}  Cloning repository…"
+        end)
+
+      lines = ["Source: repo\n" <> redraws, "\r", "\e[1G\e[J◐  Cloning repository…."]
+      stub_tools(outcome: {:exit, 1, raw_log(lines)})
+
+      assert {:error, message} = Env.run("env.create", payload(), ctx)
+      assert message =~ "Source: repo\n◒  Cloning repository…"
+      assert length(String.split(message, "Cloning repository")) == 2
+
+      logged = logged()
+      assert Enum.count(logged, &(&1 =~ "Cloning repository")) == 1
+      refute "\n" in logged
+    end
+
+    test "cleans up a tool's own spinner, cursor movement and links", %{ctx: ctx} do
+      output =
+        Enum.join([
+          "Cloning into '/w'...\n",
+          "Receiving objects:  50% (1/2)\rReceiving objects: 100% (2/2), done.\n",
+          "⠋ Resolving deltas\n",
+          "\e[1D\n",
+          "\e[0K\n",
+          "⠙ Resolving deltas\n",
+          "remote: Repository not found.\r\r\n",
+          "remote: Check the URL.\e[1G\n",
+          "fatal: \e]8;;https://example.com/help\e\\authentication failed\e]8;;\e\\\n"
+        ])
+
+      stub(RunnerMock, :run, fn "git", _args, run_opts ->
+        run_opts[:on_output].(output)
+        {:ok, %{status: 128, output: output}}
+      end)
+
+      assert {:error, message} = Env.run("env.create", payload(), ctx)
+      assert message =~ "fatal: authentication failed"
+      assert length(String.split(message, "Resolving deltas")) == 2
+
+      logged = logged()
+      assert Enum.count(logged, &(&1 =~ "Resolving deltas")) == 1
+      assert "fatal: authentication failed\n" in logged
+      assert "Receiving objects: 100% (2/2), done.\n" in logged
+      assert "remote: Repository not found.\n" in logged
+      assert "remote: Check the URL.\n" in logged
+      refute Enum.any?(logged, &(&1 =~ "50%"))
+      refute "\n" in logged
     end
 
     test "is idempotent: a retried create reuses the clone", %{ctx: ctx} do
