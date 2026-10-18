@@ -9,6 +9,8 @@ defmodule ForemanAgent.EnvTest do
   @moduletag :tmp_dir
 
   @env_id "6f1c1d1e-9a3b-4c1f-8f5e-2d7a9b0c1e2f"
+  @head "1111111111111111111111111111111111111111"
+  @base "2222222222222222222222222222222222222222"
 
   @devcontainer """
   {
@@ -816,11 +818,19 @@ defmodule ForemanAgent.EnvTest do
                                   "core.fsmonitor=false" | rest
                                 ],
                                 _ ->
-        if "status" in rest do
-          {:ok,
-           %{status: 0, output: "## main...origin/main [ahead 2]\n M lib/a.ex\n?? new.txt\n"}}
-        else
-          {:ok, %{status: 0, output: "abc one\ndef two\n"}}
+        case rest do
+          ["status" | _] ->
+            {:ok,
+             %{status: 0, output: "## main...origin/main [ahead 2]\n M lib/a.ex\n?? new.txt\n"}}
+
+          ["log" | _] ->
+            {:ok, %{status: 0, output: "abc one\ndef two\n"}}
+
+          ["rev-parse", "HEAD"] ->
+            {:ok, %{status: 0, output: @head <> "\n"}}
+
+          ["merge-base", "HEAD", "@{upstream}"] ->
+            {:ok, %{status: 0, output: @base <> "\n"}}
         end
       end)
 
@@ -831,9 +841,47 @@ defmodule ForemanAgent.EnvTest do
                "branch" => "main",
                "changed_files" => 2,
                "unpushed_commits" => 2,
-               "clean" => false
+               "clean" => false,
+               "head" => @head,
+               "base" => @base,
+               "ahead" => 2
              }
     end
+
+    test "a branch with no upstream has no base, and git's other output is ignored", %{ctx: ctx} do
+      stub_tools()
+      {:ok, _} = Env.run("env.create", payload(), ctx)
+      _ = runs()
+      stub_running_container()
+
+      stub(RunnerMock, :run, fn "docker", args, _ ->
+        case Enum.drop_while(args, &(&1 != "core.fsmonitor=false")) |> tl() do
+          ["status" | _] -> {:ok, %{status: 0, output: "## topic\n"}}
+          ["log" | _] -> {:ok, %{status: 0, output: ""}}
+          # Whatever runs in the container answers for git there.
+          ["rev-parse", "HEAD"] -> {:ok, %{status: 0, output: "../../etc\n"}}
+          ["merge-base" | _] -> {:ok, %{status: 128, output: "fatal: no upstream configured\n"}}
+        end
+      end)
+
+      assert {:ok, result} =
+               Env.run("env.git_status", %{env_id: @env_id, slug: "storefront-2"}, ctx)
+
+      assert %{"branch" => "topic", "head" => nil, "base" => nil, "ahead" => 0} = result
+    end
+  end
+
+  defp stub_running_container do
+    stub(DockerMock, :list_containers, fn ["foreman.env_id=" <> @env_id] ->
+      {:ok,
+       [
+         %{
+           "Id" => "abc123",
+           "State" => "running",
+           "Labels" => %{"com.docker.compose.service" => "app", "foreman.env_id" => @env_id}
+         }
+       ]}
+    end)
   end
 
   defp arg(args, flag) do

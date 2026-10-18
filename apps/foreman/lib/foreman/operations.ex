@@ -16,9 +16,12 @@ defmodule Foreman.Operations do
 
   def create!(attrs), do: Repo.insert!(struct(Operation, attrs))
 
-  def list_for_environment(env_id, limit \\ 20) do
+  @doc "The environment's newest operations; `except:` leaves out the actions it names."
+  def list_for_environment(env_id, limit \\ 20, opts \\ []) do
+    except = Keyword.get(opts, :except, [])
+
     from(o in Operation,
-      where: o.environment_id == ^env_id,
+      where: o.environment_id == ^env_id and o.action not in ^except,
       order_by: [desc: o.inserted_at],
       limit: ^limit,
       preload: :user

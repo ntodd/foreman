@@ -56,6 +56,19 @@ defmodule Foreman.GitHub.Client do
               {:ok, binary()} | {:error, :not_found | term()}
   @callback list_dir(token :: String.t(), full_name :: String.t(), path :: String.t()) ::
               {:ok, [map()]} | {:error, :not_found | term()}
+  @doc """
+  How `head` compares with `base`: `ahead_by` commits in `head` that
+  aren't in `base`, `behind_by` the other way round. `{:error, :not_found}`
+  when GitHub doesn't have one of them.
+  """
+  @callback compare(
+              token :: String.t(),
+              full_name :: String.t(),
+              base :: String.t(),
+              head :: String.t()
+            ) ::
+              {:ok, %{ahead_by: non_neg_integer(), behind_by: non_neg_integer()}}
+              | {:error, :not_found | term()}
   @callback convert_manifest(code :: String.t()) :: {:ok, map()} | {:error, term()}
   @callback check_classic_token(token :: String.t()) ::
               {:ok, %{login: String.t(), scopes: [String.t()], expires_at: DateTime.t() | nil}}

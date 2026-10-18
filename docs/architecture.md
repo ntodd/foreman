@@ -104,7 +104,7 @@ Each agent joins topic `agent:<agent_id>`. Commands are a fixed vocabulary; ther
 | `env.destroy` | Remove containers, volumes and the clone |
 | `env.secrets.write` | Rewrite the environment's tmpfs secrets directory |
 | `env.logs` | Stream container or build logs |
-| `env.git_status` | Dirty tree / unpushed commits check before destroy |
+| `env.git_status` | Dirty tree / unpushed commits check before destroy; the clone's HEAD and merge base, which the environment page compares with the branch on GitHub |
 | `box.inventory` | Report environments found via Docker labels |
 | `box.stats` | Report CPU, memory and disk, per environment and in total |
 | `box.gc` | Prune unused images, build cache and orphaned volumes |

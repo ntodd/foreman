@@ -19,7 +19,7 @@ defmodule Foreman.Environments do
   alias Foreman.Boxes.Box
   alias Foreman.Environments.{Environment, Server}
   alias Foreman.Repos.Repo, as: GitRepo
-  alias Foreman.{Agents, Audit, Capacity, Operations, Repo, Scope, Secrets}
+  alias Foreman.{Agents, Audit, Capacity, GitHub, Operations, Repo, Scope, Secrets}
 
   require Logger
 
@@ -222,12 +222,70 @@ defmodule Foreman.Environments do
   def restart(scope, env, :all), do: action(scope, env, :restart_all)
   def git_status(scope, env), do: action(scope, env, :git_status)
 
+  @doc """
+  A git status for comparing the clone with its branch: unaudited, since
+  the environment page asks for one whenever it opens.
+  """
+  def check_branch(%Scope{} = scope, %Environment{} = env) do
+    with :ok <- authorize(scope, env),
+         :ok <- allowed?(env, :git_status) do
+      {:ok, enqueue(env, "git_status", %{}, scope.user)}
+    end
+  end
+
   @doc "Runs the create again, for an environment whose first create failed."
   def retry(scope, env), do: action(scope, env, :create)
 
   def logs(scope, env, service \\ nil) do
     action(scope, env, :logs, %{"service" => service, "tail" => 300})
   end
+
+  @doc """
+  How the clone compares with its branch on GitHub, from a git status the
+  agent reported: `%{behind: n, ahead: n}`, or `%{other_branch: name}`
+  when the clone has another branch checked out.
+
+  HEAD is compared when GitHub has it. When it doesn't (commits that were
+  never pushed), the merge base with the clone's upstream is compared
+  instead, and the agent's own count of those commits (`ahead`) added:
+  close, though a stale upstream can make it overcount.
+  """
+  def branch_sync(%Environment{} = env, %{} = status) do
+    head = sha(status["head"])
+    base = sha(status["base"])
+    local = if is_integer(status["ahead"]) and status["ahead"] >= 0, do: status["ahead"], else: 0
+
+    cond do
+      status["branch"] != env.branch ->
+        {:ok, %{other_branch: status["branch"]}}
+
+      is_nil(head) ->
+        {:error, :no_head}
+
+      true ->
+        env = Repo.preload(env, :repo)
+
+        case GitHub.compare(env.repo, head, env.branch) do
+          {:ok, counts} ->
+            {:ok, %{behind: counts.ahead_by, ahead: counts.behind_by}}
+
+          {:error, :not_found} when not is_nil(base) and base != head ->
+            with {:ok, counts} <- GitHub.compare(env.repo, base, env.branch) do
+              {:ok, %{behind: counts.ahead_by, ahead: local + counts.behind_by}}
+            end
+
+          error ->
+            error
+        end
+    end
+  end
+
+  # Whatever runs in the environment answers for its git.
+  defp sha(value) when is_binary(value) do
+    if value =~ ~r/\A[0-9a-f]{40}([0-9a-f]{24})?\z/, do: value
+  end
+
+  defp sha(_), do: nil
 
   @doc "\"Later\": leaves the pending-restart badge and notice in place. Nothing to do."
   def restart_later(_scope, env), do: {:ok, env}

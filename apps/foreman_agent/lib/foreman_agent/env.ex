@@ -947,42 +947,62 @@ defmodule ForemanAgent.Env do
   defp git_status(p, ctx) do
     with {:ok, spec} <- load_spec(ctx.config, p.env_id),
          {:ok, container} <- devcontainer_container(ctx, p.env_id, spec.devcontainer_service) do
-      exec = [
+      git = &container_git(ctx, spec, container, &1, &2)
+
+      with {:ok, status} <- git.(["status", "--porcelain=v1", "--branch"], "git status"),
+           {:ok, unpushed} <-
+             git.(["log", "--branches", "--not", "--remotes", "--oneline"], "git log"),
+           {:ok, summary} <- git_summary(String.split(status, "\n", trim: true), unpushed) do
+        {:ok,
+         Map.merge(summary, %{
+           "head" => git_object(git, ["rev-parse", "HEAD"], "git rev-parse"),
+           "base" => git_object(git, ["merge-base", "HEAD", "@{upstream}"], "git merge-base")
+         })}
+      else
+        {:error, output} -> {:error, "git status failed: #{last_lines(output)}"}
+      end
+    end
+  end
+
+  # git inside the devcontainer, as the remote user. The workspace's owner
+  # inside the container depends on the host (Docker Desktop maps it to
+  # root), so safe.directory is opened up.
+  defp container_git(ctx, spec, container, args, label, opts \\ []) do
+    exec =
+      [
         "exec",
         "-u",
         spec.remote_user,
         "-w",
         spec.remote_workspace_folder,
         container,
-        # The workspace's owner inside the container depends on the host
-        # (Docker Desktop maps it to root), and this only reads status.
         "git",
         "-c",
         "safe.directory=*",
         "-c",
         "core.fsmonitor=false"
-      ]
+      ] ++ args
 
-      with {:ok, status} <-
-             cmd(ctx, ctx.config.docker, exec ++ ["status", "--porcelain=v1", "--branch"],
-               env: %{},
-               quiet: true,
-               label: "git status"
-             ),
-           {:ok, unpushed} <-
-             cmd(
-               ctx,
-               ctx.config.docker,
-               exec ++ ["log", "--branches", "--not", "--remotes", "--oneline"],
-               env: %{},
-               quiet: true,
-               label: "git log"
-             ) do
-        git_summary(String.split(status, "\n", trim: true), unpushed)
-      else
-        {:error, output} -> {:error, "git status failed: #{last_lines(output)}"}
-      end
+    cmd(ctx, ctx.config.docker, exec,
+      env: %{},
+      quiet: Keyword.get(opts, :quiet, true),
+      label: label
+    )
+  end
+
+  # For comparing with the branch on GitHub. A repo with no commits has no
+  # HEAD, and a branch with no upstream no merge base.
+  defp git_object(git, args, label) do
+    case git.(args, label) do
+      {:ok, out} -> sha(out)
+      {:error, _} -> nil
     end
+  end
+
+  # The container's git answers for itself, so only an object name is taken.
+  defp sha(output) do
+    trimmed = String.trim(output)
+    if trimmed =~ ~r/\A[0-9a-f]{40}([0-9a-f]{24})?\z/, do: trimmed
   end
 
   # `--branch` always prints the "## " line first; no output at all means
@@ -993,17 +1013,26 @@ defmodule ForemanAgent.Env do
        "branch" => branch_name(branch_line),
        "changed_files" => length(files),
        "unpushed_commits" => unpushed |> String.split("\n", trim: true) |> length(),
+       "ahead" => ahead(branch_line),
        "clean" => files == [] and String.trim(unpushed) == ""
      }}
   end
 
   defp git_summary(_lines, _unpushed),
-    do: {:error, "git status failed: no output from the container; is it still running?"}
+    do: {:error, "no output from the container; is it still running?"}
 
   defp branch_name("## " <> rest),
     do: rest |> String.split("...") |> hd() |> String.split(" ") |> hd()
 
   defp branch_name(_), do: nil
+
+  # Commits on the branch that aren't on its upstream, as of the last fetch.
+  defp ahead(branch_line) do
+    case Regex.run(~r/\[ahead (\d+)/, branch_line) do
+      [_, n] -> String.to_integer(n)
+      nil -> 0
+    end
+  end
 
   defp devcontainer_container(ctx, env_id, service) do
     case ctx.docker.list_containers(["foreman.env_id=#{env_id}"]) do

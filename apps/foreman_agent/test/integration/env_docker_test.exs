@@ -243,8 +243,10 @@ defmodule ForemanAgent.Integration.EnvDockerTest do
     assert {_, 0} = exec(c2["app"]["Id"], ["test", "-f", "/run/foreman/secrets.env"])
 
     # -- git status runs inside the container --------------------------------
-    assert {:ok, %{"clean" => true, "branch" => "main"}} =
+    assert {:ok, %{"clean" => true, "branch" => "main", "head" => head, "base" => head}} =
              Env.run("env.git_status", %{env_id: @env1, slug: "hello-1"}, ctx)
+
+    assert head =~ ~r/\A[0-9a-f]{40}\z/
 
     exec(app1, ["bash", "-c", "echo change >> /workspaces/hello/README.md"])
 

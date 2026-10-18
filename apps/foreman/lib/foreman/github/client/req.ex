@@ -174,6 +174,23 @@ defmodule Foreman.GitHub.Client.Req do
   end
 
   @impl true
+  def compare(token, full_name, base, head) do
+    url = "/repos/#{full_name}/compare/#{encode_path(base)}...#{encode_path(head)}"
+
+    case Req.get(api(bearer(token)), url: url, params: [per_page: 1]) do
+      {:ok, %{status: 200, body: %{"ahead_by" => ahead, "behind_by" => behind}}}
+      when is_integer(ahead) and is_integer(behind) ->
+        {:ok, %{ahead_by: ahead, behind_by: behind}}
+
+      {:ok, %{status: 404}} ->
+        {:error, :not_found}
+
+      other ->
+        unexpected(other)
+    end
+  end
+
+  @impl true
   def list_dir(token, full_name, path) do
     case Req.get(api(bearer(token)), url: "/repos/#{full_name}/contents/#{encode_path(path)}") do
       {:ok, %{status: 200, body: entries}} when is_list(entries) -> {:ok, entries}
