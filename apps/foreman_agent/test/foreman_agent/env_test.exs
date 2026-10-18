@@ -122,32 +122,35 @@ defmodule ForemanAgent.EnvTest do
             ~s({"type":"raw","level":3,"timestamp":1,"text":"\\u001b[1m\\u001b[31mColored\\u001b[39m\\u001b[22m\\n"}\n)
           )
 
-          case outcome do
-            :success ->
-              result =
-                ~s({"outcome":"success","containerId":"abc123","composeProjectName":"storefront-2","remoteUser":"vscode","remoteWorkspaceFolder":"/workspaces/storefront"}\n)
-
-              {:ok, %{status: 0, output: result}}
-
-            :error ->
-              {:ok,
-               %{
-                 status: 1,
-                 output:
-                   ~s({"outcome":"error","message":"build failed","description":"An error occurred"}\n)
-               }}
-
-            # The CLI exits without writing an outcome line: what it printed
-            # streams to the log, and the runner keeps the same bytes.
-            {:exit, status, stream} ->
-              run_opts[:on_output].(stream)
-              {:ok, %{status: status, output: stream}}
-          end
+          up_result(outcome, run_opts)
 
         other ->
           flunk("unexpected command: #{inspect(other)}")
       end
     end)
+  end
+
+  defp up_result(:success, _run_opts) do
+    result =
+      ~s({"outcome":"success","containerId":"abc123","composeProjectName":"storefront-2","remoteUser":"vscode","remoteWorkspaceFolder":"/workspaces/storefront"}\n)
+
+    {:ok, %{status: 0, output: result}}
+  end
+
+  defp up_result(:error, _run_opts) do
+    {:ok,
+     %{
+       status: 1,
+       output:
+         ~s({"outcome":"error","message":"build failed","description":"An error occurred"}\n)
+     }}
+  end
+
+  # The CLI exits without writing an outcome line: what it printed streams
+  # to the log, and the runner keeps the same bytes.
+  defp up_result({:exit, status, stream}, run_opts) do
+    run_opts[:on_output].(stream)
+    {:ok, %{status: status, output: stream}}
   end
 
   defp runs do
