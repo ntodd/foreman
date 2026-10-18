@@ -104,7 +104,7 @@ The screenshots use made-up data; `e2e/demo.exs` and
 
 | | |
 |---|---|
-| Personal (a Linux desktop, SQLite) | [docs/setup/personal.md](docs/setup/personal.md) |
+| Personal (a Linux desktop, SQLite) | [docs/setup/personal.md](docs/setup/personal.md); releases after 0.3.0 attach an installer for it, and a checkout's copy installs 0.3.0 ([the installer](docs/setup/personal.md#the-installer)) |
 | Team (EC2 + Postgres/Neon, a box per developer) | [docs/setup/team.md](docs/setup/team.md) |
 | Upgrading, backups and rolling back | [docs/setup/upgrading.md](docs/setup/upgrading.md) |
 | The GitHub App | [docs/setup/github-app.md](docs/setup/github-app.md) |

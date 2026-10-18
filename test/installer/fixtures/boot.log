@@ -1,0 +1,13 @@
+19:20:01.100 [info] Migrations already up
+19:20:01.400 [warning] Foreman isn't connected to GitHub yet. Finish setup at
+    https://dev.osiris-delta.ts.net:8443/setup
+with this one-time setup token:
+    oldsetuptokenoldsetuptokenoldset
+19:20:01.500 [info] bundled agent 0.3.0 for linux-amd64 is registered
+19:28:39.700 [info] bundled agent 0.3.0 for linux-amd64 is registered
+19:28:39.701 [info] bundled agent 0.3.0 for linux-arm64 is registered
+19:28:39.812 [warning] Foreman isn't connected to GitHub yet. Finish setup at
+    https://dev.osiris-delta.ts.net:8443/setup
+with this one-time setup token:
+    newsetuptokennewsetuptokennewset
+19:28:39.900 [info] Access ForemanWeb.Endpoint at https://dev.osiris-delta.ts.net

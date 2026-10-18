@@ -1,0 +1,21 @@
+{
+  "TCP": {
+    "443": {"HTTPS": true}, "8443": {"HTTPS": true}, "10000": {"HTTPS": true},
+    "8444": {"HTTPS": true}, "8445": {"HTTPS": true}, "8446": {"HTTPS": true},
+    "5432": {"TCPForward": "localhost:4006"}
+  },
+  "Web": {
+    "dev.osiris-delta.ts.net:443": {"Handlers": {"/": {"Proxy": "http://127.0.0.1:4001/?x=1"}}},
+    "dev.osiris-delta.ts.net:8443": {"Handlers": {"/": {"Proxy": "http://localhost:4002/app/"}}},
+    "dev.osiris-delta.ts.net:10000": {"Handlers": {"/": {"Proxy": "https+insecure://127.0.1.1:4003"}, "/api": {"Proxy": "http://0.0.0.0:4004/api"}}},
+    "dev.osiris-delta.ts.net:8444": {"Handlers": {"/": {"Proxy": "http://[::1]:4005#frag"}}},
+    "dev.osiris-delta.ts.net:8445": {"Handlers": {"/": {"Proxy": "http://LOCALHOST"}}},
+    "dev.osiris-delta.ts.net:8446": {"Handlers": {"/": {"Proxy": "http://192.168.1.5:4009"}, "/docs": {"Path": "/srv/docs"}}}
+  },
+  "Services": {
+    "svc:web": {"TCP": {"443": {"HTTPS": true}}, "Web": {"web.osiris-delta.ts.net:443": {"Handlers": {"/": {"Proxy": "http://127.0.0.1:4007"}}}}}
+  },
+  "Foreground": {
+    "abc": {"TCP": {"9000": {"TCPForward": "[::]:4008"}}}
+  }
+}

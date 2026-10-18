@@ -49,8 +49,10 @@ and rebuilds keep the same node.
 
 ## The control plane host
 
-`tailscale serve` puts the web UI on `https://<host>.<tailnet>.ts.net`,
-but that only helps machines the policy lets reach it. With the default
+`tailscale serve` puts the web UI on `https://<host>.<tailnet>.ts.net`
+(or `:8443` and so on, when something else already has 443; the
+installer picks the port and prints it), but that only helps machines
+the policy lets reach it. With the default
 allow-all policy that's everyone; with a custom one, tag the host and
 grant it explicitly, so access doesn't hang on who owns the machine:
 
@@ -61,7 +63,7 @@ grant it explicitly, so access doesn't hang on who owns the machine:
 ]
 ```
 
-Then tag it, from the host (an admin owns the tag, so this needs no
+Use the serve port in `"ip"` if it isn't 443. Then tag it, from the host (an admin owns the tag, so this needs no
 console visit) or under **Machines → ⋯ → Edit ACL tags**:
 
 ```sh
@@ -71,6 +73,11 @@ sudo tailscale up --advertise-tags=tag:foreman
 `tailscale up` wants every setting you'd changed from the default
 repeated; if you leave one out, it prints the full command to run
 instead.
+
+Keep the host's tags to what it needs. Containers on a box reach the
+tailnet as the box, with its grants (issue #50), and on a personal
+setup the box is this host, so every environment gets whatever its
+tags are granted.
 
 A tagged machine no longer belongs to your user, so rules built on
 `autogroup:self` stop covering it. If you SSH to the host over

@@ -9,7 +9,7 @@ update their agents to the ones the new image carries.
 
 | | Where | Without it |
 |---|---|---|
-| `FOREMAN_ENCRYPTION_KEY` | `/etc/foreman/foreman.env`; keep a copy off the host | Every secret, token and key in the database is unreadable |
+| `FOREMAN_ENCRYPTION_KEY` | `/etc/foreman/foreman.env` (root's: `sudo cat` it); keep a copy off the host | Every secret, token and key in the database is unreadable |
 | The release signing key | The `FOREMAN_RELEASE_PRIVATE_KEY` secret, and a copy off GitHub | New agents can't be signed; every box needs reinstalling with a new key |
 | The database | SQLite: `foreman.db` in the `foreman-data` volume. Postgres: your provider's snapshots or point-in-time restore | Everything |
 | Agent releases | `releases/` in the `foreman-data` volume | Boxes can't install or update until they're registered again (an image registers its own on boot; `scripts/publish-agent-release.sh` does older ones) |
@@ -28,7 +28,7 @@ start it again; environments keep running, and boxes reconnect within
 about 30 seconds of it coming back:
 
 ```sh
-cd docker   # wherever compose.yml is
+cd /opt/foreman   # wherever compose.yml is (docker/ in a checkout)
 sudo docker compose stop
 sudo docker run --rm -v foreman-data:/data:ro -v "$PWD":/backup debian:trixie-slim \
   tar czf "/backup/foreman-data-$(date +%F).tgz" -C /data .
@@ -79,8 +79,16 @@ before an upgrade, and restore from it the provider's way.
    for that one, stop the agent on the box first (`sudo systemctl stop
    foreman-agent`), pin it once the new control plane is up, then start
    the agent again.
-4. Point `FOREMAN_IMAGE` at the new version (in the `.env` beside
-   `compose.yml`), then pull and recreate:
+4. With the installer, run the new release's copy (see
+   [personal.md](personal.md#the-installer)). It asks before changing
+   the image (`FOREMAN_UPGRADE=yes` when unattended), offers to take the
+   backup in step 1 for you (to `/var/backups/foreman`: the data, the
+   settings file from before the run, and `github-app.pem` if you made
+   the app by hand, all root only), pins the new
+   image in `/opt/foreman/.env` and recreates the container, keeping the
+   settings and data. Otherwise, point `FOREMAN_IMAGE` at the new version (in the
+   `.env` beside `compose.yml`; `/opt/foreman` for an installed one),
+   then pull and recreate:
 
    ```sh
    sudo docker compose pull
@@ -127,6 +135,16 @@ they all follow the new control plane's agent from then on.
 ## Rolling back
 
 Point `FOREMAN_IMAGE` at the previous version and run `up -d` again.
+(An older release's installer refuses to downgrade unless
+`FOREMAN_DOWNGRADE=yes`.)
+
+To restore what the installer backed up, use the files with the same
+timestamp in `/var/backups/foreman`: restore `foreman-data.<ts>.tgz` as
+in [Backing up SQLite](#backing-up-sqlite), put `foreman.env.<ts>` back
+as `/etc/foreman/foreman.env` (`sudo install -m 0600`), and, for an app
+made by hand, `github-app.pem.<ts>` as `/etc/foreman/github-app.pem`
+(`sudo install -m 0400 -o 999`). They're root only; keep them that way
+if you copy them off the host.
 Migrations don't run backwards, so check the release notes of the
 version you're leaving. So far every migration has added tables or
 columns, which older code ignores, or changed data in a way older code

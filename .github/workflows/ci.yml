@@ -162,6 +162,24 @@ jobs:
       - name: Test the feature in a real devcontainer
         run: npx --yes @devcontainers/cli@0.89.0 features test --features foreman --base-image mcr.microsoft.com/devcontainers/base:debian --skip-scenarios features
 
+  # The personal control plane installer, against stubbed docker and
+  # tailscale (test/installer). test/installer/e2e runs it for real, but
+  # needs network and a local image, so it stays out of CI.
+  installer:
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: ShellCheck
+        run: |
+          shellcheck scripts/install-control-plane.sh test/installer/e2e/fake-tailscale
+          shellcheck -s sh scripts/render-control-plane-installer.sh scripts/release-is-latest.sh test/installer/e2e/run.sh
+      - name: Install bats
+        # jq is on the runner image already; the installer needs it, so say so.
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends bats jq
+      - name: Test the installer
+        run: bats test/installer
+
   images:
     if: github.event_name != 'schedule'
     runs-on: ubuntu-24.04

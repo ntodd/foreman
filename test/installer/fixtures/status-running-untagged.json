@@ -1,0 +1,10 @@
+{
+  "BackendState": "Running",
+  "Self": {
+    "HostName": "dev",
+    "DNSName": "dev.osiris-delta.ts.net.",
+    "CapMap": {"https": null}
+  },
+  "CurrentTailnet": {"Name": "nate@example.com", "MagicDNSSuffix": "osiris-delta.ts.net", "MagicDNSEnabled": true},
+  "CertDomains": ["dev.osiris-delta.ts.net"]
+}
