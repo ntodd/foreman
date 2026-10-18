@@ -613,6 +613,23 @@ defmodule ForemanAgent.EnvTest do
       refute Enum.any?(runs(), &match?({"devcontainer", ["up" | _], _}, &1))
     end
 
+    test "checks a service's runtime against the runtimes Docker has", %{ctx: ctx, config: config} do
+      stub_tools(
+        compose: %{"services" => %{"app" => %{"runtime" => "gpu"}, "db" => %{}}},
+        docker_info:
+          {:ok,
+           %{
+             "DefaultRuntime" => "runc",
+             "Runtimes" => %{"gpu" => %{"path" => "/usr/bin/nvidia-container-runtime"}}
+           }}
+      )
+
+      ctx = put_in(ctx.config.policy_rules, Map.put(config.policy_rules, :compose_keys, :allow))
+
+      assert {:error, message} = Env.run("env.create", payload(), ctx)
+      assert message =~ "nvidia runtime"
+    end
+
     test "refuses to start when it can't tell what Docker's default runtime is", %{ctx: ctx} do
       stub_tools(docker_info: {:error, :econnrefused})
 

@@ -148,6 +148,41 @@ defmodule ForemanAgent.Env.PolicyGpuTest do
     assert {:ok, []} = Policy.check(config, %{}, ctx(%{compose_keys: :allow, devices: :allow}))
   end
 
+  test "a runtime that's NVIDIA's under another name is a host device too" do
+    config = compose(%{"runtime" => "gpu"})
+
+    runtimes = %{
+      "runc" => %{"path" => "runc"},
+      "gpu" => %{"path" => "/usr/bin/nvidia-container-runtime"},
+      "shim" => %{
+        "runtimeType" => "io.containerd.runc.v2",
+        "options" => %{"BinaryName" => "/usr/bin/nvidia-container-runtime"}
+      },
+      "runsc" => %{"path" => "/usr/bin/runsc"}
+    }
+
+    ctx = Map.put(ctx(%{compose_keys: :allow, gpu: :allow}), :runtimes, runtimes)
+
+    for name <- ["gpu", "shim"] do
+      assert {:error, [message]} = Policy.check(compose(%{"runtime" => name}), %{}, ctx)
+      assert message =~ "nvidia runtime"
+    end
+
+    assert {:ok, []} = Policy.check(compose(%{"runtime" => "runsc"}), %{}, ctx)
+
+    assert {:ok, []} = Policy.check(config, %{}, put_in(ctx.rules[:devices], :allow))
+  end
+
+  test "a runtime Docker doesn't say what it runs is a host device" do
+    ctx =
+      Map.put(ctx(%{compose_keys: :allow}), :runtimes, %{
+        "mystery" => %{"runtimeType" => "io.containerd.mystery.v1"}
+      })
+
+    assert {:error, [message]} = Policy.check(compose(%{"runtime" => "mystery"}), %{}, ctx)
+    assert message =~ "mystery"
+  end
+
   describe "the box's Docker" do
     test "runc as the default runtime is fine" do
       assert {:ok, []} = Policy.check_docker(%{"DefaultRuntime" => "runc"}, ctx())
@@ -162,7 +197,8 @@ defmodule ForemanAgent.Env.PolicyGpuTest do
 
       assert {:error, [message]} = Policy.check_docker(info, ctx(%{gpu: :allow}))
       assert message =~ "default runtime"
-      assert message =~ "runc"
+      assert message =~ "default-runtime"
+      assert message =~ "daemon.json"
       assert {:ok, []} = Policy.check_docker(info, ctx(%{devices: :allow}))
     end
 
@@ -173,6 +209,38 @@ defmodule ForemanAgent.Env.PolicyGpuTest do
       }
 
       assert {:error, [_]} = Policy.check_docker(info, ctx())
+
+      shim = %{
+        "DefaultRuntime" => "gpu",
+        "Runtimes" => %{
+          "gpu" => %{
+            "runtimeType" => "io.containerd.runc.v2",
+            "options" => %{"BinaryName" => "/usr/bin/nvidia-container-runtime"}
+          }
+        }
+      }
+
+      assert {:error, [_]} = Policy.check_docker(shim, ctx())
+    end
+
+    test "a default runtime Docker doesn't say what it runs is refused" do
+      info = %{"DefaultRuntime" => "gpu", "Runtimes" => %{"gpu" => %{}}}
+
+      assert {:error, [message]} = Policy.check_docker(info, ctx())
+      assert message =~ "gpu"
+      assert {:ok, []} = Policy.check_docker(info, ctx(%{devices: :allow}))
+    end
+
+    test "Docker's own runc, under either name, and other runtimes with a binary are fine" do
+      for {default, runtimes} <- [
+            {"runc", %{"runc" => %{"path" => "runc"}}},
+            {"io.containerd.runc.v2", %{"io.containerd.runc.v2" => %{"path" => "runc"}}},
+            {"runc", %{}},
+            {"crun", %{"crun" => %{"path" => "/usr/bin/crun"}}}
+          ] do
+        info = %{"DefaultRuntime" => default, "Runtimes" => runtimes}
+        assert {:ok, []} = Policy.check_docker(info, ctx()), inspect(info)
+      end
     end
   end
 end

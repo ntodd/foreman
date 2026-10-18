@@ -424,54 +424,71 @@ defmodule ForemanAgent.Env.Policy do
   # The nvidia runtime hands GPUs to whatever the image's environment
   # asks for (NVIDIA_VISIBLE_DEVICES and NVIDIA_DRIVER_CAPABILITIES),
   # without a reservation. runtime is under compose_keys too; this holds
-  # on a box that allows unreviewed keys.
+  # on a box that allows unreviewed keys. The runtime's name is looked up
+  # in what Docker reports (ctx.runtimes), since it can be any name.
   defp runtime_findings(name, svc, ctx) do
-    case svc["runtime"] do
-      runtime when is_binary(runtime) ->
-        if nvidia_runtime?(runtime),
-          do: [
-            rule(
-              ctx,
-              :devices,
-              "service '#{name}' uses the nvidia runtime, which gives the image whichever GPUs " <>
-                "and driver capabilities its environment asks for; reserve GPUs under deploy instead"
-            )
-          ],
-          else: []
-
-      _ ->
-        []
+    with runtime when is_binary(runtime) <- svc["runtime"],
+         kind when kind != :other <- runtime_kind(runtime, ctx[:runtimes]) do
+      [rule(ctx, :devices, runtime_message("service '#{name}' uses", runtime, kind))]
+    else
+      _ -> []
     end
   end
-
-  defp nvidia_runtime?(name), do: String.contains?(String.downcase(name), "nvidia")
 
   @doc """
   Checks the box's Docker, from its `/info`. With NVIDIA's runtime as
   the default, any image can get GPUs through its environment (CUDA
   images set NVIDIA_VISIBLE_DEVICES), with whatever driver capabilities
-  it asks for, so that's a host device for every environment.
+  it asks for, so that's a host device for every environment. So is a
+  default runtime Docker doesn't say the binary of.
   """
   @spec check_docker(map(), ctx()) :: {:ok, [String.t()]} | {:error, [String.t()]}
   def check_docker(%{"DefaultRuntime" => default} = info, ctx) when is_binary(default) do
-    path = get_in(info, ["Runtimes", default, "path"])
+    case runtime_kind(default, info["Runtimes"] || %{}) do
+      :other ->
+        {:ok, []}
 
-    if nvidia_runtime?(default) or (is_binary(path) and nvidia_runtime?(path)) do
-      verdict([
-        rule(
-          ctx,
-          :devices,
-          "Docker's default runtime on this box is #{default}, NVIDIA's, so any image can ask " <>
-            "for GPUs and driver capabilities through its environment; make runc the default " <>
-            "(nvidia-ctk runtime configure without --set-as-default) and reserve GPUs under deploy"
-        )
-      ])
-    else
-      {:ok, []}
+      kind ->
+        verdict([
+          rule(
+            ctx,
+            :devices,
+            runtime_message("Docker's default runtime on this box is", default, kind)
+          )
+        ])
     end
   end
 
   def check_docker(_info, _ctx), do: {:error, ["couldn't tell what Docker's default runtime is"]}
+
+  @runc ~w(runc io.containerd.runc.v2)
+
+  # :nvidia, :unknown (Docker doesn't say what it runs) or :other. With no
+  # runtimes to look in, only the name can tell.
+  defp runtime_kind(name, runtimes) do
+    spec = if is_map(runtimes), do: runtimes[name], else: nil
+    spec = if is_map(spec), do: spec, else: %{}
+    binaries = Enum.filter([spec["path"], get_in(spec, ["options", "BinaryName"])], &is_binary/1)
+
+    cond do
+      Enum.any?([name | binaries], &nvidia_runtime?/1) -> :nvidia
+      name in @runc or binaries != [] or not is_map(runtimes) -> :other
+      true -> :unknown
+    end
+  end
+
+  defp nvidia_runtime?(name), do: String.contains?(String.downcase(name), "nvidia")
+
+  defp runtime_message(owner, runtime, :nvidia) do
+    "#{owner} the nvidia runtime (#{runtime}), which gives any image whichever GPUs and " <>
+      "driver capabilities its environment asks for. Reserve GPUs under deploy instead; for " <>
+      "Docker's default, set default-runtime back to runc in /etc/docker/daemon.json and restart Docker"
+  end
+
+  defp runtime_message(owner, runtime, :unknown) do
+    "#{owner} the runtime #{runtime}, and Docker doesn't say what it runs, so it could be " <>
+      "NVIDIA's, which gives any image the GPUs; use runc (default-runtime in /etc/docker/daemon.json)"
+  end
 
   defp volume_finding(service, %{"type" => "bind", "source" => source} = vol, ctx) do
     bind_finding("service '#{service}'", source, vol["target"], vol["read_only"] == true, ctx)

@@ -402,8 +402,9 @@ defmodule ForemanAgent.Env do
          overlay_path = Path.join(paths.meta, "overlay.yml"),
          :ok <- write_overlay(overlay_path, paths, spec, services, service),
          {:ok, merged} <- files_config.(compose_files ++ [overlay_path], env),
-         {:ok, policy_warnings} <- check_policy(merged, config, paths, spec, ctx.config),
-         {:ok, docker_warnings} <- check_docker(paths, spec, ctx),
+         {:ok, docker} <- docker_info(ctx),
+         {:ok, policy_warnings} <- check_policy(merged, config, paths, spec, ctx.config, docker),
+         {:ok, docker_warnings} <- check_docker(docker, paths, spec, ctx.config),
          warnings = Enum.uniq(scan_warnings ++ policy_warnings ++ docker_warnings),
          override_path = Path.join(paths.meta, "devcontainer.json"),
          :ok <- write_override(override_path, config, compose_files, overlay_path),
@@ -607,8 +608,11 @@ defmodule ForemanAgent.Env do
     end
   end
 
-  defp check_policy(merged, devcontainer, paths, spec, config) do
-    case Policy.check(merged, devcontainer, policy_ctx(paths, spec, config)) do
+  # A service's runtime is checked against the runtimes Docker has.
+  defp check_policy(merged, devcontainer, paths, spec, config, docker) do
+    ctx = Map.put(policy_ctx(paths, spec, config), :runtimes, docker["Runtimes"] || %{})
+
+    case Policy.check(merged, devcontainer, ctx) do
       {:ok, warnings} -> {:ok, warnings}
       {:error, refused} -> {:error, refusal(refused)}
     end
@@ -617,16 +621,17 @@ defmodule ForemanAgent.Env do
   # The box's Docker can hand out GPUs without a reservation; see
   # Policy.check_docker/2. Without /info there's no telling, so it's
   # refused.
-  defp check_docker(paths, spec, ctx) do
+  defp docker_info(ctx) do
     case ctx.docker.info() do
-      {:ok, info} ->
-        case Policy.check_docker(info, policy_ctx(paths, spec, ctx.config)) do
-          {:ok, warnings} -> {:ok, warnings}
-          {:error, refused} -> {:error, refusal(refused)}
-        end
+      {:ok, info} when is_map(info) -> {:ok, info}
+      other -> {:error, "couldn't check Docker's default runtime on this box: #{inspect(other)}"}
+    end
+  end
 
-      {:error, reason} ->
-        {:error, "couldn't check Docker's default runtime on this box: #{inspect(reason)}"}
+  defp check_docker(info, paths, spec, config) do
+    case Policy.check_docker(info, policy_ctx(paths, spec, config)) do
+      {:ok, warnings} -> {:ok, warnings}
+      {:error, refused} -> {:error, refusal(refused)}
     end
   end
 

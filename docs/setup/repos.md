@@ -147,8 +147,13 @@ Configure Docker with `nvidia-ctk runtime configure --runtime=docker`,
 without `--set-as-default`: with nvidia as Docker's default runtime, any
 image that sets `NVIDIA_VISIBLE_DEVICES` (CUDA images do) gets the GPUs
 without a reservation, so the agent refuses to start environments on
-that box unless it allows `devices`. If the toolkit is missing, starting
-an environment that reserves a GPU fails with an error that says so.
+that box unless it allows `devices`. If nvidia is already the default,
+running `nvidia-ctk` again doesn't change that: remove `default-runtime`
+from `/etc/docker/daemon.json` (or set it to `runc`) and restart Docker.
+The agent goes by the runtime's binary, not its name, and refuses a
+default runtime whose binary Docker doesn't report. If the toolkit is
+missing, starting an environment that reserves a GPU fails with an error
+that says so.
 
 ## Postgres 18 and its data volume
 
