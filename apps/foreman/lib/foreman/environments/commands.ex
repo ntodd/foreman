@@ -20,8 +20,8 @@ defmodule Foreman.Environments.Commands do
     env = Repo.preload(env, [:user, :box, repo: :owner])
 
     case op.action do
-      action when action in ["create", "rebuild"] ->
-        up(op, env, "env.#{action}")
+      action when action in ["create", "rebuild", "pull_rebuild"] ->
+        up(op, env)
 
       "start" ->
         with_secrets(env, fn s ->
@@ -80,7 +80,13 @@ defmodule Foreman.Environments.Commands do
     end
   end
 
-  defp up(op, env, type) do
+  # Pull and rebuild is a rebuild that fast-forwards the clone first.
+  defp up_command("create"), do: {"env.create", %{}}
+  defp up_command("rebuild"), do: {"env.rebuild", %{}}
+  defp up_command("pull_rebuild"), do: {"env.rebuild", %{pull: true}}
+
+  defp up(op, env) do
+    {type, extra} = up_command(op.action)
     secrets = secrets(env)
     identity = Accounts.effective_identity(env.user, env.repo)
     features = features(env)
@@ -112,6 +118,7 @@ defmodule Foreman.Environments.Commands do
         |> put_present(:dotfiles, dotfiles(identity))
         |> put_present(:features, features)
         |> put_present(:registry_auth, registry_auth(env.repo.owner))
+        |> Map.merge(extra)
 
       with {:ok, cmd, _} <- command(op, type, payload) do
         {:ok, cmd,

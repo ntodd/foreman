@@ -95,12 +95,7 @@ defmodule ForemanAgent.EnvTest do
           {:ok, %{status: 0, output: "Cloning into '#{dest}'...\n"}}
 
         {"docker", ["compose" | rest]} ->
-          if "config" in rest do
-            out = rest |> Enum.drop_while(&(&1 != "-o")) |> Enum.at(1)
-            File.write!(out, JSON.encode!(compose))
-          end
-
-          {:ok, %{status: 0, output: ""}}
+          fake_compose(rest, compose)
 
         {"devcontainer", ["read-configuration" | _]} ->
           log = ~s({"type":"text","level":3,"timestamp":1,"text":"Resolving features"}\n)
@@ -125,6 +120,9 @@ defmodule ForemanAgent.EnvTest do
           )
 
           up_result(outcome, run_opts)
+
+        {"docker", ["exec" | rest]} ->
+          container_git(Keyword.get(opts, :git), rest, run_opts)
 
         other ->
           flunk("unexpected command: #{inspect(other)}")
@@ -153,6 +151,25 @@ defmodule ForemanAgent.EnvTest do
   defp up_result({:exit, status, stream}, run_opts) do
     run_opts[:on_output].(stream)
     {:ok, %{status: status, output: stream}}
+  end
+
+  defp fake_compose(args, compose) do
+    if "config" in args do
+      out = args |> Enum.drop_while(&(&1 != "-o")) |> Enum.at(1)
+      File.write!(out, JSON.encode!(compose))
+    end
+
+    {:ok, %{status: 0, output: ""}}
+  end
+
+  # `answer` takes git's arguments (after the -c options) and returns
+  # {status, output}.
+  defp container_git(nil, rest, _run_opts), do: flunk("unexpected docker exec: #{inspect(rest)}")
+
+  defp container_git(answer, rest, run_opts) do
+    {status, output} = answer.(rest |> Enum.drop_while(&(&1 != "core.fsmonitor=false")) |> tl())
+    if status == 0, do: run_opts[:on_output].(output)
+    {:ok, %{status: status, output: output}}
   end
 
   defp runs do
@@ -598,6 +615,181 @@ defmodule ForemanAgent.EnvTest do
       assert {:ok, _} = Env.run("env.rebuild", payload(), ctx)
       {"devcontainer", args, _} = List.last(runs())
       assert "--remove-existing-container" in args
+    end
+  end
+
+  describe "pull and rebuild" do
+    setup %{ctx: ctx} do
+      stub_tools()
+      {:ok, _} = Env.run("env.create", payload(), ctx)
+      _ = runs()
+      stub_running_container()
+      :ok
+    end
+
+    defp pull_payload, do: Map.put(payload(), :pull, true)
+
+    # git that answers like a clone on main with nothing in the way.
+    defp git(overrides \\ %{}) do
+      answers =
+        Map.merge(
+          %{
+            "symbolic-ref" => {0, "main\n"},
+            "status" => {0, ""},
+            "fetch" => {0, "From https://github.com/acme/storefront\n"},
+            "rev-list" => {0, "0\n"},
+            "merge" => {0, "Updating 1111111..2222222\nFast-forward\n"}
+          },
+          overrides
+        )
+
+      fn [command | _] -> Map.fetch!(answers, command) end
+    end
+
+    defp git_runs(runs) do
+      for {"docker", ["exec" | args], _} <- runs,
+          do: args |> Enum.drop_while(&(&1 != "core.fsmonitor=false")) |> tl()
+    end
+
+    defp up_runs(runs), do: for({"devcontainer", ["up" | args], _} <- runs, do: args)
+
+    test "fast-forwards the clone inside the container, then rebuilds", %{ctx: ctx} do
+      stub_tools(git: git())
+
+      assert {:ok, _} = Env.run("env.rebuild", pull_payload(), ctx)
+      runs = runs()
+
+      assert git_runs(runs) == [
+               ["symbolic-ref", "--short", "-q", "HEAD"],
+               ["status", "--porcelain=v1", "--untracked-files=no"],
+               ["fetch", "--no-tags", "origin", "main"],
+               ["rev-list", "--count", "FETCH_HEAD..HEAD"],
+               ["merge", "--ff-only", "--no-overwrite-ignore", "FETCH_HEAD"]
+             ]
+
+      # As the remote user, in the container; never on the box.
+      assert {"docker", ["exec", "-u", "vscode", "-w", "/workspaces/storefront", "abc123" | _], _} =
+               Enum.find(runs, &match?({"docker", ["exec" | _], _}, &1))
+
+      refute Enum.any?(runs, &match?({"git", _, _}, &1))
+
+      merged = Enum.find_index(runs, fn {_, args, _} -> "merge" in args end)
+      read = Enum.find_index(runs, &match?({"devcontainer", ["read-configuration" | _], _}, &1))
+      assert merged < read, "the new config is read after the pull"
+
+      assert [up] = up_runs(runs)
+      assert "--remove-existing-container" in up
+      assert_received {:log, "info", "Fast-forward\n"}
+    end
+
+    test "refuses with uncommitted changes, before fetching", %{ctx: ctx} do
+      stub_tools(git: git(%{"status" => {0, " M a\n M b\nA  c\n D d\n"}}))
+
+      assert {:error, "4 changed files in the workspace; commit or stash them first",
+              %{"pull_failed" => true}} = Env.run("env.rebuild", pull_payload(), ctx)
+
+      runs = runs()
+      refute Enum.any?(git_runs(runs), &match?(["fetch" | _], &1))
+      assert up_runs(runs) == []
+      refute Enum.any?(runs, &match?({"docker", ["compose", "-p", _, "down" | _], _}, &1))
+    end
+
+    test "says one changed file", %{ctx: ctx} do
+      stub_tools(git: git(%{"status" => {0, " M a\n"}}))
+
+      assert {:error, "1 changed file in the workspace; commit or stash it first", _} =
+               Env.run("env.rebuild", pull_payload(), ctx)
+    end
+
+    test "refuses when the clone has commits the branch doesn't", %{ctx: ctx} do
+      stub_tools(git: git(%{"rev-list" => {0, "2\n"}}))
+
+      assert {:error,
+              "the clone has 2 commits that aren't on origin/main; push or rebase them first",
+              %{"pull_failed" => true}} = Env.run("env.rebuild", pull_payload(), ctx)
+
+      runs = runs()
+      refute Enum.any?(git_runs(runs), &match?(["merge" | _], &1))
+      assert up_runs(runs) == []
+    end
+
+    test "refuses on another branch", %{ctx: ctx} do
+      stub_tools(git: git(%{"symbolic-ref" => {0, "topic\n"}}))
+
+      assert {:error, "the clone has topic checked out, not main; switch back to main first",
+              %{"pull_failed" => true}} = Env.run("env.rebuild", pull_payload(), ctx)
+    end
+
+    test "refuses with a detached HEAD", %{ctx: ctx} do
+      stub_tools(git: git(%{"symbolic-ref" => {1, ""}}))
+
+      assert {:error, "the clone isn't on a branch (detached HEAD); check out main first",
+              %{"pull_failed" => true}} = Env.run("env.rebuild", pull_payload(), ctx)
+    end
+
+    test "shows git's last lines when the fast-forward fails", %{ctx: ctx} do
+      stub_tools(
+        git:
+          git(%{
+            "merge" =>
+              {128, "hint: Diverging branches\nfatal: Not possible to fast-forward, aborting.\n"}
+          })
+      )
+
+      assert {:error, message, %{"pull_failed" => true}} =
+               Env.run("env.rebuild", pull_payload(), ctx)
+
+      assert message =~ "couldn't fast-forward to origin/main"
+      assert message =~ "fatal: Not possible to fast-forward, aborting."
+      assert up_runs(runs()) == []
+    end
+
+    test "shows git's last lines when the fetch fails", %{ctx: ctx} do
+      stub_tools(git: git(%{"fetch" => {128, "fatal: couldn't find remote ref main\n"}}))
+
+      assert {:error, message, %{"pull_failed" => true}} =
+               Env.run("env.rebuild", pull_payload(), ctx)
+
+      assert message =~ "git fetch failed"
+      assert message =~ "couldn't find remote ref main"
+    end
+
+    test "starts a stopped environment to pull", %{ctx: ctx} do
+      stub_tools(git: git())
+      counter = :counters.new(1, [])
+
+      stub(DockerMock, :list_containers, fn _ ->
+        :counters.add(counter, 1, 1)
+        state = if :counters.get(counter, 1) == 1, do: "exited", else: "running"
+
+        {:ok,
+         [
+           %{
+             "Id" => "abc123",
+             "State" => state,
+             "Labels" => %{"com.docker.compose.service" => "app"}
+           }
+         ]}
+      end)
+
+      assert {:ok, _} = Env.run("env.rebuild", pull_payload(), ctx)
+      runs = runs()
+
+      assert [start, rebuild] = up_runs(runs)
+      refute "--remove-existing-container" in start
+      assert "--remove-existing-container" in rebuild
+
+      started = Enum.find_index(runs, &match?({"devcontainer", ["up" | _], _}, &1))
+      fetched = Enum.find_index(runs, fn {_, args, _} -> "fetch" in args end)
+      assert started < fetched
+    end
+
+    test "a clone made by this rebuild has nothing to pull", %{ctx: ctx, config: config} do
+      File.rm_rf!(Path.join([config.envs_root, @env_id, "meta", "spec.term"]))
+      stub_tools()
+
+      assert {:ok, _} = Env.run("env.rebuild", pull_payload(), ctx)
+      assert git_runs(runs()) == []
     end
   end
 

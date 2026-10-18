@@ -319,6 +319,68 @@ defmodule ForemanAgent.Integration.EnvDockerTest do
     assert {out, 0} = exec(new_app, ["cat", "/workspaces/hello/README.md"])
     assert out =~ "change"
 
+    # -- pull and rebuild fast-forwards the clone, in the container -----------------
+    # The container can't reach the test's git server, so origin becomes a
+    # repo in the workspace, which it can.
+    workspace = Path.join([config.envs_root, @env1, "workspace"])
+    host_git = fn args -> {_, 0} = System.cmd("git", args, stderr_to_stdout: true) end
+
+    host_git.([
+      "clone",
+      "-q",
+      "--bare",
+      base_url <> "/hello.git",
+      Path.join(workspace, "upstream.git")
+    ])
+
+    container_git = ["git", "-c", "safe.directory=*", "-C", "/workspaces/hello"]
+
+    {_, 0} =
+      exec(new_app, container_git ++ ["remote", "set-url", "origin", "/workspaces/upstream.git"])
+
+    work = Path.join(workspace, "upstream-work")
+    host_git.(["clone", "-q", Path.join(workspace, "upstream.git"), work])
+    File.write!(Path.join(work, "PULLED"), "yes\n")
+    File.write!(Path.join(work, "local.env"), "theirs\n")
+    host_git.(["-C", work, "add", "PULLED", "local.env"])
+
+    host_git.([
+      "-C",
+      work,
+      "-c",
+      "user.name=T",
+      "-c",
+      "user.email=t@example.com",
+      "commit",
+      "-qm",
+      "more"
+    ])
+
+    host_git.(["-C", work, "push", "-q", "origin", "main"])
+
+    pull = Map.put(create_payload(@env1, "hello-1", base_url), :pull, true)
+
+    assert {:error, "1 changed file in the workspace; commit or stash it first",
+            %{"pull_failed" => true}} = Env.run("env.rebuild", pull, ctx)
+
+    assert containers(@env1)["app"]["Id"] == new_app, "a refused pull leaves it running"
+
+    {_, 0} = exec(new_app, container_git ++ ["checkout", "README.md"])
+
+    # A file the clone ignores, which the branch now tracks, isn't overwritten.
+    clone = Path.join(workspace, "hello")
+    File.write!(Path.join(clone, ".git/info/exclude"), "local.env\n", [:append])
+    File.write!(Path.join(clone, "local.env"), "mine\n")
+
+    assert {:error, message, %{"pull_failed" => true}} = Env.run("env.rebuild", pull, ctx)
+    assert message =~ "local.env"
+    assert File.read!(Path.join(clone, "local.env")) == "mine\n"
+
+    File.rm!(Path.join(clone, "local.env"))
+    assert {:ok, _} = Env.run("env.rebuild", pull, ctx)
+    new_app = containers(@env1)["app"]["Id"]
+    assert {"yes\n", 0} = exec(new_app, ["cat", "/workspaces/hello/PULLED"])
+
     # -- logs ---------------------------------------------------------------------
     assert {:ok, _} =
              Env.run(

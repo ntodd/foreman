@@ -288,6 +288,7 @@ defmodule ForemanWeb.ForemanComponents do
   @doc "A human name for an operation's action."
   def action_label("create"), do: "Create"
   def action_label("rebuild"), do: "Rebuild"
+  def action_label("pull_rebuild"), do: "Pull and rebuild"
   def action_label("start"), do: "Start"
   def action_label("stop"), do: "Stop"
   def action_label("destroy"), do: "Destroy"

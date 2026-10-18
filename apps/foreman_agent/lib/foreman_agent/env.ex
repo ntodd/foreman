@@ -44,7 +44,10 @@ defmodule ForemanAgent.Env do
           log: function()
         }
 
-  @spec run(String.t(), map(), ctx()) :: {:ok, map()} | {:error, String.t()}
+  # The three-element error carries a result with it: a refused pull says
+  # so, since the environment is still as it was.
+  @spec run(String.t(), map(), ctx()) ::
+          {:ok, map()} | {:error, String.t()} | {:error, String.t(), map()}
   def run("env.create", p, ctx), do: up(p, ctx, rebuild: false)
   def run("env.rebuild", p, ctx), do: up(p, ctx, rebuild: true)
   def run("env.start", p, ctx), do: start(p, ctx)
@@ -77,12 +80,15 @@ defmodule ForemanAgent.Env do
 
   defp up(p, ctx, opts) do
     paths = paths(ctx.config, p.env_id, p.repo)
-    spec = Map.drop(p, [:files, :compose_env, :registry_auth])
+    spec = Map.drop(p, [:files, :compose_env, :registry_auth, :pull])
+    # A clone this rebuild makes is already up to date.
+    pull? = Map.get(p, :pull) == true and File.exists?(spec_path(paths))
 
     with :ok <- check_clone_url(p.clone_url, ctx.config),
          :ok <- ensure_dirs(paths),
          {:ok, _} <- write_secrets(paths, p.files),
          :ok <- ensure_clone(paths, p, ctx),
+         :ok <- if(pull?, do: pull(p, ctx), else: :ok),
          {:ok, prepared} <- prepare(paths, spec, p.compose_env, ctx),
          {:ok, result} <- devcontainer_up(paths, spec, prepared, p, ctx, opts) do
       save_spec(paths, spec, prepared, result)
@@ -250,6 +256,127 @@ defmodule ForemanAgent.Env do
 
     :ok = SafeFS.write_atomic(path, script, 0o700)
     path
+  end
+
+  # -- pull ----------------------------------------------------------------
+
+  # Fast-forwards the clone to its branch, before anything is torn down,
+  # so a refusal leaves the environment running as it was. git runs in
+  # the devcontainer, as the remote user with the environment's own
+  # credential helper: on the box it would read a .git/config anything in
+  # the environment can rewrite.
+  defp pull(p, ctx) do
+    with {:ok, spec, container} <- running_devcontainer(p, ctx) do
+      ctx.log.("info", "Pulling #{p.branch}\n")
+      git = &container_git(ctx, spec, container, &1, &2, &3)
+
+      case fast_forward(git, p.branch) do
+        :ok -> :ok
+        {:error, message} -> {:error, message, %{"pull_failed" => true}}
+      end
+    end
+  end
+
+  defp running_devcontainer(p, ctx) do
+    with {:ok, spec} <- load_spec(ctx.config, p.env_id) do
+      case devcontainer_container(ctx, p.env_id, spec.devcontainer_service) do
+        {:ok, container} ->
+          {:ok, spec, container}
+
+        {:error, _} ->
+          ctx.log.("info", "Starting the environment to pull\n")
+
+          with {:ok, _} <- start(p, ctx),
+               {:ok, spec} <- load_spec(ctx.config, p.env_id),
+               {:ok, container} <-
+                 devcontainer_container(ctx, p.env_id, spec.devcontainer_service) do
+            {:ok, spec, container}
+          end
+      end
+    end
+  end
+
+  defp fast_forward(git, branch) do
+    with :ok <- on_branch(git, branch),
+         :ok <- no_changes(git),
+         :ok <- fetch(git, branch),
+         :ok <- no_local_commits(git, branch) do
+      # git overwrites ignored files by default: a local .env the branch
+      # has started tracking would be lost.
+      case git.(["merge", "--ff-only", "--no-overwrite-ignore", "FETCH_HEAD"], "git merge",
+             quiet: false
+           ) do
+        {:ok, _} ->
+          :ok
+
+        {:error, output} ->
+          {:error, "couldn't fast-forward to origin/#{branch}: #{last_lines(output)}"}
+      end
+    end
+  end
+
+  defp on_branch(git, branch) do
+    case git.(["symbolic-ref", "--short", "-q", "HEAD"], "git symbolic-ref", []) do
+      {:ok, out} ->
+        case String.trim(out) do
+          ^branch ->
+            :ok
+
+          other ->
+            {:error,
+             "the clone has #{other} checked out, not #{branch}; switch back to #{branch} first"}
+        end
+
+      {:error, _} ->
+        {:error, "the clone isn't on a branch (detached HEAD); check out #{branch} first"}
+    end
+  end
+
+  # Untracked files don't stop a fast-forward; git says so if one would
+  # be overwritten.
+  defp no_changes(git) do
+    case git.(["status", "--porcelain=v1", "--untracked-files=no"], "git status", []) do
+      {:ok, out} ->
+        case out |> String.split("\n", trim: true) |> length() do
+          0 -> :ok
+          1 -> {:error, "1 changed file in the workspace; commit or stash it first"}
+          n -> {:error, "#{n} changed files in the workspace; commit or stash them first"}
+        end
+
+      {:error, output} ->
+        {:error, "git status failed: #{last_lines(output)}"}
+    end
+  end
+
+  defp fetch(git, branch) do
+    case git.(["fetch", "--no-tags", "origin", branch], "git fetch", quiet: false) do
+      {:ok, _} -> :ok
+      {:error, output} -> {:error, "git fetch failed: #{last_lines(output)}"}
+    end
+  end
+
+  defp no_local_commits(git, branch) do
+    case git.(["rev-list", "--count", "FETCH_HEAD..HEAD"], "git rev-list", []) do
+      {:ok, out} ->
+        case Integer.parse(String.trim(out)) do
+          {0, ""} ->
+            :ok
+
+          {1, ""} ->
+            {:error,
+             "the clone has 1 commit that isn't on origin/#{branch}; push or rebase it first"}
+
+          {n, ""} ->
+            {:error,
+             "the clone has #{n} commits that aren't on origin/#{branch}; push or rebase them first"}
+
+          _ ->
+            {:error, "git rev-list gave something other than a count"}
+        end
+
+      {:error, output} ->
+        {:error, "git rev-list failed: #{last_lines(output)}"}
+    end
   end
 
   # -- prepare -------------------------------------------------------------

@@ -25,6 +25,7 @@ defmodule ForemanWeb.EnvironmentBranchSyncTest do
 
     repo = repo_fixture(name: "storefront")
     box = box_fixture(owner_user_id: user.id)
+    box = box |> Ecto.Changeset.change(protocol_version: 3) |> Foreman.Repo.update!()
     env = environment_fixture(user: user, repo: repo, box: box, branch: "feature/x")
     stub(ClientMock, :installation_token, fn _, _ -> {:ok, "ghs_install"} end)
     %{env: env, box: box}
@@ -68,6 +69,12 @@ defmodule ForemanWeb.EnvironmentBranchSyncTest do
 
     assert has_element?(view, "#branch-sync", "3 commits behind origin/feature/x")
     assert has_element?(view, "#branch-sync", "2 ahead")
+
+    assert has_element?(
+             view,
+             "#rebuild-menu",
+             "3 new commits to pull, but the clone has 2 of its own"
+           )
   end
 
   test "says when the clone is up to date", %{conn: conn, env: env, box: box} do
@@ -77,6 +84,7 @@ defmodule ForemanWeb.EnvironmentBranchSyncTest do
     view = open_with_status(conn, env, %{})
 
     assert has_element?(view, "#branch-sync", "Up to date")
+    assert has_element?(view, "#rebuild-menu", "Nothing to pull")
   end
 
   test "says when the clone has another branch checked out", %{conn: conn, env: env, box: box} do

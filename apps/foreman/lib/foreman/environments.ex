@@ -217,6 +217,33 @@ defmodule Foreman.Environments do
   def start(scope, env), do: action(scope, env, :start)
   def stop(scope, env), do: action(scope, env, :stop)
   def rebuild(scope, env), do: action(scope, env, :rebuild)
+
+  @doc """
+  Fast-forwards the clone to its branch, then rebuilds. The agent refuses
+  (and leaves the environment running) if the clone has uncommitted
+  changes or commits the branch doesn't.
+  """
+  def pull_rebuild(scope, env) do
+    with :ok <- authorize(scope, env),
+         :ok <- can_pull?(env),
+         do: action(scope, env, :pull_rebuild)
+  end
+
+  # Protocol 3 added `pull` to env.rebuild; an older agent refuses it.
+  defp can_pull?(env) do
+    case Repo.get(Box, env.box_id) do
+      %Box{protocol_version: v} when is_integer(v) and v >= 3 ->
+        :ok
+
+      %Box{name: name} ->
+        {:error,
+         "#{name} needs a newer agent to pull; update its agent, or rebuild without pulling."}
+
+      nil ->
+        {:error, "the environment's box is gone"}
+    end
+  end
+
   def destroy(scope, env), do: action(scope, env, :destroy)
   def restart(scope, env, :affected), do: action(scope, env, :restart_affected)
   def restart(scope, env, :all), do: action(scope, env, :restart_all)
@@ -350,10 +377,17 @@ defmodule Foreman.Environments do
   defp queue_action(scope, env, action, args) do
     desired =
       case action do
-        :stop -> "stopped"
-        :destroy -> "destroyed"
-        a when a in [:create, :start, :rebuild, :restart_affected, :restart_all] -> "running"
-        _ -> env.desired_state
+        :stop ->
+          "stopped"
+
+        :destroy ->
+          "destroyed"
+
+        a when a in [:create, :start, :rebuild, :pull_rebuild, :restart_affected, :restart_all] ->
+          "running"
+
+        _ ->
+          env.desired_state
       end
 
     # Remembered so cancelling the operation can put the wish back.
@@ -486,6 +520,7 @@ defmodule Foreman.Environments do
 
   defp command_type("create"), do: "env.create"
   defp command_type("rebuild"), do: "env.rebuild"
+  defp command_type("pull_rebuild"), do: "env.rebuild"
   defp command_type("start"), do: "env.start"
   defp command_type("stop"), do: "env.stop"
   defp command_type("destroy"), do: "env.destroy"
@@ -505,7 +540,8 @@ defmodule Foreman.Environments do
 
   # -- results -----------------------------------------------------------------------
 
-  @up ~w(create rebuild start restart_affected restart_all)
+  @up ~w(create rebuild pull_rebuild start restart_affected restart_all)
+  @fresh_build ~w(create rebuild pull_rebuild)
 
   @doc """
   Applies a finished operation's outcome to its environment, then sends
@@ -575,7 +611,7 @@ defmodule Foreman.Environments do
     |> put_if(:devcontainer_service, string(result["devcontainer_service"]))
     |> put_if(:warnings, strings(result["warnings"]))
     |> put_if(:host_requirements, map(result["host_requirements"]))
-    |> then(&if(action in ["create", "rebuild"], do: Map.put(&1, :ts_authkey, nil), else: &1))
+    |> then(&if(action in @fresh_build, do: Map.put(&1, :ts_authkey, nil), else: &1))
   end
 
   defp result_attrs(%{status: "succeeded", action: "stop"}, _env),
@@ -596,6 +632,14 @@ defmodule Foreman.Environments do
       do: Map.merge(attrs, %{observed_state: "error", status_message: "cancelled"}),
       else: attrs
   end
+
+  # Refused before anything was torn down, so it's still running (the
+  # agent starts a stopped one to pull in it).
+  defp result_attrs(
+         %{status: "failed", action: "pull_rebuild", result: %{"pull_failed" => true}} = op,
+         _env
+       ),
+       do: %{observed_state: "running", status_message: "Didn't pull: #{op.error}"}
 
   defp result_attrs(%{status: status, action: action, error: error} = op, env)
        when status in ["failed", "cancelled"] and action in @up do
@@ -680,6 +724,7 @@ defmodule Foreman.Environments do
   @doc "The transitional state shown while an operation runs."
   def transitional_state("create"), do: "creating"
   def transitional_state("rebuild"), do: "creating"
+  def transitional_state("pull_rebuild"), do: "creating"
   def transitional_state("start"), do: "starting"
   def transitional_state("restart_affected"), do: "starting"
   def transitional_state("restart_all"), do: "starting"
@@ -809,7 +854,7 @@ defmodule Foreman.Environments do
     end
   end
 
-  @lifecycle ~w(create rebuild start stop destroy restart_affected restart_all)
+  @lifecycle ~w(create rebuild pull_rebuild start stop destroy restart_affected restart_all)
 
   defp lifecycle_active?(env_id) do
     Repo.exists?(

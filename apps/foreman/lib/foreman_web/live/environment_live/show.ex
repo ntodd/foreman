@@ -111,6 +111,7 @@ defmodule ForemanWeb.EnvironmentLive.Show do
         "retry" -> Environments.retry(scope, env)
         "stop" -> Environments.stop(scope, env)
         "rebuild" -> Environments.rebuild(scope, env)
+        "pull_rebuild" -> Environments.pull_rebuild(scope, env)
         "restart_affected" -> Environments.restart(scope, env, :affected)
         "restart_all" -> Environments.restart(scope, env, :all)
         "logs" -> Environments.logs(scope, env)
@@ -341,15 +342,33 @@ defmodule ForemanWeb.EnvironmentLive.Show do
           >
             Stop
           </.button>
-          <.button
-            phx-click="action"
-            phx-value-do="rebuild"
-            icon="hero-wrench-screwdriver-mini"
-            size="sm"
-            data-confirm={"Rebuild #{@env.slug}? Containers are recreated from a fresh build; the workspace, volumes and tailnet identity are kept."}
-          >
-            Rebuild
-          </.button>
+          <.dropdown id="rebuild-menu" label="Rebuild" icon="hero-wrench-screwdriver-mini">
+            <.dropdown_item
+              title="Rebuild"
+              icon="hero-wrench-screwdriver-mini"
+              phx-click={JS.push("action") |> hide_dropdown("rebuild-menu")}
+              phx-value-do="rebuild"
+              data-confirm={"Rebuild #{@env.slug}? Containers are recreated from a fresh build; the workspace, volumes and tailnet identity are kept."}
+            >
+              Recreates the containers from a fresh build. Keeps the clone as it is, along with volumes and the tailnet identity.
+            </.dropdown_item>
+            <.dropdown_item
+              title="Pull and rebuild"
+              icon="hero-arrow-down-tray-mini"
+              phx-click={JS.push("action") |> hide_dropdown("rebuild-menu")}
+              phx-value-do="pull_rebuild"
+              disabled={not pull_supported?(@env)}
+              data-confirm={"Pull and rebuild #{@env.slug}? The clone is fast-forwarded to origin/#{@env.branch}, then containers are recreated from a fresh build."}
+            >
+              Fast-forwards the clone to <span class="font-mono">origin/{@env.branch}</span>, then rebuilds. Stops if there's uncommitted or unpushed work.
+              <:note :if={not pull_supported?(@env)}>
+                <span class="text-warning">{@env.box.name} needs a newer agent to pull.</span>
+              </:note>
+              <:note :if={pull_supported?(@env) and @sync}>
+                <.pull_note sync={@sync} />
+              </:note>
+            </.dropdown_item>
+          </.dropdown>
           <.button phx-click="check_destroy" icon="hero-trash-mini" size="sm" variant="danger_outline">Destroy</.button>
         </:actions>
       </.header>
@@ -571,6 +590,50 @@ defmodule ForemanWeb.EnvironmentLive.Show do
         </div>
       </.modal>
     </Layouts.app>
+    """
+  end
+
+  defp commits(1, adjective), do: "1 #{adjective} commit"
+  defp commits(n, adjective), do: "#{n} #{adjective} commits"
+
+  # Protocol 3 agents can pull.
+  defp pull_supported?(env), do: (env.box.protocol_version || 0) >= 3
+
+  attr :sync, :map, required: true
+
+  defp pull_note(%{sync: %{other_branch: _}} = assigns) do
+    ~H"""
+    <span class="text-warning">
+      The clone has <span class="font-mono">{@sync.other_branch}</span>
+      checked out; switch back first.
+    </span>
+    """
+  end
+
+  defp pull_note(%{sync: %{behind: behind, ahead: 0}} = assigns) when behind > 0 do
+    ~H"""
+    <span class="text-warning">Brings in {commits(@sync.behind, "new")}.</span>
+    """
+  end
+
+  # The agent refuses while the clone has commits the branch doesn't.
+  defp pull_note(%{sync: %{behind: behind}} = assigns) when behind > 0 do
+    ~H"""
+    <span class="text-warning">
+      {commits(@sync.behind, "new")} to pull, but the clone has {@sync.ahead} of its own; push them first.
+    </span>
+    """
+  end
+
+  defp pull_note(%{sync: %{ahead: ahead}} = assigns) when ahead > 0 do
+    ~H"""
+    <span class="text-ink-3">Nothing to pull. The clone has commits to push.</span>
+    """
+  end
+
+  defp pull_note(assigns) do
+    ~H"""
+    <span class="text-ink-3">Nothing to pull: the clone is up to date.</span>
     """
   end
 

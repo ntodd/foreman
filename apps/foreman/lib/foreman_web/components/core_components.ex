@@ -1015,6 +1015,121 @@ defmodule ForemanWeb.CoreComponents do
   end
 
   @doc """
+  A button that opens a menu of `dropdown_item`s below it. The menu
+  closes on a click outside it or Escape; an item closes it with
+  `hide_dropdown/2`.
+
+  ## Examples
+
+      <.dropdown id="rebuild-menu" label="Rebuild" icon="hero-wrench-screwdriver-mini">
+        <.dropdown_item title="Rebuild" phx-click={JS.push("rebuild") |> hide_dropdown("rebuild-menu")}>
+          Recreates the containers.
+        </.dropdown_item>
+      </.dropdown>
+  """
+  attr :id, :string, required: true
+  attr :label, :string, required: true
+  attr :icon, :string, default: nil
+  attr :size, :string, default: "sm", values: ~w(sm md)
+  slot :inner_block, required: true
+
+  def dropdown(assigns) do
+    ~H"""
+    <div
+      id={@id}
+      class="relative"
+      phx-click-away={hide_dropdown(@id)}
+      phx-window-keydown={hide_dropdown(@id)}
+      phx-key="Escape"
+    >
+      <.button
+        type="button"
+        id={"#{@id}-trigger"}
+        size={@size}
+        icon={@icon}
+        aria-haspopup="menu"
+        aria-expanded="false"
+        aria-controls={"#{@id}-menu"}
+        phx-click={toggle_dropdown(@id)}
+      >
+        {@label}
+        <.icon name="hero-chevron-down-mini" class="-mr-1 size-4 text-ink-3" />
+      </.button>
+      <div
+        id={"#{@id}-menu"}
+        role="menu"
+        aria-labelledby={"#{@id}-trigger"}
+        class="absolute right-0 top-full z-30 mt-1.5 hidden w-80 max-w-[calc(100vw-2rem)] origin-top-right rounded-xl border border-line bg-raised p-1.5 shadow-overlay"
+      >
+        {render_slot(@inner_block)}
+      </div>
+    </div>
+    """
+  end
+
+  @doc """
+  An entry in a `dropdown`: a title, what it does underneath, and an
+  optional `note` about how things stand now.
+  """
+  attr :title, :string, required: true
+  attr :icon, :string, default: nil
+  attr :rest, :global, include: ~w(disabled name value)
+  slot :inner_block, required: true
+  slot :note
+
+  def dropdown_item(assigns) do
+    ~H"""
+    <button
+      type="button"
+      role="menuitem"
+      class="group flex w-full items-start gap-3 rounded-lg px-2.5 py-2 text-left transition-colors duration-150 hover:bg-subtle focus-visible:bg-subtle focus-visible:outline-none disabled:cursor-not-allowed disabled:hover:bg-transparent"
+      {@rest}
+    >
+      <span
+        :if={@icon}
+        class="mt-0.5 grid size-7 shrink-0 place-items-center rounded-md border border-line bg-canvas text-ink-2 shadow-xs transition-colors group-hover:text-ink group-disabled:text-ink-3"
+      >
+        <.icon name={@icon} class="size-4" />
+      </span>
+      <span class="min-w-0">
+        <span class="block text-sm font-medium text-ink group-disabled:text-ink-3">{@title}</span>
+        <span class="mt-0.5 block text-xs leading-relaxed text-ink-3">{render_slot(@inner_block)}</span>
+        <span :for={note <- @note} class="mt-1.5 block text-xs font-medium">{render_slot(note)}</span>
+      </span>
+    </button>
+    """
+  end
+
+  @doc "Opens or closes a `dropdown`'s menu."
+  def toggle_dropdown(js \\ %JS{}, id) do
+    js
+    |> JS.toggle(
+      to: "##{id}-menu",
+      time: 150,
+      in:
+        {"transition-[opacity,transform] ease-(--ease-out-expo) duration-150",
+         "opacity-0 -translate-y-1 scale-[0.98]", "opacity-100 translate-y-0 scale-100"},
+      out:
+        {"transition-[opacity,transform] ease-in duration-100",
+         "opacity-100 translate-y-0 scale-100", "opacity-0 -translate-y-1 scale-[0.98]"}
+    )
+    |> JS.toggle_attribute({"aria-expanded", "true", "false"}, to: "##{id}-trigger")
+  end
+
+  @doc "Closes a `dropdown`'s menu."
+  def hide_dropdown(js \\ %JS{}, id) do
+    js
+    |> JS.hide(
+      to: "##{id}-menu",
+      time: 100,
+      transition:
+        {"transition-[opacity,transform] ease-in duration-100",
+         "opacity-100 translate-y-0 scale-100", "opacity-0 -translate-y-1 scale-[0.98]"}
+    )
+    |> JS.set_attribute({"aria-expanded", "false"}, to: "##{id}-trigger")
+  end
+
+  @doc """
   Opens the modal with the given id.
   """
   def show_modal(js \\ %JS{}, id) when is_binary(id) do

@@ -23,12 +23,13 @@ defmodule ForemanAgent.Handler do
   @gc_timeout :timer.minutes(30)
 
   @spec handle(Command.t(), (String.t(), String.t() -> any())) ::
-          {:ok, map()} | {:error, String.t()}
+          {:ok, map()} | {:error, String.t()} | {:error, String.t(), map()}
   def handle(%Command{type: "env." <> _ = type, payload: payload} = cmd, log) do
     redactor = Redactor.new(cmd)
 
     case run_env(type, payload, ctx(Redactor.wrap_log(redactor, log)), redactor) do
       {:error, message} -> {:error, Redactor.redact(redactor, message)}
+      {:error, message, result} -> {:error, Redactor.redact(redactor, message), result}
       ok -> ok
     end
   end

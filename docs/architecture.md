@@ -100,7 +100,7 @@ Each agent joins topic `agent:<agent_id>`. Commands are a fixed vocabulary; ther
 |---|---|
 | `env.create` | Clone, write overlay and secrets, `devcontainer up` |
 | `env.start` / `env.stop` / `env.restart` | Lifecycle |
-| `env.rebuild` | Recreate containers, keeping volumes and the clone |
+| `env.rebuild` | Recreate containers, keeping volumes and the clone; with `pull`, fast-forward the clone to its branch first |
 | `env.destroy` | Remove containers, volumes and the clone |
 | `env.secrets.write` | Rewrite the environment's tmpfs secrets directory |
 | `env.logs` | Stream container or build logs |
@@ -112,7 +112,7 @@ Each agent joins topic `agent:<agent_id>`. Commands are a fixed vocabulary; ther
 
 Every command carries an `op_id`. The agent records in-flight `op_id`s, so a command retried after a reconnect is not run twice. Long operations keep running if the socket drops. The agent sends their progress and result once it reconnects.
 
-The agent sends its version and protocol version when it joins. The control plane accepts protocol N and N-1, and only sends a protocol-N field to agents that reported N, so upgrade the control plane before the agents (an older control plane refuses newer agents). Protocol 2 added `keep` to `env.secrets.write`. Protocol 3 added `features` (a user's own devcontainer features) to `env.create` and `env.rebuild`; an environment on an older agent builds without them. Once boxes run protocol-2 agents, the control plane can't be rolled back past the release that introduced it: an older control plane refuses them at join.
+The agent sends its version and protocol version when it joins. The control plane accepts protocol N and N-1, and only sends a protocol-N field to agents that reported N, so upgrade the control plane before the agents (an older control plane refuses newer agents). Protocol 2 added `keep` to `env.secrets.write`. Protocol 3 added `features` (a user's own devcontainer features) to `env.create` and `env.rebuild`, where an environment on an older agent builds without them, and `pull` to `env.rebuild`, which isn't offered on older agents. Once boxes run agents on a protocol, the control plane can't be rolled back past the release that introduced it: an older control plane refuses them at join.
 
 ### Reconciliation
 
@@ -204,6 +204,7 @@ A devcontainer feature that ships inside the agent release, so a box always runs
 
 - **Stop:** `docker compose stop`. Sidecars get a graceful shutdown; for example, a Neon Local sidecar deletes its branch on stop.
 - **Rebuild:** `devcontainer up --remove-existing-container`. Named volumes, the clone and the Tailscale identity survive.
+- **Pull and rebuild:** a rebuild that first fast-forwards the clone to `origin/<branch>`. git runs inside the devcontainer (started first if it's stopped), as the remote user with the environment's own credential helper, never on the box. It refuses, before anything is torn down, if the tree has uncommitted changes, the clone has commits the branch doesn't, another branch is checked out, or the fast-forward fails; the environment stays running and the page shows why. The policy check then runs on the pulled config as on every start.
 - **Destroy:**
   1. The agent runs `env.git_status`. The UI warns about a dirty tree or unpushed commits.
   2. The agent runs `docker compose down -v` and deletes the clone and the secrets directory.

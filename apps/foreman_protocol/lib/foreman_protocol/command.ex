@@ -48,7 +48,9 @@ defmodule ForemanProtocol.Command do
 
   @specs %{
     "env.create" => @up_spec,
-    "env.rebuild" => @up_spec,
+    # `pull`: fast-forward the clone to its branch first. Protocol 3, and
+    # absent unless set.
+    "env.rebuild" => @up_spec ++ [pull: {:boolean, []}],
     "env.start" => @env ++ [compose_env: {:env_map, default: %{}}],
     "env.stop" => @env,
     "env.restart" =>

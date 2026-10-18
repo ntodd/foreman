@@ -1,7 +1,8 @@
 defmodule ForemanProtocol.ProtocolV3Test do
   @moduledoc """
   Protocol 3: `env.create` and `env.rebuild` can carry the devcontainer
-  features a user adds to their own environments.
+  features a user adds to their own environments, and `env.rebuild` can
+  fast-forward the clone to its branch first (`pull`).
   """
   use ExUnit.Case, async: true
 
@@ -12,6 +13,22 @@ defmodule ForemanProtocol.ProtocolV3Test do
   defp create(overrides) do
     Command.new(
       "env.create",
+      Map.merge(
+        %{
+          "env_id" => @env_id,
+          "slug" => "storefront-2",
+          "repo" => "acme/storefront",
+          "clone_url" => "https://github.com/acme/storefront.git",
+          "branch" => "main"
+        },
+        overrides
+      )
+    )
+  end
+
+  defp rebuild(overrides) do
+    Command.new(
+      "env.rebuild",
       Map.merge(
         %{
           "env_id" => @env_id,
@@ -109,6 +126,23 @@ defmodule ForemanProtocol.ProtocolV3Test do
 
       assert Feature.id("ghcr.io/ntodd/foreman/foreman@sha256:" <> String.duplicate("a", 64)) ==
                "foreman"
+    end
+  end
+
+  describe "pull" do
+    test "a rebuild can pull first" do
+      assert {:ok, cmd} = rebuild(%{"pull" => true})
+      assert cmd.payload.pull == true
+    end
+
+    test "is absent unless set, so a protocol 2 agent sees the rebuild it knows" do
+      assert {:ok, cmd} = rebuild(%{})
+      refute Map.has_key?(cmd.payload, :pull)
+      refute Map.has_key?(Command.to_wire(cmd)["payload"], "pull")
+    end
+
+    test "only a rebuild pulls" do
+      assert {:error, _} = create(%{"pull" => true})
     end
   end
 end
