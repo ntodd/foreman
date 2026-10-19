@@ -323,6 +323,12 @@ jobs:
         if: ${{ !cancelled() }}
         working-directory: apps/foreman
         run: MIX_ENV=test mix deps.audit
+      # gitleaks-action downloads to a fixed gitleaks.tmp in the runner's
+      # temp directory and fails if one is there already, which a job that
+      # died mid-download leaves behind on these long-lived runners.
+      - name: Clear a stale gitleaks download
+        if: ${{ !cancelled() }}
+        run: rm -f "$RUNNER_TEMP/gitleaks.tmp" "${TMPDIR:-/tmp}/gitleaks.tmp" "$RUNNER_TEMP/../tmp/gitleaks.tmp"
       - name: Scan for secrets
         if: ${{ !cancelled() }}
         uses: gitleaks/gitleaks-action@e0c47f4f8be36e29cdc102c57e68cb5cbf0e8d1e # v3.0.0
