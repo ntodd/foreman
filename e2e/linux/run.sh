@@ -147,7 +147,7 @@ sig=$(cd apps/foreman_agent && FOREMAN_RELEASE_PRIVATE_KEY=$FOREMAN_RELEASE_PRIV
 # update before the reconnect below.
 cp_eval 'E2E.desire_version("0.1.0")'
 docker cp "$work/agent-0.1.1/foreman_agent.tar.gz" "$($compose ps -q cp):/tmp/foreman_agent-0.1.1.tar.gz"
-$compose exec -T cp env -u PHX_SERVER /app/bin/foreman eval "Foreman.Release.publish_agent(\"0.1.1\", \"$target\", \"/tmp/foreman_agent-0.1.1.tar.gz\", \"$sig\")" 2>/dev/null | grep published
+$compose exec -T cp /app/bin/foreman eval "Foreman.Release.publish_agent(\"0.1.1\", \"$target\", \"/tmp/foreman_agent-0.1.1.tar.gz\", \"$sig\")" 2>/dev/null | grep published
 cp_eval 'E2E.desire_version("0.1.1")'
 # The running control plane sends the update on the agent's next connect.
 box pkill -f beam.smp || true

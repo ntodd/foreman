@@ -38,6 +38,8 @@ for tarball in "$dir"/foreman_agent-"$version"-*.tar.gz; do
 
   remote="/tmp/foreman_agent-$version-$target.tar.gz"
   docker cp "$tarball" "$container:$remote"
+  # Images before the fix for #42 start the whole app here, endpoint
+  # included, which collides with the running one without this.
   docker exec "$container" env -u PHX_SERVER /app/bin/foreman eval \
     "Foreman.Release.publish_agent(\"$version\", \"$target\", \"$remote\", \"$signature\")"
   docker exec -u 0 "$container" rm -f "$remote"
