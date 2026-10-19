@@ -36,6 +36,8 @@ defmodule ForemanAgent.Env do
   # message is the one people see.
   @up_timeout :timer.minutes(165)
   @logs_timeout :timer.minutes(5)
+  @tailscale_timeout :timer.seconds(15)
+  @join_poll 500
 
   @type ctx :: %{
           config: ForemanAgent.Config.t(),
@@ -50,7 +52,7 @@ defmodule ForemanAgent.Env do
           {:ok, map()} | {:error, String.t()} | {:error, String.t(), map()}
   def run("env.create", p, ctx), do: up(p, ctx, rebuild: false)
   def run("env.rebuild", p, ctx), do: up(p, ctx, rebuild: true)
-  def run("env.start", p, ctx), do: start(p, ctx)
+  def run("env.start", p, ctx), do: start(p, ctx, node_id: true)
   def run("env.stop", p, ctx), do: stop(p, ctx)
   def run("env.restart", p, ctx), do: restart(p, ctx)
   def run("env.destroy", p, ctx), do: destroy(p, ctx)
@@ -92,11 +94,11 @@ defmodule ForemanAgent.Env do
          {:ok, prepared} <- prepare(paths, spec, p.compose_env, ctx),
          {:ok, result} <- devcontainer_up(paths, spec, prepared, p, ctx, opts) do
       save_spec(paths, spec, prepared, result)
-      {:ok, result}
+      {:ok, put_node_id(result, spec, ctx)}
     end
   end
 
-  defp start(p, ctx) do
+  defp start(p, ctx, opts \\ []) do
     with {:ok, spec} <- load_spec(ctx.config, p.env_id) do
       paths = paths(ctx.config, p.env_id, spec.repo)
       ensure_secrets_dir(paths)
@@ -104,8 +106,66 @@ defmodule ForemanAgent.Env do
       with {:ok, prepared} <- prepare(paths, spec, p.compose_env, ctx),
            {:ok, result} <- devcontainer_up(paths, spec, prepared, p, ctx, rebuild: false) do
         save_spec(paths, spec, prepared, result)
-        {:ok, result}
+        {:ok, if(opts[:node_id], do: put_node_id(result, spec, ctx), else: result)}
       end
+    end
+  end
+
+  # The control plane deletes exactly this device when the environment is
+  # destroyed; another deployment on the tailnet can have a device with
+  # the same hostname. The node joins in the background once the
+  # container starts (tailscale-up.sh), so this waits a little for it.
+  defp put_node_id(%{"container_id" => container} = result, %{tailscale: %{enabled: true}}, ctx)
+       when is_binary(container) do
+    deadline = System.monotonic_time(:millisecond) + ctx.config.tailscale_join_wait
+
+    case await_node_id(ctx, container, deadline) do
+      nil ->
+        ctx.log.(
+          "info",
+          "The environment hasn't joined the tailnet yet; see /var/log/foreman-tailscale.log in the container\n"
+        )
+
+        result
+
+      id ->
+        Map.put(result, "tailscale_node_id", id)
+    end
+  end
+
+  defp put_node_id(result, _spec, _ctx), do: result
+
+  defp await_node_id(ctx, container, deadline) do
+    with nil <- node_id(ctx, container) do
+      left = deadline - System.monotonic_time(:millisecond)
+
+      if left > 0 do
+        Process.sleep(min(@join_poll, left))
+        await_node_id(ctx, container, deadline)
+      end
+    end
+  end
+
+  # As root, which tailscaled's socket wants. What the container says is
+  # the repo's to decide, so only an ID-shaped answer is taken.
+  defp node_id(ctx, container) do
+    args =
+      ["exec", "-u", "0", container, "tailscale", "--socket=/var/run/tailscale/tailscaled.sock"] ++
+        ["status", "--json", "--peers=false"]
+
+    with {:ok, output} <-
+           cmd(ctx, ctx.config.docker, args,
+             env: %{},
+             quiet: true,
+             timeout: @tailscale_timeout,
+             label: "tailscale status"
+           ),
+         {:ok, %{"BackendState" => "Running", "Self" => %{"ID" => id}}} when is_binary(id) <-
+           JSON.decode(output),
+         true <- id =~ ~r/\A[A-Za-z0-9]{1,64}\z/ do
+      id
+    else
+      _ -> nil
     end
   end
 

@@ -25,7 +25,8 @@ defmodule ForemanAgent.Config do
             release_public_key: nil,
             feature_dir: nil,
             join_token: nil,
-            connect: true
+            connect: true,
+            tailscale_join_wait: :timer.seconds(30)
 
   @type t :: %__MODULE__{}
 

@@ -107,6 +107,9 @@ defmodule ForemanAgent.EnvHardeningTest do
 
         {"devcontainer", _} ->
           {:ok, %{status: 0, output: @success}}
+
+        {"docker", ["exec", "-u", "0", _container, "tailscale" | _]} ->
+          {:ok, %{status: 0, output: ~s({"BackendState":"Running","Self":{"ID":"nTest1CNTRL"}})}}
       end
     end)
   end
