@@ -26,6 +26,8 @@ defmodule ForemanWeb.SecretsLive do
      )}
   end
 
+  def handle_info(_message, socket), do: {:noreply, socket}
+
   @impl true
   def render(assigns) do
     ~H"""
