@@ -62,6 +62,24 @@ defmodule Foreman.AccountsTest do
                Accounts.sign_in_from_github(bob, @tokens, config: config, org_member?: true)
     end
 
+    test "configured logins match whatever case GitHub returns" do
+      config = %{admins: ["Mona"], allowed_users: ["ALICE"], allowed_org: nil}
+
+      assert {:ok, %User{login: "mona", role: "admin"} = mona} =
+               Accounts.sign_in_from_github(@profile, @tokens, config: config, org_member?: false)
+
+      assert {:ok, %User{role: "admin"}} =
+               Accounts.sign_in_from_github(@profile, @tokens, config: config, org_member?: false)
+
+      alice = %{@profile | "id" => 1, "login" => "Alice"}
+
+      assert {:ok, %User{login: "Alice", role: "member"} = alice} =
+               Accounts.sign_in_from_github(alice, @tokens, config: config, org_member?: false)
+
+      assert Accounts.access(mona, config) == :allowed
+      assert Accounts.access(alice, config) == :allowed
+    end
+
     test "matches users by GitHub id, so a renamed account keeps its data" do
       config = %{admins: ["mona"], allowed_users: [], allowed_org: nil}
 

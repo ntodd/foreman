@@ -111,8 +111,15 @@ defmodule Foreman.Accounts do
   end
 
   defp listed?(login, config, org_member?) do
-    login in config.admins or login in config.allowed_users or
+    listed_in?(login, config.admins) or listed_in?(login, config.allowed_users) or
       (config.allowed_org != nil and org_member? == true)
+  end
+
+  # GitHub logins aren't case-sensitive, and the configured lists are
+  # typed by hand.
+  defp listed_in?(login, list) do
+    login = String.downcase(login)
+    Enum.any?(list, &(String.downcase(&1) == login))
   end
 
   defp ui_admin?(existing, config) do
@@ -165,7 +172,7 @@ defmodule Foreman.Accounts do
 
   defp initial_role(login, config) do
     cond do
-      login in config.admins ->
+      listed_in?(login, config.admins) ->
         "admin"
 
       config.admins == [] and not Repo.exists?(from u in User, where: u.role == "admin") ->
@@ -181,7 +188,7 @@ defmodule Foreman.Accounts do
   defp role_for(nil, login, config), do: initial_role(login, config)
 
   defp role_for(%User{role: role}, login, config),
-    do: if(login in config.admins, do: "admin", else: role)
+    do: if(listed_in?(login, config.admins), do: "admin", else: role)
 
   defp token_attrs(tokens) do
     now = DateTime.utc_now()
