@@ -41,23 +41,39 @@ any Chromium works.
 
 ## On an emulated Linux box
 
-The control plane release image, and a box image running the agent
-release with its own Docker daemon. The box container runs privileged
-to host that daemon, the way a real box's Docker runs on its host; the
-environments inside it don't. `run.sh` builds both and checks
-enrollment, single-use join tokens, create, what's inside an environment
-(identity, feature, read-only secrets, no published ports, uid mapping,
-0600 secrets other users can't read), secrets delivery, a box reboot
-(tmpfs secrets restored and the environment restarted), a signed agent
-self-update and destroy.
+The control plane release image, and a box image with what the install
+script expects of a box (systemd, Docker Engine, git, Node) and nothing
+of Foreman's. The box container runs privileged to boot systemd and host
+its own Docker daemon, the way a real box's Docker runs on its host; the
+environments inside it don't. `run.sh` builds both, publishes agents with
+`scripts/publish-agent-release.sh` (`bin/gh` stands in for the GitHub
+release), and installs the agent with the install script the control
+plane serves. It checks enrollment, single-use join tokens, a re-run of
+the install script, create, what's inside an environment (identity,
+feature, read-only secrets, no published ports, uid mapping, 0600
+secrets other users can't read), secrets delivery, a box reboot (tmpfs
+secrets restored and the environment restarted), a signed agent
+self-update, destroy, `--reenroll` after a revoke, and the systemd unit
+rolling back an update that crash-loops. CI runs it on every push.
 
 ```sh
 e2e/linux/run.sh                 # SKIP_BUILD=1 to reuse images
+e2e/linux/run.sh --logs          # the stack's logs and the box's journal
 e2e/linux/run.sh --down          # remove the stack and its volumes
 ```
 
-It needs `mise` (to sign the update with `mix foreman_agent.sign`) and
-`openssl`.
+It needs `openssl`, and Elixir for `mix foreman_agent.sign` (through
+`mise` if it's installed). `E2E_PROJECT` names the compose project and
+images, so runs can share a Docker daemon.
+
+`agent-smoke.sh` starts an agent release on Ubuntu 22.04 and 24.04 and
+Debian 12 and 13, in this machine's architecture. CI runs it for amd64,
+and the release workflow for both architectures before signing:
+
+```sh
+docker build -f docker/box.Dockerfile --target agent-tarball -o tmp/agent .
+e2e/agent-smoke.sh tmp/agent/foreman_agent.tar.gz
+```
 
 ## On a real tailnet
 

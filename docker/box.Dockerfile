@@ -1,11 +1,9 @@
-# A stand-in for a remote Linux box, for end-to-end tests: Docker Engine
-# (docker-in-docker), git, Node and the devcontainer CLI, and the Foreman
-# agent release, supervised by a loop that does what systemd would.
+# The agent release, and a stand-in for a remote Linux box for end-to-end
+# tests: systemd, Docker Engine (docker-in-docker), git and Node.
 #
-#   docker build -f docker/box.Dockerfile -t foreman-box .
-#
-# The agent target is also exported for self-update tests:
 #   docker build -f docker/box.Dockerfile --target agent-tarball -o tmp/agent .
+#   docker build -f docker/box.Dockerfile --target box -t foreman-box .
+#
 # The agent release bundles ERTS, which links the build image's glibc and
 # OpenSSL, so it only runs on systems at least that new. Build it on the
 # oldest base boxes should support: jammy runs on Ubuntu 22.04+ and
@@ -37,36 +35,25 @@ FROM scratch AS agent-tarball
 COPY --from=agent /foreman_agent.tar.gz /
 
 FROM ${RUNTIME_IMAGE} AS box
+# What the install script expects of a box: systemd, Docker Engine with
+# Compose, git, and Node for the devcontainer CLI. Nothing of Foreman's:
+# e2e/linux/run.sh installs the agent with the control plane's install
+# script, as on a real box.
 RUN apt-get update -y \
-  && apt-get install -y --no-install-recommends ca-certificates curl gnupg git procps iptables \
-       libstdc++6 openssl libncurses6 libsctp1 locales nodejs npm \
+  && apt-get install -y --no-install-recommends systemd systemd-sysv dbus ca-certificates curl gnupg git procps iptables nodejs npm \
   && install -m 0755 -d /etc/apt/keyrings \
   && curl -fsSL https://download.docker.com/linux/debian/gpg -o /etc/apt/keyrings/docker.asc \
   && echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/debian trixie stable" > /etc/apt/sources.list.d/docker.list \
   && apt-get update -y \
   && apt-get install -y --no-install-recommends docker-ce docker-ce-cli containerd.io docker-compose-plugin docker-buildx-plugin \
   && rm -rf /var/lib/apt/lists/* \
-  && sed -i '/en_US.UTF-8/s/^# //g' /etc/locale.gen && locale-gen
-ENV LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8
-
-# The same layout the install script creates.
-RUN useradd --system --home-dir /var/lib/foreman-agent --shell /usr/sbin/nologin foreman \
-  && usermod -aG docker foreman \
-  && install -d -m 0700 -o foreman -g foreman /var/lib/foreman-agent \
-  && install -d -m 0755 -o foreman -g foreman /srv/foreman /srv/foreman/envs /opt/foreman-agent /opt/foreman-agent/releases \
-  && npm install --prefix /opt/foreman-agent/node --no-fund --no-audit --silent @devcontainers/cli@0.89.0
-
-ARG FOREMAN_AGENT_VERSION=0.1.0
-COPY --from=agent /foreman_agent.tar.gz /tmp/foreman_agent.tar.gz
-RUN install -d -o foreman -g foreman /opt/foreman-agent/releases/${FOREMAN_AGENT_VERSION} \
-  && tar -xzf /tmp/foreman_agent.tar.gz -C /opt/foreman-agent/releases/${FOREMAN_AGENT_VERSION} \
-  && chown -R foreman:foreman /opt/foreman-agent \
-  && ln -sfn releases/${FOREMAN_AGENT_VERSION} /opt/foreman-agent/current \
-  && chown -h foreman:foreman /opt/foreman-agent/current \
-  && rm /tmp/foreman_agent.tar.gz
-
-COPY docker/box-entrypoint.sh /usr/local/bin/box-entrypoint
-ENV FOREMAN_DEVCONTAINER_CLI=/opt/foreman-agent/node/node_modules/.bin/devcontainer \
-    HOME=/var/lib/foreman-agent
-VOLUME /var/lib/docker
-ENTRYPOINT ["/usr/local/bin/box-entrypoint"]
+  && echo LANG=C.UTF-8 > /etc/locale.conf
+# Nothing to log in on and no hardware; and, since the container is
+# privileged on a host other jobs share, nothing that writes the host's
+# kernel settings (sysctls, binfmt handlers, modules).
+RUN systemctl mask getty.target console-getty.service systemd-udevd.service systemd-udevd-control.socket systemd-udevd-kernel.socket systemd-firstboot.service \
+      systemd-sysctl.service systemd-binfmt.service proc-sys-fs-binfmt_misc.automount proc-sys-fs-binfmt_misc.mount systemd-modules-load.service
+ENV container=docker
+STOPSIGNAL SIGRTMIN+3
+VOLUME /var/lib/docker /var/lib/containerd
+CMD ["/sbin/init"]
