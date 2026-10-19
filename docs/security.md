@@ -157,7 +157,17 @@ to the box it runs on (up to the limits in "Known gaps").
     `o: bind` or a `device`), and volumes from outside the project
     (`external`, or a `name:` belonging to another project)
   - host devices, `/dev/net/tun` included, also through
-    `device_cgroup_rules` and GPU reservations under `deploy`
+    `device_cgroup_rules`, device reservations that aren't NVIDIA GPUs,
+    `runtime: nvidia`, and a box whose Docker runs nvidia as its default
+    runtime (any image could then take the GPUs through its environment)
+  - NVIDIA GPU reservations (`deploy.resources.reservations.devices`,
+    `gpus`), under their own `gpu` rule. Only `driver: nvidia` with the
+    driver capabilities listed, from `compute`, `compat32`, `utility` and
+    `video`, counts as a GPU; anything else, `graphics` and `display`
+    included, is a host device. The devcontainer CLI runs with
+    `--gpu-availability none`, so `hostRequirements.gpu` can't add a
+    reservation after the check. GPUs and their memory are shared by the
+    box's environments.
   - builds that run privileged, on the host network, or with BuildKit
     entitlements (`security.insecure` is privileged)
   - networks from outside the project (`external`, or a fixed `name:`):

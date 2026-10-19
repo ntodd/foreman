@@ -2,11 +2,13 @@ defmodule ForemanProtocol.ProtocolV3Test do
   @moduledoc """
   Protocol 3: `env.create` and `env.rebuild` can carry the devcontainer
   features a user adds to their own environments, and `env.rebuild` can
-  fast-forward the clone to its branch first (`pull`).
+  fast-forward the clone to its branch first (`pull`). GPU reservations
+  have their own policy rule, so a box can allow GPUs without allowing
+  every host device.
   """
   use ExUnit.Case, async: true
 
-  alias ForemanProtocol.{Command, Feature}
+  alias ForemanProtocol.{Command, Feature, Policy}
 
   @env_id "6f1c1d1e-9a3b-4c1f-8f5e-2d7a9b0c1e2f"
 
@@ -143,6 +145,28 @@ defmodule ForemanProtocol.ProtocolV3Test do
 
     test "only a rebuild pulls" do
       assert {:error, _} = create(%{"pull" => true})
+    end
+  end
+
+  describe "the gpu policy rule" do
+    test "is a rule of its own, refused by default" do
+      assert "gpu" in Policy.rules()
+      assert Policy.defaults()["gpu"] == "refuse"
+      assert Policy.relaxed(%{"gpu" => "allow"}) == [{"gpu", "allow"}]
+    end
+
+    test "an agent can report it when it joins" do
+      join = %{
+        "agent_version" => "0.4.0",
+        "protocol_version" => 3,
+        "hostname" => "gpu-box",
+        "os" => "linux",
+        "arch" => "x86_64",
+        "policy" => Map.put(Policy.defaults(), "gpu", "allow")
+      }
+
+      assert {:ok, %{policy: %{"gpu" => "allow", "devices" => "refuse"}}} =
+               ForemanProtocol.cast_join(join)
     end
   end
 end

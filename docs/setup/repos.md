@@ -42,7 +42,10 @@ edit the files in its workspace. By default a box refuses:
 - `env_file`, `secrets`, `configs` or build contexts outside the
   workspace
 - host devices, including `/dev/net/tun` (Foreman's Tailscale doesn't
-  need it, so remove a repo's own Tailscale setup)
+  need it, so remove a repo's own Tailscale setup), `device_cgroup_rules`,
+  and device reservations that aren't NVIDIA GPUs
+- NVIDIA GPU reservations, under a rule of their own so a box can allow
+  them without allowing host devices; see [GPUs](#gpus)
 - turning seccomp off (`seccomp=unconfined`). The official Go and Rust
   features ask for it, for debuggers; remove it from the repo's config,
   or let a box allow it with `FOREMAN_POLICY=seccomp=allow`. That only
@@ -55,10 +58,9 @@ edit the files in its workspace. By default a box refuses:
 - networks from outside the project (an `external` network, or one with
   a fixed `name:`), and `devcontainer.json` mounts of `external` volumes
   that aren't the environment's own
-- builds with `privileged`, `network: host` or `entitlements`, and GPU
-  reservations (`gpus`, `deploy.resources.reservations.devices`)
+- builds with `privileged`, `network: host` or `entitlements`
 - compose keys Foreman hasn't reviewed, such as `runtime`,
-  `cgroup_parent`, `external_links`, `gpus`, `models` or
+  `cgroup_parent`, `external_links`, `models` or
   `use_api_socket`. A box can allow unreviewed keys with
   `FOREMAN_POLICY=compose_keys=allow`. `x-` extension keys are always
   fine.
@@ -93,6 +95,68 @@ root on the box, so it's refused. Usually it isn't needed:
 If a repo really needs a Docker daemon in its environments, run them on
 a box that allows it (`FOREMAN_POLICY=privileged=allow`) and treat that
 box as belonging to whatever runs in it. Its own VM is a good fit.
+
+## GPUs
+
+A box with NVIDIA GPUs can let environments use them with
+`FOREMAN_POLICY=gpu=allow` (or `gpu=warn`). That doesn't let them map
+other host devices; those stay under the `devices` rule. Reserve the GPU
+in the compose file, with the driver and the driver capabilities the
+service uses:
+
+```yaml
+deploy:
+  resources:
+    reservations:
+      devices:
+        - driver: nvidia
+          count: all              # or a number, or device_ids: ["0"]
+          capabilities: [gpu, compute, video, utility]
+```
+
+`compute` is CUDA, `video` is NVENC and NVDEC, `utility` is
+`nvidia-smi` and NVML, and `compat32` is the 32-bit libraries. Listing
+`video` and `utility` without `compute` replaces NVIDIA's default set,
+so CUDA (Whisper, say) needs `compute` listed too. The `gpus:` key works
+the same way, as a list with `driver: nvidia` and `capabilities`.
+
+These stay under the `devices` rule, so `gpu=allow` doesn't cover them:
+
+- `graphics` and `display`, which bring in OpenGL and Vulkan and the
+  display's modeset device
+- a reservation that names no driver capabilities, `gpus: all` among
+  them. Docker then leaves the capabilities to the image, which can ask
+  for all of them.
+- another driver (`cdi` can name any device), `options`, and device IDs
+  that aren't a GPU index or a `GPU-`/`MIG-` UUID
+- `runtime: nvidia`, which hands GPUs to whatever the image's
+  environment asks for
+
+`hostRequirements.gpu` in `devcontainer.json` is ignored: the agent runs
+the devcontainer CLI with `--gpu-availability none`, so only the
+reservations in the compose file reach a container. Agents before this
+let the CLI add a GPU for `hostRequirements.gpu`, and a container made
+that way keeps it across starts and restarts, so rebuild environments
+on a GPU box after upgrading its agent.
+
+Environments on a box share its GPUs. Foreman doesn't limit their GPU
+memory or keep one environment's work off another's GPU, so one that
+fills the memory starves the rest. Give a GPU box to environments that
+can share it.
+
+The box needs the NVIDIA driver and the
+[NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html).
+Configure Docker with `nvidia-ctk runtime configure --runtime=docker`,
+without `--set-as-default`: with nvidia as Docker's default runtime, any
+image that sets `NVIDIA_VISIBLE_DEVICES` (CUDA images do) gets the GPUs
+without a reservation, so the agent refuses to start environments on
+that box unless it allows `devices`. If nvidia is already the default,
+running `nvidia-ctk` again doesn't change that: remove `default-runtime`
+from `/etc/docker/daemon.json` (or set it to `runc`) and restart Docker.
+The agent goes by the runtime's binary, not its name, and refuses a
+default runtime whose binary Docker doesn't report. If the toolkit is
+missing, starting an environment that reserves a GPU fails with an error
+that says so.
 
 ## Postgres 18 and its data volume
 

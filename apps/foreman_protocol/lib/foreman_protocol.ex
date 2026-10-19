@@ -10,7 +10,8 @@ defmodule ForemanProtocol do
 
   # 2: env.secrets.write can `keep` files; the seccomp policy rule.
   # 3: env.create and env.rebuild can carry a user's own `features`;
-  # env.rebuild can `pull` (fast-forward the clone) first.
+  # env.rebuild can `pull` (fast-forward the clone) first; the gpu
+  # policy rule.
   @version 3
 
   @doc "The protocol version this build speaks."

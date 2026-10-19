@@ -74,6 +74,9 @@ defmodule ForemanAgent.EnvTest do
     compose = Keyword.get(opts, :compose, %{"services" => %{"app" => %{}, "db" => %{}}})
     devcontainer = Keyword.get(opts, :devcontainer, @devcontainer)
     outcome = Keyword.get(opts, :outcome, :success)
+    docker_info = Keyword.get(opts, :docker_info, {:ok, %{"DefaultRuntime" => "runc"}})
+
+    stub(DockerMock, :info, fn -> docker_info end)
 
     resolved =
       Keyword.get(opts, :resolved, %{
@@ -170,6 +173,11 @@ defmodule ForemanAgent.EnvTest do
     {status, output} = answer.(rest |> Enum.drop_while(&(&1 != "core.fsmonitor=false")) |> tl())
     if status == 0, do: run_opts[:on_output].(output)
     {:ok, %{status: status, output: output}}
+  end
+
+  defp up_result({:error, message}, _run_opts) do
+    failure = %{"outcome" => "error", "message" => message, "description" => ""}
+    {:ok, %{status: 1, output: JSON.encode!(failure) <> "\n"}}
   end
 
   defp runs do
@@ -581,6 +589,89 @@ defmodule ForemanAgent.EnvTest do
       assert "remote: Check the URL.\n" in logged
       refute Enum.any?(logged, &(&1 =~ "50%"))
       refute "\n" in logged
+    end
+
+    test "the devcontainer CLI never adds GPUs of its own", %{ctx: ctx} do
+      # hostRequirements.gpu (in devcontainer.json or an image's metadata)
+      # makes the CLI reserve GPUs after the policy has checked compose.
+      stub_tools(
+        devcontainer:
+          ~s({"dockerComposeFile": "docker-compose.yml", "service": "app", "hostRequirements": {"gpu": true}})
+      )
+
+      assert {:ok, _} = Env.run("env.create", payload(), ctx)
+      {"devcontainer", up_args, _} = List.last(runs())
+      assert ["up" | _] = up_args
+      assert arg(up_args, "--gpu-availability") == "none"
+    end
+
+    test "refuses to start on a box whose default Docker runtime is nvidia", %{ctx: ctx} do
+      stub_tools(docker_info: {:ok, %{"DefaultRuntime" => "nvidia"}})
+
+      assert {:error, message} = Env.run("env.create", payload(), ctx)
+      assert message =~ "default runtime"
+      refute Enum.any?(runs(), &match?({"devcontainer", ["up" | _], _}, &1))
+    end
+
+    test "checks a service's runtime against the runtimes Docker has", %{ctx: ctx, config: config} do
+      stub_tools(
+        compose: %{"services" => %{"app" => %{"runtime" => "gpu"}, "db" => %{}}},
+        docker_info:
+          {:ok,
+           %{
+             "DefaultRuntime" => "runc",
+             "Runtimes" => %{"gpu" => %{"path" => "/usr/bin/nvidia-container-runtime"}}
+           }}
+      )
+
+      ctx = put_in(ctx.config.policy_rules, Map.put(config.policy_rules, :compose_keys, :allow))
+
+      assert {:error, message} = Env.run("env.create", payload(), ctx)
+      assert message =~ "nvidia runtime"
+    end
+
+    test "refuses to start when it can't tell what Docker's default runtime is", %{ctx: ctx} do
+      stub_tools(docker_info: {:error, :econnrefused})
+
+      assert {:error, message} = Env.run("env.create", payload(), ctx)
+      assert message =~ "default runtime"
+      refute Enum.any?(runs(), &match?({"devcontainer", ["up" | _], _}, &1))
+    end
+
+    test "says the box needs the NVIDIA Container Toolkit when Docker has no GPU driver", %{
+      ctx: ctx,
+      config: config
+    } do
+      gpu = %{"driver" => "nvidia", "count" => -1, "capabilities" => ["gpu", "video", "utility"]}
+
+      compose = %{
+        "services" => %{
+          "app" => %{"deploy" => %{"resources" => %{"reservations" => %{"devices" => [gpu]}}}}
+        }
+      }
+
+      stub_tools(
+        compose: compose,
+        outcome:
+          {:error,
+           ~s(Error response from daemon: could not select device driver "nvidia" with capabilities: [[gpu video utility]])}
+      )
+
+      ctx = put_in(ctx.config.policy_rules, Map.put(config.policy_rules, :gpu, :allow))
+
+      assert {:error, message} = Env.run("env.create", payload(), ctx)
+      assert message =~ "NVIDIA Container Toolkit"
+      assert message =~ "could not select device driver"
+    end
+
+    test "a device driver failure without a GPU request is reported as it is", %{ctx: ctx} do
+      stub_tools(
+        outcome: {:error, ~s(could not select device driver "" with capabilities: [[x]])}
+      )
+
+      assert {:error, message} = Env.run("env.create", payload(), ctx)
+      assert message =~ "could not select device driver"
+      refute message =~ "NVIDIA"
     end
 
     test "is idempotent: a retried create reuses the clone", %{ctx: ctx} do

@@ -139,7 +139,8 @@ though: once boxes run agents on a newer protocol, a control plane older
 than that protocol refuses them when they connect, and they can't be
 moved back from there. The release notes say when the protocol changes;
 protocol 2 came in with 0.2.1, and protocol 3 (your own devcontainer
-features, and Pull and rebuild) with the release after 0.3.0.
+features, Pull and rebuild, and the `gpu` policy rule) with the release
+after 0.3.0.
 
 Following starts with 0.3.0, and 0.3.0 is the first release with
 images, so rolling back from it means building the older version

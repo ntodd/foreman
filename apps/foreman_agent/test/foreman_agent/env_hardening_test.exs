@@ -24,6 +24,12 @@ defmodule ForemanAgent.EnvHardeningTest do
 
   setup :verify_on_exit!
 
+  # A box whose default Docker runtime is runc.
+  setup do
+    stub(DockerMock, :info, fn -> {:ok, %{"DefaultRuntime" => "runc"}} end)
+    :ok
+  end
+
   setup %{tmp_dir: tmp} do
     config = %Config{
       data_dir: Path.join(tmp, "data"),

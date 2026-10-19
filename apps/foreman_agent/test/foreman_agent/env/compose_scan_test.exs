@@ -276,10 +276,14 @@ defmodule ForemanAgent.Env.ComposeScanTest do
     end
 
     test "an unknown service key is refused; extension keys are fine", ctx do
-      assert refused(check(ctx, "services:\n  app: {image: alpine, gpus: all}\n")) =~
-               "service 'app' uses gpus"
+      assert refused(check(ctx, "services:\n  app: {image: alpine, cgroup_parent: x}\n")) =~
+               "service 'app' uses cgroup_parent"
 
       assert {:ok, []} = check(ctx, "services:\n  app: {image: alpine, x-anything: 1}\n")
+    end
+
+    test "gpus has been reviewed (the policy checks it with GPU reservations)", ctx do
+      assert {:ok, []} = check(ctx, "services:\n  app: {image: alpine, gpus: all}\n")
     end
 
     test "an unknown key inside a merge is still seen", ctx do

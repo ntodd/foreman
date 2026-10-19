@@ -16,4 +16,12 @@ defmodule Foreman.BoxPolicyLabelsTest do
     assert [%{label: label}] = Boxes.policy_exceptions(box)
     assert label =~ "seccomp"
   end
+
+  test "a box that allows GPUs says that, not that it allows host devices" do
+    box = %Boxes.Box{policy: Map.put(ForemanProtocol.Policy.defaults(), "gpu", "allow")}
+    assert [%{label: label}] = Boxes.policy_exceptions(box)
+    assert label =~ "GPUs"
+    assert label =~ "share"
+    refute label =~ "host devices"
+  end
 end
