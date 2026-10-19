@@ -208,7 +208,7 @@ A devcontainer feature that ships inside the agent release, so a box always runs
 - **Destroy:**
   1. The agent runs `env.git_status`. The UI warns about a dirty tree or unpushed commits.
   2. The agent runs `docker compose down -v` and deletes the clone and the secrets directory.
-  3. The control plane deletes the Tailscale device through the API.
+  3. The control plane deletes the Tailscale device the environment joined as through the API.
 
 ## Networking
 
@@ -226,7 +226,9 @@ A devcontainer feature that ships inside the agent release, so a box always runs
   - Tailnet ACLs decide who can log in as which local user.
   - SSH rules use `action: accept`, not `check`, so editors and other SSH tools aren't sent to re-authenticate.
 - **DNS:** untouched. In userspace mode tailscaled doesn't change `resolv.conf`, so Docker's resolver keeps answering compose service names. MagicDNS names resolve for connections made through the proxy.
-- **Cleanup:** an Oban job removes tailnet devices that no longer match a live environment. It only ever touches devices tagged `tag:foreman-env` (always applied to environments; `FOREMAN_TAILSCALE_TAGS` adds to it), and a destroyed environment's cleanup skips its slug if a new environment has taken it.
+- **Cleanup:** after a create, rebuild or start, the agent asks the devcontainer's tailscaled for its node ID and reports it, and the control plane stores it as the environment's `tailscale_device_id`. Destroying the environment deletes that device and nothing else: two deployments on one tailnet can both have a `storefront-1`, so a hostname match isn't enough. An environment that comes back as a new node (its Tailscale state was lost) has the old device deleted and the new one renamed to the slug. The ID comes from inside the repo's container, so every delete also needs `tag:foreman-env`, the environment's hostname and, when one is configured, the deployment tag.
+  - An hourly job retries the deletes for destroyed environments.
+  - With `FOREMAN_TAILSCALE_DEPLOYMENT_TAG`, every environment also carries that tag, and the hourly job removes devices with it that don't belong to a live environment, recorded or not. Without it, devices Foreman has no record of are left alone.
 
 ### ACLs
 

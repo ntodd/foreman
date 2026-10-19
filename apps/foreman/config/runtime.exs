@@ -34,6 +34,12 @@ end
 # Settings every environment reads (dev and prod), with defaults that suit
 # a single-user personal deployment.
 if config_env() != :test do
+  deployment_tag = System.get_env("FOREMAN_TAILSCALE_DEPLOYMENT_TAG", "")
+
+  if deployment_tag != "" and not (deployment_tag =~ ~r/\Atag:[A-Za-z0-9][A-Za-z0-9-]{0,62}\z/) do
+    raise "FOREMAN_TAILSCALE_DEPLOYMENT_TAG must look like tag:name, got #{inspect(deployment_tag)}"
+  end
+
   config :foreman,
     slug_style: if(System.get_env("FOREMAN_SLUG_STYLE") == "team", do: :team, else: :personal),
     admins: list.("FOREMAN_ADMINS"),
@@ -55,7 +61,8 @@ if config_env() != :test do
       client_id: System.get_env("FOREMAN_TAILSCALE_CLIENT_ID"),
       client_secret: System.get_env("FOREMAN_TAILSCALE_CLIENT_SECRET"),
       tailnet: System.get_env("FOREMAN_TAILSCALE_TAILNET", "-"),
-      tags: list.("FOREMAN_TAILSCALE_TAGS")
+      tags: list.("FOREMAN_TAILSCALE_TAGS"),
+      deployment_tag: deployment_tag
     },
     tailnet_sweep: System.get_env("FOREMAN_TAILNET_SWEEP", "true") != "false"
 end

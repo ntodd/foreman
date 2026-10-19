@@ -39,6 +39,24 @@ defmodule ForemanWeb.PagesTest do
     assert Foreman.Config.version() == to_string(Application.spec(:foreman, :vsn))
   end
 
+  test "the Deployment page says whether this deployment has its own tailnet tag", %{conn: conn} do
+    Application.put_env(:foreman, :tailscale, %{client_id: "c", client_secret: "s"})
+    on_exit(fn -> Application.delete_env(:foreman, :tailscale) end)
+
+    {:ok, view, _html} = live(conn, "/admin")
+    assert has_element?(view, "#tailscale-sweep", "FOREMAN_TAILSCALE_DEPLOYMENT_TAG")
+
+    Application.put_env(:foreman, :tailscale, %{
+      client_id: "c",
+      client_secret: "s",
+      deployment_tag: "tag:foreman-dev"
+    })
+
+    {:ok, view, html} = live(conn, "/admin")
+    assert html =~ "tag:foreman-env, tag:foreman-dev"
+    refute has_element?(view, "#tailscale-sweep")
+  end
+
   test "creating an environment from the form", %{conn: conn, repo: repo, box: box} do
     {:ok, view, _html} = live(conn, ~p"/environments/new")
 

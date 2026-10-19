@@ -14,6 +14,8 @@ defmodule Foreman.Tailscale.Client do
               {:ok, %{key: String.t(), id: String.t()}} | {:error, term()}
   @callback list_devices(creds) :: {:ok, [map()]} | {:error, term()}
   @callback delete_device(creds, device_id :: String.t()) :: :ok | {:error, term()}
+  @callback set_device_name(creds, device_id :: String.t(), name :: String.t()) ::
+              :ok | {:error, term()}
 
   def impl, do: Application.get_env(:foreman, :tailscale_client, Foreman.Tailscale.Client.Req)
 end

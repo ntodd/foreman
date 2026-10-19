@@ -6,9 +6,16 @@ defmodule Foreman.Tailscale do
   `tag:foreman-env`, plus any configured tags, the repo's tags, and
   `tag:foreman-<login>` on team deployments so ACLs can keep developers
   to their own environments. The node's state lives in a volume, so the
-  key is only needed on the first boot. Destroyed environments' devices
-  are deleted, and a periodic job removes any that are left over. Both
-  only ever delete devices tagged `tag:foreman-env`.
+  key is only needed on the first boot.
+
+  The agent reports the node each environment joined as, and destroying
+  the environment deletes that device. Matching on hostname alone isn't
+  enough: two deployments sharing a tailnet can both have a `storefront-1`.
+  A periodic job retries deletes that didn't happen. Only with a
+  deployment tag (`FOREMAN_TAILSCALE_DEPLOYMENT_TAG`) does Foreman delete
+  devices it has no record of, and then only ones carrying that tag.
+  Every delete needs `tag:foreman-env`, the environment's hostname and
+  any deployment tag: recorded IDs come from inside the repo's container.
   """
 
   alias Foreman.Tailscale.Client
@@ -41,6 +48,17 @@ defmodule Foreman.Tailscale do
   """
   def marker_tag, do: @marker
 
+  @doc """
+  The tag that marks this deployment's nodes on a tailnet other
+  deployments share (`FOREMAN_TAILSCALE_DEPLOYMENT_TAG`), or nil.
+  """
+  def deployment_tag do
+    case Application.get_env(:foreman, :tailscale, %{})[:deployment_tag] do
+      tag when is_binary(tag) and tag != "" -> tag
+      _ -> nil
+    end
+  end
+
   @doc "Extra tags every environment gets (`FOREMAN_TAILSCALE_TAGS`)."
   def base_tags do
     case Application.get_env(:foreman, :tailscale, %{})[:tags] do
@@ -56,7 +74,9 @@ defmodule Foreman.Tailscale do
         do: ["tag:foreman-" <> String.downcase(user.login)],
         else: []
 
-    Enum.uniq([@marker | base_tags()] ++ repo.tailscale_tags ++ team)
+    Enum.uniq(
+      [@marker | base_tags()] ++ repo.tailscale_tags ++ team ++ List.wrap(deployment_tag())
+    )
   end
 
   def create_auth_key(env, repo, user) do
@@ -74,20 +94,20 @@ defmodule Foreman.Tailscale do
   end
 
   @doc """
-  Deletes the Foreman-tagged devices named after `slug`. Does nothing if
-  a live environment has taken the slug since: a retried job can run
-  long after the destroy.
+  Deletes the device an environment joined as. The ID came from inside
+  the repo's container, so the device must also be Foreman's and carry
+  the environment's hostname. With `replaced_by` (the environment came
+  back as a new node), the new device gets the bare `slug` name, which
+  Tailscale gave it a suffix for while the old one was around.
   """
-  def delete_devices_for(slug) do
+  def delete_device(slug, device_id, replaced_by \\ nil) do
     with creds when not is_nil(creds) <- creds(),
          {:ok, devices} <- Client.impl().list_devices(creds) do
-      if slug in Foreman.Environments.live_slugs() do
-        :ok
-      else
-        devices
-        |> Enum.filter(&(foreman_device?(&1) and hostname(&1) == slug))
-        |> delete_all(creds)
-      end
+      old = Enum.filter(devices, &(device_id?(&1, device_id) and ours?(&1, slug)))
+
+      with :ok <- delete_all(old, creds),
+           do:
+             rename(replaced_by && Enum.find(devices, &device_id?(&1, replaced_by)), slug, creds)
     else
       nil -> :ok
       error -> error
@@ -95,18 +115,87 @@ defmodule Foreman.Tailscale do
   end
 
   @doc """
-  Deletes Foreman-tagged devices whose hostname doesn't belong to a live
-  environment. Tagged devices count against the plan, so stale ones cost.
+  Deletes this deployment's devices named after `slug`, for an
+  environment whose device was never recorded. Needs a deployment tag:
+  without one, another deployment's device could have the same name.
+  Does nothing if a live environment has taken the slug since: a retried
+  job can run long after the destroy.
   """
-  def cleanup(live_slugs) do
+  def delete_devices_for(slug) do
+    with true <- deployment_tag() != nil,
+         creds when not is_nil(creds) <- creds(),
+         {:ok, devices} <- Client.impl().list_devices(creds) do
+      if slug in Foreman.Environments.live_slugs() do
+        :ok
+      else
+        devices
+        |> Enum.filter(&ours?(&1, slug))
+        |> delete_all(creds)
+      end
+    else
+      false -> :ok
+      nil -> :ok
+      error -> error
+    end
+  end
+
+  @doc """
+  Deletes the recorded devices of destroyed environments that are still
+  on the tailnet, and with a deployment tag, this deployment's devices
+  that don't belong to a live environment. Tagged devices count against
+  the plan, so stale ones cost.
+  """
+  def cleanup do
     with creds when not is_nil(creds) <- creds(),
          {:ok, devices} <- Client.impl().list_devices(creds) do
-      stale = Enum.filter(devices, &(foreman_device?(&1) and hostname(&1) not in live_slugs))
+      recorded = Foreman.Environments.recorded_devices()
+      live_ids = for {id, _slug, true} <- recorded, into: MapSet.new(), do: id
+      live_slugs = Foreman.Environments.live_slugs()
+      live? = fn device -> Enum.any?(live_ids, &device_id?(device, &1)) end
+
+      destroyed =
+        for {id, slug, false} <- recorded,
+            device <- devices,
+            device_id?(device, id) and ours?(device, slug),
+            do: device
+
+      untracked =
+        case deployment_tag() do
+          nil ->
+            []
+
+          tag ->
+            Enum.filter(devices, fn device ->
+              foreman_device?(device) and tag in tags(device) and
+                hostname(device) not in live_slugs
+            end)
+        end
+
+      stale = (destroyed ++ untracked) |> Enum.reject(live?) |> Enum.uniq_by(& &1["id"])
 
       with :ok <- delete_all(stale, creds), do: {:ok, length(stale)}
     else
       nil -> {:ok, 0}
       error -> error
+    end
+  end
+
+  # Tailscale refuses a name another device holds, which can be an old
+  # device another job is still removing, so a failure is retried.
+  defp rename(nil, _slug, _creds), do: :ok
+
+  defp rename(device, slug, creds) do
+    if ours?(device, slug) and dns_label(device) != slug do
+      case Client.impl().set_device_name(creds, device["id"], slug) do
+        :ok ->
+          Logger.info("renamed tailnet device #{device["name"]} to #{slug}")
+
+        error ->
+          Logger.warning("couldn't rename tailnet device #{device["name"]}: #{inspect(error)}")
+          error
+      end
+    else
+      :ok
     end
   end
 
@@ -128,8 +217,22 @@ defmodule Foreman.Tailscale do
     |> Enum.find(:ok, &(&1 != :ok))
   end
 
-  defp foreman_device?(device), do: @marker in (device["tags"] || [])
+  defp foreman_device?(device), do: @marker in tags(device)
 
-  defp hostname(device),
-    do: device["hostname"] || (device["name"] || "") |> String.split(".") |> hd()
+  # With a deployment tag, a device without it is another deployment's,
+  # whatever ID the environment's container reported.
+  defp ours?(device, slug) do
+    foreman_device?(device) and hostname(device) == slug and
+      (deployment_tag() == nil or deployment_tag() in tags(device))
+  end
+
+  # The agent reports the stable node ID; the API lists it as `nodeId`
+  # beside the older numeric `id`.
+  defp device_id?(device, id), do: id in [device["nodeId"], device["id"]]
+
+  defp tags(device), do: device["tags"] || []
+
+  defp dns_label(device), do: (device["name"] || "") |> String.split(".") |> hd()
+
+  defp hostname(device), do: device["hostname"] || dns_label(device)
 end

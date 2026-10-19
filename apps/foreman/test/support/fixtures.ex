@@ -101,6 +101,8 @@ defmodule Foreman.Fixtures do
       desired_state: Map.get(attrs, :desired_state, "running"),
       observed_state: Map.get(attrs, :observed_state, "running"),
       created_once: Map.get(attrs, :created_once, true),
+      tailscale_device_id: Map.get(attrs, :tailscale_device_id),
+      destroyed_at: Map.get(attrs, :destroyed_at),
       devcontainer_service: "app",
       services: ["app", "db"]
     }

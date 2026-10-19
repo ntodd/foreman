@@ -73,6 +73,15 @@ defmodule Foreman.Environments do
   def live_slugs,
     do: Repo.all(from e in Environment, where: is_nil(e.destroyed_at), select: e.slug)
 
+  @doc "Every recorded tailnet device, as `{device_id, slug, live?}`."
+  def recorded_devices do
+    Repo.all(
+      from e in Environment,
+        where: not is_nil(e.tailscale_device_id),
+        select: {e.tailscale_device_id, e.slug, is_nil(e.destroyed_at)}
+    )
+  end
+
   def subscribe(env_id), do: Phoenix.PubSub.subscribe(Foreman.PubSub, "environment:" <> env_id)
   def subscribe_all, do: Phoenix.PubSub.subscribe(Foreman.PubSub, "environments")
 
@@ -478,7 +487,7 @@ defmodule Foreman.Environments do
          |> Repo.update!()}
       end)
 
-    %{"slug" => env.slug} |> Foreman.Jobs.CleanupTailnet.new() |> Oban.insert()
+    cleanup_tailnet(env)
     Audit.log(scope, "environment.forget", env, %{"reason" => "box revoked"})
     broadcast(env)
     {:ok, env}
@@ -566,9 +575,31 @@ defmodule Foreman.Environments do
     env = Repo.get!(Environment, op.environment_id)
 
     case result_attrs(op, env) do
-      attrs when attrs == %{} -> env
-      attrs -> env |> Environment.state_changeset(attrs) |> Repo.update!()
+      attrs when attrs == %{} ->
+        env
+
+      attrs ->
+        replaced_device(env, attrs[:tailscale_device_id])
+        env |> Environment.state_changeset(attrs) |> Repo.update!()
     end
+  end
+
+  # Came back as a new node (its Tailscale state was lost), so the old
+  # device is offline and holding the environment's name.
+  defp replaced_device(%Environment{tailscale_device_id: old} = env, new)
+       when is_binary(old) and is_binary(new) and old != new do
+    %{"slug" => env.slug, "device_id" => old, "replaced_by" => new}
+    |> Foreman.Jobs.CleanupTailnet.new()
+    |> Oban.insert!()
+  end
+
+  defp replaced_device(_env, _new), do: :ok
+
+  defp cleanup_tailnet(env) do
+    %{"slug" => env.slug}
+    |> put_if("device_id", env.tailscale_device_id)
+    |> Foreman.Jobs.CleanupTailnet.new()
+    |> Oban.insert()
   end
 
   @doc "What follows a recorded result: tell the UI, clean up, send the next operation."
@@ -577,9 +608,7 @@ defmodule Foreman.Environments do
   def after_result(op, %Environment{} = env) do
     broadcast(env)
 
-    if op.action == "destroy" and op.status == "succeeded" do
-      %{"slug" => env.slug} |> Foreman.Jobs.CleanupTailnet.new() |> Oban.insert()
-    end
+    if op.action == "destroy" and op.status == "succeeded", do: cleanup_tailnet(env)
 
     # Secrets changed while it came up: the files it got are already stale.
     if op.action in @up and op.status == "succeeded" and env.pending_restart and
@@ -611,6 +640,7 @@ defmodule Foreman.Environments do
     |> put_if(:devcontainer_service, string(result["devcontainer_service"]))
     |> put_if(:warnings, strings(result["warnings"]))
     |> put_if(:host_requirements, map(result["host_requirements"]))
+    |> put_if(:tailscale_device_id, node_id(result["tailscale_node_id"]))
     |> then(&if(action in @fresh_build, do: Map.put(&1, :ts_authkey, nil), else: &1))
   end
 
@@ -710,6 +740,11 @@ defmodule Foreman.Environments do
 
   defp map(v) when is_map(v), do: v
   defp map(_), do: nil
+
+  # Tailscale's stable node IDs are short and alphanumeric, and this one
+  # ends up in an API path.
+  defp node_id(v) when is_binary(v), do: if(v =~ ~r/\A[A-Za-z0-9]{1,64}\z/, do: v)
+  defp node_id(_), do: nil
 
   defp put_if(map, _key, nil), do: map
   defp put_if(map, key, value), do: Map.put(map, key, value)

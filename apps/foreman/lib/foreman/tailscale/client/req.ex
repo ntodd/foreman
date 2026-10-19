@@ -44,6 +44,19 @@ defmodule Foreman.Tailscale.Client.Req do
     end
   end
 
+  @impl true
+  def set_device_name(creds, device_id, name) do
+    with {:ok, req} <- authed(creds) do
+      case Req.post(req,
+             url: "/api/v2/device/#{URI.encode_www_form(device_id)}/name",
+             json: %{name: name}
+           ) do
+        {:ok, %{status: 200}} -> :ok
+        other -> unexpected(other)
+      end
+    end
+  end
+
   defp tailnet(creds), do: URI.encode_www_form(creds[:tailnet] || "-")
 
   # OAuth access tokens last an hour; cache one per client until near expiry.

@@ -16,8 +16,9 @@ does both with an OAuth client:
    (Older consoles had this under Settings → OAuth clients.)
 3. Scopes: **Keys → Auth Keys: write** and **Devices → Core: write**.
 4. Tags: `tag:foreman-env`, plus any repo tags you'll use (for example
-   `tag:staging-access`) and, on a team deployment, one
-   `tag:foreman-<login>` per developer.
+   `tag:staging-access`), on a team deployment one
+   `tag:foreman-<login>` per developer, and the deployment's own tag if
+   it shares the tailnet with another ([below](#a-tag-per-deployment)).
 5. Copy the client ID and secret; the secret is only shown once. Put
    them in the control plane's env file, without quotes (the file is
    read as written, so quotes would be part of the value):
@@ -179,10 +180,34 @@ grants only add access, so one like that lets everyone back in.
   ACL lets reach the environment, and sees them as 127.0.0.1. Keep
   `tag:foreman-env` reachable only by the people who own those
   environments.
-- **Cleanup:** an hourly job removes `tag:foreman-env` devices that
-  don't belong to a live environment. It never looks at other tags, so
-  laptops or CI machines sharing a repo tag are safe. Tagged devices
-  count against the plan.
+- **Cleanup:** the agent reports the node each environment joined as,
+  and destroying the environment deletes that device and no other. An
+  hourly job retries deletes that failed. Every delete needs
+  `tag:foreman-env` and the environment's hostname, so laptops or CI
+  machines sharing a repo tag are safe. Tagged devices count against
+  the plan.
+- **Another deployment on the same tailnet** (a test box beside your
+  main one, say) can have environments with the same names, so Foreman
+  never deletes a device just because its name matches. Devices it has
+  no record of (environments from before the agent reported nodes, or a
+  create that joined and then failed) stay until you delete them in the
+  admin console, unless you give each deployment its own tag; see
+  below.
+
+### A tag per deployment
+
+Set `FOREMAN_TAILSCALE_DEPLOYMENT_TAG` to a tag only this deployment
+uses, for example `tag:foreman-dev`, and every environment it creates
+carries it. Foreman then also removes devices it has no record of, but
+only ones with that tag that don't belong to a live environment, and it
+never deletes or renames a device without the tag. That matters
+because the node ID comes from inside the repo's container: without a
+deployment tag, a repo could report the ID of another deployment's
+environment with the same name and have it deleted when its own is
+destroyed. Add
+the tag to `tagOwners` and to the OAuth client's tags first: an auth key
+with a tag the client doesn't own fails every create. Environments made
+before you set it don't have the tag until they're recreated.
 - **Without Tailscale configured,** environments still build and run;
   the feature skips Tailscale, and you connect with `docker exec` on the
   box.

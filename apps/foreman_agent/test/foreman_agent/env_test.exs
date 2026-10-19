@@ -24,6 +24,8 @@ defmodule ForemanAgent.EnvTest do
   }
   """
 
+  @joined ~s({"BackendState":"Running","Self":{"ID":"nTest1CNTRL","HostName":"storefront-2"}})
+
   setup :verify_on_exit!
 
   setup %{tmp_dir: tmp} do
@@ -75,6 +77,7 @@ defmodule ForemanAgent.EnvTest do
     devcontainer = Keyword.get(opts, :devcontainer, @devcontainer)
     outcome = Keyword.get(opts, :outcome, :success)
     docker_info = Keyword.get(opts, :docker_info, {:ok, %{"DefaultRuntime" => "runc"}})
+    tailscale = Keyword.get(opts, :tailscale, fn -> {0, @joined} end)
 
     stub(DockerMock, :info, fn -> docker_info end)
 
@@ -123,6 +126,10 @@ defmodule ForemanAgent.EnvTest do
           )
 
           up_result(outcome, run_opts)
+
+        {"docker", ["exec", "-u", "0", _container, "tailscale" | _]} ->
+          {status, output} = tailscale.()
+          {:ok, %{status: status, output: output}}
 
         {"docker", ["exec" | rest]} ->
           container_git(Keyword.get(opts, :git), rest, run_opts)
@@ -184,6 +191,11 @@ defmodule ForemanAgent.EnvTest do
     receive_all([])
   end
 
+  # The last devcontainer CLI run; asking Tailscale for the node comes after.
+  defp last_devcontainer do
+    runs() |> Enum.filter(&match?({"devcontainer", _, _}, &1)) |> List.last()
+  end
+
   # Everything the operation logged so far, in order.
   defp logged do
     receive do
@@ -229,7 +241,7 @@ defmodule ForemanAgent.EnvTest do
 
       # The repo's compose files are read before compose reads anything
       # (ComposeScan), so compose itself runs twice: services, then policy.
-      [git, _services, _policy, read_config, up] = runs()
+      [git, _services, _policy, read_config, up, _tailscale] = runs()
 
       {"git", git_args, git_opts} = git
 
@@ -292,16 +304,87 @@ defmodule ForemanAgent.EnvTest do
       refute_received {:log, _, "name: storefront-2" <> _}
     end
 
+    test "reports the node the environment joined the tailnet as", %{ctx: ctx} do
+      stub_tools()
+
+      assert {:ok, result} = Env.run("env.create", payload(), ctx)
+      assert result["tailscale_node_id"] == "nTest1CNTRL"
+
+      # Asked inside the devcontainer, after it's up.
+      {"docker", args, opts} = List.last(runs())
+
+      assert args == [
+               "exec",
+               "-u",
+               "0",
+               "abc123",
+               "tailscale",
+               "--socket=/var/run/tailscale/tailscaled.sock",
+               "status",
+               "--json",
+               "--peers=false"
+             ]
+
+      assert opts[:timeout] <= :timer.seconds(15)
+    end
+
+    test "waits for the node to join", %{ctx: ctx, config: config} do
+      calls = :counters.new(1, [])
+
+      stub_tools(
+        tailscale: fn ->
+          :counters.add(calls, 1, 1)
+
+          if :counters.get(calls, 1) < 3,
+            do: {0, ~s({"BackendState":"NeedsLogin","Self":{"ID":""}})},
+            else: {0, @joined}
+        end
+      )
+
+      ctx = %{ctx | config: %{config | tailscale_join_wait: 5_000}}
+      assert {:ok, result} = Env.run("env.create", payload(), ctx)
+      assert result["tailscale_node_id"] == "nTest1CNTRL"
+      assert :counters.get(calls, 1) == 3
+    end
+
+    test "still succeeds when the node hasn't joined in time", %{ctx: ctx, config: config} do
+      stub_tools(tailscale: fn -> {1, "failed to connect to local tailscaled"} end)
+
+      ctx = %{ctx | config: %{config | tailscale_join_wait: 0}}
+      assert {:ok, result} = Env.run("env.create", payload(), ctx)
+      refute Map.has_key?(result, "tailscale_node_id")
+      assert Enum.any?(logged(), &(&1 =~ "hasn't joined the tailnet"))
+    end
+
+    test "ignores a node ID that isn't one", %{ctx: ctx, config: config} do
+      stub_tools(
+        tailscale: fn -> {0, ~s({"BackendState":"Running","Self":{"ID":"n1/../../x"}})} end
+      )
+
+      ctx = %{ctx | config: %{config | tailscale_join_wait: 0}}
+      assert {:ok, result} = Env.run("env.create", payload(), ctx)
+      refute Map.has_key?(result, "tailscale_node_id")
+    end
+
+    test "doesn't look for a node without Tailscale", %{ctx: ctx} do
+      stub_tools(tailscale: fn -> flunk("asked tailscale") end)
+
+      assert {:ok, result} =
+               Env.run("env.create", payload(%{"tailscale" => %{"enabled" => false}}), ctx)
+
+      refute Map.has_key?(result, "tailscale_node_id")
+    end
+
     test "doesn't leave a feature lockfile behind unless the repo keeps one", %{ctx: ctx} do
       stub_tools()
       assert {:ok, _} = Env.run("env.create", payload(), ctx)
-      {"devcontainer", args, _} = List.last(runs())
+      {"devcontainer", args, _} = last_devcontainer()
       assert "--no-lockfile" in args
 
       clone = Path.join([ctx.config.envs_root, @env_id, "workspace", "storefront"])
       File.write!(Path.join(clone, ".devcontainer/devcontainer-lock.json"), "{}")
       assert {:ok, _} = Env.run("env.rebuild", payload(), ctx)
-      {"devcontainer", args, _} = List.last(runs())
+      {"devcontainer", args, _} = last_devcontainer()
       refute "--no-lockfile" in args
     end
 
@@ -315,7 +398,7 @@ defmodule ForemanAgent.EnvTest do
 
       assert {:ok, _} = Env.run("env.create", payload(%{"dotfiles" => dotfiles}), ctx)
 
-      {"devcontainer", args, _} = List.last(runs())
+      {"devcontainer", args, _} = last_devcontainer()
       assert arg(args, "--dotfiles-repository") == "https://github.com/mona/dotfiles.git"
       assert arg(args, "--dotfiles-install-command") == "./install.sh"
     end
@@ -326,7 +409,7 @@ defmodule ForemanAgent.EnvTest do
 
       assert {:ok, _} = Env.run("env.create", payload(%{"features" => orca}), ctx)
 
-      [_git, _services, _policy, {"devcontainer", rc_args, _}, {"devcontainer", up_args, _}] =
+      [_git, _services, _policy, {"devcontainer", rc_args, _}, {"devcontainer", up_args, _}, _ts] =
         runs()
 
       expected =
@@ -356,7 +439,7 @@ defmodule ForemanAgent.EnvTest do
 
       assert {:ok, _} = Env.run("env.create", payload(%{"features" => features}), ctx)
 
-      {"devcontainer", up_args, _} = List.last(runs())
+      {"devcontainer", up_args, _} = last_devcontainer()
 
       assert JSON.decode!(arg(up_args, "--additional-features")) == %{
                "ghcr.io/ntodd/devcontainer-features/orca:1" => %{},
@@ -600,7 +683,7 @@ defmodule ForemanAgent.EnvTest do
       )
 
       assert {:ok, _} = Env.run("env.create", payload(), ctx)
-      {"devcontainer", up_args, _} = List.last(runs())
+      {"devcontainer", up_args, _} = last_devcontainer()
       assert ["up" | _] = up_args
       assert arg(up_args, "--gpu-availability") == "none"
     end
@@ -704,7 +787,7 @@ defmodule ForemanAgent.EnvTest do
     test "removes the existing container", %{ctx: ctx} do
       stub_tools()
       assert {:ok, _} = Env.run("env.rebuild", payload(), ctx)
-      {"devcontainer", args, _} = List.last(runs())
+      {"devcontainer", args, _} = last_devcontainer()
       assert "--remove-existing-container" in args
     end
   end
@@ -739,6 +822,7 @@ defmodule ForemanAgent.EnvTest do
 
     defp git_runs(runs) do
       for {"docker", ["exec" | args], _} <- runs,
+          "core.fsmonitor=false" in args,
           do: args |> Enum.drop_while(&(&1 != "core.fsmonitor=false")) |> tl()
     end
 
@@ -897,9 +981,24 @@ defmodule ForemanAgent.EnvTest do
                  ctx
                )
 
-      {"devcontainer", args, opts} = List.last(runs())
+      {"devcontainer", args, opts} = last_devcontainer()
       refute "--remove-existing-container" in args
       assert opts[:env]["X"] == "1"
+    end
+
+    # Environments created before the agent reported nodes get one recorded.
+    test "reports the node the environment joined the tailnet as", %{ctx: ctx} do
+      stub_tools()
+      {:ok, _} = Env.run("env.create", payload(), ctx)
+
+      assert {:ok, result} =
+               Env.run(
+                 "env.start",
+                 %{env_id: @env_id, slug: "storefront-2", compose_env: %{}},
+                 ctx
+               )
+
+      assert result["tailscale_node_id"] == "nTest1CNTRL"
     end
 
     test "fails clearly for an environment this box never prepared", %{ctx: ctx} do

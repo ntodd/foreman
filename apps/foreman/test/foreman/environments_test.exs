@@ -1,10 +1,12 @@
 defmodule Foreman.EnvironmentsTest do
   use Foreman.DataCase
+  use Oban.Testing, repo: Foreman.Repo
 
   import Mox
 
-  alias Foreman.{Agents, Environments, Operations, Scope, Secrets}
+  alias Foreman.{Agents, Boxes, Environments, Operations, Scope, Secrets}
   alias Foreman.Environments.Environment
+  alias Foreman.Jobs.CleanupTailnet
   alias ForemanProtocol.{Command, Event}
 
   setup :verify_on_exit!
@@ -615,6 +617,102 @@ defmodule Foreman.EnvironmentsTest do
 
       succeed(box, cmd, @up_result)
       assert Repo.reload!(env).ts_authkey == nil
+    end
+
+    test "records the node the environment joined as", %{scope: scope, repo: repo, box: box} do
+      connect_agent(box)
+
+      stub(Foreman.Tailscale.ClientMock, :create_auth_key, fn _, _ ->
+        {:ok, %{key: "k", id: "1"}}
+      end)
+
+      {:ok, env} =
+        Environments.create_environment(scope, %{"repo_id" => repo.id, "box_id" => box.id})
+
+      assert_receive {:dispatch, cmd}
+      succeed(box, cmd, Map.put(@up_result, "tailscale_node_id", "nAbc123CNTRL"))
+
+      assert Repo.reload!(env).tailscale_device_id == "nAbc123CNTRL"
+      refute_enqueued(worker: CleanupTailnet)
+    end
+
+    test "ignores a node ID that isn't one", %{scope: scope, repo: repo, box: box} do
+      connect_agent(box)
+
+      stub(Foreman.Tailscale.ClientMock, :create_auth_key, fn _, _ ->
+        {:ok, %{key: "k", id: "1"}}
+      end)
+
+      {:ok, env} =
+        Environments.create_environment(scope, %{"repo_id" => repo.id, "box_id" => box.id})
+
+      assert_receive {:dispatch, cmd}
+      succeed(box, cmd, Map.put(@up_result, "tailscale_node_id", "n1/../../devices"))
+
+      assert Repo.reload!(env).tailscale_device_id == nil
+    end
+
+    test "a destroy removes the recorded device", %{
+      scope: scope,
+      user: user,
+      repo: repo,
+      box: box
+    } do
+      connect_agent(box)
+      env = environment_fixture(user: user, repo: repo, box: box, tailscale_device_id: "nAbc")
+
+      {:ok, _} = Environments.destroy(scope, env)
+      assert_receive {:dispatch, %Command{type: "env.destroy"} = cmd}
+      succeed(box, cmd)
+
+      assert_enqueued(worker: CleanupTailnet, args: %{"slug" => env.slug, "device_id" => "nAbc"})
+    end
+
+    test "a destroy on a revoked box removes the recorded device", %{
+      scope: scope,
+      user: user,
+      repo: repo,
+      box: box
+    } do
+      env = environment_fixture(user: user, repo: repo, box: box, tailscale_device_id: "nAbc")
+      admin = Scope.for_user(user_fixture(role: "admin"))
+      {:ok, _} = Boxes.revoke(admin, Boxes.get_box!(box.id))
+
+      {:ok, _} = Environments.destroy(scope, Repo.reload!(env))
+
+      assert_enqueued(worker: CleanupTailnet, args: %{"slug" => env.slug, "device_id" => "nAbc"})
+    end
+
+    test "a new node queues removal of the one it replaced", %{
+      scope: scope,
+      user: user,
+      repo: repo,
+      box: box
+    } do
+      connect_agent(box)
+      env = environment_fixture(user: user, repo: repo, box: box, tailscale_device_id: "nOld")
+
+      {:ok, _} = Environments.rebuild(scope, env)
+      assert_receive {:dispatch, %Command{type: "env.rebuild"} = cmd}
+      succeed(box, cmd, Map.put(@up_result, "tailscale_node_id", "nNew"))
+
+      assert Repo.reload!(env).tailscale_device_id == "nNew"
+
+      assert_enqueued(
+        worker: CleanupTailnet,
+        args: %{"slug" => env.slug, "device_id" => "nOld", "replaced_by" => "nNew"}
+      )
+    end
+
+    test "the same node queues nothing", %{scope: scope, user: user, repo: repo, box: box} do
+      connect_agent(box)
+      env = environment_fixture(user: user, repo: repo, box: box, tailscale_device_id: "nSame")
+
+      {:ok, _} = Environments.rebuild(scope, env)
+      assert_receive {:dispatch, %Command{type: "env.rebuild"} = cmd}
+      succeed(box, cmd, Map.put(@up_result, "tailscale_node_id", "nSame"))
+
+      refute_enqueued(worker: CleanupTailnet)
     end
   end
 

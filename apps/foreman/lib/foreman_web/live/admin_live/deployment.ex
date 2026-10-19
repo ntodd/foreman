@@ -149,9 +149,16 @@ defmodule ForemanWeb.AdminLive.Deployment do
           <p class="mt-2 text-sm text-ink-2">
             {if @tailscale,
               do:
-                "Environments join the tailnet tagged #{Enum.join(Enum.uniq([Tailscale.marker_tag() | Tailscale.base_tags()]), ", ")}.",
+                "Environments join the tailnet tagged #{Enum.join(Enum.uniq([Tailscale.marker_tag() | Tailscale.base_tags()] ++ List.wrap(Tailscale.deployment_tag())), ", ")}.",
               else:
                 "Set FOREMAN_TAILSCALE_CLIENT_ID and _SECRET (an OAuth client with auth_keys and devices:core) to join environments to the tailnet."}
+          </p>
+          <p
+            :if={@tailscale and is_nil(Tailscale.deployment_tag())}
+            id="tailscale-sweep"
+            class="mt-2 text-sm text-ink-2"
+          >
+            Foreman only removes tailnet devices it recorded an environment joining as. Set FOREMAN_TAILSCALE_DEPLOYMENT_TAG to a tag only this deployment uses, and it also removes the ones it missed.
           </p>
         </.panel>
         <.panel title="Database">

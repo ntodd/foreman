@@ -219,7 +219,8 @@ updates its agent to the one the new image carries; see
 | `FOREMAN_ALLOWED_ORG` | | Active members of this org may sign in |
 | `FOREMAN_SLUG_STYLE` | `personal` | `team` puts the login in environment names |
 | `FOREMAN_TAILSCALE_CLIENT_ID`, `_CLIENT_SECRET` | | Tailscale OAuth client |
-| `FOREMAN_TAILSCALE_TAGS` | (none) | Extra tags every environment gets. `tag:foreman-env` is always applied, and it's the only tag cleanup looks at |
+| `FOREMAN_TAILSCALE_TAGS` | (none) | Extra tags every environment gets. `tag:foreman-env` is always applied, and cleanup only deletes devices that have it |
+| `FOREMAN_TAILSCALE_DEPLOYMENT_TAG` | (none) | A tag only this deployment uses. Every environment gets it, and cleanup also removes this deployment's devices it has no record of ([tailscale.md](tailscale.md#a-tag-per-deployment)) |
 | `FOREMAN_GITHUB_APP_ID`, `_CLIENT_ID`, `_CLIENT_SECRET`, `_PRIVATE_KEY_FILE` | | Instead of the manifest flow; the key file has to be mounted in ([github-app.md](github-app.md)) |
 | `FOREMAN_AGENT_RELEASE_PUBLIC_KEY` | | Verifies the agent releases the control plane serves, including the ones its image carries |
 | `FOREMAN_AGENT_RELEASE_DIR` | system temp dir | Where published releases are kept; set it to a persistent path |

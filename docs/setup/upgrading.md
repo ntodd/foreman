@@ -41,8 +41,9 @@ control plane makes them match it:
 - Environments it thinks are running but are missing are created again,
   ones it thinks are stopped are stopped, and environments made since
   the backup show up as orphans on their box's page.
-- The hourly tailnet sweep removes devices for environments the
-  restored database doesn't know, unless it's turned off.
+- With a deployment tag, the hourly tailnet sweep removes devices for
+  environments the restored database doesn't know, unless it's turned
+  off.
 - A box revoked since the backup has its key back and can reconnect, so
   revoke it again. A box enrolled since the backup is refused until it's
   enrolled again with `--reenroll` and a new token.
