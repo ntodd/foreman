@@ -12,6 +12,11 @@ defmodule Foreman.Application do
       {Ecto.Migrator,
        repos: Application.fetch_env!(:foreman, :ecto_repos), skip: skip_migrations?()},
       %{
+        id: :check_encryption_key,
+        start: {Foreman.Settings, :start_checking_encryption_key, []},
+        restart: :temporary
+      },
+      %{
         id: :register_bundled_agents,
         start: {Foreman.Agents.Releases, :start_registering_bundled, []},
         restart: :temporary

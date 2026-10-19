@@ -119,15 +119,41 @@ if config_env() == :prod do
 
   # 32 random bytes, base64. Encrypts secrets, tokens and keys at rest.
   #     openssl rand -base64 32
+  # A key of another length would boot and fail at the first encryption.
+  decode_key = fn name, value ->
+    case Base.decode64(String.trim(value)) do
+      {:ok, <<_::binary-size(32)>> = key} ->
+        key
+
+      {:ok, key} ->
+        raise "#{name} is #{byte_size(key)} bytes, not 32; " <>
+                "generate one with: openssl rand -base64 32"
+
+      :error ->
+        raise "#{name} isn't base64; generate one with: openssl rand -base64 32"
+    end
+  end
+
   encryption_key =
     System.get_env("FOREMAN_ENCRYPTION_KEY") ||
       raise "FOREMAN_ENCRYPTION_KEY is missing; generate one with: openssl rand -base64 32"
 
+  # Older keys, comma-separated, kept for reading while
+  # Foreman.Release.reencrypt() moves everything to the current one.
+  retired_keys =
+    System.get_env("FOREMAN_ENCRYPTION_KEYS_RETIRED", "")
+    |> String.split(",", trim: true)
+    |> Enum.map(&String.trim/1)
+    |> Enum.reject(&(&1 == ""))
+    |> Enum.map(&decode_key.("FOREMAN_ENCRYPTION_KEYS_RETIRED", &1))
+
   config :foreman, Foreman.Vault,
     ciphers: [
       default:
-        {Cloak.Ciphers.AES.GCM,
-         tag: "AES.GCM.V1", key: Base.decode64!(encryption_key), iv_length: 12}
+        {Foreman.Vault.Cipher,
+         tag: "AES.GCM.V1",
+         keys: [decode_key.("FOREMAN_ENCRYPTION_KEY", encryption_key) | retired_keys],
+         iv_length: 12}
     ]
 
   host =

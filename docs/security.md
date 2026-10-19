@@ -280,7 +280,8 @@ These are accepted for now, or need someone to try them:
     replayed within 60 seconds of a control plane restart.
 11. **Keys in the environment.** `FOREMAN_ENCRYPTION_KEY` and the Tailscale
     OAuth secret are environment variables, readable in
-    `/proc/<pid>/environ` by the same user and root.
+    `/proc/<pid>/environ` by the same user and root. If the encryption key
+    leaks, change it ([upgrading.md](setup/upgrading.md#changing-the-encryption-key)).
 12. **Tokens in environments are usable by anything in them.** The
     scoped GitHub token can push to the environment's repo (and its
     extra repos) as the user. That's the point, but a malicious

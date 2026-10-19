@@ -16,7 +16,10 @@ defmodule Foreman.RuntimeConfigTest do
   }
 
   setup do
-    keys = Map.keys(@env) ++ ["FOREMAN_DB", "FOREMAN_TAILSCALE_DEPLOYMENT_TAG"]
+    keys =
+      Map.keys(@env) ++
+        ["FOREMAN_DB", "FOREMAN_TAILSCALE_DEPLOYMENT_TAG", "FOREMAN_ENCRYPTION_KEYS_RETIRED"]
+
     saved_env = Map.new(keys, &{&1, System.get_env(&1)})
     saved_database = Application.get_env(:foreman, :database)
 
@@ -26,6 +29,7 @@ defmodule Foreman.RuntimeConfigTest do
     end)
 
     System.delete_env("FOREMAN_DB")
+    System.delete_env("FOREMAN_ENCRYPTION_KEYS_RETIRED")
     System.put_env(@env)
     :ok
   end
@@ -92,5 +96,57 @@ defmodule Foreman.RuntimeConfigTest do
     System.put_env("FOREMAN_TAILSCALE_DEPLOYMENT_TAG", "foreman-dev")
 
     assert_raise RuntimeError, ~r/FOREMAN_TAILSCALE_DEPLOYMENT_TAG/, fn -> read_config() end
+  end
+
+  defp vault_keys do
+    Application.put_env(:foreman, :database, "postgres")
+    {Foreman.Vault.Cipher, opts} = read_config()[Foreman.Vault][:ciphers][:default]
+    opts[:keys]
+  end
+
+  test "FOREMAN_ENCRYPTION_KEY is the key everything is encrypted with" do
+    assert vault_keys() == [Base.decode64!(@env["FOREMAN_ENCRYPTION_KEY"])]
+  end
+
+  # It would boot, and the first encryption (saving the GitHub App at
+  # the end of setup, after the manifest code is spent) would fail.
+  test "a FOREMAN_ENCRYPTION_KEY that isn't 32 bytes is refused" do
+    for key <- [
+          # SECRET_KEY_BASE's recipe, and `openssl rand -hex 32`
+          Base.encode64(:crypto.strong_rand_bytes(48)),
+          Base.encode16(:crypto.strong_rand_bytes(32)),
+          Base.encode64(:crypto.strong_rand_bytes(16))
+        ] do
+      System.put_env("FOREMAN_ENCRYPTION_KEY", key)
+
+      assert_raise RuntimeError, ~r/FOREMAN_ENCRYPTION_KEY is \d+ bytes, not 32/, fn ->
+        vault_keys()
+      end
+    end
+  end
+
+  test "a FOREMAN_ENCRYPTION_KEY that isn't base64 is refused" do
+    System.put_env("FOREMAN_ENCRYPTION_KEY", "not base64!")
+
+    assert_raise RuntimeError, ~r/FOREMAN_ENCRYPTION_KEY isn't base64/, fn -> vault_keys() end
+  end
+
+  test "a trailing newline on FOREMAN_ENCRYPTION_KEY is ignored" do
+    System.put_env("FOREMAN_ENCRYPTION_KEY", @env["FOREMAN_ENCRYPTION_KEY"] <> "\n")
+
+    assert vault_keys() == [Base.decode64!(@env["FOREMAN_ENCRYPTION_KEY"])]
+  end
+
+  test "FOREMAN_ENCRYPTION_KEYS_RETIRED are kept for reading, after the current key" do
+    old = for _ <- 1..2, do: :crypto.strong_rand_bytes(32)
+    System.put_env("FOREMAN_ENCRYPTION_KEYS_RETIRED", Enum.map_join(old, ", ", &Base.encode64/1))
+
+    assert vault_keys() == [Base.decode64!(@env["FOREMAN_ENCRYPTION_KEY"]) | old]
+  end
+
+  test "a retired key that isn't 32 bytes is refused" do
+    System.put_env("FOREMAN_ENCRYPTION_KEYS_RETIRED", Base.encode64("short"))
+
+    assert_raise RuntimeError, ~r/FOREMAN_ENCRYPTION_KEYS_RETIRED/, fn -> vault_keys() end
   end
 end

@@ -120,8 +120,9 @@ see the desktop until a rule lets them reach it. Tag the desktop
 "Server Not Found" for the `.ts.net` name usually means exactly this.
 
 **Back up `FOREMAN_ENCRYPTION_KEY`.** Every secret, token and key in the
-database is encrypted with it; without it they're gone. What else to
-keep, and how to upgrade, is in [upgrading.md](upgrading.md).
+database is encrypted with it; without it they're gone, and the control
+plane won't start with a different one. What else to keep, how to
+upgrade and how to change the key are in [upgrading.md](upgrading.md).
 
 ### Building the image yourself
 
@@ -210,6 +211,7 @@ updates its agent to the one the new image carries; see
 |---|---|---|
 | `SECRET_KEY_BASE` | required | Signs sessions |
 | `FOREMAN_ENCRYPTION_KEY` | required | 32 bytes, base64. Encrypts secrets at rest |
+| `FOREMAN_ENCRYPTION_KEYS_RETIRED` | | Old encryption keys, comma-separated, still read while changing it ([upgrading.md](upgrading.md#changing-the-encryption-key)) |
 | `PHX_HOST` | required | The tailnet host name |
 | `FOREMAN_LISTEN_IP` | `127.0.0.1` | `0.0.0.0` inside a container |
 | `PORT` | `4000` | |
