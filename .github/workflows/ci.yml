@@ -323,13 +323,27 @@ jobs:
         if: ${{ !cancelled() }}
         working-directory: apps/foreman
         run: MIX_ENV=test mix deps.audit
+      # gitleaks-action downloads to a fixed $TMPDIR/gitleaks.tmp and fails
+      # if it already exists. TMPDIR on the self-hosted runners is shared,
+      # so give the scan a directory of its own.
+      - name: Make a temp directory for gitleaks
+        if: ${{ !cancelled() }}
+        run: |
+          dir="$RUNNER_TEMP/gitleaks-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          mkdir -p "$dir"
+          echo "GITLEAKS_TMPDIR=$dir" >> "$GITHUB_ENV"
       - name: Scan for secrets
         if: ${{ !cancelled() }}
         uses: gitleaks/gitleaks-action@e0c47f4f8be36e29cdc102c57e68cb5cbf0e8d1e # v3.0.0
         env:
+          TMPDIR: ${{ env.GITLEAKS_TMPDIR }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           # .gitleaks.toml uses [[allowlists]], which needs 8.25 or newer.
           GITLEAKS_VERSION: 8.30.1
           # The upload wants the workspace under $HOME, which it isn't on
           # the self-hosted runners; findings are in the log anyway.
           GITLEAKS_ENABLE_UPLOAD_ARTIFACT: "false"
+      - name: Remove the gitleaks temp directory
+        if: ${{ always() }}
+        run: |
+          if [ -n "${GITLEAKS_TMPDIR:-}" ]; then rm -rf "$GITLEAKS_TMPDIR"; fi
