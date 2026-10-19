@@ -77,6 +77,21 @@ defmodule ForemanAgent.Integration.EnvDockerTest do
     end
   end
 
+  # The repo's feature, at another version.
+  defp feature_at(config, version) do
+    dir = Path.join(Path.dirname(config.envs_root), "feature-#{version}")
+    File.rm_rf!(dir)
+    File.cp_r!(config.feature_dir, dir)
+    json = Path.join(dir, "devcontainer-feature.json")
+
+    File.write!(
+      json,
+      String.replace(File.read!(json), ~r/"version": "[^"]+"/, ~s("version": "#{version}"))
+    )
+
+    dir
+  end
+
   defp ctx(config) do
     test_pid = self()
 
@@ -188,6 +203,7 @@ defmodule ForemanAgent.Integration.EnvDockerTest do
     assert r1["services"] == ["app", "sidecar"]
     assert r1["compose_project"] == @slug1
     assert r2["compose_project"] == @slug2
+    assert r1["feature_version"] == ForemanAgent.Config.feature_version(config)
 
     c1 = containers(@env1)
     c2 = containers(@env2)
@@ -309,7 +325,7 @@ defmodule ForemanAgent.Integration.EnvDockerTest do
     assert {:ok, _} = Env.run("env.stop", %{env_id: @env1, slug: @slug1}, ctx)
     assert_states(@env1, "exited")
 
-    assert {:ok, _} =
+    assert {:ok, started} =
              Env.run(
                "env.start",
                %{env_id: @env1, slug: @slug1, compose_env: %{"SIDECAR_TOKEN" => "token-two"}},
@@ -318,11 +334,30 @@ defmodule ForemanAgent.Integration.EnvDockerTest do
 
     assert_states(@env1, "running")
     assert containers(@env1)["app"]["Id"] == app1
+    assert started["container_id"] == app1
+    assert started["feature_version"] == r1["feature_version"]
+
+    # -- a newer feature reaches the container only through a rebuild ----------------
+    newer = ctx(%{config | feature_dir: feature_at(config, "9.9.9")})
+    assert {:ok, _} = Env.run("env.stop", %{env_id: @env1, slug: @slug1}, ctx)
+
+    assert {:ok, started} =
+             Env.run(
+               "env.start",
+               %{env_id: @env1, slug: @slug1, compose_env: %{"SIDECAR_TOKEN" => "token-two"}},
+               newer
+             )
+
+    assert started["container_id"] == app1
+    assert started["feature_version"] == r1["feature_version"]
 
     # -- rebuild keeps the workspace ----------------------------------------------
-    assert {:ok, _} = Env.run("env.rebuild", create_payload(@env1, @slug1, base_url), ctx)
+    assert {:ok, rebuilt} =
+             Env.run("env.rebuild", create_payload(@env1, @slug1, base_url), newer)
+
     new_app = containers(@env1)["app"]["Id"]
     assert new_app != app1
+    assert rebuilt["feature_version"] == "9.9.9"
     assert {out, 0} = exec(new_app, ["cat", "/workspaces/hello/README.md"])
     assert out =~ "change"
 

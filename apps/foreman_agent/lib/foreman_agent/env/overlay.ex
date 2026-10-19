@@ -4,7 +4,8 @@ defmodule ForemanAgent.Env.Overlay do
 
   - a compose overlay that strips published ports, turns off restart
     policies (the agent orders starts after a reboot, once secrets are back
-    on tmpfs), labels every service with the environment, and mounts the
+    on tmpfs), labels every service with the environment (and the
+    devcontainer with the Foreman feature it's built with), and mounts the
     secrets directory and the Tailscale state volume
   - an override devcontainer.json that appends the overlay to
     `dockerComposeFile` (with absolute paths) and drops `initializeCommand`
@@ -23,7 +24,8 @@ defmodule ForemanAgent.Env.Overlay do
           devcontainer_service: String.t(),
           secrets_dir: Path.t(),
           tailscale: %{enabled: boolean()},
-          limits: map()
+          limits: map(),
+          feature_version: String.t() | nil
         }
 
   @spec compose(params()) :: String.t()
@@ -45,6 +47,7 @@ defmodule ForemanAgent.Env.Overlay do
           "      \"foreman.slug\": ",
           q(params.slug),
           "\n",
+          feature_label(service, params),
           if(service == params.devcontainer_service,
             do: devcontainer_service(params, tailscale?),
             else: []
@@ -62,6 +65,16 @@ defmodule ForemanAgent.Env.Overlay do
       services,
       volumes
     ])
+  end
+
+  # Set when the container is created, which is when the CLI builds its
+  # image; a container the CLI reuses keeps its labels. Every other service
+  # gets an empty one, which overrides any label the repo gives it.
+  defp feature_label(service, params) do
+    version =
+      if service == params.devcontainer_service, do: params[:feature_version] || "", else: ""
+
+    ["      \"foreman.feature_version\": ", q(version), "\n"]
   end
 
   defp devcontainer_service(params, tailscale?) do

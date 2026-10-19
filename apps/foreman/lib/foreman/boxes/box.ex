@@ -14,6 +14,7 @@ defmodule Foreman.Boxes.Box do
     field :public_key, :binary, redact: true
     field :agent_version, :string
     field :protocol_version, :integer
+    field :feature_version, :string
     field :desired_agent_version, :string
     field :failed_agent_version, :string
     field :hostname, :string

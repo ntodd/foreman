@@ -18,6 +18,7 @@ defmodule ForemanAgent.Env do
       %{config: %Config{}, runner: module, docker: module, log: fn stream, data -> ... end}
   """
 
+  alias ForemanAgent.Config
   alias ForemanAgent.Env.{Affected, ComposeScan, Overlay, Policy}
   alias ForemanAgent.SafeFS
   alias ForemanProtocol.{Feature, Jsonc}
@@ -38,6 +39,11 @@ defmodule ForemanAgent.Env do
   @logs_timeout :timer.minutes(5)
   @tailscale_timeout :timer.seconds(15)
   @join_poll 500
+
+  # A start or restart rebuilds a container built with an older Foreman
+  # feature than this, since a reused container keeps the old feature.
+  # 1.1.0 dropped NET_ADMIN and NET_RAW.
+  @feature_floor "1.1.0"
 
   @type ctx :: %{
           config: ForemanAgent.Config.t(),
@@ -104,7 +110,8 @@ defmodule ForemanAgent.Env do
       ensure_secrets_dir(paths)
 
       with {:ok, prepared} <- prepare(paths, spec, p.compose_env, ctx),
-           {:ok, result} <- devcontainer_up(paths, spec, prepared, p, ctx, rebuild: false) do
+           {:ok, rebuild} <- feature_rebuild(ctx, p.env_id, prepared, opts),
+           {:ok, result} <- devcontainer_up(paths, spec, prepared, p, ctx, rebuild: rebuild) do
         save_spec(paths, spec, prepared, result)
         {:ok, if(opts[:node_id], do: put_node_id(result, spec, ctx), else: result)}
       end
@@ -346,7 +353,9 @@ defmodule ForemanAgent.Env do
         {:error, _} ->
           ctx.log.("info", "Starting the environment to pull\n")
 
-          with {:ok, _} <- start(p, ctx),
+          # The rebuild after the pull updates the feature; a refused pull
+          # leaves the container as it was.
+          with {:ok, _} <- start(p, ctx, feature_rebuild: false),
                {:ok, spec} <- load_spec(ctx.config, p.env_id),
                {:ok, container} <-
                  devcontainer_container(ctx, p.env_id, spec.devcontainer_service) do
@@ -460,7 +469,7 @@ defmodule ForemanAgent.Env do
          :ok <- check_service(service, services),
          :ok <- check_run_services(config["runServices"], services),
          overlay_path = Path.join(paths.meta, "overlay.yml"),
-         :ok <- write_overlay(overlay_path, paths, spec, services, service),
+         :ok <- write_overlay(overlay_path, paths, spec, services, service, ctx),
          {:ok, merged} <- files_config.(compose_files ++ [overlay_path], env),
          {:ok, docker} <- docker_info(ctx),
          {:ok, policy_warnings} <- check_policy(merged, config, paths, spec, ctx.config, docker),
@@ -633,7 +642,7 @@ defmodule ForemanAgent.Env do
     end
   end
 
-  defp write_overlay(path, paths, spec, services, service) do
+  defp write_overlay(path, paths, spec, services, service, ctx) do
     yaml =
       Overlay.compose(%{
         env_id: spec.env_id,
@@ -642,7 +651,8 @@ defmodule ForemanAgent.Env do
         devcontainer_service: service,
         secrets_dir: paths.secrets,
         tailscale: spec.tailscale,
-        limits: spec.limits
+        limits: spec.limits,
+        feature_version: Config.feature_version(ctx.config)
       })
 
     SafeFS.write_atomic(path, yaml, 0o600)
@@ -734,6 +744,63 @@ defmodule ForemanAgent.Env do
     :ok
   end
 
+  # -- feature version -----------------------------------------------------
+
+  # The overlay labels the devcontainer with the feature version when the
+  # container is created, which is when the CLI builds its image. The CLI
+  # starts a container that exists without recreating it, so the label is
+  # the feature that's in it.
+  defp put_feature_version(result, ctx, env_id, service) do
+    case built_feature(ctx, env_id, service) do
+      {:ok, version} -> Map.put(result, "feature_version", version)
+      _ -> Map.put(result, "feature_version", nil)
+    end
+  end
+
+  # With no container the CLI builds one anyway, so only one it would
+  # reuse is rebuilt: one without a label was made before the agent set it.
+  defp feature_rebuild(ctx, env_id, prepared, opts) do
+    with true <- Keyword.get(opts, :feature_rebuild, true),
+         {:ok, built} <- built_feature(ctx, env_id, prepared.devcontainer_service),
+         true <- below_floor?(built) and not below_floor?(Config.feature_version(ctx.config)) do
+      ctx.log.(
+        "info",
+        "This environment was built with an older Foreman feature (#{built || "unrecorded"}); rebuilding it\n"
+      )
+
+      {:ok, true}
+    else
+      {:error, reason} ->
+        {:error, "couldn't check the environment's containers: #{inspect(reason)}"}
+
+      _ ->
+        {:ok, false}
+    end
+  end
+
+  # The oldest among the service's containers: a replica scaled up later,
+  # without a build, has a newer label than its image. If the replicas
+  # built with the image are removed by hand, the rest overstate it, and
+  # a start can skip the floor's rebuild.
+  defp built_feature(ctx, env_id, service) do
+    with {:ok, containers} <- ctx.docker.list_containers(["foreman.env_id=#{env_id}"]) do
+      case Enum.filter(containers, &(&1["Labels"]["com.docker.compose.service"] == service)) do
+        [] -> :none
+        found -> {:ok, found |> Enum.map(&label_version/1) |> oldest()}
+      end
+    end
+  end
+
+  defp label_version(container) do
+    version = container["Labels"]["foreman.feature_version"]
+    if is_binary(version) and match?({:ok, _}, Version.parse(version)), do: version
+  end
+
+  defp oldest(versions), do: if(nil in versions, do: nil, else: Enum.min(versions, Version))
+
+  defp below_floor?(nil), do: true
+  defp below_floor?(version), do: Version.compare(version, @feature_floor) == :lt
+
   # -- devcontainer up -----------------------------------------------------
 
   defp devcontainer_up(paths, spec, prepared, p, ctx, opts) do
@@ -761,7 +828,11 @@ defmodule ForemanAgent.Env do
 
       with {:ok, warnings} <- check_resolved(config_args, env, paths, spec, ctx) do
         warnings = Enum.uniq(prepared.warnings ++ warnings)
-        up(paths, spec, %{prepared | warnings: warnings}, config_args, env, ctx, opts)
+
+        with {:ok, result} <-
+               up(paths, spec, %{prepared | warnings: warnings}, config_args, env, ctx, opts) do
+          {:ok, put_feature_version(result, ctx, spec.env_id, prepared.devcontainer_service)}
+        end
       end
     end)
   end
@@ -1041,8 +1112,8 @@ defmodule ForemanAgent.Env do
 
   defp restart(%{mode: "all"} = p, ctx) do
     with {:ok, _} <- stop(p, ctx),
-         {:ok, _} <- start(p, ctx) do
-      {:ok, %{"restarted" => "all"}}
+         {:ok, result} <- start(p, ctx) do
+      {:ok, %{"restarted" => "all", "feature_version" => result["feature_version"]}}
     end
   end
 
@@ -1065,12 +1136,15 @@ defmodule ForemanAgent.Env do
     service = prepared.devcontainer_service
     sidecars = affected -- [service]
 
-    with :ok <- recreate(ctx, spec.slug, files, env, sidecars, prepared),
+    with {:ok, outdated} <- feature_rebuild(ctx, p.env_id, prepared, []),
+         rebuild = service in affected or outdated,
+         :ok <- recreate(ctx, spec.slug, files, env, sidecars, prepared),
          {:ok, _} <- compose(ctx, spec.slug, ["stop", service]),
          # Recreating the devcontainer itself means the CLI has to do it,
          # since it owns the image and labels.
-         {:ok, _} <- devcontainer_up(paths, spec, prepared, p, ctx, rebuild: service in affected) do
-      {:ok, %{"restarted" => sidecars ++ [service]}}
+         {:ok, result} <- devcontainer_up(paths, spec, prepared, p, ctx, rebuild: rebuild) do
+      {:ok,
+       %{"restarted" => sidecars ++ [service], "feature_version" => result["feature_version"]}}
     end
   end
 

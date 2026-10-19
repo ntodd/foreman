@@ -34,6 +34,20 @@ defmodule ForemanAgent.Env.OverlayTest do
       assert length(Regex.scan(~r/"foreman.slug": "storefront-2"/, yaml)) == 2
     end
 
+    test "labels the devcontainer with the Foreman feature it's built with" do
+      yaml = Overlay.compose(params(%{feature_version: "1.1.0"}))
+
+      [app, db] = String.split(yaml, ~r/\n  "db":\n/)
+      assert app =~ ~s("foreman.feature_version": "1.1.0")
+      # A repo can't label a service it later makes the devcontainer.
+      assert db =~ ~s("foreman.feature_version": "")
+    end
+
+    test "labels the devcontainer with no feature when the agent can't read its own" do
+      yaml = Overlay.compose(params(%{feature_version: nil}))
+      assert length(Regex.scan(~r/"foreman.feature_version": ""/, yaml)) == 2
+    end
+
     test "mounts the secrets directory read-only into the devcontainer service only" do
       yaml = Overlay.compose(params())
 

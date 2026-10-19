@@ -112,7 +112,7 @@ Each agent joins topic `agent:<agent_id>`. Commands are a fixed vocabulary; ther
 
 Every command carries an `op_id`. The agent records in-flight `op_id`s, so a command retried after a reconnect is not run twice. Long operations keep running if the socket drops. The agent sends their progress and result once it reconnects.
 
-The agent sends its version and protocol version when it joins. The control plane accepts protocol N and N-1, and only sends a protocol-N field to agents that reported N, so upgrade the control plane before the agents (an older control plane refuses newer agents). Protocol 2 added `keep` to `env.secrets.write`. Protocol 3 added `features` (a user's own devcontainer features) to `env.create` and `env.rebuild`, where an environment on an older agent builds without them, `pull` to `env.rebuild`, which isn't offered on older agents, and the `gpu` policy rule. Once boxes run agents on a protocol, the control plane can't be rolled back past the release that introduced it: an older control plane refuses them at join.
+The agent sends its version and protocol version when it joins. The control plane accepts protocol N and N-1, and only sends a protocol-N field to agents that reported N, so upgrade the control plane before the agents (an older control plane refuses newer agents). Protocol 2 added `keep` to `env.secrets.write`. Protocol 3 added `features` (a user's own devcontainer features) to `env.create` and `env.rebuild`, where an environment on an older agent builds without them, `pull` to `env.rebuild`, which isn't offered on older agents, and the `gpu` policy rule. The join's optional `feature_version` came without a new protocol: control planes before it refuse agents that send it. Once boxes run agents on a protocol, the control plane can't be rolled back past the release that introduced it: an older control plane refuses them at join.
 
 ### Reconciliation
 
@@ -185,7 +185,9 @@ volumes:
 
 ### Foreman feature
 
-A devcontainer feature that ships inside the agent release, so a box always runs the feature version its agent was built with. The agent copies it into the clone at `<config dir>/.foreman/feature` (excluded through `.git/info/exclude`) and adds it with `--additional-features`, so repos don't declare it. (Spike 1 showed the CLI resolves local features against the repo's devcontainer folder, not the override config's.)
+A devcontainer feature that ships inside the agent release, so a box installs the feature version its agent was built with. The agent copies it into the clone at `<config dir>/.foreman/feature` (excluded through `.git/info/exclude`) and adds it with `--additional-features`, so repos don't declare it. (Spike 1 showed the CLI resolves local features against the repo's devcontainer folder, not the override config's.)
+
+The feature goes into the image, and the CLI builds the image only when it creates the container, so a start or restart that reuses a container keeps the feature it was built with. The overlay labels the devcontainer with `foreman.feature_version`, which Docker sets when the container is created and the CLI never changes on a container it reuses (it passes `--no-recreate`); every other service gets an empty one, so a repo can't label a service it later makes the devcontainer. With replicas, the oldest label counts, since a replica scaled up later skips the build. The agent reads that label to report the version in up and restart results, and reports the version it ships when it joins. The environment page offers a rebuild when the box ships a newer one. A start or restart rebuilds a container whose label is below the agent's floor (1.1.0, which dropped `NET_ADMIN` and `NET_RAW`) or missing; the start a pull needs first doesn't, so a refused pull leaves the container as it was.
 
 - **Tailscale:**
   - Installs `tailscale` and `tailscaled` from the static tarball, with a checksum check.

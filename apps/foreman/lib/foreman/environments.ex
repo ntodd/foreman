@@ -547,6 +547,33 @@ defmodule Foreman.Environments do
     end
   end
 
+  @doc """
+  Whether the environment's box ships a newer Foreman feature than the one
+  its container was built with: `{:behind, built, shipped}`, or
+  `{:unknown, shipped}` for one built before agents recorded it. Only a
+  rebuild updates it. Takes the environment with its box loaded.
+  """
+  def feature_update(
+        %Environment{created_once: true, destroyed_at: nil, box: %Foreman.Boxes.Box{} = box} = env
+      ) do
+    case {parse_version(env.feature_version), parse_version(box.feature_version)} do
+      {_, :error} ->
+        nil
+
+      {:error, {:ok, _}} ->
+        {:unknown, box.feature_version}
+
+      {{:ok, built}, {:ok, shipped}} ->
+        if Version.compare(built, shipped) == :lt,
+          do: {:behind, env.feature_version, box.feature_version}
+    end
+  end
+
+  def feature_update(%Environment{}), do: nil
+
+  defp parse_version(v) when is_binary(v), do: Version.parse(v)
+  defp parse_version(_), do: :error
+
   # -- results -----------------------------------------------------------------------
 
   @up ~w(create rebuild pull_rebuild start restart_affected restart_all)
@@ -640,6 +667,8 @@ defmodule Foreman.Environments do
     |> put_if(:devcontainer_service, string(result["devcontainer_service"]))
     |> put_if(:warnings, strings(result["warnings"]))
     |> put_if(:host_requirements, map(result["host_requirements"]))
+    # Absent from an older agent, which could have built it with anything.
+    |> Map.put(:feature_version, version(result["feature_version"]))
     |> put_if(:tailscale_device_id, node_id(result["tailscale_node_id"]))
     |> then(&if(action in @fresh_build, do: Map.put(&1, :ts_authkey, nil), else: &1))
   end
@@ -740,6 +769,11 @@ defmodule Foreman.Environments do
 
   defp map(v) when is_map(v), do: v
   defp map(_), do: nil
+
+  defp version(v) when is_binary(v) and byte_size(v) <= 64,
+    do: if(match?({:ok, _}, Version.parse(v)), do: v)
+
+  defp version(_), do: nil
 
   # Tailscale's stable node IDs are short and alphanumeric, and this one
   # ends up in an API path.

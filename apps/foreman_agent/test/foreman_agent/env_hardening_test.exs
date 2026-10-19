@@ -27,6 +27,7 @@ defmodule ForemanAgent.EnvHardeningTest do
   # A box whose default Docker runtime is runc.
   setup do
     stub(DockerMock, :info, fn -> {:ok, %{"DefaultRuntime" => "runc"}} end)
+    stub(DockerMock, :list_containers, fn _ -> {:ok, []} end)
     :ok
   end
 
