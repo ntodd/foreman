@@ -24,12 +24,16 @@ config :foreman, ForemanWeb.Endpoint,
   secret_key_base: "e/Y5OfWQvLQ62yfWWoqWxf2uf5xbDAh/05h3jTT3BKyCPDKEikFPkDG7Xe2K4lFD",
   server: false
 
+# The second key is a retired one, for the rotation tests.
 config :foreman, Foreman.Vault,
   ciphers: [
     default:
-      {Cloak.Ciphers.AES.GCM,
+      {Foreman.Vault.Cipher,
        tag: "AES.GCM.V1",
-       key: Base.decode64!("vT8f4ZpX3m2Qb9yR1sL0kW7cH5nJ6dA4eG2tU8iO3xM="),
+       keys: [
+         Base.decode64!("vT8f4ZpX3m2Qb9yR1sL0kW7cH5nJ6dA4eG2tU8iO3xM="),
+         Base.decode64!("q1Zt8mR4bN7cW2xK9pL5vD3hF6jS0aG8eY4uT1iQ7oE=")
+       ],
        iv_length: 12}
   ]
 
