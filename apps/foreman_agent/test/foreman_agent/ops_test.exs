@@ -7,6 +7,10 @@ defmodule ForemanAgent.OpsTest do
   @env1 "6f1c1d1e-9a3b-4c1f-8f5e-2d7a9b0c1e2f"
   @env2 "0b8e3a6c-5d2f-4e1a-9c7b-3f2e1d0c9b8a"
 
+  # These tests are about ordering, not speed. The default 100ms is too tight
+  # on a loaded CI runner.
+  @timeout 1_000
+
   setup do
     test_pid = self()
 
@@ -40,14 +44,15 @@ defmodule ForemanAgent.OpsTest do
     assert :accepted = Ops.submit(ops, cmd)
 
     op_id = cmd.op_id
-    assert_receive {:event, "op.accepted", %{op_id: ^op_id}}
-    assert_receive {:started, ^op_id, pid}
-    assert_receive {:event, "op.log", %{op_id: ^op_id, data: "started env.stop\n"}}
+    assert_receive {:event, "op.accepted", %{op_id: ^op_id}}, @timeout
+    assert_receive {:started, ^op_id, pid}, @timeout
+    assert_receive {:event, "op.log", %{op_id: ^op_id, data: "started env.stop\n"}}, @timeout
 
     finish(pid, {:ok, %{"done" => true}})
 
     assert_receive {:event, "op.result",
-                    %{op_id: ^op_id, status: "ok", result: %{"done" => true}}}
+                    %{op_id: ^op_id, status: "ok", result: %{"done" => true}}},
+                   @timeout
 
     assert Ops.in_flight(ops) == []
   end
@@ -55,27 +60,28 @@ defmodule ForemanAgent.OpsTest do
   test "reports errors as error results", %{ops: ops} do
     cmd = stop_cmd(@env1)
     Ops.submit(ops, cmd)
-    assert_receive {:started, _, pid}
+    assert_receive {:started, _, pid}, @timeout
     finish(pid, {:error, "boom"})
-    assert_receive {:event, "op.result", %{status: "error", error: "boom"}}
+    assert_receive {:event, "op.result", %{status: "error", error: "boom"}}, @timeout
   end
 
   test "an error can carry a result", %{ops: ops} do
     cmd = stop_cmd(@env1)
     Ops.submit(ops, cmd)
-    assert_receive {:started, _, pid}
+    assert_receive {:started, _, pid}, @timeout
     finish(pid, {:error, "refused", %{"pull_failed" => true}})
 
     assert_receive {:event, "op.result",
-                    %{status: "error", error: "refused", result: %{"pull_failed" => true}}}
+                    %{status: "error", error: "refused", result: %{"pull_failed" => true}}},
+                   @timeout
   end
 
   test "a crashing handler becomes an error result", %{ops: ops} do
     cmd = stop_cmd(@env1)
     Ops.submit(ops, cmd)
-    assert_receive {:started, _, pid}
+    assert_receive {:started, _, pid}, @timeout
     Process.exit(pid, :kill)
-    assert_receive {:event, "op.result", %{status: "error", error: error}}
+    assert_receive {:event, "op.result", %{status: "error", error: error}}, @timeout
     assert error =~ "crashed"
   end
 
@@ -84,15 +90,15 @@ defmodule ForemanAgent.OpsTest do
     assert :accepted = Ops.submit(ops, cmd)
     assert :duplicate = Ops.submit(ops, cmd)
 
-    assert_receive {:started, _, pid}
+    assert_receive {:started, _, pid}, @timeout
     refute_receive {:started, _, _}, 50
 
     finish(pid)
-    assert_receive {:event, "op.result", %{status: "ok"}}
+    assert_receive {:event, "op.result", %{status: "ok"}}, @timeout
 
     # Once finished, a retry gets the stored result again rather than a rerun.
     assert :duplicate = Ops.submit(ops, cmd)
-    assert_receive {:event, "op.result", %{status: "ok"}}
+    assert_receive {:event, "op.result", %{status: "ok"}}, @timeout
     refute_receive {:started, _, _}, 50
   end
 
@@ -109,12 +115,12 @@ defmodule ForemanAgent.OpsTest do
     other_id = other.op_id
     second_id = second.op_id
 
-    assert_receive {:started, ^first_id, first_pid}
-    assert_receive {:started, ^other_id, _}
+    assert_receive {:started, ^first_id, first_pid}, @timeout
+    assert_receive {:started, ^other_id, _}, @timeout
     refute_receive {:started, ^second_id, _}, 50
 
     finish(first_pid)
-    assert_receive {:started, ^second_id, _}
+    assert_receive {:started, ^second_id, _}, @timeout
   end
 
   test "box commands don't wait on environments", %{ops: ops} do
@@ -122,7 +128,7 @@ defmodule ForemanAgent.OpsTest do
     inventory = command("box.inventory", %{})
     Ops.submit(ops, inventory)
     inventory_id = inventory.op_id
-    assert_receive {:started, ^inventory_id, _}
+    assert_receive {:started, ^inventory_id, _}, @timeout
   end
 
   test "cancel kills a running operation and drops queued ones", %{ops: ops} do
@@ -130,21 +136,23 @@ defmodule ForemanAgent.OpsTest do
     queued = command("env.start", %{env_id: @env1, slug: "x"})
     Ops.submit(ops, running)
     Ops.submit(ops, queued)
-    assert_receive {:started, _, pid}
+    assert_receive {:started, _, pid}, @timeout
     ref = Process.monitor(pid)
 
     Ops.submit(ops, command("op.cancel", %{target_op_id: running.op_id}))
-    assert_receive {:DOWN, ^ref, :process, ^pid, _}
+    assert_receive {:DOWN, ^ref, :process, ^pid, _}, @timeout
     running_id = running.op_id
 
     assert_receive {:event, "op.result",
-                    %{op_id: ^running_id, status: "error", error: "cancelled"}}
+                    %{op_id: ^running_id, status: "error", error: "cancelled"}},
+                   @timeout
 
     Ops.submit(ops, command("op.cancel", %{target_op_id: queued.op_id}))
     queued_id = queued.op_id
 
     assert_receive {:event, "op.result",
-                    %{op_id: ^queued_id, status: "error", error: "cancelled"}}
+                    %{op_id: ^queued_id, status: "error", error: "cancelled"}},
+                   @timeout
   end
 
   test "in_flight lists running and queued op ids", %{ops: ops} do
@@ -152,7 +160,7 @@ defmodule ForemanAgent.OpsTest do
     b = command("env.start", %{env_id: @env1, slug: "x"})
     Ops.submit(ops, a)
     Ops.submit(ops, b)
-    assert_receive {:started, _, _}
+    assert_receive {:started, _, _}, @timeout
     assert Enum.sort(Ops.in_flight(ops)) == Enum.sort([a.op_id, b.op_id])
   end
 end
