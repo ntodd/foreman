@@ -172,7 +172,7 @@ jobs:
         with:
           node-version: "22"
       - name: ShellCheck
-        run: shellcheck -s sh features/src/foreman/install.sh features/src/foreman/scripts/* docker/box-entrypoint.sh apps/foreman/priv/agent/install.sh scripts/publish-agent-release.sh
+        run: shellcheck -s sh features/src/foreman/install.sh features/src/foreman/scripts/* apps/foreman/priv/agent/install.sh scripts/publish-agent-release.sh e2e/*.sh e2e/linux/run.sh e2e/linux/bin/gh
       - name: Test the feature in a real devcontainer
         run: npx --yes @devcontainers/cli@0.89.0 features test --features foreman --base-image mcr.microsoft.com/devcontainers/base:debian --skip-scenarios features
 
@@ -244,14 +244,60 @@ jobs:
             "$RUN" > refused.log 2>&1 || status=$?
           cat refused.log
           [ "$status" -ne 0 ] && [ "$status" -ne 124 ] && grep -q "built for SQLite" refused.log
-      - name: Build the box image
-        run: docker build -f docker/box.Dockerfile --target box -t "$RUN-box" .
       # A hosted VM would be thrown away; this daemon is shared and kept.
       - name: Remove the containers and images
         if: always()
         run: |
           docker rm -f "$RUN-sqlite" "$RUN-pg" "$RUN-refused" 2>/dev/null || true
-          docker image rm -f "$RUN" "$RUN-pg" "$RUN-box" 2>/dev/null || true
+          docker image rm -f "$RUN" "$RUN-pg" 2>/dev/null || true
+
+  # The agent release bundles ERTS, linked against its build image's glibc
+  # and OpenSSL; it has to start on the oldest systems boxes run.
+  agent-smoke:
+    if: github.event_name != 'schedule'
+    runs-on: [self-hosted, Linux, X64]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Build the agent release
+        run: docker build -f docker/box.Dockerfile --target agent-tarball -o "$RUNNER_TEMP/agent" .
+      - name: Start it on Ubuntu 22.04 and 24.04, and Debian 12 and 13
+        run: e2e/agent-smoke.sh "$RUNNER_TEMP/agent/foreman_agent.tar.gz"
+
+  # A control plane, and a box that boots systemd and installs the agent
+  # with the served install script: enrollment, a re-run, an environment,
+  # secrets, a reboot, a self-update, --reenroll and a rollback.
+  e2e-linux:
+    if: github.event_name != 'schedule'
+    runs-on: [self-hosted, Linux, X64]
+    timeout-minutes: 40
+    env:
+      E2E_PROJECT: foreman-e2e-${{ github.run_id }}-${{ github.run_attempt }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # For mix foreman_agent.sign, which makes the release keys and signs
+      # the agents the run publishes.
+      - uses: erlef/setup-beam@54075bcc5e249e4758d363f27d099f55d843f124 # v1.24.1
+        with:
+          elixir-version: ${{ env.ELIXIR_VERSION }}
+          otp-version: ${{ env.OTP_VERSION }}
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            apps/foreman_agent/deps
+            apps/foreman_agent/_build
+          key: agent-dev-${{ env.ELIXIR_VERSION }}-${{ env.OTP_VERSION }}-${{ hashFiles('apps/foreman_agent/mix.lock') }}
+      - name: Compile the agent
+        working-directory: apps/foreman_agent
+        run: mix deps.get && mix compile
+      - run: e2e/linux/run.sh
+      - name: Logs
+        if: failure()
+        run: e2e/linux/run.sh --logs
+      - name: Remove the stack and its images
+        if: always()
+        run: |
+          e2e/linux/run.sh --down || true
+          docker image rm -f "$E2E_PROJECT-cp" "$E2E_PROJECT-box" 2>/dev/null || true
 
   security:
     runs-on: [self-hosted, Linux, X64]

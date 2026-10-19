@@ -79,6 +79,12 @@ jobs:
             --build-arg FOREMAN_RELEASE_PUBLIC_KEY="$PUBLIC_KEY" \
             -o out .
           mv out/foreman_agent.tar.gz "out/foreman_agent-$VERSION-linux-$ARCH.tar.gz"
+      # On this runner's architecture, before anything is signed or published.
+      - name: Start it on Ubuntu 22.04 and 24.04, and Debian 12 and 13
+        env:
+          VERSION: ${{ needs.check.outputs.version }}
+          ARCH: ${{ matrix.arch }}
+        run: e2e/agent-smoke.sh "out/foreman_agent-$VERSION-linux-$ARCH.tar.gz"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: agent-${{ matrix.arch }}

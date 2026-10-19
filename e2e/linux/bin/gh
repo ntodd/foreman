@@ -1,0 +1,29 @@
+#!/bin/sh
+# Stands in for `gh release download vX.Y.Z --dir D --pattern P` when
+# run.sh drives scripts/publish-agent-release.sh: copies the matching
+# assets from $E2E_RELEASE_ASSETS (named the way release.yml names them).
+set -eu
+[ "${1:-} ${2:-}" = "release download" ] || { echo "stub gh: unexpected: $*" >&2; exit 1; }
+tag=$3
+shift 3
+dir="" pattern=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --dir) dir=$2; shift 2 ;;
+    --pattern) pattern=$2; shift 2 ;;
+    --repo) shift 2 ;;
+    *) echo "stub gh: unexpected option: $1" >&2; exit 1 ;;
+  esac
+done
+if [ -z "$dir" ] || [ -z "$pattern" ]; then
+  echo "stub gh: needs --dir and --pattern" >&2
+  exit 1
+fi
+[ "$pattern" = "foreman_agent-${tag#v}-*" ] || { echo "stub gh: $pattern isn't $tag's agents" >&2; exit 1; }
+found=0
+for asset in "${E2E_RELEASE_ASSETS:?}"/$pattern; do
+  [ -e "$asset" ] || continue
+  cp "$asset" "$dir/"
+  found=1
+done
+[ "$found" -eq 1 ] || { echo "stub gh: release $tag not found" >&2; exit 1; }

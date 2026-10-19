@@ -68,6 +68,13 @@ defmodule E2E do
     Repo.one!(from e in Foreman.Environments.Environment, where: e.slug == ^slug and is_nil(e.destroyed_at))
   end
 
+  def revoke do
+    scope = Scope.for_user(admin())
+    box = box()
+    {:ok, _} = Boxes.revoke(scope, box)
+    IO.puts("revoked #{box.name}")
+  end
+
   def desire_version(version) do
     admin()
     box = box()

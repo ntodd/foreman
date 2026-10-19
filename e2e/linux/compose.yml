@@ -1,15 +1,17 @@
 # A control plane (the release image), a git server for the fixture repo,
 # and a Linux box running the agent with its own Docker daemon. Driven by
-# e2e/linux/run.sh.
+# e2e/linux/run.sh, which names the project and the images, and copies
+# e2e/ and the fixture repo in rather than bind-mounting them, so it also
+# works against a Docker daemon that can't see this checkout.
 name: foreman-e2e
 
 services:
   cp:
-    image: foreman-cp:e2e
+    image: ${E2E_CP_IMAGE:-foreman-e2e-cp}
     environment:
-      SECRET_KEY_BASE: ${SECRET_KEY_BASE}
-      FOREMAN_ENCRYPTION_KEY: ${FOREMAN_ENCRYPTION_KEY}
-      FOREMAN_AGENT_RELEASE_PUBLIC_KEY: ${FOREMAN_RELEASE_PUBLIC_KEY}
+      SECRET_KEY_BASE: ${SECRET_KEY_BASE:-}
+      FOREMAN_ENCRYPTION_KEY: ${FOREMAN_ENCRYPTION_KEY:-}
+      FOREMAN_AGENT_RELEASE_PUBLIC_KEY: ${FOREMAN_RELEASE_PUBLIC_KEY:-}
       PHX_HOST: cp
       PORT: "4000"
       FOREMAN_LISTEN_IP: 0.0.0.0
@@ -20,29 +22,30 @@ services:
       FOREMAN_AGENT_RELEASE_DIR: /var/lib/foreman/releases
     volumes:
       - cp-data:/var/lib/foreman
-      - ../:/e2e:ro
 
   git:
-    image: busybox:1.37
+    # Docker Hub's busybox, from its ECR Public mirror (no anonymous rate limit).
+    image: public.ecr.aws/docker/library/busybox:1.37
     command: ["httpd", "-f", "-v", "-p", "8080", "-h", "/srv"]
-    volumes:
-      - ../../tmp/e2e-linux/git:/srv:ro
 
   box:
-    image: foreman-box:e2e
+    image: ${E2E_BOX_IMAGE:-foreman-e2e-box}
+    # systemd as PID 1, hosting its own Docker daemon the way a real box's
+    # Docker runs on its host; the environments inside it aren't privileged.
     privileged: true
     depends_on: [cp, git]
     # Like a real box, /run is a tmpfs: secrets don't survive a restart.
-    tmpfs: [/run]
-    environment:
-      FOREMAN_URL: http://cp:4000
-      FOREMAN_JOIN_TOKEN: ${FOREMAN_JOIN_TOKEN:-}
-      FOREMAN_ALLOWED_GIT_HOSTS: git
-      FOREMAN_INSECURE_GIT_HOSTS: git
+    tmpfs: [/run, /run/lock]
+    # Time for systemd to stop the agent and Docker on a restart.
+    stop_grace_period: 30s
+    # Docker's and containerd's storage can't be on the container's own
+    # overlayfs (no whiteouts on overlay-on-overlay), and survive a reboot.
     volumes:
       - box-docker:/var/lib/docker
+      - box-containerd:/var/lib/containerd
     profiles: [box]
 
 volumes:
   cp-data:
   box-docker:
+  box-containerd:
