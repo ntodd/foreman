@@ -122,6 +122,16 @@ defmodule Foreman.Agents.ReleasesTest do
              )
   end
 
+  # Postgres would refuse a path past 255 characters in a varchar.
+  test "stores a tarball under a release dir with a long path", %{tmp_dir: tmp} = ctx do
+    dir = Path.join([tmp | List.duplicate(String.duplicate("d", 60), 5)])
+    Application.put_env(:foreman, :agent_release_dir, dir)
+
+    release = register!(ctx, "0.2.0", "linux-arm64")
+    assert String.length(release.path) > 255
+    assert Repo.reload!(release).path == release.path
+  end
+
   test "keeps tarballs in the temp dir when no release dir is set", %{tmp_dir: tmp} = ctx do
     # Not the real temp dir, which a dev control plane uses too.
     previous = System.get_env("TMPDIR")

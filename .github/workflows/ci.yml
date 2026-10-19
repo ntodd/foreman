@@ -72,6 +72,10 @@ jobs:
             apps/foreman_agent/deps
             apps/foreman_agent/_build
           key: agent-${{ env.ELIXIR_VERSION }}-${{ env.OTP_VERSION }}-${{ hashFiles('apps/foreman_agent/mix.lock') }}
+      # The agent reads compose files with Node (ComposeScan).
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "22"
       - run: mix deps.get
       - run: mix format --check-formatted
       - run: mix compile --warnings-as-errors
@@ -280,3 +284,6 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           # .gitleaks.toml uses [[allowlists]], which needs 8.25 or newer.
           GITLEAKS_VERSION: 8.30.1
+          # The upload wants the workspace under $HOME, which it isn't on
+          # the self-hosted runners; findings are in the log anyway.
+          GITLEAKS_ENABLE_UPLOAD_ARTIFACT: "false"
