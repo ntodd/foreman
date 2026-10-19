@@ -64,9 +64,12 @@ defmodule ForemanWeb.AgentChannel do
   def handle_in(_event, _payload, socket),
     do: {:reply, {:error, %{reason: "unknown message"}}, socket}
 
+  # Phoenix calls this for a refused join too, which never had a box.
   @impl true
-  def terminate(_reason, socket) do
+  def terminate(_reason, %{assigns: %{box: _}} = socket) do
     Boxes.agent_left(socket.assigns.box_id)
     :ok
   end
+
+  def terminate(_reason, _socket), do: :ok
 end

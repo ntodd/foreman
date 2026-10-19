@@ -431,8 +431,9 @@ defmodule ForemanWeb.AgentReconnectTest do
       refute_push "command", %{"type" => "agent.update"}
 
       admin = Scope.for_user(user_fixture(role: "admin"))
-      assert {:error, :unauthorized} = Boxes.retry_agent_update(ctx.scope, ctx.box)
-      assert {:ok, box} = Boxes.retry_agent_update(admin, Boxes.get_box!(ctx.box.id))
+      box = Boxes.get_box!(ctx.box.id)
+      assert {:error, :unauthorized} = Boxes.retry_agent_update(ctx.scope, box)
+      assert {:ok, box} = Boxes.retry_agent_update(admin, box)
       assert box.failed_agent_version == nil
       {"agent.update", _} = next_command()
     end

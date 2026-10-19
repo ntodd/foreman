@@ -89,6 +89,21 @@ defmodule ForemanWeb.AgentChannelTest do
                  join_payload(%{"protocol_version" => 99})
                )
     end
+
+    test "a refused join doesn't mark the box offline", %{box: box} do
+      {:ok, socket} = connect(AgentSocket, %{}, connect_info: signed_connect_info(box))
+      Phoenix.PubSub.subscribe(Foreman.PubSub, "boxes")
+
+      assert {:error, _} =
+               subscribe_and_join(
+                 socket,
+                 "agent:#{box.id}",
+                 join_payload(%{"protocol_version" => 99})
+               )
+
+      refute_receive {:box, :offline, _}
+      assert Repo.reload!(box).last_seen_at == nil
+    end
   end
 
   describe "commands and events" do
