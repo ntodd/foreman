@@ -107,6 +107,68 @@ defmodule ForemanWeb.ForemanComponents do
     """
   end
 
+  @doc "The chip on a box card when the box's firewall isn't keeping environments off the tailnet."
+  attr :box, :map, required: true
+
+  def box_firewall_badge(assigns) do
+    assigns = assign(assigns, :problem, Foreman.Boxes.firewall_problem(assigns.box))
+
+    ~H"""
+    <.badge
+      :if={@problem in [:missing, :outdated]}
+      color={if @problem == :missing, do: "rose", else: "amber"}
+      size="sm"
+      data-role="firewall-alert"
+    >
+      {if @problem == :missing, do: "Firewall unconfirmed", else: "Firewall rules differ"}
+    </.badge>
+    """
+  end
+
+  @doc "The box page's alert for a box whose firewall isn't loaded, is out of date, or leaves builds out."
+  attr :box, :map, required: true
+
+  def box_firewall_alert(assigns) do
+    assigns =
+      assigns
+      |> assign(:problem, Foreman.Boxes.firewall_problem(assigns.box))
+      |> assign(:command, Foreman.Boxes.reinstall_command(assigns.box))
+
+    ~H"""
+    <.callout
+      :if={@problem}
+      kind={if @problem == :missing, do: "danger", else: "warning"}
+      id="box-firewall-alert"
+      class={@problem == :missing && "border-2"}
+    >
+      <p class="text-[15px] font-semibold">
+        {case @problem do
+          :missing -> "Foreman can't confirm this box's firewall is loaded"
+          :outdated -> "This box's firewall rules differ from its agent's"
+          :default_bridge -> "Image builds on this box can reach the tailnet as this box"
+        end}
+      </p>
+      <p class="mt-1">
+        {case @problem do
+          :missing ->
+            "Without it, code in this box's environments can reach the tailnet as this box, with its tags and grants, not just tag:foreman-env's."
+
+          :outdated ->
+            "The rules loaded on the box differ from the ones its agent ships with. Agents update themselves, but the rules only change when the install script runs."
+
+          :default_bridge ->
+            "It was installed with --default-bridge-reaches-tailnet, which leaves Docker's default bridge, where image builds run, unfiltered."
+        end}
+      </p>
+      <p :if={@problem != :default_bridge} class="mt-2 text-xs">
+        Run the install command on the box again. An enrolled box needs no token, and this one keeps its policy and default bridge setting: <span class="font-mono break-all">{@command}</span>. If the firewall is installed,
+        <span class="font-mono">systemctl status foreman-firewall</span>
+        on the box says what's wrong.
+      </p>
+    </.callout>
+    """
+  end
+
   @doc "A labelled capacity bar: used (or provisioned) of total."
   attr :label, :string, required: true
   attr :value, :any, required: true

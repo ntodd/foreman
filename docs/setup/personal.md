@@ -7,6 +7,7 @@ the database. Everything is reachable only on your tailnet.
 
 - Docker Engine with the Compose plugin, v2.30 or newer (boxes need
   v2.24; the control plane's compose file needs 2.30)
+- nftables (for the box's firewall; `apt install nftables`)
 - git, and Node 20+ (for the devcontainer CLI)
 - systemd
 - Tailscale, logged in to your tailnet
@@ -181,13 +182,18 @@ The script checks the prerequisites, creates a `foreman` user in the
 `docker` group, installs the devcontainer CLI and the agent, writes a
 systemd unit (with a rollback unit for failed updates), and waits for
 the agent to enroll. It then deletes the spent token from the agent's
-settings.
+settings. It also installs the box's firewall, `foreman-firewall.service`,
+which keeps environments and image builds from reaching the tailnet as
+the box (see [tailscale.md](tailscale.md#boxes-on-the-tailnet), which
+also covers `--default-bridge-reaches-tailnet`). It refuses a box that
+sends its traffic through a Tailscale exit node, since the firewall
+would cut environments off from the internet there.
 
 Re-running the script on a box that's already enrolled upgrades the
 agent and its units and keeps the box's identity; it doesn't need a
 token. It rewrites `/etc/foreman-agent/agent.env`, though, so pass
-`--policy` again if the box had one, and add back anything you added by
-hand. To enroll the box again (after revoking it, say), pass
+`--policy` (and `--default-bridge-reaches-tailnet`) again if the box had
+one, and add back anything you added by hand. To enroll the box again (after revoking it, say), pass
 `--reenroll` with a new token: the old identity is moved aside.
 
 Boxes don't need the script for agent updates; see below.

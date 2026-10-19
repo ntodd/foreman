@@ -227,6 +227,21 @@ defmodule ForemanAgent.Integration.EnvDockerTest do
 
     assert inspect =~ ~s("Name":"no")
 
+    # Each copy's network is on its own Foreman bridge, which the box's
+    # firewall matches on.
+    for {env_id, slug} <- [{@env1, @slug1}, {@env2, @slug2}] do
+      {bridge, 0} =
+        System.cmd("docker", [
+          "network",
+          "inspect",
+          "#{slug}_default",
+          "--format",
+          ~s({{index .Options "com.docker.network.bridge.name"}})
+        ])
+
+      assert String.trim(bridge) == Env.Overlay.bridge_name(env_id, "#{slug}_default")
+    end
+
     # initializeCommand never ran on the box.
     refute File.exists?("/tmp/foreman-initialize-command-ran")
 
@@ -571,5 +586,77 @@ defmodule ForemanAgent.Integration.EnvDockerTest do
     assert message =~ "protected"
 
     assert {:ok, _} = Env.run("env.destroy", %{env_id: env_id, slug: "hello-#{@run}-3"}, ctx)
+  end
+
+  # Environments created before Foreman named their bridges: one running
+  # on compose's own network, labelled with a config hash, so compose
+  # recreates it once the project stops; and one whose network compose
+  # would reuse as it is (an older compose made it without the label),
+  # which is refused rather than taken down with its containers.
+  test "an environment from before Foreman's bridges moves onto one when it starts", %{
+    config: config,
+    base_url: base_url
+  } do
+    ctx = ctx(config)
+    env_id = "#{@run}77-7777-4777-8777-777777777777"
+    slug = "hello-#{@run}-4"
+    payload = create_payload(env_id, slug, base_url, %{"tailscale" => %{"enabled" => false}})
+    start = %{env_id: env_id, slug: slug, compose_env: %{"HELLO_TOKEN" => "token-one"}}
+
+    assert {:ok, _} = Env.run("env.create", payload, ctx)
+
+    on_exit(fn ->
+      System.cmd("docker", ["compose", "-p", slug, "down", "--volumes"], stderr_to_stdout: true)
+    end)
+
+    bridge = fn ->
+      {out, 0} =
+        System.cmd("docker", [
+          "network",
+          "inspect",
+          "#{slug}_default",
+          "--format",
+          ~s({{index .Options "com.docker.network.bridge.name"}})
+        ])
+
+      String.trim(out)
+    end
+
+    repo_file =
+      Path.join([config.envs_root, env_id, "workspace/hello/.devcontainer/docker-compose.yml"])
+
+    compose = fn args ->
+      {_, 0} =
+        System.cmd("docker", ["compose", "-p", slug | args],
+          env: [{"HELLO_TOKEN", "token-one"}],
+          stderr_to_stdout: true
+        )
+    end
+
+    # Running on compose's network, without the overlay.
+    compose.(["down"])
+    compose.(["-f", repo_file, "up", "-d"])
+    refute String.starts_with?(bridge.(), "fm-")
+
+    assert {:ok, _} = Env.run("env.start", start, ctx)
+    assert bridge.() == Env.Overlay.bridge_name(env_id, "#{slug}_default")
+
+    # A network compose didn't label with a config hash.
+    compose.(["down"])
+
+    {_, 0} =
+      System.cmd("docker", [
+        "network",
+        "create",
+        "--label",
+        "com.docker.compose.project=#{slug}",
+        "--label",
+        "com.docker.compose.network=default",
+        "#{slug}_default"
+      ])
+
+    assert {:error, message} = Env.run("env.start", start, ctx)
+    assert message =~ "#{slug}_default"
+    assert containers(env_id) == %{}
   end
 end

@@ -14,7 +14,7 @@ defmodule ForemanAgent.Connection do
   """
   use Slipstream, restart: :permanent
 
-  alias ForemanAgent.{Config, Identity, Ops, Outbox, Reporter, Text, Updater}
+  alias ForemanAgent.{Config, Firewall, Identity, Ops, Outbox, Reporter, Text, Updater}
   alias ForemanProtocol.{Auth, Command, Event}
 
   require Logger
@@ -121,7 +121,9 @@ defmodule ForemanAgent.Connection do
 
   # Built fresh for every join and rejoin: the operations in flight change.
   defp join_payload do
-    ForemanProtocol.dump_join(%{
+    config = Config.get()
+
+    %{
       agent_version: Identity.version(),
       protocol_version: ForemanProtocol.version(),
       hostname: Identity.hostname(),
@@ -129,8 +131,10 @@ defmodule ForemanAgent.Connection do
       arch: Updater.target(),
       feature_version: Config.feature_version(Config.get()),
       in_flight: Ops.in_flight(),
-      policy: Config.policy_report(Config.get())
-    })
+      policy: Config.policy_report(config)
+    }
+    |> Map.merge(Firewall.report(config))
+    |> ForemanProtocol.dump_join()
   end
 
   @impl Slipstream

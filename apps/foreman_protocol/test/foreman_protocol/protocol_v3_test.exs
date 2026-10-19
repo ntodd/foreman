@@ -44,13 +44,6 @@ defmodule ForemanProtocol.ProtocolV3Test do
     )
   end
 
-  test "this build speaks protocol 3 and still accepts agents on 2" do
-    assert ForemanProtocol.version() == 3
-    assert ForemanProtocol.compatible?(3)
-    assert ForemanProtocol.compatible?(2)
-    refute ForemanProtocol.compatible?(1)
-  end
-
   describe "features" do
     test "carries feature refs and their options" do
       features = %{
@@ -167,6 +160,74 @@ defmodule ForemanProtocol.ProtocolV3Test do
 
       assert {:ok, %{policy: %{"gpu" => "allow", "devices" => "refuse"}}} =
                ForemanProtocol.cast_join(join)
+    end
+  end
+
+  test "this build speaks protocol 3 and still accepts agents on 2" do
+    assert ForemanProtocol.version() == 3
+    assert ForemanProtocol.compatible?(3)
+    assert ForemanProtocol.compatible?(2)
+    refute ForemanProtocol.compatible?(1)
+  end
+
+  describe "the box firewall" do
+    @join %{
+      "agent_version" => "0.4.0",
+      "protocol_version" => 3,
+      "hostname" => "desktop",
+      "os" => "linux",
+      "arch" => "x86_64"
+    }
+
+    test "a join can carry its state" do
+      for state <- ~w(active outdated missing) do
+        assert {:ok, %{firewall: ^state}} =
+                 ForemanProtocol.cast_join(Map.put(@join, "firewall", state))
+      end
+    end
+
+    test "and whether the default bridge reaches the tailnet" do
+      for bridge <- ~w(filtered reaches_tailnet) do
+        join = Map.merge(@join, %{"firewall" => "active", "firewall_default_bridge" => bridge})
+        assert {:ok, %{firewall_default_bridge: ^bridge}} = ForemanProtocol.cast_join(join)
+      end
+    end
+
+    test "an agent on 2 reports neither" do
+      assert {:ok, join} = ForemanProtocol.cast_join(Map.put(@join, "protocol_version", 2))
+      refute Map.has_key?(join, :firewall)
+      refute Map.has_key?(join, :firewall_default_bridge)
+    end
+
+    test "refuses a state it doesn't know" do
+      assert {:error, _} = ForemanProtocol.cast_join(Map.put(@join, "firewall", "probably"))
+
+      assert {:error, _} =
+               ForemanProtocol.cast_join(Map.put(@join, "firewall_default_bridge", "open"))
+    end
+
+    # The agent reports it again when it changes between joins.
+    test "box.firewall carries the same, as an event" do
+      assert {:ok, %{payload: %{firewall: "missing", firewall_default_bridge: "filtered"}}} =
+               ForemanProtocol.Event.new("box.firewall", %{
+                 firewall: "missing",
+                 firewall_default_bridge: "filtered"
+               })
+
+      assert {:ok, %{payload: payload}} =
+               ForemanProtocol.Event.new("box.firewall", %{firewall: "active"})
+
+      refute Map.has_key?(payload, :firewall_default_bridge)
+      assert {:error, _} = ForemanProtocol.Event.new("box.firewall", %{firewall: "probably"})
+      assert {:error, _} = ForemanProtocol.Event.new("box.firewall", %{})
+    end
+
+    test "dumps what it casts" do
+      join = Map.merge(@join, %{"firewall" => "missing", "firewall_default_bridge" => "filtered"})
+      {:ok, cast} = ForemanProtocol.cast_join(join)
+
+      assert %{"firewall" => "missing", "firewall_default_bridge" => "filtered"} =
+               ForemanProtocol.dump_join(cast)
     end
   end
 end

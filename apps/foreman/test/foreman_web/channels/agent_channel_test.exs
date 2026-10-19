@@ -73,6 +73,32 @@ defmodule ForemanWeb.AgentChannelTest do
       assert Repo.reload!(box).policy == policy
     end
 
+    test "records the box firewall the agent reports", %{box: box} do
+      {:ok, socket} = connect(AgentSocket, %{}, connect_info: signed_connect_info(box))
+      firewall = %{"firewall" => "missing", "firewall_default_bridge" => "reaches_tailnet"}
+
+      assert {:ok, _, _} =
+               subscribe_and_join(socket, "agent:#{box.id}", join_payload(firewall))
+
+      box = Repo.reload!(box)
+      assert box.firewall == "missing"
+      assert box.firewall_default_bridge == "reaches_tailnet"
+    end
+
+    test "an agent from before the firewall leaves it unknown", %{box: box} do
+      box |> Ecto.Changeset.change(firewall: "active") |> Repo.update!()
+      {:ok, socket} = connect(AgentSocket, %{}, connect_info: signed_connect_info(box))
+
+      assert {:ok, _, _} =
+               subscribe_and_join(
+                 socket,
+                 "agent:#{box.id}",
+                 join_payload(%{"protocol_version" => 2})
+               )
+
+      assert Repo.reload!(box).firewall == nil
+    end
+
     test "an agent that doesn't report a policy leaves it unknown", %{box: box} do
       {:ok, socket} = connect(AgentSocket, %{}, connect_info: signed_connect_info(box))
       assert {:ok, _, _} = subscribe_and_join(socket, "agent:#{box.id}", join_payload())
@@ -167,6 +193,17 @@ defmodule ForemanWeb.AgentChannelTest do
       ref = push(socket, "event", Event.to_wire(stats))
       assert_reply ref, :ok
       assert Repo.reload!(box).capacity["cpus"] == 8
+    end
+
+    test "records the box firewall when it changes between joins", %{socket: socket, box: box} do
+      {:ok, firewall} =
+        Event.new("box.firewall", %{firewall: "missing", firewall_default_bridge: "filtered"})
+
+      ref = push(socket, "event", Event.to_wire(firewall))
+      assert_reply ref, :ok
+      box = Repo.reload!(box)
+      assert box.firewall == "missing"
+      assert box.firewall_default_bridge == "filtered"
     end
 
     test "records host metrics", %{socket: socket, box: box} do

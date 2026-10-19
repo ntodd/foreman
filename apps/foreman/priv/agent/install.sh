@@ -7,6 +7,12 @@
 # CLI and keeps the box's identity (no token needed). To enroll again, for
 # example after the box was revoked, pass --reenroll with a new token.
 #
+# It also installs the box's firewall, which keeps environments (and
+# Docker's default bridge, where image builds run) from reaching the
+# tailnet as this box. --default-bridge-reaches-tailnet leaves the
+# default bridge out, for a box whose other containers need the tailnet
+# there; builds can then reach it too.
+#
 # Needs: systemd, Docker Engine with Compose v2.24+, git, and Node 20+
 # (for the devcontainer CLI). The agent runs as the `foreman` user, which
 # joins the docker group: that is root-equivalent on this box, so only
@@ -18,6 +24,7 @@ DEVCONTAINER_CLI_VERSION="0.89.0"
 TOKEN=""
 POLICY=""
 REENROLL=""
+DEFAULT_BRIDGE_FILTER=1
 IDENTITY=/var/lib/foreman-agent/identity.json
 
 while [ $# -gt 0 ]; do
@@ -26,6 +33,7 @@ while [ $# -gt 0 ]; do
     --policy) POLICY="$2"; shift 2 ;;
     --url) FOREMAN_URL="$2"; shift 2 ;;
     --reenroll) REENROLL=1; shift ;;
+    --default-bridge-reaches-tailnet) DEFAULT_BRIDGE_FILTER=""; shift ;;
     *) echo "unknown option: $1" >&2; exit 64 ;;
   esac
 done
@@ -47,6 +55,13 @@ command -v systemctl >/dev/null 2>&1 || fail "systemd is required"
 command -v docker >/dev/null 2>&1 || fail "Docker Engine is required"
 command -v git >/dev/null 2>&1 || fail "git is required"
 command -v npm >/dev/null 2>&1 || fail "Node.js (with npm) is required for the devcontainer CLI"
+nft=$(command -v nft 2>/dev/null || true)
+[ -n "$nft" ] || fail "nftables is required for the box's firewall (apt install nftables)"
+# The firewall rejects environment traffic out of tailscale0, which on a
+# box using an exit node is all of it.
+if command -v tailscale >/dev/null 2>&1 && tailscale status --json 2>/dev/null | grep -q '"ExitNodeStatus"'; then
+  fail "this box sends its traffic through a Tailscale exit node, and the box's firewall would cut environments off from the internet; turn it off with: tailscale set --exit-node="
+fi
 
 compose=$(docker compose version --short 2>/dev/null || true)
 [ -n "$compose" ] || fail "the Docker Compose plugin is required"
@@ -135,12 +150,102 @@ chgrp foreman /etc/foreman-agent/agent.env
 chmod 0640 /etc/foreman-agent/agent.env
 umask 022
 
+# The box's firewall: environments don't reach the tailnet as the box
+# (the rules explain why). The rules ship with the agent; this copy, with
+# the box's name for Docker's default bridge, is what loads. Anything
+# that flushes the whole ruleset (nftables.service's stop or reload, on
+# Debian) takes the table with it, so a timer loads it again within
+# seconds.
+set -- "$dest"/lib/foreman_agent-*/priv/firewall/foreman.nft
+[ -f "$1" ] || fail "the agent release has no firewall rules"
+if [ -n "$DEFAULT_BRIDGE_FILTER" ]; then
+  default_bridge=$(docker network inspect bridge --format '{{index .Options "com.docker.network.bridge.name"}}' 2>/dev/null || true)
+  # Guessing would leave builds unfiltered without a word.
+  case "$default_bridge" in
+    "") fail "couldn't find the name of Docker's default bridge; if this box has none, pass --default-bridge-reaches-tailnet" ;;
+    *[!A-Za-z0-9_.+@-]*) fail "Docker's default bridge is named '$default_bridge', which the firewall rules can't name; rename it, or pass --default-bridge-reaches-tailnet" ;;
+  esac
+  sed "s/\"docker0\"/\"$default_bridge\"/" "$1" > /etc/foreman-agent/firewall.nft.new
+else
+  sed '/# default-bridge$/d' "$1" > /etc/foreman-agent/firewall.nft.new
+fi
+"$nft" -c -f /etc/foreman-agent/firewall.nft.new || fail "nftables rejected the firewall rules"
+chmod 0644 /etc/foreman-agent/firewall.nft.new
+mv /etc/foreman-agent/firewall.nft.new /etc/foreman-agent/firewall.nft
+# What the agent reports to the control plane: which rules these came
+# from (an agent that updated itself past them reports them outdated),
+# and whether the default bridge is left out. The unit puts it in /run
+# while the rules are loaded.
+if [ -n "$DEFAULT_BRIDGE_FILTER" ]; then bridge_mode=filtered; else bridge_mode=reaches_tailnet; fi
+printf 'source_sha256=%s\ndefault_bridge=%s\n' "$(sha256sum < "$1" | cut -d' ' -f1)" "$bridge_mode" \
+  > /etc/foreman-agent/firewall.info
+chmod 0644 /etc/foreman-agent/firewall.info
+
+cat > /etc/systemd/system/foreman-firewall.service <<EOF
+[Unit]
+Description=Foreman box firewall (environments stay off the tailnet)
+After=nftables.service
+Before=docker.service foreman-agent.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+RuntimeDirectory=foreman-firewall
+ExecStart=$nft -f /etc/foreman-agent/firewall.nft
+ExecStartPost=/bin/cp /etc/foreman-agent/firewall.info /run/foreman-firewall/loaded
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+# Loads the rules again every tick, whatever removed or changed them:
+# the file deletes and re-adds the table in one transaction, so there's no
+# gap. The marker the agent reports tracks whether that worked; the agent
+# watches it and tells the control plane.
+cat > /etc/foreman-agent/firewall-check <<EOF
+#!/bin/sh
+set -u
+marker=/run/foreman-firewall/loaded
+# Stopped on purpose: leave it stopped.
+systemctl is-active --quiet foreman-firewall || exit 0
+if $nft -f /etc/foreman-agent/firewall.nft; then
+  [ -e "\$marker" ] || cp /etc/foreman-agent/firewall.info "\$marker"
+else
+  rm -f "\$marker"
+  exit 1
+fi
+EOF
+chmod 0755 /etc/foreman-agent/firewall-check
+
+cat > /etc/systemd/system/foreman-firewall-check.service <<'EOF'
+[Unit]
+Description=Load the Foreman box firewall again
+After=foreman-firewall.service
+
+[Service]
+Type=oneshot
+ExecStart=/etc/foreman-agent/firewall-check
+EOF
+
+cat > /etc/systemd/system/foreman-firewall-check.timer <<'EOF'
+[Unit]
+Description=Check the Foreman box firewall is loaded
+
+[Timer]
+OnBootSec=15s
+OnUnitActiveSec=15s
+AccuracySec=1s
+
+[Install]
+WantedBy=timers.target
+EOF
+
 cat > /etc/systemd/system/foreman-agent.service <<'EOF'
 [Unit]
 Description=Foreman agent
-After=network-online.target docker.service
+After=network-online.target docker.service foreman-firewall.service
 Wants=network-online.target
-Requires=docker.service
+Requires=docker.service foreman-firewall.service
 OnFailure=foreman-agent-rollback.service
 StartLimitIntervalSec=120
 StartLimitBurst=5
@@ -177,7 +282,10 @@ ExecStart=/bin/sh -c 'cd /opt/foreman-agent && if [ -L previous ]; then ln -sfn 
 EOF
 
 systemctl daemon-reload
-systemctl enable foreman-agent
+systemctl enable foreman-firewall foreman-agent
+systemctl enable --now foreman-firewall-check.timer
+# Loads the rules again on a re-run, in case they changed.
+systemctl restart foreman-firewall
 # Restart, not start: on a re-run the agent may already be running (or
 # have hit its start limit) with the old settings and join token.
 systemctl reset-failed foreman-agent 2>/dev/null || true

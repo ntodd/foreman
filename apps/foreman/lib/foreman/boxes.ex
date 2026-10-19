@@ -160,12 +160,31 @@ defmodule Foreman.Boxes do
         os: join.os,
         arch: join.arch,
         policy: if(join.policy == %{}, do: nil, else: join.policy),
+        firewall: Map.get(join, :firewall),
+        firewall_default_bridge: Map.get(join, :firewall_default_bridge),
         last_seen_at: DateTime.utc_now()
       )
       |> Repo.update!()
 
     broadcast(box, :online)
     box
+  end
+
+  @doc "Records the box firewall an agent reports between joins."
+  def record_firewall(box_id, firewall) do
+    if box = get_box(box_id) do
+      box =
+        box
+        |> Ecto.Changeset.change(
+          firewall: firewall.firewall,
+          firewall_default_bridge: Map.get(firewall, :firewall_default_bridge)
+        )
+        |> Repo.update!()
+
+      broadcast(box, :updated)
+    end
+
+    :ok
   end
 
   @policy_labels %{
@@ -195,6 +214,49 @@ defmodule Foreman.Boxes do
   end
 
   def policy_exceptions(%Box{}), do: []
+
+  @doc """
+  What's wrong with a box's firewall, which keeps the code in its
+  environments (and its image builds) from reaching the tailnet as the
+  box: `:missing` (not loaded), `:outdated` (older rules than its agent
+  ships), `:default_bridge` (loaded, but builds aren't covered), or nil.
+  Nil too for an agent that doesn't report it.
+  """
+  def firewall_problem(%Box{firewall: "missing"}), do: :missing
+  def firewall_problem(%Box{firewall: "outdated"}), do: :outdated
+
+  def firewall_problem(%Box{firewall: "active", firewall_default_bridge: "reaches_tailnet"}),
+    do: :default_bridge
+
+  def firewall_problem(%Box{}), do: nil
+
+  @doc """
+  The install command that loads a box's firewall again without
+  changing the box: running the script without the box's `--policy` or
+  `--default-bridge-reaches-tailnet` would reset them.
+  """
+  def reinstall_command(%Box{} = box) do
+    policy =
+      case ForemanProtocol.Policy.relaxed(box.policy || %{}) do
+        [] ->
+          []
+
+        rules ->
+          ["--policy", Enum.map_join(rules, ",", fn {rule, action} -> "#{rule}=#{action}" end)]
+      end
+
+    bridge =
+      if box.firewall_default_bridge == "reaches_tailnet",
+        do: ["--default-bridge-reaches-tailnet"],
+        else: []
+
+    base = "curl -fsSL #{Foreman.Config.base_url()}/agent/install.sh | sudo sh"
+
+    case policy ++ bridge do
+      [] -> base
+      flags -> Enum.join([base, "-s", "--" | flags], " ")
+    end
+  end
 
   def agent_left(box_id) do
     if box = get_box(box_id) do

@@ -40,6 +40,12 @@ defmodule ForemanProtocol.Event do
                 service: {:string, required: true},
                 state: {:string, required: true}}}, default: []}}}, required: true}
     ],
+    # The box's firewall, when it changes between joins (see the join's
+    # fields of the same names).
+    "box.firewall" => [
+      firewall: {{:enum, ~w(active outdated missing)}, required: true},
+      firewall_default_bridge: {{:enum, ~w(filtered reaches_tailnet)}, []}
+    ],
     "box.stats" => [
       capacity:
         {{:object,

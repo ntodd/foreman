@@ -179,6 +179,7 @@ defmodule ForemanWeb.BoxLive.Show do
       </.header>
 
       <.box_policy_alert box={@box} />
+      <.box_firewall_alert box={@box} />
 
       <.callout
         :if={@box.failed_agent_version && @box.failed_agent_version == @target_version}

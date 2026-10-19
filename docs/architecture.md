@@ -181,7 +181,14 @@ services:
 
 volumes:
   tailscale-state:
+
+networks:                   # every network the project creates
+  default:
+    driver_opts:
+      com.docker.network.bridge.name: fm-<12 hex>   # hash of env_id and network
 ```
+
+The `fm-` bridge names are how the box's firewall picks out environment traffic, so the policy refuses any network that doesn't end up on one.
 
 ### Foreman feature
 

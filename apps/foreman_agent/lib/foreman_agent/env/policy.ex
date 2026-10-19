@@ -20,6 +20,7 @@ defmodule ForemanAgent.Env.Policy do
   devcontainer CLI resolves, features included.
   """
 
+  alias ForemanAgent.Env.Overlay
   alias ForemanAgent.SafeFS
 
   @default_rules Map.new(ForemanProtocol.Policy.defaults(), fn {rule, action} ->
@@ -288,21 +289,75 @@ defmodule ForemanAgent.Env.Policy do
       network_findings(compose, ctx) ++ top_keys
   end
 
-  # Networks outside the project: another environment's, which its
-  # sidecars (a database, say) are on, or a shared one.
+  # The box's firewall keeps environment traffic off the tailnet by the
+  # bridge it arrives on, so every network has to be a bridge the overlay
+  # named. Anything else is outside the environment: another environment's
+  # network (its sidecars, a database say, are on it), a shared one, or a
+  # driver like macvlan that puts containers on the box's own network.
   defp network_findings(compose, ctx) do
     project = compose["name"]
 
     for {key, spec} <- Map.get(compose, "networks") || %{},
         is_map(spec),
-        name = spec["name"],
-        is_binary(name),
-        not (is_binary(project) and String.starts_with?(name, project <> "_")) do
-      rule(
-        ctx,
-        :host_namespace,
-        "network '#{key}' is the Docker network #{name}, outside this environment"
-      )
+        finding <- network_finding(key, spec, project, ctx) ++ bridge_finding(key, spec) do
+      finding
+    end
+  end
+
+  # Whatever the box allows: a bridge network the firewall can't see.
+  defp bridge_finding(key, spec) do
+    if spec["external"] not in [true, "true"] and spec["driver"] in [nil, "bridge"] and
+         not foreman_bridge?(spec),
+       do: [
+         {:refuse,
+          "network '#{key}' isn't on a Foreman bridge, so the box's firewall can't keep it off the tailnet"}
+       ],
+       else: []
+  end
+
+  defp network_finding(key, spec, project, ctx) do
+    name = spec["name"]
+
+    cond do
+      spec["external"] in [true, "true"] ->
+        [
+          rule(
+            ctx,
+            :host_namespace,
+            "network '#{key}' is the external Docker network #{name}; Foreman creates an environment's networks itself"
+          )
+        ]
+
+      is_binary(name) and not (is_binary(project) and String.starts_with?(name, project <> "_")) ->
+        [
+          rule(
+            ctx,
+            :host_namespace,
+            "network '#{key}' is the Docker network #{name}, outside this environment"
+          )
+        ]
+
+      spec["driver"] not in [nil, "bridge"] ->
+        [
+          rule(
+            ctx,
+            :host_namespace,
+            "network '#{key}' uses the #{spec["driver"]} driver; environments only get bridge networks"
+          )
+        ]
+
+      true ->
+        []
+    end
+  end
+
+  defp foreman_bridge?(spec) do
+    case spec["driver_opts"] do
+      %{"com.docker.network.bridge.name" => name} when is_binary(name) ->
+        String.starts_with?(name, Overlay.bridge_prefix())
+
+      _ ->
+        false
     end
   end
 
@@ -778,6 +833,20 @@ defmodule ForemanAgent.Env.Policy do
         "service '#{service}' joins the #{label} of container #{name}, outside this environment"
       )
     ]
+  end
+
+  defp namespace_finding(_service, "network", "none", _ctx), do: []
+  defp namespace_finding(_service, "network", "service:" <> _, _ctx), do: []
+
+  # Docker's default bridge (docker0), or a network named directly rather
+  # than through `networks`: neither is a bridge the overlay named.
+  defp namespace_finding(service, "network", value, ctx) do
+    what =
+      if value in ["bridge", "default"],
+        do: "Docker's default bridge network",
+        else: "the Docker network #{value}"
+
+    [rule(ctx, :host_namespace, "service '#{service}' uses #{what}, outside this environment")]
   end
 
   defp namespace_finding(_service, _label, _value, _ctx), do: []

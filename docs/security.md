@@ -171,7 +171,10 @@ to the box it runs on (up to the limits in "Known gaps").
   - builds that run privileged, on the host network, or with BuildKit
     entitlements (`security.insecure` is privileged)
   - networks from outside the project (`external`, or a fixed `name:`):
-    another environment's network reaches its sidecars
+    another environment's network reaches its sidecars. So are network
+    drivers other than `bridge` (macvlan and ipvlan put containers on the
+    box's own network), Docker's default bridge (`network_mode: bridge`)
+    and a network named directly in `network_mode`
   - `devcontainer.json` or feature mounts of an `external` volume that
     isn't this environment's
   - `use_api_socket` (the Docker socket, under its rule)
@@ -181,6 +184,12 @@ to the box it runs on (up to the limits in "Known gaps").
 
   `provider` services are refused whatever the box allows: Compose runs a
   provider's `type` as a program on the box.
+
+  The overlay puts every network an environment uses on a bridge named
+  `fm-` and a hash of the environment and network, replacing any bridge
+  name the repo set. A network that ends up on any other bridge is
+  refused whatever the box allows: that name is how the box tells
+  environment traffic from other containers'.
 
   Binds and host files that expose the agent's state, other environments
   or secrets directories are refused whatever the box allows. A failed
@@ -214,9 +223,25 @@ to the box it runs on (up to the limits in "Known gaps").
 Each environment is a tailnet node tagged `tag:foreman-env` (plus repo
 tags, and `tag:foreman-<login>` on team deployments). The suggested ACL
 in [setup/tailscale.md](setup/tailscale.md) grants people access to
-environments and grants environments nothing, so code in an environment
+environments and grants environments nothing, so an environment's node
 can't reach laptops or other environments. Tailscale SSH replaces sshd;
 no ports are published.
+
+That node isn't the only way out. A container's ordinary traffic is
+forwarded through the box, and a box on the tailnet sends tailnet
+addresses over its own Tailscale interface, so peers would see the box
+and apply the box's grants. The box's firewall (an nftables table loaded
+by `foreman-firewall.service`, see
+[setup/tailscale.md](setup/tailscale.md#boxes-on-the-tailnet)) rejects
+anything from an environment's bridges, or from Docker's default bridge
+where image builds run, bound for the tailnet, the box's own tailnet
+addresses (published ports included, by the destination before Docker
+rewrote it) or `tailscale0`, except DNS to MagicDNS. Environment bridges
+are all named `fm-...`, which the overlay and the policy guarantee
+(below). The agent reports whether the firewall is loaded, and from the
+rules it ships with, when it joins and whenever that changes; the
+control plane flags a box without it. A process on the box that an environment can reach and that
+connects onward (a proxy, say) still connects as the box.
 
 Tailscale runs in userspace mode, without a TUN device or `NET_ADMIN`.
 In that mode it delivers tailnet connections to `127.0.0.1:<port>` in
@@ -299,7 +324,17 @@ These are accepted for now, or need someone to try them:
     boxes patched, keep them single-owner, and treat code
     in an environment (including coding agents) as able to reach
     anything the box can: there's no egress filtering, and on cloud
-    instances the metadata endpoint is reachable unless blocked.
+    instances the metadata endpoint is reachable unless blocked. The
+    tailnet is the exception: the box's firewall keeps environments off
+    it as the box. Something that flushes the box's whole ruleset
+    removes the firewall until its timer loads it again (within 15
+    seconds), and a box installed with
+    `--default-bridge-reaches-tailnet` lets image builds reach the
+    tailnet as the box. Even with the firewall, Docker's builder fetches
+    a Dockerfile's `ADD <url>` (and a git build context) itself, from
+    the box, so a Dockerfile can read from the tailnet as the box; its
+    RUN steps can't. Filtering the daemon would also stop the box
+    pulling images from a registry on the tailnet.
 14. **No default resource limits.** Without CPU, memory or pids limits
     on the repo or environment, one runaway process can starve every
     environment on its box.
