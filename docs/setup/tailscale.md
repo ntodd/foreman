@@ -117,8 +117,23 @@ aren't granted.
 }
 ```
 
-With no grant whose `src` is `tag:foreman-env`, environments can't open
-connections to your laptops or to each other.
+With no grant whose `src` is `tag:foreman-env`, an environment's own
+node can't open connections to your laptops or to each other.
+
+### Boxes on the tailnet
+
+That only covers the environment's own node. Ordinary traffic out of a
+container leaves through the box: Docker forwards it to the host, and a
+host on the tailnet routes `100.64.0.0/10` over its own Tailscale
+interface. Peers see the box, so code in any environment on it gets the
+box's grants. The personal setup runs the agent on the control plane's
+host, which is on the tailnet, so most personal installs are in this
+situation.
+
+Until the agent filters this itself, keep a box's tags to what its
+environments may reach: `tag:foreman` and nothing that grants
+production. A box that doesn't need the tailnet for anything else is
+safer off it.
 
 ### Only some of your machines
 

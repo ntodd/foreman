@@ -214,9 +214,15 @@ to the box it runs on (up to the limits in "Known gaps").
 Each environment is a tailnet node tagged `tag:foreman-env` (plus repo
 tags, and `tag:foreman-<login>` on team deployments). The suggested ACL
 in [setup/tailscale.md](setup/tailscale.md) grants people access to
-environments and grants environments nothing, so code in an environment
+environments and grants environments nothing, so an environment's node
 can't reach laptops or other environments. Tailscale SSH replaces sshd;
 no ports are published.
+
+That node isn't the only way out. A container's ordinary traffic is
+forwarded through the box, and a box on the tailnet sends tailnet
+addresses over its own Tailscale interface, so peers see the box and
+apply the box's grants. Code in an environment can reach whatever its
+box's tags can (see known gap 13). Keep box tags minimal.
 
 Tailscale runs in userspace mode, without a TUN device or `NET_ADMIN`.
 In that mode it delivers tailnet connections to `127.0.0.1:<port>` in
@@ -299,7 +305,10 @@ These are accepted for now, or need someone to try them:
     boxes patched, keep them single-owner, and treat code
     in an environment (including coding agents) as able to reach
     anything the box can: there's no egress filtering, and on cloud
-    instances the metadata endpoint is reachable unless blocked.
+    instances the metadata endpoint is reachable unless blocked. That
+    includes the tailnet: a box on it forwards environment traffic as
+    itself, so environments get the box's tags and grants, not just
+    `tag:foreman-env`'s.
 14. **No default resource limits.** Without CPU, memory or pids limits
     on the repo or environment, one runaway process can starve every
     environment on its box.
