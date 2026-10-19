@@ -10,6 +10,15 @@ defmodule ForemanWeb.UserAuth do
 
   alias Foreman.{Accounts, Scope}
 
+  @github_fields [
+    :access_token,
+    :access_token_expires_at,
+    :refresh_token,
+    :refresh_token_expires_at,
+    :github_login_expired,
+    :updated_at
+  ]
+
   @doc "Starts a session for `user`. The session is renewed to prevent fixation."
   def sign_in(conn, user) do
     token = Accounts.create_session(user, conn |> get_req_header("user-agent") |> List.first())
@@ -96,7 +105,7 @@ defmodule ForemanWeb.UserAuth do
       {:cont,
        socket
        |> Phoenix.LiveView.attach_hook(:current_path, :handle_params, &put_current_path/3)
-       |> Phoenix.LiveView.attach_hook(:access_changed, :handle_info, &reload_on_access_change/2)}
+       |> Phoenix.LiveView.attach_hook(:user_events, :handle_info, &handle_user_event/2)}
     else
       {:halt, Phoenix.LiveView.redirect(socket, to: ~p"/sign-in")}
     end
@@ -117,11 +126,30 @@ defmodule ForemanWeb.UserAuth do
   # The user was disabled or their role changed: reload the page so it
   # mounts again with their current access, instead of acting on the
   # scope this LiveView started with.
-  defp reload_on_access_change(:access_changed, socket) do
-    {:halt, Phoenix.LiveView.redirect(socket, to: socket.assigns[:current_path] || ~p"/")}
+  defp handle_user_event(:access_changed, socket), do: reload(socket)
+
+  # Their refresh token was rejected: pick up the cleared tokens so the
+  # page shows the sign-in-again banner, without each view handling it.
+  # Only the GitHub fields are taken, since forms built from the mounted
+  # user diff their changes against the scope's.
+  defp handle_user_event(:github_login_expired, socket) do
+    %Scope{user: user} = socket.assigns.current_scope
+
+    case Accounts.get_user(user.id) do
+      nil ->
+        reload(socket)
+
+      fresh ->
+        user = struct(user, Map.take(fresh, @github_fields))
+        {:halt, Phoenix.Component.assign(socket, :current_scope, Scope.for_user(user))}
+    end
   end
 
-  defp reload_on_access_change(_message, socket), do: {:cont, socket}
+  defp handle_user_event(_message, socket), do: {:cont, socket}
+
+  defp reload(socket) do
+    {:halt, Phoenix.LiveView.redirect(socket, to: socket.assigns[:current_path] || ~p"/")}
+  end
 
   defp put_current_path(_params, uri, socket) do
     {:cont, Phoenix.Component.assign(socket, :current_path, URI.parse(uri).path)}

@@ -29,6 +29,46 @@ defmodule ForemanWeb.AccessTest do
 
       assert Repo.reload!(target).role == "member"
     end
+
+    for path <- ["/secrets", "/", "/settings"] do
+      test "#{path} stays up and shows the banner when the GitHub login expires" do
+        user = user_fixture()
+        {:ok, view, _} = live(log_in(build_conn(), user), unquote(path))
+        refute has_element?(view, "#github-expired-banner")
+
+        :ok = Accounts.mark_github_login_expired(user)
+        Phoenix.PubSub.broadcast(Foreman.PubSub, "user:#{user.id}", :github_login_expired)
+
+        assert has_element?(view, "#github-expired-banner")
+      end
+    end
+
+    test "doesn't show the banner when they signed in again before the message arrived" do
+      user = user_fixture()
+      {:ok, view, _} = live(log_in(build_conn(), user), ~p"/secrets")
+
+      :ok = Accounts.mark_github_login_expired(user)
+
+      {:ok, _} =
+        Accounts.update_tokens(Repo.reload!(user), %{access_token: "new", refresh_token: "new"})
+
+      Phoenix.PubSub.broadcast(Foreman.PubSub, "user:#{user.id}", :github_login_expired)
+
+      refute has_element?(view, "#github-expired-banner")
+    end
+
+    test "an open settings form doesn't undo another tab's change after the GitHub login expires" do
+      user = user_fixture(git_name: "old name")
+      {:ok, view, _} = live(log_in(build_conn(), user), ~p"/settings")
+
+      {:ok, user} = Accounts.update_preferences(Scope.for_user(user), %{"git_name" => "new name"})
+      :ok = Accounts.mark_github_login_expired(user)
+      Phoenix.PubSub.broadcast(Foreman.PubSub, "user:#{user.id}", :github_login_expired)
+
+      view |> form("#preferences", user: %{git_email: "me@example.com"}) |> render_submit()
+
+      assert Repo.reload!(user).git_name == "new name"
+    end
   end
 
   test "an environment page won't show another environment's operation log" do
