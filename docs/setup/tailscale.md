@@ -157,7 +157,10 @@ install script refuses it), and one that starts using an exit node later
 cuts its environments off from the internet. Anything that flushes the
 whole ruleset (`nft flush ruleset`, or stopping or reloading
 `nftables.service` on Debian) removes the table too, and a timer
-(`foreman-firewall-check.timer`) loads it again within 15 seconds.
+(`foreman-firewall-check.timer`) loads it again within 15 seconds. The
+agent reports whether the firewall is loaded when it connects and
+whenever that changes, and the box's page says so when it isn't, or when its rules differ from the
+ones the agent ships with.
 Still keep a box's tags to what's needed.
 
 ### Only some of your machines

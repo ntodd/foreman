@@ -101,6 +101,24 @@ running, and its agent restarts only once it's idle; environments keep
 running throughout. The box page shows the version a box is updating
 to.
 
+Some releases change what the install script sets up on a box, which a
+self-update can't do: the box firewall, for one, which keeps
+environments off the tailnet as the box (see
+[tailscale.md](tailscale.md#boxes-on-the-tailnet)). A box whose agent
+reports no firewall, or older rules than the agent ships with, gets an
+alert on its page and its cards. Run the install command on it again;
+an enrolled box needs no token, but pass any `--policy` or
+`--default-bridge-reaches-tailnet` it had:
+
+```sh
+curl -fsSL https://desktop.tail1234.ts.net/agent/install.sh | sudo sh
+```
+
+Restart its environments afterwards (stop and start them): one that
+kept running through the upgrade is still on the Docker network it was
+created with, and only moves onto its own bridge, which the firewall
+knows it by, when it next starts.
+
 Upgrade the control plane before agents, which following does for you:
 the control plane accepts agents on its protocol and the one before,
 but an older control plane refuses newer agents.
@@ -140,8 +158,8 @@ though: once boxes run agents on a newer protocol, a control plane older
 than that protocol refuses them when they connect, and they can't be
 moved back from there. The release notes say when the protocol changes;
 protocol 2 came in with 0.2.1, and protocol 3 (your own devcontainer
-features, Pull and rebuild, and the `gpu` policy rule) with the release
-after 0.3.0.
+features, Pull and rebuild, the `gpu` policy rule, and agents reporting
+the box firewall) with the release after 0.3.0.
 
 Following starts with 0.3.0, and 0.3.0 is the first release with
 images, so rolling back from it means building the older version

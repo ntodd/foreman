@@ -172,6 +172,14 @@ fi
 "$nft" -c -f /etc/foreman-agent/firewall.nft.new || fail "nftables rejected the firewall rules"
 chmod 0644 /etc/foreman-agent/firewall.nft.new
 mv /etc/foreman-agent/firewall.nft.new /etc/foreman-agent/firewall.nft
+# What the agent reports to the control plane: which rules these came
+# from (an agent that updated itself past them reports them outdated),
+# and whether the default bridge is left out. The unit puts it in /run
+# while the rules are loaded.
+if [ -n "$DEFAULT_BRIDGE_FILTER" ]; then bridge_mode=filtered; else bridge_mode=reaches_tailnet; fi
+printf 'source_sha256=%s\ndefault_bridge=%s\n' "$(sha256sum < "$1" | cut -d' ' -f1)" "$bridge_mode" \
+  > /etc/foreman-agent/firewall.info
+chmod 0644 /etc/foreman-agent/firewall.info
 
 cat > /etc/systemd/system/foreman-firewall.service <<EOF
 [Unit]
@@ -182,20 +190,41 @@ Before=docker.service foreman-agent.service
 [Service]
 Type=oneshot
 RemainAfterExit=yes
+RuntimeDirectory=foreman-firewall
 ExecStart=$nft -f /etc/foreman-agent/firewall.nft
+ExecStartPost=/bin/cp /etc/foreman-agent/firewall.info /run/foreman-firewall/loaded
 
 [Install]
 WantedBy=multi-user.target
 EOF
 
-cat > /etc/systemd/system/foreman-firewall-check.service <<EOF
+# Loads the rules again every tick, whatever removed or changed them:
+# the file deletes and re-adds the table in one transaction, so there's no
+# gap. The marker the agent reports tracks whether that worked; the agent
+# watches it and tells the control plane.
+cat > /etc/foreman-agent/firewall-check <<EOF
+#!/bin/sh
+set -u
+marker=/run/foreman-firewall/loaded
+# Stopped on purpose: leave it stopped.
+systemctl is-active --quiet foreman-firewall || exit 0
+if $nft -f /etc/foreman-agent/firewall.nft; then
+  [ -e "\$marker" ] || cp /etc/foreman-agent/firewall.info "\$marker"
+else
+  rm -f "\$marker"
+  exit 1
+fi
+EOF
+chmod 0755 /etc/foreman-agent/firewall-check
+
+cat > /etc/systemd/system/foreman-firewall-check.service <<'EOF'
 [Unit]
-Description=Load the Foreman box firewall again if something removed it
+Description=Load the Foreman box firewall again
 After=foreman-firewall.service
 
 [Service]
 Type=oneshot
-ExecStart=/bin/sh -c '$nft list table inet foreman >/dev/null 2>&1 || exec $nft -f /etc/foreman-agent/firewall.nft'
+ExecStart=/etc/foreman-agent/firewall-check
 EOF
 
 cat > /etc/systemd/system/foreman-firewall-check.timer <<'EOF'

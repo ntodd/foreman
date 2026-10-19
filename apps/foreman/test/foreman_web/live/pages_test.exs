@@ -279,6 +279,121 @@ defmodule ForemanWeb.PagesTest do
     refute has_element?(view, "[data-role=policy-alert]")
   end
 
+  # Without its firewall, code in a box's environments reaches the
+  # tailnet as the box, with the box's grants.
+  test "a box whose firewall isn't loaded gets an alert everywhere it's shown", %{
+    conn: conn,
+    user: user
+  } do
+    bare = box_fixture(owner_user_id: user.id, name: "bare", firewall: "missing")
+
+    {:ok, view, _html} = live(conn, ~p"/boxes/#{bare.id}")
+    assert has_element?(view, "#box-firewall-alert", "can't confirm")
+    assert has_element?(view, "#box-firewall-alert", "reach the tailnet as this box")
+    assert has_element?(view, "#box-firewall-alert", "/agent/install.sh | sudo sh")
+
+    {:ok, view, _html} = live(conn, ~p"/boxes")
+
+    assert has_element?(
+             view,
+             "#box-#{bare.id} [data-role=firewall-alert]",
+             "Firewall unconfirmed"
+           )
+
+    {:ok, view, _html} = live(conn, ~p"/")
+
+    assert has_element?(
+             view,
+             "#box-card-#{bare.id} [data-role=firewall-alert]",
+             "Firewall unconfirmed"
+           )
+  end
+
+  # Running the install script again without them would reset them.
+  test "the command to fix a box's firewall keeps its policy and default bridge", %{
+    conn: conn,
+    user: user
+  } do
+    box =
+      box_fixture(
+        owner_user_id: user.id,
+        name: "kept",
+        firewall: "outdated",
+        firewall_default_bridge: "reaches_tailnet",
+        policy:
+          Map.merge(ForemanProtocol.Policy.defaults(), %{
+            "privileged" => "allow",
+            "host_bind" => "warn"
+          })
+      )
+
+    {:ok, view, _html} = live(conn, ~p"/boxes/#{box.id}")
+
+    assert has_element?(
+             view,
+             "#box-firewall-alert",
+             "sudo sh -s -- --policy host_bind=warn,privileged=allow --default-bridge-reaches-tailnet"
+           )
+  end
+
+  test "a box with other firewall rules than its agent's is told to re-run the install", %{
+    conn: conn,
+    user: user
+  } do
+    old = box_fixture(owner_user_id: user.id, name: "old", firewall: "outdated")
+
+    {:ok, view, _html} = live(conn, ~p"/boxes/#{old.id}")
+    assert has_element?(view, "#box-firewall-alert", "differ from the ones its agent ships with")
+
+    {:ok, view, _html} = live(conn, ~p"/boxes")
+
+    assert has_element?(
+             view,
+             "#box-#{old.id} [data-role=firewall-alert]",
+             "Firewall rules differ"
+           )
+  end
+
+  test "a box whose default bridge reaches the tailnet says builds can too", %{
+    conn: conn,
+    user: user
+  } do
+    open =
+      box_fixture(
+        owner_user_id: user.id,
+        name: "open-bridge",
+        firewall: "active",
+        firewall_default_bridge: "reaches_tailnet"
+      )
+
+    {:ok, view, _html} = live(conn, ~p"/boxes/#{open.id}")
+    assert has_element?(view, "#box-firewall-alert", "Image builds")
+    assert has_element?(view, "#box-firewall-alert", "--default-bridge-reaches-tailnet")
+  end
+
+  test "a box with its firewall loaded, or an agent that doesn't say, has no firewall alert", %{
+    conn: conn,
+    user: user
+  } do
+    fine =
+      box_fixture(
+        owner_user_id: user.id,
+        name: "fine",
+        firewall: "active",
+        firewall_default_bridge: "filtered"
+      )
+
+    unknown = box_fixture(owner_user_id: user.id, name: "unknown-fw")
+
+    for b <- [fine, unknown] do
+      {:ok, view, _html} = live(conn, ~p"/boxes/#{b.id}")
+      refute has_element?(view, "#box-firewall-alert")
+    end
+
+    {:ok, view, _html} = live(conn, ~p"/boxes")
+    refute has_element?(view, "[data-role=firewall-alert]")
+  end
+
   test "adding a box shows a one-time install command", %{conn: conn} do
     {:ok, view, _html} = live(conn, ~p"/boxes")
     html = view |> form("#join-token-form", box: %{box_name: "work-box"}) |> render_submit()

@@ -11,7 +11,8 @@ defmodule ForemanProtocol do
   # 2: env.secrets.write can `keep` files; the seccomp policy rule.
   # 3: env.create and env.rebuild can carry a user's own `features`;
   # env.rebuild can `pull` (fast-forward the clone) first; the gpu
-  # policy rule.
+  # policy rule; the join reports the box's firewall (`firewall`,
+  # `firewall_default_bridge`), and box.firewall when it changes.
   @version 3
 
   @doc "The protocol version this build speaks."
@@ -33,7 +34,12 @@ defmodule ForemanProtocol do
     in_flight: {{:list, :uuid}, default: []},
     policy:
       {{:map_of, {:enum, ForemanProtocol.Policy.rules()},
-        {:enum, ForemanProtocol.Policy.actions()}}, default: %{}}
+        {:enum, ForemanProtocol.Policy.actions()}}, default: %{}},
+    # Whether the box's firewall, which keeps environments off the tailnet
+    # as the box, is loaded and the one this agent ships with; and whether
+    # it leaves Docker's default bridge, where image builds run, out.
+    firewall: {{:enum, ~w(active outdated missing)}, []},
+    firewall_default_bridge: {{:enum, ~w(filtered reaches_tailnet)}, []}
   ]
 
   @doc "Validates the payload an agent sends when it joins its topic."

@@ -2,12 +2,13 @@ defmodule ForemanAgent.Reporter do
   @moduledoc """
   Reports the box's inventory (every 15 seconds, when it changes), host
   metrics (every 5 seconds) and stats (every 30 seconds) to the control
-  plane, and an `env.state` event for each environment whose state
-  changed in between.
+  plane, an `env.state` event for each environment whose state changed in
+  between, and the box's firewall when it changes from what the join
+  said.
   """
   use GenServer
 
-  alias ForemanAgent.{Handler, HostMetrics, Outbox, Stats}
+  alias ForemanAgent.{Config, Firewall, Handler, HostMetrics, Outbox, Stats}
   alias ForemanProtocol.Event
 
   require Logger
@@ -25,7 +26,7 @@ defmodule ForemanAgent.Reporter do
     Process.send_after(self(), :inventory, @inventory_every)
     Process.send_after(self(), :stats, @stats_every)
     send(self(), :metrics)
-    {:ok, %{states: %{}, last: nil, cpu: nil}}
+    {:ok, %{states: %{}, last: nil, cpu: nil, firewall: nil}}
   end
 
   # Each report is best effort: a failure (Docker restarting, no file
@@ -35,6 +36,9 @@ defmodule ForemanAgent.Reporter do
   @impl true
   def handle_cast(:report_now, state) do
     state = safely("inventory", state, &inventory(%{&1 | last: nil}))
+    # Sent again after every join: the firewall may have changed and
+    # changed back since this process last looked.
+    state = safely("firewall", state, &firewall(%{&1 | firewall: nil}))
     safely("stats", state, &tap(&1, fn _ -> stats() end))
     {:noreply, state}
   end
@@ -42,7 +46,8 @@ defmodule ForemanAgent.Reporter do
   @impl true
   def handle_info(:inventory, state) do
     Process.send_after(self(), :inventory, @inventory_every)
-    {:noreply, safely("inventory", state, &inventory/1)}
+    state = safely("inventory", state, &inventory/1)
+    {:noreply, safely("firewall", state, &firewall/1)}
   end
 
   def handle_info(:stats, state) do
@@ -102,6 +107,17 @@ defmodule ForemanAgent.Reporter do
       {:error, message} ->
         Logger.warning(message)
         state
+    end
+  end
+
+  defp firewall(state) do
+    case Firewall.report(Config.get()) do
+      same when same == state.firewall ->
+        state
+
+      report ->
+        push("box.firewall", report)
+        %{state | firewall: report}
     end
   end
 

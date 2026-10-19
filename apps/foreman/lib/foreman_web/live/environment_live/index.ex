@@ -115,6 +115,7 @@ defmodule ForemanWeb.EnvironmentLive.Index do
             </div>
             <div class="flex items-center gap-1.5">
               <.box_policy_badge box={card.box} />
+              <.box_firewall_badge box={card.box} />
               <.badge :if={card.summary.contention} color="amber" size="sm">Contention</.badge>
               <.box_status online={card.online} />
             </div>

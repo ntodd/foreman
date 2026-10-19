@@ -24,6 +24,9 @@ defmodule ForemanAgent.Config do
             release_root: "/opt/foreman-agent",
             release_public_key: nil,
             feature_dir: nil,
+            firewall_rules: nil,
+            firewall_marker: "/run/foreman-firewall/loaded",
+            firewall_info: "/etc/foreman-agent/firewall.info",
             join_token: nil,
             connect: true,
             tailscale_join_wait: :timer.seconds(30)
@@ -38,6 +41,7 @@ defmodule ForemanAgent.Config do
     |> Map.update!(:policy_rules, &Map.merge(Policy.default_rules(), &1))
     |> Map.put(:release_public_key, decode_key(env[:release_public_key] || @release_public_key))
     |> Map.update!(:feature_dir, &(&1 || default_feature_dir()))
+    |> Map.update!(:firewall_rules, &(&1 || default_firewall_rules()))
   end
 
   @doc "The loaded config. Loaded on first use and cached."
@@ -98,6 +102,9 @@ defmodule ForemanAgent.Config do
   @doc "Paths no environment may ever bind-mount."
   def protected_paths(%__MODULE__{} = c),
     do: [c.data_dir, c.envs_root, c.secrets_root, c.release_root]
+
+  defp default_firewall_rules,
+    do: Application.app_dir(:foreman_agent, "priv/firewall/foreman.nft")
 
   defp default_feature_dir do
     priv = Application.app_dir(:foreman_agent, "priv/feature")

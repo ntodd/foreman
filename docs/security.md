@@ -238,7 +238,9 @@ where image builds run, bound for the tailnet, the box's own tailnet
 addresses (published ports included, by the destination before Docker
 rewrote it) or `tailscale0`, except DNS to MagicDNS. Environment bridges
 are all named `fm-...`, which the overlay and the policy guarantee
-(below). A process on the box that an environment can reach and that
+(below). The agent reports whether the firewall is loaded, and from the
+rules it ships with, when it joins and whenever that changes; the
+control plane flags a box without it. A process on the box that an environment can reach and that
 connects onward (a proxy, say) still connects as the box.
 
 Tailscale runs in userspace mode, without a TUN device or `NET_ADMIN`.

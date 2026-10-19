@@ -76,6 +76,8 @@ defmodule Foreman.Fixtures do
           }),
         capacity_policy: Map.get(attrs, :capacity_policy, "allow"),
         policy: Map.get(attrs, :policy, ForemanProtocol.Policy.defaults()),
+        firewall: Map.get(attrs, :firewall),
+        firewall_default_bridge: Map.get(attrs, :firewall_default_bridge),
         agent_version: "0.1.0",
         protocol_version: 1,
         feature_version: Map.get(attrs, :feature_version)
