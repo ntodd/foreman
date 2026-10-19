@@ -60,6 +60,16 @@ defmodule ForemanAgent.OpsTest do
     assert_receive {:event, "op.result", %{status: "error", error: "boom"}}
   end
 
+  test "an error can carry a result", %{ops: ops} do
+    cmd = stop_cmd(@env1)
+    Ops.submit(ops, cmd)
+    assert_receive {:started, _, pid}
+    finish(pid, {:error, "refused", %{"pull_failed" => true}})
+
+    assert_receive {:event, "op.result",
+                    %{status: "error", error: "refused", result: %{"pull_failed" => true}}}
+  end
+
   test "a crashing handler becomes an error result", %{ops: ops} do
     cmd = stop_cmd(@env1)
     Ops.submit(ops, cmd)

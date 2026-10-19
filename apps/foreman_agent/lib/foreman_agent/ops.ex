@@ -250,6 +250,9 @@ defmodule ForemanAgent.Ops do
         {:error, message} when is_binary(message) ->
           %{op_id: op_id, status: "error", error: message}
 
+        {:error, message, map} when is_binary(message) and is_map(map) ->
+          %{op_id: op_id, status: "error", error: message, result: map}
+
         other ->
           %{op_id: op_id, status: "error", error: "unexpected result: #{inspect(other)}"}
       end

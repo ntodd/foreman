@@ -27,21 +27,51 @@ defmodule ForemanWeb.EnvironmentLive.Show do
      |> assign(:log, "")
      |> assign(:destroy_check, nil)
      |> assign(:later, false)
-     |> load()}
+     |> assign(:sync, nil)
+     |> assign(:sync_op, nil)
+     |> assign(:loaded_state, nil)
+     |> load()
+     |> check_branch()}
   end
+
+  # The page's own git status checks aren't activity anyone asked for.
+  @unlisted ~w(git_status)
 
   defp load(socket) do
     env = Environments.get_environment!(socket.assigns.current_scope, socket.assigns.env.id)
-    ops = Operations.list_for_environment(env.id, 15)
+    all_ops = Operations.list_for_environment(env.id, 15)
+    ops = Operations.list_for_environment(env.id, 15, except: @unlisted)
+    previous = socket.assigns.loaded_state
 
     socket
     |> assign(:env, env)
+    |> assign(:loaded_state, env.observed_state)
     |> assign(:ops, ops)
-    |> assign(:in_progress, in_progress(ops))
+    # A check that's holding up a Stop has to be cancellable too.
+    |> assign(:in_progress, in_progress(all_ops))
     |> assign(:online, Boxes.online?(env.box_id))
     |> assign(:provisioned, Capacity.provisioned(env, env.repo))
     |> assign(:usage, Foreman.Capacity.Tracker.latest_usage(env.id))
     |> select_default_op()
+    |> then(&if(came_up?(previous, env), do: check_branch(&1), else: &1))
+  end
+
+  defp came_up?(previous, env),
+    do: previous not in [nil, "running"] and env.observed_state == "running"
+
+  # Compares the clone with its branch on GitHub: the agent reports the
+  # clone's HEAD, and branch_sync asks GitHub.
+  defp check_branch(socket) do
+    %{env: env, online: online, current_scope: scope} = socket.assigns
+
+    with true <- connected?(socket) and online and env.observed_state == "running",
+         true <- Foreman.GitHub.configured?(),
+         {:ok, op} <- Environments.check_branch(scope, env) do
+      Operations.subscribe(op.id)
+      assign(socket, :sync_op, op.id)
+    else
+      _ -> socket
+    end
   end
 
   # Follows the newest operation unless the reader picked one.
@@ -81,6 +111,7 @@ defmodule ForemanWeb.EnvironmentLive.Show do
         "retry" -> Environments.retry(scope, env)
         "stop" -> Environments.stop(scope, env)
         "rebuild" -> Environments.rebuild(scope, env)
+        "pull_rebuild" -> Environments.pull_rebuild(scope, env)
         "restart_affected" -> Environments.restart(scope, env, :affected)
         "restart_all" -> Environments.restart(scope, env, :all)
         "logs" -> Environments.logs(scope, env)
@@ -193,29 +224,52 @@ defmodule ForemanWeb.EnvironmentLive.Show do
 
   def handle_info({:op_log, _op_id, _data}, socket), do: {:noreply, socket}
 
-  def handle_info(
-        {:operation, %{id: id} = op},
-        %{assigns: %{destroy_check: %{op_id: id}}} = socket
-      ) do
-    socket =
-      if Foreman.Operations.Operation.finished?(op) do
-        status = if op.status == "succeeded", do: :done, else: :failed
+  def handle_info({:operation, op}, socket) do
+    finished? = Foreman.Operations.Operation.finished?(op)
 
-        update(
-          socket,
-          :destroy_check,
-          &%{&1 | status: status, result: op.result || %{"error" => op.error}}
-        )
-      else
-        socket
-      end
+    socket =
+      socket
+      |> then(&if(finished?, do: destroy_check_done(&1, op), else: &1))
+      |> then(&if(finished?, do: branch_check_done(&1, op), else: &1))
 
     {:noreply, load(socket)}
   end
 
-  def handle_info({:operation, _op}, socket), do: {:noreply, load(socket)}
   def handle_info({:environment, _id}, socket), do: {:noreply, load(socket)}
   def handle_info(_message, socket), do: {:noreply, socket}
+
+  # The destroy check and the page's own check can be the same operation:
+  # a queued git status is shared.
+  defp destroy_check_done(%{assigns: %{destroy_check: %{op_id: id}}} = socket, %{id: id} = op) do
+    status = if op.status == "succeeded", do: :done, else: :failed
+
+    update(
+      socket,
+      :destroy_check,
+      &%{&1 | status: status, result: op.result || %{"error" => op.error}}
+    )
+  end
+
+  defp destroy_check_done(socket, _op), do: socket
+
+  defp branch_check_done(%{assigns: %{sync_op: id}} = socket, %{id: id} = op) do
+    socket = assign(socket, :sync_op, nil)
+
+    if op.status == "succeeded" and is_map(op.result) do
+      env = socket.assigns.env
+      start_async(socket, :branch_sync, fn -> Environments.branch_sync(env, op.result) end)
+    else
+      assign(socket, :sync, nil)
+    end
+  end
+
+  defp branch_check_done(socket, _op), do: socket
+
+  @impl true
+  def handle_async(:branch_sync, {:ok, {:ok, sync}}, socket),
+    do: {:noreply, assign(socket, :sync, sync)}
+
+  def handle_async(:branch_sync, _result, socket), do: {:noreply, assign(socket, :sync, nil)}
 
   defp trim_log(log) when byte_size(log) > 400_000,
     do: binary_part(log, byte_size(log) - 300_000, 300_000)
@@ -250,6 +304,8 @@ defmodule ForemanWeb.EnvironmentLive.Show do
             <.link navigate={~p"/repos/#{@env.repo.id}"} class="hover:text-ink">{@env.repo.full_name}</.link>
             <span class="text-ink-3">·</span>
             <span class="font-mono">{@env.branch}</span>
+            <span :if={@sync} class="text-ink-3">·</span>
+            <.branch_sync :if={@sync} sync={@sync} branch={@env.branch} />
             <span class="text-ink-3">·</span>
             <.link navigate={~p"/boxes/#{@env.box.id}"} class="hover:text-ink">{@env.box.name}</.link>
             <.badge :if={not @online} size="sm">Box offline</.badge>
@@ -286,15 +342,33 @@ defmodule ForemanWeb.EnvironmentLive.Show do
           >
             Stop
           </.button>
-          <.button
-            phx-click="action"
-            phx-value-do="rebuild"
-            icon="hero-wrench-screwdriver-mini"
-            size="sm"
-            data-confirm={"Rebuild #{@env.slug}? Containers are recreated from a fresh build; the workspace, volumes and tailnet identity are kept."}
-          >
-            Rebuild
-          </.button>
+          <.dropdown id="rebuild-menu" label="Rebuild" icon="hero-wrench-screwdriver-mini">
+            <.dropdown_item
+              title="Rebuild"
+              icon="hero-wrench-screwdriver-mini"
+              phx-click={JS.push("action") |> hide_dropdown("rebuild-menu")}
+              phx-value-do="rebuild"
+              data-confirm={"Rebuild #{@env.slug}? Containers are recreated from a fresh build; the workspace, volumes and tailnet identity are kept."}
+            >
+              Recreates the containers from a fresh build. Keeps the clone as it is, along with volumes and the tailnet identity.
+            </.dropdown_item>
+            <.dropdown_item
+              title="Pull and rebuild"
+              icon="hero-arrow-down-tray-mini"
+              phx-click={JS.push("action") |> hide_dropdown("rebuild-menu")}
+              phx-value-do="pull_rebuild"
+              disabled={not pull_supported?(@env)}
+              data-confirm={"Pull and rebuild #{@env.slug}? The clone is fast-forwarded to origin/#{@env.branch}, then containers are recreated from a fresh build."}
+            >
+              Fast-forwards the clone to <span class="font-mono">origin/{@env.branch}</span>, then rebuilds. Stops if there's uncommitted or unpushed work.
+              <:note :if={not pull_supported?(@env)}>
+                <span class="text-warning">{@env.box.name} needs a newer agent to pull.</span>
+              </:note>
+              <:note :if={pull_supported?(@env) and @sync}>
+                <.pull_note sync={@sync} />
+              </:note>
+            </.dropdown_item>
+          </.dropdown>
           <.button phx-click="check_destroy" icon="hero-trash-mini" size="sm" variant="danger_outline">Destroy</.button>
         </:actions>
       </.header>
@@ -516,6 +590,88 @@ defmodule ForemanWeb.EnvironmentLive.Show do
         </div>
       </.modal>
     </Layouts.app>
+    """
+  end
+
+  defp commits(1, adjective), do: "1 #{adjective} commit"
+  defp commits(n, adjective), do: "#{n} #{adjective} commits"
+
+  # Protocol 3 agents can pull.
+  defp pull_supported?(env), do: (env.box.protocol_version || 0) >= 3
+
+  attr :sync, :map, required: true
+
+  defp pull_note(%{sync: %{other_branch: _}} = assigns) do
+    ~H"""
+    <span class="text-warning">
+      The clone has <span class="font-mono">{@sync.other_branch}</span>
+      checked out; switch back first.
+    </span>
+    """
+  end
+
+  defp pull_note(%{sync: %{behind: behind, ahead: 0}} = assigns) when behind > 0 do
+    ~H"""
+    <span class="text-warning">Brings in {commits(@sync.behind, "new")}.</span>
+    """
+  end
+
+  # The agent refuses while the clone has commits the branch doesn't.
+  defp pull_note(%{sync: %{behind: behind}} = assigns) when behind > 0 do
+    ~H"""
+    <span class="text-warning">
+      {commits(@sync.behind, "new")} to pull, but the clone has {@sync.ahead} of its own; push them first.
+    </span>
+    """
+  end
+
+  defp pull_note(%{sync: %{ahead: ahead}} = assigns) when ahead > 0 do
+    ~H"""
+    <span class="text-ink-3">Nothing to pull. The clone has commits to push.</span>
+    """
+  end
+
+  defp pull_note(assigns) do
+    ~H"""
+    <span class="text-ink-3">Nothing to pull: the clone is up to date.</span>
+    """
+  end
+
+  attr :sync, :map, required: true
+  attr :branch, :string, required: true
+
+  defp branch_sync(%{sync: %{other_branch: _}} = assigns) do
+    ~H"""
+    <span
+      id="branch-sync"
+      class="text-warning"
+      title={"Not compared with #{@branch}: the clone has another branch checked out."}
+    >
+      <span class="font-mono">{@sync.other_branch}</span> checked out
+    </span>
+    """
+  end
+
+  defp branch_sync(%{sync: %{behind: 0, ahead: 0}} = assigns) do
+    ~H"""
+    <span id="branch-sync" class="inline-flex items-center gap-1 text-ink-3">
+      <.icon name="hero-check-mini" class="size-4" /> Up to date
+    </span>
+    """
+  end
+
+  defp branch_sync(assigns) do
+    ~H"""
+    <span id="branch-sync" class="inline-flex items-center gap-1.5">
+      <span :if={@sync.behind > 0} class="font-medium text-warning">
+        {@sync.behind} {if @sync.behind == 1, do: "commit", else: "commits"} behind
+        <span class="font-mono">origin/{@branch}</span>
+      </span>
+      <span :if={@sync.behind > 0 and @sync.ahead > 0} class="text-ink-3">·</span>
+      <span :if={@sync.ahead > 0} class="text-ink-2">
+        {@sync.ahead} ahead<span :if={@sync.behind == 0}> of <span class="font-mono">origin/{@branch}</span></span>
+      </span>
+    </span>
     """
   end
 

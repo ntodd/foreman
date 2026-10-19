@@ -19,7 +19,7 @@ defmodule Foreman.Environments do
   alias Foreman.Boxes.Box
   alias Foreman.Environments.{Environment, Server}
   alias Foreman.Repos.Repo, as: GitRepo
-  alias Foreman.{Agents, Audit, Capacity, Operations, Repo, Scope, Secrets}
+  alias Foreman.{Agents, Audit, Capacity, GitHub, Operations, Repo, Scope, Secrets}
 
   require Logger
 
@@ -217,10 +217,48 @@ defmodule Foreman.Environments do
   def start(scope, env), do: action(scope, env, :start)
   def stop(scope, env), do: action(scope, env, :stop)
   def rebuild(scope, env), do: action(scope, env, :rebuild)
+
+  @doc """
+  Fast-forwards the clone to its branch, then rebuilds. The agent refuses
+  (and leaves the environment running) if the clone has uncommitted
+  changes or commits the branch doesn't.
+  """
+  def pull_rebuild(scope, env) do
+    with :ok <- authorize(scope, env),
+         :ok <- can_pull?(env),
+         do: action(scope, env, :pull_rebuild)
+  end
+
+  # Protocol 3 added `pull` to env.rebuild; an older agent refuses it.
+  defp can_pull?(env) do
+    case Repo.get(Box, env.box_id) do
+      %Box{protocol_version: v} when is_integer(v) and v >= 3 ->
+        :ok
+
+      %Box{name: name} ->
+        {:error,
+         "#{name} needs a newer agent to pull; update its agent, or rebuild without pulling."}
+
+      nil ->
+        {:error, "the environment's box is gone"}
+    end
+  end
+
   def destroy(scope, env), do: action(scope, env, :destroy)
   def restart(scope, env, :affected), do: action(scope, env, :restart_affected)
   def restart(scope, env, :all), do: action(scope, env, :restart_all)
   def git_status(scope, env), do: action(scope, env, :git_status)
+
+  @doc """
+  A git status for comparing the clone with its branch: unaudited, since
+  the environment page asks for one whenever it opens.
+  """
+  def check_branch(%Scope{} = scope, %Environment{} = env) do
+    with :ok <- authorize(scope, env),
+         :ok <- allowed?(env, :git_status) do
+      {:ok, enqueue(env, "git_status", %{}, scope.user)}
+    end
+  end
 
   @doc "Runs the create again, for an environment whose first create failed."
   def retry(scope, env), do: action(scope, env, :create)
@@ -228,6 +266,53 @@ defmodule Foreman.Environments do
   def logs(scope, env, service \\ nil) do
     action(scope, env, :logs, %{"service" => service, "tail" => 300})
   end
+
+  @doc """
+  How the clone compares with its branch on GitHub, from a git status the
+  agent reported: `%{behind: n, ahead: n}`, or `%{other_branch: name}`
+  when the clone has another branch checked out.
+
+  HEAD is compared when GitHub has it. When it doesn't (commits that were
+  never pushed), the merge base with the clone's upstream is compared
+  instead, and the agent's own count of those commits (`ahead`) added:
+  close, though a stale upstream can make it overcount.
+  """
+  def branch_sync(%Environment{} = env, %{} = status) do
+    head = sha(status["head"])
+    base = sha(status["base"])
+    local = if is_integer(status["ahead"]) and status["ahead"] >= 0, do: status["ahead"], else: 0
+
+    cond do
+      status["branch"] != env.branch ->
+        {:ok, %{other_branch: status["branch"]}}
+
+      is_nil(head) ->
+        {:error, :no_head}
+
+      true ->
+        env = Repo.preload(env, :repo)
+
+        case GitHub.compare(env.repo, head, env.branch) do
+          {:ok, counts} ->
+            {:ok, %{behind: counts.ahead_by, ahead: counts.behind_by}}
+
+          {:error, :not_found} when not is_nil(base) and base != head ->
+            with {:ok, counts} <- GitHub.compare(env.repo, base, env.branch) do
+              {:ok, %{behind: counts.ahead_by, ahead: local + counts.behind_by}}
+            end
+
+          error ->
+            error
+        end
+    end
+  end
+
+  # Whatever runs in the environment answers for its git.
+  defp sha(value) when is_binary(value) do
+    if value =~ ~r/\A[0-9a-f]{40}([0-9a-f]{24})?\z/, do: value
+  end
+
+  defp sha(_), do: nil
 
   @doc "\"Later\": leaves the pending-restart badge and notice in place. Nothing to do."
   def restart_later(_scope, env), do: {:ok, env}
@@ -292,10 +377,17 @@ defmodule Foreman.Environments do
   defp queue_action(scope, env, action, args) do
     desired =
       case action do
-        :stop -> "stopped"
-        :destroy -> "destroyed"
-        a when a in [:create, :start, :rebuild, :restart_affected, :restart_all] -> "running"
-        _ -> env.desired_state
+        :stop ->
+          "stopped"
+
+        :destroy ->
+          "destroyed"
+
+        a when a in [:create, :start, :rebuild, :pull_rebuild, :restart_affected, :restart_all] ->
+          "running"
+
+        _ ->
+          env.desired_state
       end
 
     # Remembered so cancelling the operation can put the wish back.
@@ -428,6 +520,7 @@ defmodule Foreman.Environments do
 
   defp command_type("create"), do: "env.create"
   defp command_type("rebuild"), do: "env.rebuild"
+  defp command_type("pull_rebuild"), do: "env.rebuild"
   defp command_type("start"), do: "env.start"
   defp command_type("stop"), do: "env.stop"
   defp command_type("destroy"), do: "env.destroy"
@@ -447,7 +540,8 @@ defmodule Foreman.Environments do
 
   # -- results -----------------------------------------------------------------------
 
-  @up ~w(create rebuild start restart_affected restart_all)
+  @up ~w(create rebuild pull_rebuild start restart_affected restart_all)
+  @fresh_build ~w(create rebuild pull_rebuild)
 
   @doc """
   Applies a finished operation's outcome to its environment, then sends
@@ -517,7 +611,7 @@ defmodule Foreman.Environments do
     |> put_if(:devcontainer_service, string(result["devcontainer_service"]))
     |> put_if(:warnings, strings(result["warnings"]))
     |> put_if(:host_requirements, map(result["host_requirements"]))
-    |> then(&if(action in ["create", "rebuild"], do: Map.put(&1, :ts_authkey, nil), else: &1))
+    |> then(&if(action in @fresh_build, do: Map.put(&1, :ts_authkey, nil), else: &1))
   end
 
   defp result_attrs(%{status: "succeeded", action: "stop"}, _env),
@@ -538,6 +632,14 @@ defmodule Foreman.Environments do
       do: Map.merge(attrs, %{observed_state: "error", status_message: "cancelled"}),
       else: attrs
   end
+
+  # Refused before anything was torn down, so it's still running (the
+  # agent starts a stopped one to pull in it).
+  defp result_attrs(
+         %{status: "failed", action: "pull_rebuild", result: %{"pull_failed" => true}} = op,
+         _env
+       ),
+       do: %{observed_state: "running", status_message: "Didn't pull: #{op.error}"}
 
   defp result_attrs(%{status: status, action: action, error: error} = op, env)
        when status in ["failed", "cancelled"] and action in @up do
@@ -622,6 +724,7 @@ defmodule Foreman.Environments do
   @doc "The transitional state shown while an operation runs."
   def transitional_state("create"), do: "creating"
   def transitional_state("rebuild"), do: "creating"
+  def transitional_state("pull_rebuild"), do: "creating"
   def transitional_state("start"), do: "starting"
   def transitional_state("restart_affected"), do: "starting"
   def transitional_state("restart_all"), do: "starting"
@@ -751,7 +854,7 @@ defmodule Foreman.Environments do
     end
   end
 
-  @lifecycle ~w(create rebuild start stop destroy restart_affected restart_all)
+  @lifecycle ~w(create rebuild pull_rebuild start stop destroy restart_affected restart_all)
 
   defp lifecycle_active?(env_id) do
     Repo.exists?(

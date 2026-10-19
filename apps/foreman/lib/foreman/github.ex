@@ -276,6 +276,27 @@ defmodule Foreman.GitHub do
     end
   end
 
+  @doc """
+  Compares two commits or branches of `repo` through the app's
+  installation, so it works whoever is asking. See `Client.compare/4`.
+  """
+  def compare(%Repos.Repo{} = repo, base, head) do
+    repo = Foreman.Repo.preload(repo, :owner)
+
+    cond do
+      not configured?() ->
+        {:error, :not_configured}
+
+      is_nil(repo.owner.installation_id) ->
+        {:error, :not_installed}
+
+      true ->
+        with {:ok, token} <- client().installation_token(app(), repo.owner.installation_id) do
+          client().compare(token, repo.full_name, base, head)
+        end
+    end
+  end
+
   # -- repo sync -----------------------------------------------------------------
 
   @doc """
