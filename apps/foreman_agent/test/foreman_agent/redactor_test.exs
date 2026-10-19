@@ -1,5 +1,7 @@
 defmodule ForemanAgent.RedactorTest do
-  use ExUnit.Case, async: true
+  # Not async: the agent's key is global (Identity keeps it in a
+  # persistent term), and the async identity tests replace it with theirs.
+  use ExUnit.Case, async: false
 
   alias ForemanAgent.Redactor
   alias ForemanProtocol.Command

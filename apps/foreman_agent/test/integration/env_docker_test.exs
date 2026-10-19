@@ -17,8 +17,15 @@ defmodule ForemanAgent.Integration.EnvDockerTest do
   @moduletag :docker
   @moduletag timeout: 900_000
 
-  @env1 "11111111-1111-4111-8111-111111111111"
-  @env2 "22222222-2222-4222-8222-222222222222"
+  # CI's runners share one Docker daemon, so each run's compose projects,
+  # volumes and env_id labels carry an id of their own (an .exs file is
+  # compiled on every run).
+  @run Base.encode16(:crypto.strong_rand_bytes(3), case: :lower)
+
+  @env1 "#{@run}11-1111-4111-8111-111111111111"
+  @env2 "#{@run}22-2222-4222-8222-222222222222"
+  @slug1 "hello-#{@run}-1"
+  @slug2 "hello-#{@run}-2"
 
   setup_all do
     root = Path.expand("../../tmp/docker-test", __DIR__)
@@ -47,7 +54,7 @@ defmodule ForemanAgent.Integration.EnvDockerTest do
     Config.put(config)
 
     on_exit(fn ->
-      for slug <- ["hello-1", "hello-2"] do
+      for slug <- [@slug1, @slug2] do
         System.cmd("docker", ["compose", "-p", slug, "down", "--volumes", "--remove-orphans"],
           stderr_to_stdout: true
         )
@@ -173,14 +180,14 @@ defmodule ForemanAgent.Integration.EnvDockerTest do
     ctx = ctx(config)
 
     # -- create two copies -------------------------------------------------
-    assert {:ok, r1} = Env.run("env.create", create_payload(@env1, "hello-1", base_url), ctx)
-    assert {:ok, r2} = Env.run("env.create", create_payload(@env2, "hello-2", base_url), ctx)
+    assert {:ok, r1} = Env.run("env.create", create_payload(@env1, @slug1, base_url), ctx)
+    assert {:ok, r2} = Env.run("env.create", create_payload(@env2, @slug2, base_url), ctx)
 
     assert r1["remote_user"] == "vscode"
     assert r1["remote_workspace_folder"] == "/workspaces/hello"
     assert r1["services"] == ["app", "sidecar"]
-    assert r1["compose_project"] == "hello-1"
-    assert r2["compose_project"] == "hello-2"
+    assert r1["compose_project"] == @slug1
+    assert r2["compose_project"] == @slug2
 
     c1 = containers(@env1)
     c2 = containers(@env2)
@@ -223,12 +230,12 @@ defmodule ForemanAgent.Integration.EnvDockerTest do
     # outbound proxy listens on 127.0.0.2, out of the tailnet's reach.
     assert eventually(fn -> listening?(app1, {127, 0, 0, 2}, 1055) end)
     refute listening?(app1, {127, 0, 0, 1}, 1055)
-    assert {"hello-1\n", 0} = exec(app1, ["printenv", "TS_HOSTNAME"])
+    assert exec(app1, ["printenv", "TS_HOSTNAME"]) == {@slug1 <> "\n", 0}
 
     # Tailscale SSH starts a clean login shell, without the container's
     # environment; the feature's profile hook brings it back.
     clean_login = ["env", "-i", "HOME=/home/vscode", "bash", "-lc"]
-    assert {"hello-1\n", 0} = exec(app1, clean_login ++ ["echo $FOREMAN_ENV"])
+    assert exec(app1, clean_login ++ ["echo $FOREMAN_ENV"]) == {@slug1 <> "\n", 0}
     assert {"first value\n", 0} = exec(app1, clean_login ++ ["echo \"$HELLO_SECRET\""])
 
     # The secrets directory is read-only inside the container.
@@ -244,14 +251,14 @@ defmodule ForemanAgent.Integration.EnvDockerTest do
 
     # -- git status runs inside the container --------------------------------
     assert {:ok, %{"clean" => true, "branch" => "main", "head" => head, "base" => head}} =
-             Env.run("env.git_status", %{env_id: @env1, slug: "hello-1"}, ctx)
+             Env.run("env.git_status", %{env_id: @env1, slug: @slug1}, ctx)
 
     assert head =~ ~r/\A[0-9a-f]{40}\z/
 
     exec(app1, ["bash", "-c", "echo change >> /workspaces/hello/README.md"])
 
     assert {:ok, %{"clean" => false, "changed_files" => 1}} =
-             Env.run("env.git_status", %{env_id: @env1, slug: "hello-1"}, ctx)
+             Env.run("env.git_status", %{env_id: @env1, slug: @slug1}, ctx)
 
     # -- new secrets reach new shells without a restart ----------------------
     assert {:ok, _} =
@@ -282,7 +289,7 @@ defmodule ForemanAgent.Integration.EnvDockerTest do
                "env.restart",
                %{
                  env_id: @env1,
-                 slug: "hello-1",
+                 slug: @slug1,
                  mode: "affected",
                  changed: ["SIDECAR_TOKEN"],
                  compose_env: %{"SIDECAR_TOKEN" => "token-two"}
@@ -299,13 +306,13 @@ defmodule ForemanAgent.Integration.EnvDockerTest do
     assert after_restart != before
 
     # -- stop and start ---------------------------------------------------------
-    assert {:ok, _} = Env.run("env.stop", %{env_id: @env1, slug: "hello-1"}, ctx)
+    assert {:ok, _} = Env.run("env.stop", %{env_id: @env1, slug: @slug1}, ctx)
     assert_states(@env1, "exited")
 
     assert {:ok, _} =
              Env.run(
                "env.start",
-               %{env_id: @env1, slug: "hello-1", compose_env: %{"SIDECAR_TOKEN" => "token-two"}},
+               %{env_id: @env1, slug: @slug1, compose_env: %{"SIDECAR_TOKEN" => "token-two"}},
                ctx
              )
 
@@ -313,7 +320,7 @@ defmodule ForemanAgent.Integration.EnvDockerTest do
     assert containers(@env1)["app"]["Id"] == app1
 
     # -- rebuild keeps the workspace ----------------------------------------------
-    assert {:ok, _} = Env.run("env.rebuild", create_payload(@env1, "hello-1", base_url), ctx)
+    assert {:ok, _} = Env.run("env.rebuild", create_payload(@env1, @slug1, base_url), ctx)
     new_app = containers(@env1)["app"]["Id"]
     assert new_app != app1
     assert {out, 0} = exec(new_app, ["cat", "/workspaces/hello/README.md"])
@@ -358,7 +365,7 @@ defmodule ForemanAgent.Integration.EnvDockerTest do
 
     host_git.(["-C", work, "push", "-q", "origin", "main"])
 
-    pull = Map.put(create_payload(@env1, "hello-1", base_url), :pull, true)
+    pull = Map.put(create_payload(@env1, @slug1, base_url), :pull, true)
 
     assert {:error, "1 changed file in the workspace; commit or stash it first",
             %{"pull_failed" => true}} = Env.run("env.rebuild", pull, ctx)
@@ -385,14 +392,14 @@ defmodule ForemanAgent.Integration.EnvDockerTest do
     assert {:ok, _} =
              Env.run(
                "env.logs",
-               %{env_id: @env1, slug: "hello-1", service: "sidecar", tail: 10},
+               %{env_id: @env1, slug: @slug1, service: "sidecar", tail: 10},
                ctx
              )
 
     assert_received {:log, "stdout", _}
 
     # -- destroy --------------------------------------------------------------------
-    for {env_id, slug} <- [{@env1, "hello-1"}, {@env2, "hello-2"}] do
+    for {env_id, slug} <- [{@env1, @slug1}, {@env2, @slug2}] do
       assert {:ok, _} = Env.run("env.destroy", %{env_id: env_id, slug: slug}, ctx)
       assert containers(env_id) == %{}
       refute File.exists?(Path.join(config.envs_root, env_id))
@@ -405,7 +412,7 @@ defmodule ForemanAgent.Integration.EnvDockerTest do
         "ls",
         "-q",
         "--filter",
-        "label=com.docker.compose.project=hello-1"
+        "label=com.docker.compose.project=#{@slug1}"
       ])
 
     assert volumes == ""
@@ -416,10 +423,10 @@ defmodule ForemanAgent.Integration.EnvDockerTest do
     base_url: base_url
   } do
     ctx = ctx(config)
-    env_id = "44444444-4444-4444-8444-444444444444"
+    env_id = "#{@run}44-4444-4444-8444-444444444444"
 
     payload =
-      create_payload(env_id, "sneaky-1", base_url, %{
+      create_payload(env_id, "sneaky-#{@run}-1", base_url, %{
         "repo" => "acme/sneaky",
         "clone_url" => base_url <> "/sneaky.git",
         "tailscale" => %{"enabled" => false}
@@ -439,10 +446,10 @@ defmodule ForemanAgent.Integration.EnvDockerTest do
     config: config,
     base_url: base_url
   } do
-    env_id = "55555555-5555-4555-8555-555555555555"
+    env_id = "#{@run}55-5555-4555-8555-555555555555"
 
     payload =
-      create_payload(env_id, "innocent-1", base_url, %{
+      create_payload(env_id, "innocent-#{@run}-1", base_url, %{
         "repo" => "acme/innocent",
         "clone_url" => base_url <> "/innocent.git",
         "tailscale" => %{"enabled" => false}
@@ -460,11 +467,11 @@ defmodule ForemanAgent.Integration.EnvDockerTest do
     config: config,
     base_url: base_url
   } do
-    env_id = "66666666-6666-4666-8666-666666666666"
+    env_id = "#{@run}66-6666-4666-8666-666666666666"
     ref = "ghcr.io/devcontainers/features/docker-in-docker:2"
 
     payload =
-      create_payload(env_id, "hello-9", base_url, %{
+      create_payload(env_id, "hello-#{@run}-9", base_url, %{
         "tailscale" => %{"enabled" => false},
         "features" => %{ref => %{}}
       })
@@ -480,13 +487,15 @@ defmodule ForemanAgent.Integration.EnvDockerTest do
     base_url: base_url
   } do
     ctx = ctx(config)
-    env_id = "33333333-3333-4333-8333-333333333333"
-    payload = create_payload(env_id, "hello-3", base_url, %{"tailscale" => %{"enabled" => false}})
+    env_id = "#{@run}33-3333-4333-8333-333333333333"
+
+    payload =
+      create_payload(env_id, "hello-#{@run}-3", base_url, %{"tailscale" => %{"enabled" => false}})
 
     assert {:ok, _} = Env.run("env.create", payload, ctx)
 
     on_exit(fn ->
-      System.cmd("docker", ["compose", "-p", "hello-3", "down", "--volumes"],
+      System.cmd("docker", ["compose", "-p", "hello-#{@run}-3", "down", "--volumes"],
         stderr_to_stdout: true
       )
     end)
@@ -515,13 +524,17 @@ defmodule ForemanAgent.Integration.EnvDockerTest do
         ~s(cd /workspaces/hello/.devcontainer && sed -i 's/"docker-compose.yml"\\]/"docker-compose.yml", "docker-compose.override.yml"]/' devcontainer.json)
       ])
 
-    assert {:ok, _} = Env.run("env.stop", %{env_id: env_id, slug: "hello-3"}, ctx)
+    assert {:ok, _} = Env.run("env.stop", %{env_id: env_id, slug: "hello-#{@run}-3"}, ctx)
 
     assert {:error, message} =
-             Env.run("env.start", %{env_id: env_id, slug: "hello-3", compose_env: %{}}, ctx)
+             Env.run(
+               "env.start",
+               %{env_id: env_id, slug: "hello-#{@run}-3", compose_env: %{}},
+               ctx
+             )
 
     assert message =~ "protected"
 
-    assert {:ok, _} = Env.run("env.destroy", %{env_id: env_id, slug: "hello-3"}, ctx)
+    assert {:ok, _} = Env.run("env.destroy", %{env_id: env_id, slug: "hello-#{@run}-3"}, ctx)
   end
 end
