@@ -19,20 +19,37 @@ defmodule Foreman.TailscaleTest do
     on_exit(fn -> Application.delete_env(:foreman, :tailscale) end)
   end
 
-  test "cleanup removes Foreman-tagged devices without a live environment, and nothing else" do
-    env = environment_fixture(slug: "storefront-1")
+  test "cleanup removes devices recorded for destroyed environments, and nothing else" do
+    env = environment_fixture(slug: "storefront-1", tailscale_device_id: "nLive")
+
+    environment_fixture(
+      slug: "storefront-9",
+      tailscale_device_id: "nGone",
+      destroyed_at: DateTime.utc_now()
+    )
 
     stub(ClientMock, :list_devices, fn _ ->
       {:ok,
        [
-         %{"id" => "1", "hostname" => env.slug, "tags" => ["tag:foreman-env"]},
-         %{"id" => "2", "hostname" => "storefront-9", "tags" => ["tag:foreman-env"]},
-         %{"id" => "3", "hostname" => "monas-laptop", "tags" => []}
+         %{
+           "id" => "1",
+           "nodeId" => "nLive",
+           "hostname" => env.slug,
+           "tags" => ["tag:foreman-env"]
+         },
+         %{
+           "id" => "2",
+           "nodeId" => "nGone",
+           "hostname" => "storefront-9",
+           "tags" => ["tag:foreman-env"]
+         },
+         %{"id" => "3", "hostname" => "storefront-7", "tags" => ["tag:foreman-env"]},
+         %{"id" => "4", "hostname" => "monas-laptop", "tags" => []}
        ]}
     end)
 
     expect(ClientMock, :delete_device, fn _, "2" -> :ok end)
-    assert {:ok, 1} = Tailscale.cleanup(Foreman.Environments.live_slugs())
+    assert {:ok, 1} = Tailscale.cleanup()
   end
 
   test "team deployments tag nodes per developer" do

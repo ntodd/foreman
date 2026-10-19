@@ -16,7 +16,7 @@ defmodule Foreman.RuntimeConfigTest do
   }
 
   setup do
-    keys = Map.keys(@env) ++ ["FOREMAN_DB"]
+    keys = Map.keys(@env) ++ ["FOREMAN_DB", "FOREMAN_TAILSCALE_DEPLOYMENT_TAG"]
     saved_env = Map.new(keys, &{&1, System.get_env(&1)})
     saved_database = Application.get_env(:foreman, :database)
 
@@ -30,9 +30,9 @@ defmodule Foreman.RuntimeConfigTest do
     :ok
   end
 
-  defp read_repo_config do
-    Config.Reader.read!(@runtime, env: :prod, target: :host)[:foreman][Foreman.Repo]
-  end
+  defp read_config, do: Config.Reader.read!(@runtime, env: :prod, target: :host)[:foreman]
+
+  defp read_repo_config, do: read_config()[Foreman.Repo]
 
   test "a release built for Postgres uses DATABASE_URL without FOREMAN_DB set at runtime" do
     Application.put_env(:foreman, :database, "postgres")
@@ -76,5 +76,21 @@ defmodule Foreman.RuntimeConfigTest do
     System.put_env("FOREMAN_DB", "")
 
     assert read_repo_config()[:url] == @env["DATABASE_URL"]
+  end
+
+  test "FOREMAN_TAILSCALE_DEPLOYMENT_TAG sets the deployment tag" do
+    Application.put_env(:foreman, :database, "postgres")
+    System.put_env("FOREMAN_TAILSCALE_DEPLOYMENT_TAG", "tag:foreman-dev")
+
+    assert read_config()[:tailscale][:deployment_tag] == "tag:foreman-dev"
+  end
+
+  # A typo would leave the sweep off without saying so, and an auth key
+  # with a tag the OAuth client doesn't own fails every create.
+  test "a FOREMAN_TAILSCALE_DEPLOYMENT_TAG that isn't a tag is refused" do
+    Application.put_env(:foreman, :database, "postgres")
+    System.put_env("FOREMAN_TAILSCALE_DEPLOYMENT_TAG", "foreman-dev")
+
+    assert_raise RuntimeError, ~r/FOREMAN_TAILSCALE_DEPLOYMENT_TAG/, fn -> read_config() end
   end
 end
