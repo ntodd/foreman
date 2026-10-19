@@ -19,6 +19,7 @@ defmodule Foreman.Accounts.User do
     field :git_email, :string
     field :dotfiles_repository, :string
     field :dotfiles_install_command, :string
+    field :devcontainer_features, :map, default: %{}
     field :disabled_at, :utc_datetime_usec
     timestamps()
   end
@@ -50,6 +51,19 @@ defmodule Foreman.Accounts.User do
     user
     |> cast(attrs, [:role, :disabled_at])
     |> validate_inclusion(:role, @roles)
+  end
+
+  @doc "Features go on all of the user's environments: ref => options, as in devcontainer.json."
+  def features_changeset(user, features) when is_map(features) do
+    user
+    |> cast(%{devcontainer_features: features}, [:devcontainer_features])
+    |> Foreman.Validations.validate_features(:devcontainer_features)
+  end
+
+  def features_changeset(user, _features) do
+    user
+    |> change()
+    |> add_error(:devcontainer_features, "must be an object of feature refs and their options")
   end
 
   def preferences_changeset(user, attrs) do

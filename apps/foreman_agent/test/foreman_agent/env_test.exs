@@ -293,6 +293,89 @@ defmodule ForemanAgent.EnvTest do
       assert arg(args, "--dotfiles-install-command") == "./install.sh"
     end
 
+    test "adds the user's features alongside Foreman's", %{ctx: ctx} do
+      stub_tools()
+      orca = %{"ghcr.io/ntodd/devcontainer-features/orca:1" => %{"server" => true}}
+
+      assert {:ok, _} = Env.run("env.create", payload(%{"features" => orca}), ctx)
+
+      [_git, _services, _policy, {"devcontainer", rc_args, _}, {"devcontainer", up_args, _}] =
+        runs()
+
+      expected =
+        Map.put(orca, "./.foreman/feature", %{"tailscale" => true})
+
+      assert JSON.decode!(arg(rc_args, "--additional-features")) == expected
+      assert JSON.decode!(arg(up_args, "--additional-features")) == expected
+    end
+
+    test "skips a user feature the repo already declares, whatever its version or case", %{
+      ctx: ctx
+    } do
+      stub_tools(
+        devcontainer: """
+        {
+          "dockerComposeFile": ["docker-compose.yml"],
+          "service": "app",
+          "features": {"GHCR.IO/devcontainers/features/Node:1": {"version": "20"}}
+        }
+        """
+      )
+
+      features = %{
+        "ghcr.io/devcontainers/features/node:2" => %{"version" => "22"},
+        "ghcr.io/ntodd/devcontainer-features/orca:1" => %{}
+      }
+
+      assert {:ok, _} = Env.run("env.create", payload(%{"features" => features}), ctx)
+
+      {"devcontainer", up_args, _} = List.last(runs())
+
+      assert JSON.decode!(arg(up_args, "--additional-features")) == %{
+               "ghcr.io/ntodd/devcontainer-features/orca:1" => %{},
+               "./.foreman/feature" => %{"tailscale" => true}
+             }
+
+      assert_received {:log, "info",
+                       "Skipping your feature ghcr.io/devcontainers/features/node:2" <> rest}
+
+      assert rest =~ "already declares"
+    end
+
+    test "refuses a user feature that would stand in for Foreman's", %{ctx: ctx} do
+      stub_tools()
+      features = %{"ghcr.io/mona/features/foreman:1" => %{}}
+
+      assert {:error, message} = Env.run("env.create", payload(%{"features" => features}), ctx)
+      assert message =~ "ghcr.io/mona/features/foreman:1"
+      assert message =~ "your feature"
+      refute Enum.any?(runs(), &match?({"devcontainer", _, _}, &1))
+    end
+
+    test "names the user's feature when the policy refuses it", %{ctx: ctx} do
+      ref = "ghcr.io/mona/features/root:1"
+
+      stub_tools(
+        resolved: %{
+          "configuration" => %{},
+          "mergedConfiguration" => %{"privileged" => true},
+          "featuresConfiguration" => %{
+            "featureSets" => [
+              %{
+                "sourceInformation" => %{"userFeatureId" => ref},
+                "features" => [%{"id" => "root", "privileged" => true}]
+              }
+            ]
+          }
+        }
+      )
+
+      assert {:error, message} =
+               Env.run("env.create", payload(%{"features" => %{ref => %{}}}), ctx)
+
+      assert message =~ "your feature #{ref}"
+    end
+
     test "refuses clone hosts that aren't allowed, before running anything", %{ctx: ctx} do
       stub_tools()
 

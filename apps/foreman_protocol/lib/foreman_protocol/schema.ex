@@ -25,6 +25,7 @@ defmodule ForemanProtocol.Schema do
   @sha256 ~r/\A[0-9a-f]{64}\z/
   @ts_tag ~r/\Atag:[A-Za-z0-9][A-Za-z0-9-]{0,62}\z/
   @hostname ~r/\A[A-Za-z0-9](?:[A-Za-z0-9.-]{0,251}[A-Za-z0-9])?(?::\d{1,5})?\z/
+  @option_name ~r/\A[A-Za-z0-9_][A-Za-z0-9_-]{0,127}\z/
 
   # Names the agent sets itself on the processes it runs. A payload must
   # not be able to override them (or inject a loader).
@@ -221,6 +222,20 @@ defmodule ForemanProtocol.Schema do
   defp cast_value(v, :sha256, p), do: match(v, @sha256, p, "must be a lowercase hex SHA-256")
   defp cast_value(v, :ts_tag, p), do: match(v, @ts_tag, p, "must be a Tailscale tag")
   defp cast_value(v, :hostname, p), do: match(v, @hostname, p, "must be a host name")
+
+  defp cast_value(v, :option_name, p),
+    do: match(v, @option_name, p, "must be a feature option name")
+
+  defp cast_value(v, :feature_ref, p) do
+    if ForemanProtocol.Feature.valid_ref?(v),
+      do: {:ok, v},
+      else: err(p, "must be a feature ref like ghcr.io/owner/features/name:1")
+  end
+
+  # Feature options are strings or booleans, as devcontainer.json has them.
+  defp cast_value(v, :feature_option, _p) when is_boolean(v), do: {:ok, v}
+  defp cast_value("", :feature_option, _p), do: {:ok, ""}
+  defp cast_value(v, :feature_option, p), do: cast_value(v, :string, p)
 
   defp cast_value(v, :repo, p) do
     with {:ok, v} <- match(v, @repo, p, "must look like owner/name") do

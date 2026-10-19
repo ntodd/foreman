@@ -32,6 +32,8 @@ defmodule ForemanProtocol.Command do
                    repository: {:https_url, required: true},
                    install_command: {:string, []},
                    target_path: {:string, []}}, []},
+               # Protocol 3, and absent unless the user has features.
+               features: {ForemanProtocol.Feature.type(), []},
                tailscale:
                  {{:object,
                    enabled: {:boolean, default: false}, tags: {{:list, :ts_tag}, default: []}},

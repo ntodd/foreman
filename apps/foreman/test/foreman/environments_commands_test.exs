@@ -4,7 +4,7 @@ defmodule Foreman.EnvironmentsCommandsTest do
 
   import Mox
 
-  alias Foreman.{Agents, Environments, Scope}
+  alias Foreman.{Accounts, Agents, Environments, Scope}
   alias Foreman.GitHub.ClientMock
   alias ForemanProtocol.{Command, Event}
 
@@ -121,5 +121,55 @@ defmodule Foreman.EnvironmentsCommandsTest do
 
     # The env holds no token now, so it's first in line for the next refresh.
     assert is_nil(Repo.reload!(ctx.env).token_pushed_at)
+  end
+
+  describe "the user's own devcontainer features" do
+    @orca "ghcr.io/ntodd/devcontainer-features/orca:1"
+    @node "ghcr.io/devcontainers/features/node:1"
+
+    setup ctx do
+      stub(ClientMock, :scope_user_token, fn _, _, _, _, _ -> {:error, {:http, 502, "x"}} end)
+      on_protocol(ctx.box, 3)
+
+      {:ok, _} =
+        Accounts.update_features(ctx.scope, %{@orca => %{"server" => true}, @node => %{}})
+
+      :ok
+    end
+
+    defp rebuild(ctx) do
+      {:ok, _} =
+        Environments.rebuild(Scope.for_user(Repo.reload!(ctx.user)), Repo.reload!(ctx.env))
+
+      assert_receive {:dispatch, %Command{type: "env.rebuild"} = cmd}
+      report(ctx.box, cmd, %{status: "ok", result: %{"remote_user" => "vscode"}})
+      cmd
+    end
+
+    test "go on a rebuild, less the ones turned off for the repo", ctx do
+      assert rebuild(ctx).payload.features == %{@orca => %{"server" => true}, @node => %{}}
+
+      repo = Repo.preload(ctx.env, :repo).repo
+
+      {:ok, _} =
+        Accounts.put_repo_setting(ctx.scope, repo, %{
+          "disabled_features" => ["ghcr.io/devcontainers/features/node"]
+        })
+
+      assert rebuild(ctx).payload.features == %{@orca => %{"server" => true}}
+    end
+
+    test "are left out for an agent older than protocol 3, which would refuse them", ctx do
+      on_protocol(ctx.box, 2)
+      cmd = rebuild(ctx)
+      refute Map.has_key?(cmd.payload, :features)
+    end
+
+    test "are left out of the command when there are none", ctx do
+      {:ok, _} = Accounts.update_features(Scope.for_user(Repo.reload!(ctx.user)), %{})
+      cmd = rebuild(ctx)
+      refute Map.has_key?(cmd.payload, :features)
+      refute "features" in Map.keys(Command.to_wire(cmd)["payload"])
+    end
   end
 end

@@ -20,7 +20,7 @@ defmodule ForemanAgent.Env do
 
   alias ForemanAgent.Env.{Affected, ComposeScan, Overlay, Policy}
   alias ForemanAgent.SafeFS
-  alias ForemanProtocol.Jsonc
+  alias ForemanProtocol.{Feature, Jsonc}
 
   require Logger
 
@@ -263,6 +263,7 @@ defmodule ForemanAgent.Env do
     files_config = &compose_config(ctx, spec.slug, &1, &2, paths.meta, @check_args)
 
     with {:ok, config} <- read_devcontainer(paths.clone, spec.config_path),
+         {:ok, features} <- user_features(spec, config, ctx),
          {:ok, rel_files, service} <- compose_spec(config),
          {:ok, compose_files} <- resolve_compose_files(paths.clone, config_dir, rel_files),
          {:ok, scan_warnings} <- scan_compose(paths, compose_files, spec, ctx.config),
@@ -289,10 +290,41 @@ defmodule ForemanAgent.Env do
          override_path: override_path,
          services: services,
          devcontainer_service: service,
+         features: features,
          warnings: warnings
        }}
     end
   end
+
+  # The features a user adds to their own environments, less any the repo
+  # already declares at whatever version: the repo's copy is the one that
+  # installs. None can take the Foreman feature's id. The CLI lowercases
+  # refs, so a repo's are compared that way (a user's already are).
+  defp user_features(spec, config, ctx) do
+    features = Map.get(spec, :features, %{})
+    declared = declared_features(config["features"])
+
+    case Enum.find(Map.keys(features), &(Feature.id(&1) == Feature.foreman_id())) do
+      nil ->
+        {skipped, kept} =
+          Enum.split_with(features, fn {ref, _} -> Feature.base(ref) in declared end)
+
+        for {ref, _} <- skipped do
+          ctx.log.("info", "Skipping your feature #{ref}: the repo already declares it\n")
+        end
+
+        {:ok, Map.new(kept)}
+
+      ref ->
+        {:error,
+         "your feature #{ref} (from your Foreman settings) uses the id of Foreman's own feature; remove it"}
+    end
+  end
+
+  defp declared_features(features) when is_map(features),
+    do: MapSet.new(Map.keys(features), &(&1 |> String.downcase() |> Feature.base()))
+
+  defp declared_features(_), do: MapSet.new()
 
   defp read_devcontainer(clone, rel) do
     case SafeFS.read(clone, rel, max_bytes: @max_config_bytes) do
@@ -459,7 +491,8 @@ defmodule ForemanAgent.Env do
       workspace_root: paths.workspace,
       secrets_dir: paths.secrets,
       protected: ForemanAgent.Config.protected_paths(config),
-      rules: config.policy_rules
+      rules: config.policy_rules,
+      user_features: spec |> Map.get(:features, %{}) |> Map.keys()
     }
   end
 
@@ -508,7 +541,9 @@ defmodule ForemanAgent.Env do
         "--override-config",
         prepared.override_path,
         "--additional-features",
-        JSON.encode!(%{@feature_ref => Overlay.feature_options(spec.tailscale)}),
+        JSON.encode!(
+          Map.put(prepared.features, @feature_ref, Overlay.feature_options(spec.tailscale))
+        ),
         "--log-format",
         "json",
         "--oci-auth-hardening"

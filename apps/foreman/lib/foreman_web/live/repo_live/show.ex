@@ -1,28 +1,31 @@
 defmodule ForemanWeb.RepoLive.Show do
   @moduledoc """
   One repo: its environments, your git identity and dotfiles overrides
-  for it, and (admins) its token scope, Tailscale tags, default limits and
-  repo-level secrets.
+  for it, which of your own devcontainer features go on it, and (admins)
+  its token scope, Tailscale tags, default limits and repo-level secrets.
   """
   use ForemanWeb, :live_view
 
   import ForemanWeb.ForemanComponents
 
   alias Foreman.{Accounts, Environments, Repos, Scope}
+  alias ForemanProtocol.Feature
 
   @impl true
   def mount(%{"id" => id}, _session, socket) do
     repo = Repos.get_repo!(id)
     user = socket.assigns.current_scope.user
+    setting = Accounts.get_repo_setting(user, repo)
 
     {:ok,
      socket
      |> assign(:repo, repo)
+     |> assign(:disabled_features, disabled_features(setting))
      |> assign(:page_title, repo.full_name)
      |> assign(:settings_form, to_form(settings_params(repo), as: :settings))
      |> assign(
        :override_form,
-       to_form(override_params(Accounts.get_repo_setting(user, repo)), as: :override)
+       to_form(override_params(setting), as: :override)
      )
      |> assign(
        :environments,
@@ -41,6 +44,12 @@ defmodule ForemanWeb.RepoLive.Show do
       "default_branch" => repo.default_branch
     }
   end
+
+  defp disabled_features(nil), do: []
+  defp disabled_features(setting), do: setting.disabled_features || []
+
+  defp user_features(scope),
+    do: (scope.user.devcontainer_features || %{}) |> Map.keys() |> Enum.sort()
 
   defp override_params(nil),
     do: %{
@@ -95,6 +104,31 @@ defmodule ForemanWeb.RepoLive.Show do
       {:error, changeset} ->
         {:noreply,
          assign(socket, :override_form, to_form(%{changeset | action: :update}, as: :override))}
+    end
+  end
+
+  # The boxes left ticked are the features that stay on. Anything of the
+  # user's not among them is off here.
+  def handle_event("save_features", %{"repo_features" => params}, socket) do
+    on = List.wrap(params["on"])
+
+    disabled =
+      socket.assigns.current_scope
+      |> user_features()
+      |> Enum.map(&Feature.base/1)
+      |> Enum.reject(&(&1 in on))
+
+    case Accounts.put_repo_setting(socket.assigns.current_scope, socket.assigns.repo, %{
+           "disabled_features" => disabled
+         }) do
+      {:ok, setting} ->
+        {:noreply,
+         socket
+         |> assign(:disabled_features, disabled_features(setting))
+         |> put_flash(:info, "Saved. Features change on each environment's next rebuild.")}
+
+      {:error, _changeset} ->
+        {:noreply, put_flash(socket, :error, "Couldn't save that.")}
     end
   end
 
@@ -175,6 +209,41 @@ defmodule ForemanWeb.RepoLive.Show do
               label="Dotfiles install command"
               placeholder="./install.sh"
             />
+            <.button type="submit" size="sm">Save</.button>
+          </.form>
+          <p :if={user_features(@current_scope) == []} class="mt-4 text-xs text-ink-3">
+            You can add your own devcontainer features in <.link
+              navigate={~p"/settings"}
+              class="underline"
+            >Settings</.link>.
+          </p>
+        </.panel>
+
+        <.panel :if={user_features(@current_scope) != []} title="Your devcontainer features here">
+          <:subtitle>
+            From your Settings. Untick one to leave it out of your environments of this repo. Changes apply on the next rebuild.
+          </:subtitle>
+          <.form
+            for={%{}}
+            as={:repo_features}
+            id="repo-features"
+            phx-submit="save_features"
+            class="space-y-3"
+          >
+            <input type="hidden" name="repo_features[on][]" value="" />
+            <label
+              :for={ref <- user_features(@current_scope)}
+              class="flex items-center gap-2 font-mono text-sm text-ink"
+            >
+              <input
+                type="checkbox"
+                class="checkbox"
+                name="repo_features[on][]"
+                value={Feature.base(ref)}
+                checked={Feature.base(ref) not in @disabled_features}
+              />
+              {ref}
+            </label>
             <.button type="submit" size="sm">Save</.button>
           </.form>
         </.panel>
