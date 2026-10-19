@@ -125,15 +125,40 @@ node can't open connections to your laptops or to each other.
 That only covers the environment's own node. Ordinary traffic out of a
 container leaves through the box: Docker forwards it to the host, and a
 host on the tailnet routes `100.64.0.0/10` over its own Tailscale
-interface. Peers see the box, so code in any environment on it gets the
-box's grants. The personal setup runs the agent on the control plane's
-host, which is on the tailnet, so most personal installs are in this
-situation.
+interface. Peers would see the box, and code in any environment on it
+would get the box's grants. The personal setup runs the agent on the
+control plane's host, which is on the tailnet, so most personal installs
+are in this situation.
 
-Until the agent filters this itself, keep a box's tags to what its
-environments may reach: `tag:foreman` and nothing that grants
-production. A box that doesn't need the tailnet for anything else is
-safer off it.
+So the agent's install script adds a firewall to the box, an nftables
+table (`inet foreman`) loaded by `foreman-firewall.service`. Every
+environment network is a bridge named `fm-...`. Nothing arriving on
+those bridges, or on Docker's default bridge (where Docker's builder runs
+a Dockerfile's RUN steps and features' install scripts), may go to
+tailnet addresses (`100.64.0.0/10`, `fd7a:115c:a1e0::/48`), to the box's
+own tailnet addresses (ports published on them included), or out of
+`tailscale0` (subnet routes the box accepts); it's rejected. MagicDNS
+(port 53 on `100.100.100.100` and `fd7a:115c:a1e0::53`) is let through,
+in case Docker hands an environment's lookups to it. Containers on other
+networks aren't affected, and environments reach the tailnet through
+their own node as before.
+
+A box with other containers on Docker's default bridge (`docker run`
+without `--network`) that need the tailnet can leave that bridge out:
+install with `--default-bridge-reaches-tailnet` (and pass it again on a
+re-run). Image builds on that box can then reach the tailnet as the box.
+Either way, Docker fetches a Dockerfile's `ADD <url>` itself, from the
+box rather than the default bridge, so that isn't covered.
+
+The rules assume Tailscale's interface is `tailscale0`, the default, and
+treat any interface named `fm-...` as an environment's. A box that
+routes everything through an exit node can't run the firewall (the
+install script refuses it), and one that starts using an exit node later
+cuts its environments off from the internet. Anything that flushes the
+whole ruleset (`nft flush ruleset`, or stopping or reloading
+`nftables.service` on Debian) removes the table too, and a timer
+(`foreman-firewall-check.timer`) loads it again within 15 seconds.
+Still keep a box's tags to what's needed.
 
 ### Only some of your machines
 

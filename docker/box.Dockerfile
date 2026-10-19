@@ -36,11 +36,11 @@ COPY --from=agent /foreman_agent.tar.gz /
 
 FROM ${RUNTIME_IMAGE} AS box
 # What the install script expects of a box: systemd, Docker Engine with
-# Compose, git, and Node for the devcontainer CLI. Nothing of Foreman's:
-# e2e/linux/run.sh installs the agent with the control plane's install
-# script, as on a real box.
+# Compose, nftables (for the box firewall), git, and Node for the
+# devcontainer CLI. Nothing of Foreman's: e2e/linux/run.sh installs the
+# agent with the control plane's install script, as on a real box.
 RUN apt-get update -y \
-  && apt-get install -y --no-install-recommends systemd systemd-sysv dbus ca-certificates curl gnupg git procps iptables nodejs npm \
+  && apt-get install -y --no-install-recommends systemd systemd-sysv dbus ca-certificates curl gnupg git procps iptables nftables nodejs npm \
   && install -m 0755 -d /etc/apt/keyrings \
   && curl -fsSL https://download.docker.com/linux/debian/gpg -o /etc/apt/keyrings/docker.asc \
   && echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/debian trixie stable" > /etc/apt/sources.list.d/docker.list \

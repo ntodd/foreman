@@ -172,9 +172,30 @@ jobs:
         with:
           node-version: "22"
       - name: ShellCheck
-        run: shellcheck -s sh features/src/foreman/install.sh features/src/foreman/scripts/* apps/foreman/priv/agent/install.sh scripts/publish-agent-release.sh e2e/*.sh e2e/linux/run.sh e2e/linux/bin/gh
+        run: shellcheck -s sh features/src/foreman/install.sh features/src/foreman/scripts/* apps/foreman/priv/agent/install.sh scripts/publish-agent-release.sh e2e/*.sh e2e/firewall/test.sh e2e/linux/run.sh e2e/linux/bin/gh
       - name: Test the feature in a real devcontainer
         run: npx --yes @devcontainers/cli@0.89.0 features test --features foreman --base-image mcr.microsoft.com/devcontainers/base:debian --skip-scenarios features
+
+  # The box firewall against a fake tailnet: a peer behind an interface
+  # named tailscale0, as a box on the tailnet has. The test changes its
+  # host's network, so it runs in a privileged Docker-in-Docker container
+  # of its own, with its own network namespace, nftables and Docker.
+  firewall:
+    if: github.event_name != 'schedule'
+    runs-on: [self-hosted, Linux, X64]
+    env:
+      RUN: foreman-ci-firewall-${{ github.run_id }}-${{ github.run_attempt }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Test the rules
+        run: |
+          trap 'docker rm -f "$RUN" >/dev/null 2>&1' EXIT
+          docker run -d --privileged --name "$RUN" public.ecr.aws/docker/library/docker:29-dind >/dev/null
+          docker cp e2e/firewall/test.sh "$RUN":/test.sh
+          docker cp apps/foreman_agent/priv/firewall/foreman.nft "$RUN":/foreman.nft
+          docker exec "$RUN" sh -c 'for _ in $(seq 60); do docker info >/dev/null 2>&1 && exit 0; sleep 1; done; exit 1'
+          docker exec "$RUN" apk add -q nftables iproute2
+          docker exec -e FWTEST_IMAGE=public.ecr.aws/docker/library/busybox:1.37-musl "$RUN" sh /test.sh /foreman.nft
 
   images:
     if: github.event_name != 'schedule'

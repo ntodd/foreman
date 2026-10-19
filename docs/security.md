@@ -229,9 +229,17 @@ no ports are published.
 
 That node isn't the only way out. A container's ordinary traffic is
 forwarded through the box, and a box on the tailnet sends tailnet
-addresses over its own Tailscale interface, so peers see the box and
-apply the box's grants. Code in an environment can reach whatever its
-box's tags can (see known gap 13). Keep box tags minimal.
+addresses over its own Tailscale interface, so peers would see the box
+and apply the box's grants. The box's firewall (an nftables table loaded
+by `foreman-firewall.service`, see
+[setup/tailscale.md](setup/tailscale.md#boxes-on-the-tailnet)) rejects
+anything from an environment's bridges, or from Docker's default bridge
+where image builds run, bound for the tailnet, the box's own tailnet
+addresses (published ports included, by the destination before Docker
+rewrote it) or `tailscale0`, except DNS to MagicDNS. Environment bridges
+are all named `fm-...`, which the overlay and the policy guarantee
+(below). A process on the box that an environment can reach and that
+connects onward (a proxy, say) still connects as the box.
 
 Tailscale runs in userspace mode, without a TUN device or `NET_ADMIN`.
 In that mode it delivers tailnet connections to `127.0.0.1:<port>` in
@@ -314,10 +322,17 @@ These are accepted for now, or need someone to try them:
     boxes patched, keep them single-owner, and treat code
     in an environment (including coding agents) as able to reach
     anything the box can: there's no egress filtering, and on cloud
-    instances the metadata endpoint is reachable unless blocked. That
-    includes the tailnet: a box on it forwards environment traffic as
-    itself, so environments get the box's tags and grants, not just
-    `tag:foreman-env`'s.
+    instances the metadata endpoint is reachable unless blocked. The
+    tailnet is the exception: the box's firewall keeps environments off
+    it as the box. Something that flushes the box's whole ruleset
+    removes the firewall until its timer loads it again (within 15
+    seconds), and a box installed with
+    `--default-bridge-reaches-tailnet` lets image builds reach the
+    tailnet as the box. Even with the firewall, Docker's builder fetches
+    a Dockerfile's `ADD <url>` (and a git build context) itself, from
+    the box, so a Dockerfile can read from the tailnet as the box; its
+    RUN steps can't. Filtering the daemon would also stop the box
+    pulling images from a registry on the tailnet.
 14. **No default resource limits.** Without CPU, memory or pids limits
     on the repo or environment, one runaway process can starve every
     environment on its box.

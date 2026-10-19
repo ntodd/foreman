@@ -1,0 +1,66 @@
+#!/usr/sbin/nft -f
+# Foreman's box firewall: environments don't reach the tailnet as the box.
+#
+# A container's ordinary traffic is forwarded through the box, and a box
+# on the tailnet sends tailnet addresses (and any subnet routes it
+# accepts) over tailscale0 as itself, so peers would apply the box's
+# grants. Every environment network is a bridge named fm-..., and
+# nothing arriving on one may go to the tailnet, to the box's own
+# tailnet addresses, or out of tailscale0. Docker's default bridge gets
+# the same treatment, since Docker's builder runs a Dockerfile's RUN
+# steps there (the install script leaves those lines out, the ones
+# marked default-bridge, for a box that opts out). An environment
+# reaches the tailnet only through its own node, which the tailnet
+# policy governs.
+#
+# This table is Foreman's alone: Docker's and Tailscale's rules live in
+# their own tables, and a reject here is final whatever they accept.
+# Loading the file replaces the table, so it can be loaded again.
+
+table inet foreman
+delete table inet foreman
+
+table inet foreman {
+	set tailnet4 {
+		type ipv4_addr
+		flags interval
+		elements = { 100.64.0.0/10 }
+	}
+
+	set tailnet6 {
+		type ipv6_addr
+		flags interval
+		elements = { fd7a:115c:a1e0::/48 }
+	}
+
+	chain environment {
+		# MagicDNS: Docker's DNS may hand an environment's lookups to
+		# the box's resolver, which Tailscale can set to its own.
+		ip daddr 100.100.100.100 udp dport 53 accept
+		ip daddr 100.100.100.100 tcp dport 53 accept
+		ip6 daddr fd7a:115c:a1e0::53 udp dport 53 accept
+		ip6 daddr fd7a:115c:a1e0::53 tcp dport 53 accept
+		ip daddr @tailnet4 reject with icmpx type admin-prohibited
+		ip6 daddr @tailnet6 reject with icmpx type admin-prohibited
+		# Where the connection was headed before Docker rewrote it: a
+		# port published on the box's tailnet address.
+		ct original ip daddr @tailnet4 reject with icmpx type admin-prohibited
+		ct original ip6 daddr @tailnet6 reject with icmpx type admin-prohibited
+		# Subnet routes the box accepts from the tailnet.
+		oifname "tailscale0" reject with icmpx type admin-prohibited
+	}
+
+	chain forward {
+		type filter hook forward priority filter - 10; policy accept;
+		iifname "fm-*" jump environment
+		iifname "docker0" jump environment # default-bridge
+	}
+
+	# The box's own tailnet addresses, and anything listening on them
+	# (a control plane on the same host, say), aren't forwarded.
+	chain input {
+		type filter hook input priority filter - 10; policy accept;
+		iifname "fm-*" jump environment
+		iifname "docker0" jump environment # default-bridge
+	}
+}
