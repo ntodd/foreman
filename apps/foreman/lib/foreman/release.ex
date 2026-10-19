@@ -18,11 +18,21 @@ defmodule Foreman.Release do
     end
   end
 
-  @doc "Registers a CI-built, signed agent release so boxes can update to it."
-  def publish_agent(version, target, tarball_path, signature) do
-    {:ok, _} = Application.ensure_all_started(@app)
+  @doc """
+  Registers a CI-built, signed agent release so boxes can update to it.
 
-    case Foreman.Agents.Releases.register(version, target, tarball_path, signature) do
+  Starts only the repo: the whole app would start Oban's queues and Cron
+  in the eval VM, beside the running control plane's.
+  """
+  def publish_agent(version, target, tarball_path, signature) do
+    load_app()
+
+    {:ok, result, _} =
+      Ecto.Migrator.with_repo(Foreman.Repo, fn _repo ->
+        Foreman.Agents.Releases.register(version, target, tarball_path, signature)
+      end)
+
+    case result do
       {:ok, release} ->
         IO.puts("published agent #{release.version} for #{release.target} (#{release.sha256})")
 
