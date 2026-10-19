@@ -149,6 +149,37 @@ yourself. A control plane older than 0.3.0 doesn't move boxes back:
 they stay on the agent they run, which works as long as it speaks the
 same protocol, and they only move when you set a version on their page.
 
+## Changing the encryption key
+
+The control plane won't start if `FOREMAN_ENCRYPTION_KEY` can't decrypt
+what's in the database, and the log says so. That's usually a copy that
+lost a character or a settings file that was generated again, so put the
+original key back.
+
+To change the key on purpose (because it leaked, say):
+
+1. Back up, as above. That backup needs the old key, so keep the two
+   together.
+2. In `/etc/foreman/foreman.env`, set `FOREMAN_ENCRYPTION_KEY` to a new
+   key (`openssl rand -base64 32`) and move the old one to
+   `FOREMAN_ENCRYPTION_KEYS_RETIRED` (comma-separated, if there's more
+   than one).
+3. Recreate the container so it reads the file again:
+   `sudo docker compose up -d --force-recreate`. It now encrypts with
+   the new key and reads with either.
+4. Re-encrypt everything with the new key. It's safe while the control
+   plane runs, and prints how many rows of each table it rewrote:
+
+   ```sh
+   sudo docker exec foreman env -u PHX_SERVER /app/bin/foreman eval 'Foreman.Release.reencrypt()'
+   ```
+
+5. Take `FOREMAN_ENCRYPTION_KEYS_RETIRED` out of the settings file and
+   recreate the container again.
+
+Don't drop the old key before step 4 has finished. Anything still
+encrypted with it can't be read without it.
+
 ## When an agent update fails
 
 An update counts as failed when the box doesn't come back on the new

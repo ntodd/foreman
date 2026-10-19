@@ -29,9 +29,9 @@ config :foreman, ForemanWeb.Endpoint,
 config :foreman, Foreman.Vault,
   ciphers: [
     default:
-      {Cloak.Ciphers.AES.GCM,
+      {Foreman.Vault.Cipher,
        tag: "AES.GCM.V1",
-       key: Base.decode64!("3Jnb0hZiHIhHCOH6yX8mAh6s0b3o8TfA6cZJ3dzBnS8="),
+       keys: [Base.decode64!("3Jnb0hZiHIhHCOH6yX8mAh6s0b3o8TfA6cZJ3dzBnS8=")],
        iv_length: 12}
   ]
 
