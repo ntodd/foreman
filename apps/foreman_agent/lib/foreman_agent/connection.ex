@@ -127,6 +127,7 @@ defmodule ForemanAgent.Connection do
       hostname: Identity.hostname(),
       os: to_string(elem(:os.type(), 1)),
       arch: Updater.target(),
+      feature_version: Config.feature_version(Config.get()),
       in_flight: Ops.in_flight(),
       policy: Config.policy_report(Config.get())
     })

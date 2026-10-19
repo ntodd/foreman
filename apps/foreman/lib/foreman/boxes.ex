@@ -155,6 +155,7 @@ defmodule Foreman.Boxes do
       |> Ecto.Changeset.change(
         agent_version: join.agent_version,
         protocol_version: join.protocol_version,
+        feature_version: feature_version(join),
         hostname: join.hostname,
         os: join.os,
         arch: join.arch,
@@ -302,6 +303,14 @@ defmodule Foreman.Boxes do
   # Drops the agent's socket (the agent socket's id is agent_socket:<box_id>).
   defp disconnect(%Box{id: id}),
     do: Phoenix.Channel.Server.broadcast(Foreman.PubSub, "agent_socket:#{id}", "disconnect", %{})
+
+  # The protocol takes versions Version can't compare ("1.01.0").
+  defp feature_version(join) do
+    with v when is_binary(v) <- Map.get(join, :feature_version),
+         {:ok, _} <- Version.parse(v),
+         do: v,
+         else: (_ -> nil)
+  end
 
   defp broadcast(box, event),
     do: Phoenix.PubSub.broadcast(Foreman.PubSub, "boxes", {:box, event, box.id})

@@ -80,6 +80,11 @@ defmodule ForemanAgent.EnvTest do
     tailscale = Keyword.get(opts, :tailscale, fn -> {0, @joined} end)
 
     stub(DockerMock, :info, fn -> docker_info end)
+    containers = fake_containers()
+
+    stub(DockerMock, :list_containers, fn ["foreman.env_id=" <> @env_id] ->
+      {:ok, containers |> Agent.get(& &1) |> List.wrap() |> Enum.map(&fake_container/1)}
+    end)
 
     resolved =
       Keyword.get(opts, :resolved, %{
@@ -101,13 +106,15 @@ defmodule ForemanAgent.EnvTest do
           {:ok, %{status: 0, output: "Cloning into '#{dest}'...\n"}}
 
         {"docker", ["compose" | rest]} ->
-          fake_compose(rest, compose)
+          fake_compose(rest, compose, containers)
 
         {"devcontainer", ["read-configuration" | _]} ->
           log = ~s({"type":"text","level":3,"timestamp":1,"text":"Resolving features"}\n)
           {:ok, %{status: 0, output: log <> JSON.encode!(resolved) <> "\n"}}
 
-        {"devcontainer", _} ->
+        {"devcontainer", args} ->
+          container = fake_up(containers, args)
+
           run_opts[:on_output].(
             ~s({"type":"text","level":3,"timestamp":1,"text":"Building image"}\n)
           )
@@ -125,7 +132,7 @@ defmodule ForemanAgent.EnvTest do
             ~s({"type":"raw","level":3,"timestamp":1,"text":"\\u001b[1m\\u001b[31mColored\\u001b[39m\\u001b[22m\\n"}\n)
           )
 
-          up_result(outcome, run_opts)
+          up_result(outcome, run_opts, container)
 
         {"docker", ["exec", "-u", "0", _container, "tailscale" | _]} ->
           {status, output} = tailscale.()
@@ -140,14 +147,55 @@ defmodule ForemanAgent.EnvTest do
     end)
   end
 
-  defp up_result(:success, _run_opts) do
+  # The environment's devcontainer, as Docker would have it: the CLI
+  # reuses one that exists unless it's told to remove it, and keeps one it
+  # made even when setting it up fails.
+  defp fake_containers do
+    with nil <- Process.get(:fake_containers) do
+      {:ok, pid} = Agent.start_link(fn -> nil end)
+      Process.put(:fake_containers, pid)
+      pid
+    end
+  end
+
+  defp fake_up(containers, args) do
+    overlay = args |> arg("--override-config") |> Path.dirname() |> Path.join("overlay.yml")
+
+    label =
+      case Regex.run(~r/"foreman.feature_version": "([^"]+)"/, File.read!(overlay)) do
+        [_, version] -> version
+        nil -> nil
+      end
+
+    remove? = "--remove-existing-container" in args
+
+    Agent.get_and_update(containers, fn
+      %{} = c when not remove? ->
+        {c.id, %{c | state: "running"}}
+
+      previous ->
+        id = if previous, do: "abc123-#{System.unique_integer([:positive])}", else: "abc123"
+        {id, %{id: id, state: "running", label: label}}
+    end)
+  end
+
+  defp fake_container(c) do
+    labels = %{"com.docker.compose.service" => "app", "foreman.env_id" => @env_id}
+    labels = if c.label, do: Map.put(labels, "foreman.feature_version", c.label), else: labels
+    %{"Id" => c.id, "State" => c.state, "Labels" => labels}
+  end
+
+  # What happens to the container outside the agent.
+  defp update_container(fun), do: Agent.update(fake_containers(), fun)
+
+  defp up_result(:success, _run_opts, container) do
     result =
-      ~s({"outcome":"success","containerId":"abc123","composeProjectName":"storefront-2","remoteUser":"vscode","remoteWorkspaceFolder":"/workspaces/storefront"}\n)
+      ~s({"outcome":"success","containerId":"#{container}","composeProjectName":"storefront-2","remoteUser":"vscode","remoteWorkspaceFolder":"/workspaces/storefront"}\n)
 
     {:ok, %{status: 0, output: result}}
   end
 
-  defp up_result(:error, _run_opts) do
+  defp up_result(:error, _run_opts, _container) do
     {:ok,
      %{
        status: 1,
@@ -156,19 +204,22 @@ defmodule ForemanAgent.EnvTest do
      }}
   end
 
-  defp up_result({:error, message}, _run_opts) do
+  defp up_result({:error, message}, _run_opts, _container) do
     failure = %{"outcome" => "error", "message" => message, "description" => ""}
     {:ok, %{status: 1, output: JSON.encode!(failure) <> "\n"}}
   end
 
   # The CLI exits without writing an outcome line: what it printed streams
   # to the log, and the runner keeps the same bytes.
-  defp up_result({:exit, status, stream}, run_opts) do
+  defp up_result({:exit, status, stream}, run_opts, _container) do
     run_opts[:on_output].(stream)
     {:ok, %{status: status, output: stream}}
   end
 
-  defp fake_compose(args, compose) do
+  defp fake_compose(args, compose, containers) do
+    if "stop" in args, do: Agent.update(containers, &(&1 && %{&1 | state: "exited"}))
+    if "down" in args, do: Agent.update(containers, fn _ -> nil end)
+
     if "config" in args do
       out = args |> Enum.drop_while(&(&1 != "-o")) |> Enum.at(1)
       File.write!(out, JSON.encode!(compose))
@@ -1010,6 +1061,233 @@ defmodule ForemanAgent.EnvTest do
                )
 
       assert message =~ "rebuild"
+    end
+  end
+
+  describe "feature version" do
+    # The repo's feature, at another version.
+    defp feature_at(tmp, version) do
+      dir = Path.join(tmp, "feature-#{version}")
+      File.cp_r!(Path.expand("../../../../features/src/foreman", __DIR__), dir)
+      json = Path.join(dir, "devcontainer-feature.json")
+
+      File.write!(
+        json,
+        String.replace(File.read!(json), ~r/"version": "[^"]+"/, ~s("version": "#{version}"))
+      )
+
+      dir
+    end
+
+    defp with_feature(ctx, tmp, version),
+      do: put_in(ctx.config.feature_dir, feature_at(tmp, version))
+
+    defp start_payload, do: %{env_id: @env_id, slug: "storefront-2", compose_env: %{}}
+
+    defp restart_payload(mode, changed),
+      do: %{env_id: @env_id, slug: "storefront-2", mode: mode, changed: changed, compose_env: %{}}
+
+    defp rebuilt? do
+      {"devcontainer", args, _} = last_devcontainer()
+      "--remove-existing-container" in args
+    end
+
+    test "is read from the feature the agent ships", %{config: config, tmp_dir: tmp} do
+      assert Config.feature_version(config) == "1.1.0"
+      assert Config.feature_version(%{config | feature_dir: feature_at(tmp, "2.0.0")}) == "2.0.0"
+      assert Config.feature_version(%{config | feature_dir: Path.join(tmp, "missing")}) == nil
+    end
+
+    test "a create reports the version it built with", %{ctx: ctx} do
+      stub_tools()
+      assert {:ok, %{"feature_version" => "1.1.0"}} = Env.run("env.create", payload(), ctx)
+    end
+
+    test "a rebuild reports the version it built with", %{ctx: ctx, tmp_dir: tmp} do
+      stub_tools()
+      {:ok, _} = Env.run("env.create", payload(), ctx)
+
+      assert {:ok, %{"feature_version" => "1.2.0"}} =
+               Env.run("env.rebuild", payload(), with_feature(ctx, tmp, "1.2.0"))
+    end
+
+    test "a start that reuses the container keeps the version it was built with",
+         %{ctx: ctx, tmp_dir: tmp} do
+      stub_tools()
+      {:ok, _} = Env.run("env.create", payload(), ctx)
+      _ = runs()
+
+      assert {:ok, %{"feature_version" => "1.1.0"}} =
+               Env.run("env.start", start_payload(), with_feature(ctx, tmp, "1.2.0"))
+
+      refute rebuilt?()
+    end
+
+    test "a start whose container is gone builds one with the shipped version",
+         %{ctx: ctx, tmp_dir: tmp} do
+      stub_tools()
+      {:ok, _} = Env.run("env.create", payload(), ctx)
+      update_container(fn _ -> nil end)
+      _ = runs()
+
+      assert {:ok, %{"feature_version" => "1.2.0"}} =
+               Env.run("env.start", start_payload(), with_feature(ctx, tmp, "1.2.0"))
+
+      refute rebuilt?()
+    end
+
+    # The CLI keeps a container whose setup failed, and starts it next time.
+    test "a rebuild that failed after making its container leaves that container's version",
+         %{ctx: ctx, tmp_dir: tmp} do
+      stub_tools()
+      {:ok, _} = Env.run("env.create", payload(), ctx)
+      stub_tools(outcome: :error)
+      {:error, _} = Env.run("env.rebuild", payload(), with_feature(ctx, tmp, "1.2.0"))
+      stub_tools()
+
+      assert {:ok, %{"feature_version" => "1.2.0"}} =
+               Env.run("env.start", start_payload(), with_feature(ctx, tmp, "1.3.0"))
+    end
+
+    test "a start rebuilds a container built with a feature below the floor",
+         %{ctx: ctx, tmp_dir: tmp} do
+      stub_tools()
+      {:ok, _} = Env.run("env.create", payload(), with_feature(ctx, tmp, "1.0.0"))
+      _ = runs()
+
+      assert {:ok, %{"feature_version" => "1.1.0"}} = Env.run("env.start", start_payload(), ctx)
+      assert rebuilt?()
+      assert Enum.any?(logged(), &(&1 =~ "older Foreman feature"))
+
+      assert {:ok, _} = Env.run("env.start", start_payload(), ctx)
+      refute rebuilt?()
+    end
+
+    # Made before the agent labelled containers: there's no telling.
+    test "a start rebuilds a container with no version", %{ctx: ctx} do
+      stub_tools()
+      {:ok, _} = Env.run("env.create", payload(), ctx)
+      update_container(&%{&1 | label: nil})
+      _ = runs()
+
+      assert {:ok, %{"feature_version" => "1.1.0"}} = Env.run("env.start", start_payload(), ctx)
+      assert rebuilt?()
+    end
+
+    test "a start doesn't rebuild when the agent's own feature is below the floor",
+         %{ctx: ctx, tmp_dir: tmp} do
+      stub_tools()
+      old = with_feature(ctx, tmp, "1.0.0")
+      {:ok, _} = Env.run("env.create", payload(), old)
+      _ = runs()
+
+      assert {:ok, %{"feature_version" => "1.0.0"}} = Env.run("env.start", start_payload(), old)
+      refute rebuilt?()
+    end
+
+    defp stub_containers(containers) do
+      stub(DockerMock, :list_containers, fn ["foreman.env_id=" <> @env_id] ->
+        {:ok,
+         for {id, service, label} <- containers do
+           %{
+             "Id" => id,
+             "State" => "exited",
+             "Labels" => %{
+               "com.docker.compose.service" => service,
+               "foreman.env_id" => @env_id,
+               "foreman.feature_version" => label
+             }
+           }
+         end}
+      end)
+    end
+
+    # The CLI builds the image when it creates the first; a replica scaled
+    # up later gets the label of the agent that made it.
+    test "a start goes by the oldest of the devcontainer's replicas", %{ctx: ctx} do
+      stub_tools()
+      {:ok, _} = Env.run("env.create", payload(), ctx)
+      stub_containers([{"abc123", "app", "1.0.0"}, {"def456", "app", "1.1.0"}])
+      _ = runs()
+
+      assert {:ok, _} = Env.run("env.start", start_payload(), ctx)
+      assert rebuilt?()
+    end
+
+    test "a start checks the service the repo makes the devcontainer now", %{
+      ctx: ctx,
+      config: config
+    } do
+      stub_tools()
+      {:ok, _} = Env.run("env.create", payload(), ctx)
+      stub_containers([{"abc123", "app", "1.1.0"}, {"def456", "db", ""}])
+
+      config_path =
+        Path.join([
+          config.envs_root,
+          @env_id,
+          "workspace/storefront/.devcontainer/devcontainer.json"
+        ])
+
+      File.write!(
+        config_path,
+        String.replace(@devcontainer, ~s("service": "app"), ~s("service": "db"))
+      )
+
+      _ = runs()
+
+      assert {:ok, _} = Env.run("env.start", start_payload(), ctx)
+      assert rebuilt?()
+    end
+
+    test "a start fails when it can't tell what the container was built with", %{ctx: ctx} do
+      stub_tools()
+      {:ok, _} = Env.run("env.create", payload(), ctx)
+      stub(DockerMock, :list_containers, fn _ -> {:error, :timeout} end)
+      _ = runs()
+
+      assert {:error, message} = Env.run("env.start", start_payload(), ctx)
+      assert message =~ "couldn't check"
+      refute Enum.any?(runs(), &match?({"devcontainer", ["up" | _], _}, &1))
+    end
+
+    test "restart affected rebuilds below the floor even when the devcontainer isn't affected",
+         %{ctx: ctx, tmp_dir: tmp} do
+      stub_tools()
+      {:ok, _} = Env.run("env.create", payload(), with_feature(ctx, tmp, "1.0.0"))
+      _ = runs()
+
+      assert {:ok, %{"restarted" => ["app"], "feature_version" => "1.1.0"}} =
+               Env.run("env.restart", restart_payload("affected", []), ctx)
+
+      assert rebuilt?()
+
+      assert {:ok, _} = Env.run("env.start", start_payload(), ctx)
+      refute rebuilt?()
+    end
+
+    test "restart all reports the version", %{ctx: ctx} do
+      stub_tools()
+      {:ok, _} = Env.run("env.create", payload(), ctx)
+
+      assert {:ok, %{"restarted" => "all", "feature_version" => "1.1.0"}} =
+               Env.run("env.restart", restart_payload("all", []), ctx)
+    end
+
+    # A refused pull leaves the environment as it was, container and all.
+    test "pull and rebuild starts a stopped environment without rebuilding it to check git",
+         %{ctx: ctx, tmp_dir: tmp} do
+      stub_tools(git: git())
+      {:ok, _} = Env.run("env.create", payload(), with_feature(ctx, tmp, "1.0.0"))
+      {:ok, _} = Env.run("env.stop", %{env_id: @env_id, slug: "storefront-2"}, ctx)
+      _ = runs()
+
+      assert {:ok, %{"feature_version" => "1.1.0"}} =
+               Env.run("env.rebuild", Map.put(payload(), :pull, true), ctx)
+
+      assert [start, rebuild] = for({"devcontainer", ["up" | args], _} <- runs(), do: args)
+      refute "--remove-existing-container" in start
+      assert "--remove-existing-container" in rebuild
     end
   end
 

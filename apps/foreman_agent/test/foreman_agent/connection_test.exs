@@ -34,6 +34,16 @@ defmodule ForemanAgent.ConnectionTest do
       assert_receive {:__slipstream_command__, %JoinTopic{payload: payload}}, 5_000
       refute "stale" in payload["in_flight"]
     end
+
+    test "is rejoined reporting the Foreman feature the agent installs" do
+      {:ok, _socket} = Connection.handle_topic_close(@topic, :closed, closed_socket())
+      assert_receive {:__slipstream_command__, %JoinTopic{payload: payload}}, 5_000
+
+      assert payload["feature_version"] ==
+               ForemanAgent.Config.feature_version(ForemanAgent.Config.get())
+
+      assert payload["feature_version"] =~ ~r/\A\d+\.\d+\.\d+/
+    end
   end
 
   test "a result the control plane refuses isn't redelivered on every connect" do

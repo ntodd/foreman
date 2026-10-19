@@ -77,7 +77,8 @@ defmodule Foreman.Fixtures do
         capacity_policy: Map.get(attrs, :capacity_policy, "allow"),
         policy: Map.get(attrs, :policy, ForemanProtocol.Policy.defaults()),
         agent_version: "0.1.0",
-        protocol_version: 1
+        protocol_version: 1,
+        feature_version: Map.get(attrs, :feature_version)
       }
       |> Repo.insert!()
 
@@ -104,7 +105,8 @@ defmodule Foreman.Fixtures do
       tailscale_device_id: Map.get(attrs, :tailscale_device_id),
       destroyed_at: Map.get(attrs, :destroyed_at),
       devcontainer_service: "app",
-      services: ["app", "db"]
+      services: ["app", "db"],
+      feature_version: Map.get(attrs, :feature_version)
     }
     |> Repo.insert!()
   end

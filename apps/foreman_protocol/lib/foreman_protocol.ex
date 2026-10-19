@@ -27,6 +27,9 @@ defmodule ForemanProtocol do
     hostname: {:string, required: true},
     os: {:string, required: true},
     arch: {:string, required: true},
+    # The Foreman feature the agent installs. Agents before it reported
+    # this leave it out.
+    feature_version: {:version, []},
     in_flight: {{:list, :uuid}, default: []},
     policy:
       {{:map_of, {:enum, ForemanProtocol.Policy.rules()},

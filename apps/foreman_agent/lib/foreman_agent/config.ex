@@ -83,6 +83,18 @@ defmodule ForemanAgent.Config do
     end)
   end
 
+  @doc "The version of the Foreman feature this agent installs, or nil if it can't be read."
+  @spec feature_version(t()) :: String.t() | nil
+  def feature_version(%__MODULE__{feature_dir: dir}) do
+    with {:ok, content} <- File.read(Path.join(dir, "devcontainer-feature.json")),
+         {:ok, %{"version" => version}} when is_binary(version) <- JSON.decode(content),
+         {:ok, _} <- Version.parse(version) do
+      version
+    else
+      _ -> nil
+    end
+  end
+
   @doc "Paths no environment may ever bind-mount."
   def protected_paths(%__MODULE__{} = c),
     do: [c.data_dir, c.envs_root, c.secrets_root, c.release_root]

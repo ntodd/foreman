@@ -32,6 +32,7 @@ defmodule Foreman.Environments.Environment do
     field :devcontainer_service, :string
     field :warnings, {:array, :string}, default: []
     field :host_requirements, :map
+    field :feature_version, :string
     field :tailscale_device_id, :string
     field :ts_authkey, Foreman.Encrypted.Binary, redact: true
     field :created_once, :boolean, default: false
@@ -100,6 +101,7 @@ defmodule Foreman.Environments.Environment do
       :devcontainer_service,
       :warnings,
       :host_requirements,
+      :feature_version,
       :tailscale_device_id,
       :ts_authkey,
       :created_once,

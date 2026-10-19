@@ -50,6 +50,7 @@ defmodule ForemanWeb.EnvironmentLive.Show do
     # A check that's holding up a Stop has to be cancellable too.
     |> assign(:in_progress, in_progress(all_ops))
     |> assign(:online, Boxes.online?(env.box_id))
+    |> assign(:feature_update, Environments.feature_update(env))
     |> assign(:provisioned, Capacity.provisioned(env, env.repo))
     |> assign(:usage, Foreman.Capacity.Tracker.latest_usage(env.id))
     |> select_default_op()
@@ -236,6 +237,11 @@ defmodule ForemanWeb.EnvironmentLive.Show do
   end
 
   def handle_info({:environment, _id}, socket), do: {:noreply, load(socket)}
+
+  # An agent that joins can ship a newer feature.
+  def handle_info({:box, _event, box_id}, %{assigns: %{env: %{box_id: box_id}}} = socket),
+    do: {:noreply, load(socket)}
+
   def handle_info(_message, socket), do: {:noreply, socket}
 
   # The destroy check and the page's own check can be the same operation:
@@ -392,6 +398,14 @@ defmodule ForemanWeb.EnvironmentLive.Show do
           <.button size="sm" phx-click="action" phx-value-do="restart_affected">Restart affected</.button>
           <.button size="sm" phx-click="action" phx-value-do="restart_all">Restart all</.button>
           <.button size="sm" variant="ghost" phx-click="later">Later</.button>
+        </:actions>
+      </.callout>
+
+      <.callout :if={@feature_update} kind="info" icon="hero-arrow-path-mini" id="feature-update">
+        <p class="font-medium">{feature_update_text(@feature_update, @env.box.name)}</p>
+        <p class="mt-0.5">Rebuild to update it. The clone and volumes are kept.</p>
+        <:actions>
+          <.button size="sm" phx-click="action" phx-value-do="rebuild">Rebuild</.button>
         </:actions>
       </.callout>
 
@@ -598,6 +612,12 @@ defmodule ForemanWeb.EnvironmentLive.Show do
   defp commits(n, adjective), do: "#{n} #{adjective} commits"
 
   # Protocol 3 agents can pull.
+  defp feature_update_text({:behind, built, shipped}, box),
+    do: "Built with Foreman feature #{built}; #{box} has #{shipped}."
+
+  defp feature_update_text({:unknown, _shipped}, _box),
+    do: "Built before Foreman recorded feature versions, so it may have an older Foreman feature."
+
   defp pull_supported?(env), do: (env.box.protocol_version || 0) >= 3
 
   attr :sync, :map, required: true
