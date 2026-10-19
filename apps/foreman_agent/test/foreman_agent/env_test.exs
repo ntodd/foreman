@@ -156,6 +156,11 @@ defmodule ForemanAgent.EnvTest do
      }}
   end
 
+  defp up_result({:error, message}, _run_opts) do
+    failure = %{"outcome" => "error", "message" => message, "description" => ""}
+    {:ok, %{status: 1, output: JSON.encode!(failure) <> "\n"}}
+  end
+
   # The CLI exits without writing an outcome line: what it printed streams
   # to the log, and the runner keeps the same bytes.
   defp up_result({:exit, status, stream}, run_opts) do
@@ -180,11 +185,6 @@ defmodule ForemanAgent.EnvTest do
     {status, output} = answer.(rest |> Enum.drop_while(&(&1 != "core.fsmonitor=false")) |> tl())
     if status == 0, do: run_opts[:on_output].(output)
     {:ok, %{status: status, output: output}}
-  end
-
-  defp up_result({:error, message}, _run_opts) do
-    failure = %{"outcome" => "error", "message" => message, "description" => ""}
-    {:ok, %{status: 1, output: JSON.encode!(failure) <> "\n"}}
   end
 
   defp runs do

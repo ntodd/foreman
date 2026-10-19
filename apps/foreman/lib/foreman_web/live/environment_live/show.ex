@@ -568,6 +568,7 @@ defmodule ForemanWeb.EnvironmentLive.Show do
               @destroy_check.status in [:done, :failed] and
                 not (@destroy_check.result["clean"] == true)
             }
+            id="confirm-destroy"
             phx-change="confirm_input"
             class="mt-4"
           >

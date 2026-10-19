@@ -229,6 +229,8 @@ defmodule Foreman.Agents.Releases do
       :ignore
   end
 
+  def register_bundled(nil), do: []
+
   def register_bundled(dir) do
     for {file, version, target} <- bundled_files(dir) do
       {file, register_file(Path.join(dir, file), version, target)}

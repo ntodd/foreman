@@ -34,12 +34,17 @@ config :foreman, Foreman.Vault,
   ]
 
 config :foreman,
+  env: :test,
   github_client: Foreman.GitHub.ClientMock,
   tailscale_client: Foreman.Tailscale.ClientMock,
   agent_release_public_key: nil
 
 config :logger, level: :warning
 config :phoenix, :plug_init_mode, :runtime
-config :phoenix_live_view, enable_expensive_runtime_checks: true
+
+config :phoenix_live_view,
+  enable_expensive_runtime_checks: true,
+  test_warnings: [missing_form_id: :raise]
+
 config :phoenix, sort_verified_routes_query_params: true
 config :foreman, sync_dispatch: true
