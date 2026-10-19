@@ -171,7 +171,10 @@ to the box it runs on (up to the limits in "Known gaps").
   - builds that run privileged, on the host network, or with BuildKit
     entitlements (`security.insecure` is privileged)
   - networks from outside the project (`external`, or a fixed `name:`):
-    another environment's network reaches its sidecars
+    another environment's network reaches its sidecars. So are network
+    drivers other than `bridge` (macvlan and ipvlan put containers on the
+    box's own network), Docker's default bridge (`network_mode: bridge`)
+    and a network named directly in `network_mode`
   - `devcontainer.json` or feature mounts of an `external` volume that
     isn't this environment's
   - `use_api_socket` (the Docker socket, under its rule)
@@ -181,6 +184,12 @@ to the box it runs on (up to the limits in "Known gaps").
 
   `provider` services are refused whatever the box allows: Compose runs a
   provider's `type` as a program on the box.
+
+  The overlay puts every network an environment uses on a bridge named
+  `fm-` and a hash of the environment and network, replacing any bridge
+  name the repo set. A network that ends up on any other bridge is
+  refused whatever the box allows: that name is how the box tells
+  environment traffic from other containers'.
 
   Binds and host files that expose the agent's state, other environments
   or secrets directories are refused whatever the box allows. A failed

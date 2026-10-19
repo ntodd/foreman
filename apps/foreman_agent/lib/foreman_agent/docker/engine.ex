@@ -9,6 +9,9 @@ defmodule ForemanAgent.Docker.Engine do
   end
 
   @impl true
+  def list_networks(filters), do: get("/networks", filters: JSON.encode!(filters))
+
+  @impl true
   def info, do: get("/info", [])
 
   @impl true

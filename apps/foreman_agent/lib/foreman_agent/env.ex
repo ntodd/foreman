@@ -469,7 +469,7 @@ defmodule ForemanAgent.Env do
          :ok <- check_service(service, services),
          :ok <- check_run_services(config["runServices"], services),
          overlay_path = Path.join(paths.meta, "overlay.yml"),
-         :ok <- write_overlay(overlay_path, paths, spec, services, service, ctx),
+         :ok <- write_overlay(overlay_path, paths, spec, services, service, base, ctx),
          {:ok, merged} <- files_config.(compose_files ++ [overlay_path], env),
          {:ok, docker} <- docker_info(ctx),
          {:ok, policy_warnings} <- check_policy(merged, config, paths, spec, ctx.config, docker),
@@ -490,6 +490,7 @@ defmodule ForemanAgent.Env do
          devcontainer_service: service,
          features: features,
          gpus: Policy.requests_gpus?(merged),
+         networks: network_names_in(merged),
          warnings: warnings
        }}
     end
@@ -642,12 +643,13 @@ defmodule ForemanAgent.Env do
     end
   end
 
-  defp write_overlay(path, paths, spec, services, service, ctx) do
+  defp write_overlay(path, paths, spec, services, service, base, ctx) do
     yaml =
       Overlay.compose(%{
         env_id: spec.env_id,
         slug: spec.slug,
         services: services,
+        networks: own_networks(base),
         devcontainer_service: service,
         secrets_dir: paths.secrets,
         tailscale: spec.tailscale,
@@ -656,6 +658,23 @@ defmodule ForemanAgent.Env do
       })
 
     SafeFS.write_atomic(path, yaml, 0o600)
+  end
+
+  # The Docker names of the networks compose will use.
+  defp network_names_in(merged) do
+    for {_key, %{"name" => name}} <- Map.get(merged, "networks") || %{},
+        is_binary(name),
+        do: name
+  end
+
+  # The networks compose creates for the project, with their Docker
+  # names. An external one already exists, so its bridge isn't compose's
+  # to name (the policy refuses it).
+  defp own_networks(base) do
+    for {key, spec} <- Enum.sort(Map.get(base, "networks") || %{}),
+        is_map(spec),
+        spec["external"] not in [true, "true"],
+        do: {key, spec["name"] || "#{base["name"]}_#{key}"}
   end
 
   defp write_override(path, config, compose_files, overlay_path) do
@@ -826,16 +845,151 @@ defmodule ForemanAgent.Env do
         "--oci-auth-hardening"
       ]
 
-      with {:ok, warnings} <- check_resolved(config_args, env, paths, spec, ctx) do
+      with {:ok, warnings} <- check_resolved(config_args, env, paths, spec, ctx),
+           :ok <- move_to_foreman_bridges(ctx, spec.slug, prepared.networks) do
         warnings = Enum.uniq(prepared.warnings ++ warnings)
+        result = up(paths, spec, %{prepared | warnings: warnings}, config_args, env, ctx, opts)
 
-        with {:ok, result} <-
-               up(paths, spec, %{prepared | warnings: warnings}, config_args, env, ctx, opts) do
+        # Even after a failed up: a lifecycle command can fail it with the
+        # containers already running.
+        with {:ok, result} <- checked(result, check_foreman_bridges(ctx, spec.slug)) do
           {:ok, put_feature_version(result, ctx, spec.env_id, prepared.devcontainer_service)}
         end
       end
     end)
   end
+
+  defp checked(result, :ok), do: result
+  defp checked({:error, message}, {:error, check}), do: {:error, "#{message}\n\n#{check}"}
+  defp checked(_result, error), do: error
+
+  # The box's firewall knows environment traffic by its fm- bridge (see
+  # Overlay), and nothing moves an existing network onto one by itself:
+  # the CLI leaves a running environment alone, and compose reuses a
+  # network it didn't label with a config hash, or didn't create. A
+  # network compose labelled is recreated by its next up once the project
+  # is stopped, containers kept. Anything else would mean taking the
+  # containers down, and what they hold (an anonymous volume's data, say)
+  # with them, so it's refused before anything starts.
+  defp move_to_foreman_bridges(ctx, slug, names) do
+    with {:ok, stale} <- stale_networks(ctx, names) do
+      {recreated, kept} =
+        Enum.split_with(stale, &(compose_label(&1) == slug and config_hash?(&1)))
+
+      cond do
+        kept != [] ->
+          {:error,
+           "the Docker network #{network_names(kept)} isn't on a Foreman bridge, and compose would keep using it as it is, out of the box firewall's sight; destroy the environment and create it again, or remove the network on the box"}
+
+        recreated != [] ->
+          ctx.log.("info", "Moving #{network_names(recreated)} onto Foreman bridges\n")
+          with {:ok, _} <- compose(ctx, slug, ["stop"]), do: :ok
+
+        true ->
+          :ok
+      end
+    end
+  end
+
+  # The existing networks the project's compose config names, matched by
+  # exact name (Docker's name filter matches substrings).
+  defp stale_networks(_ctx, []), do: {:ok, []}
+
+  defp stale_networks(ctx, names) do
+    with {:ok, networks} <- list_networks(ctx, %{"name" => names}) do
+      {:ok, Enum.filter(networks, &(&1["Name"] in names and not foreman_bridge?(&1)))}
+    end
+  end
+
+  # What the containers really got, whatever compose was asked for.
+  defp check_foreman_bridges(ctx, slug) do
+    with {:ok, containers} <- list_project_containers(ctx, slug),
+         {:ok, stale} <- stale_attachments(ctx, containers) do
+      case stale do
+        [] ->
+          :ok
+
+        _ ->
+          stop_unsafe(
+            ctx,
+            slug,
+            "#{Enum.join(stale, ", ")} isn't on a Foreman bridge, so the box's firewall can't keep it off the tailnet"
+          )
+      end
+    else
+      {:error, message} -> stop_unsafe(ctx, slug, message)
+    end
+  end
+
+  defp stop_unsafe(ctx, slug, why) do
+    case compose(ctx, slug, ["stop"]) do
+      {:ok, _} -> {:error, "#{why}; the environment is stopped"}
+      {:error, stop} -> {:error, "#{why}, and Foreman couldn't stop the environment: #{stop}"}
+    end
+  end
+
+  defp stale_attachments(ctx, containers) do
+    attachments =
+      for c <- containers,
+          {_, %{"NetworkID" => id}} <- get_in(c, ["NetworkSettings", "Networks"]) || %{},
+          do: {container_name(c), id}
+
+    case Enum.uniq(for {_, id} <- attachments, do: id) do
+      [] ->
+        {:ok, []}
+
+      ids ->
+        with {:ok, networks} <- list_networks(ctx, %{"id" => ids}) do
+          ok =
+            for n <- networks,
+                n["Driver"] == "null" or foreman_bridge?(n),
+                into: MapSet.new(),
+                do: n["Id"]
+
+          {:ok, for({name, id} <- attachments, id not in ok, uniq: true, do: name)}
+        end
+    end
+  end
+
+  defp container_name(%{"Names" => [name | _]}), do: String.trim_leading(name, "/")
+  defp container_name(c), do: c["Id"]
+
+  defp list_project_containers(ctx, slug) do
+    case ctx.docker.list_containers(["com.docker.compose.project=#{slug}"]) do
+      {:ok, containers} ->
+        {:ok, containers}
+
+      {:error, reason} ->
+        {:error, "couldn't list this environment's containers: #{inspect(reason)}"}
+    end
+  end
+
+  defp list_networks(ctx, filters) do
+    case ctx.docker.list_networks(filters) do
+      {:ok, networks} -> {:ok, networks}
+      {:error, reason} -> {:error, "couldn't list Docker networks: #{inspect(reason)}"}
+    end
+  end
+
+  # The option alone proves nothing: other drivers keep it and ignore it.
+  defp foreman_bridge?(%{"Driver" => "bridge", "Options" => options}) do
+    case options do
+      %{"com.docker.network.bridge.name" => name} when is_binary(name) ->
+        String.starts_with?(name, Overlay.bridge_prefix())
+
+      _ ->
+        false
+    end
+  end
+
+  defp foreman_bridge?(_network), do: false
+
+  defp compose_label(network), do: (network["Labels"] || %{})["com.docker.compose.project"]
+
+  defp config_hash?(network),
+    do: (network["Labels"] || %{})["com.docker.compose.config-hash"] not in [nil, ""]
+
+  defp network_names(networks), do: Enum.map_join(networks, ", ", & &1["Name"])
 
   # Features can ask for privileges in their own metadata, which only the
   # CLI resolves. Ask it what the devcontainer will get before running it.
@@ -1138,7 +1292,7 @@ defmodule ForemanAgent.Env do
 
     with {:ok, outdated} <- feature_rebuild(ctx, p.env_id, prepared, []),
          rebuild = service in affected or outdated,
-         :ok <- recreate(ctx, spec.slug, files, env, sidecars, prepared),
+         :ok <- recreate_checked(ctx, spec.slug, files, env, sidecars, prepared),
          {:ok, _} <- compose(ctx, spec.slug, ["stop", service]),
          # Recreating the devcontainer itself means the CLI has to do it,
          # since it owns the image and labels.
@@ -1148,7 +1302,16 @@ defmodule ForemanAgent.Env do
     end
   end
 
-  defp recreate(_ctx, _slug, _files, _env, [], _prepared), do: :ok
+  # Compose recreates sidecars itself, so they get the same checks as
+  # the CLI's up (see devcontainer_up).
+  defp recreate_checked(_ctx, _slug, _files, _env, [], _prepared), do: :ok
+
+  defp recreate_checked(ctx, slug, files, env, services, prepared) do
+    with :ok <- move_to_foreman_bridges(ctx, slug, prepared.networks) do
+      result = recreate(ctx, slug, files, env, services, prepared)
+      checked(result, check_foreman_bridges(ctx, slug))
+    end
+  end
 
   defp recreate(ctx, slug, files, env, services, prepared) do
     args =

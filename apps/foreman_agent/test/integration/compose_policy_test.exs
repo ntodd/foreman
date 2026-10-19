@@ -28,6 +28,7 @@ defmodule ForemanAgent.Integration.ComposePolicyTest do
   # A box whose default Docker runtime is runc.
   setup do
     stub(DockerMock, :info, fn -> {:ok, %{"DefaultRuntime" => "runc"}} end)
+    stub(DockerMock, :list_networks, fn _ -> {:ok, []} end)
     stub(DockerMock, :list_containers, fn _ -> {:ok, []} end)
     :ok
   end
@@ -294,5 +295,53 @@ defmodule ForemanAgent.Integration.ComposePolicyTest do
     assert {:ok, %{"services" => ["app", "tools"]}} = Env.run("env.create", payload(), ctx)
     overlay = File.read!(Path.join([config.envs_root, @env_id, "meta/overlay.yml"]))
     assert overlay =~ ~s("tools":)
+  end
+
+  # The box's firewall knows environment traffic by its bridge, so what
+  # compose really merges has to put every network on one, including a
+  # network the repo named a bridge for itself.
+  test "every network the environment uses is on a Foreman bridge", %{ctx: ctx, config: config} do
+    stub_tools(@devcontainer, """
+    services:
+      app:
+        image: alpine
+        networks: [default, back]
+      db:
+        image: postgres
+        networks: [back]
+      tools:
+        image: alpine
+        profiles: ["tools"]
+        networks: [debug]
+    networks:
+      back:
+        driver_opts:
+          com.docker.network.bridge.name: docker0
+      debug: {}
+    """)
+
+    assert {:ok, _} = Env.run("env.create", payload(), ctx)
+
+    [repo_file] =
+      Path.wildcard(Path.join([config.envs_root, @env_id, "**/docker-compose.yml"]),
+        match_dot: true
+      )
+
+    overlay = Path.join([config.envs_root, @env_id, "meta/overlay.yml"])
+
+    {out, 0} =
+      System.cmd(
+        "docker",
+        ~w(compose -p storefront-2 --profile * -f #{repo_file} -f #{overlay} config --format json),
+        stderr_to_stdout: true
+      )
+
+    networks = JSON.decode!(out)["networks"]
+    assert Enum.sort(Map.keys(networks)) == ["back", "debug", "default"]
+
+    for {key, spec} <- networks do
+      bridge = spec["driver_opts"]["com.docker.network.bridge.name"]
+      assert bridge == Env.Overlay.bridge_name(@env_id, spec["name"]), key
+    end
   end
 end

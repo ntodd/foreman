@@ -350,12 +350,100 @@ defmodule ForemanAgent.Env.PolicyHardeningTest do
 
     test "a network from outside the project", %{ctx: ctx} do
       networks = %{
-        "default" => %{"name" => "s-1_default"},
+        "default" => %{
+          "name" => "s-1_default",
+          "driver_opts" => %{"com.docker.network.bridge.name" => "fm-0123456789ab"}
+        },
         "other" => %{"name" => "s-2_default", "external" => true}
       }
 
       assert {:error, [message]} = Policy.check(compose(%{}, %{"networks" => networks}), %{}, ctx)
       assert message =~ "s-2_default"
+    end
+  end
+
+  # The box's firewall keeps environments off the tailnet by the bridge
+  # their traffic arrives on, so every network has to be one the overlay
+  # named.
+  describe "networks the box's firewall can't see" do
+    defp network(extra \\ %{}) do
+      Map.merge(
+        %{
+          "name" => "s-1_default",
+          "driver_opts" => %{"com.docker.network.bridge.name" => "fm-0123456789ab"}
+        },
+        extra
+      )
+    end
+
+    defp with_networks(networks, svc \\ %{}), do: compose(svc, %{"networks" => networks})
+
+    test "a network on a Foreman bridge is fine", %{ctx: ctx} do
+      assert {:ok, []} = Policy.check(with_networks(%{"default" => network()}), %{}, ctx)
+
+      config = with_networks(%{"default" => network(%{"driver" => "bridge"})})
+      assert {:ok, []} = Policy.check(config, %{}, ctx)
+    end
+
+    test "a network without one is refused, whatever the box allows", %{ctx: ctx} do
+      bare = %{"name" => "s-1_default"}
+      own = network(%{"driver_opts" => %{"com.docker.network.bridge.name" => "docker0"}})
+      ctx = loosen(ctx, %{host_namespace: :allow})
+
+      for spec <- [bare, own] do
+        assert {:error, [message]} =
+                 Policy.check(with_networks(%{"default" => spec}), %{}, ctx),
+               inspect(spec)
+
+        assert message =~ "network 'default'"
+      end
+    end
+
+    test "loosening host_namespace for a shared network still needs a Foreman bridge", %{
+      ctx: ctx
+    } do
+      spec = %{
+        "name" => "shared",
+        "driver_opts" => %{"com.docker.network.bridge.name" => "docker0"}
+      }
+
+      ctx = loosen(ctx, %{host_namespace: :allow})
+      assert {:error, [message]} = Policy.check(with_networks(%{"shared" => spec}), %{}, ctx)
+      assert message =~ "Foreman bridge"
+    end
+
+    test "drivers other than bridge are refused", %{ctx: ctx} do
+      for driver <- ["macvlan", "ipvlan", "overlay"] do
+        spec = network(%{"driver" => driver, "driver_opts" => %{"parent" => "eth0"}})
+
+        assert {:error, [message]} =
+                 Policy.check(with_networks(%{"lan" => spec}), %{}, ctx),
+               driver
+
+        assert message =~ driver
+      end
+    end
+
+    test "an external network is refused, even one named for the project", %{ctx: ctx} do
+      spec = %{"name" => "s-1_shared", "external" => true}
+
+      assert {:error, [message]} =
+               Policy.check(with_networks(%{"shared" => spec}), %{}, ctx)
+
+      assert message =~ "external"
+    end
+
+    test "Docker's default bridge and networks named directly are refused", %{ctx: ctx} do
+      for mode <- ["bridge", "s-2_default", "default"] do
+        assert {:error, [message]} = Policy.check(compose(%{"network_mode" => mode}), %{}, ctx),
+               mode
+
+        assert message =~ "service 'app'"
+      end
+    end
+
+    test "no network at all is fine", %{ctx: ctx} do
+      assert {:ok, []} = Policy.check(compose(%{"network_mode" => "none"}), %{}, ctx)
     end
   end
 

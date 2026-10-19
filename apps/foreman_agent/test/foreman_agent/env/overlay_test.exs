@@ -11,6 +11,7 @@ defmodule ForemanAgent.Env.OverlayTest do
         env_id: @env_id,
         slug: "storefront-2",
         services: ["app", "db"],
+        networks: [],
         devcontainer_service: "app",
         secrets_dir: "/run/foreman/envs/#{@env_id}",
         tailscale: %{enabled: true, tags: []},
@@ -95,6 +96,51 @@ defmodule ForemanAgent.Env.OverlayTest do
       yaml = Overlay.compose(params(%{services: ["app", "on", "1"]}))
       assert yaml =~ ~s("on":)
       assert yaml =~ ~s("1":)
+    end
+
+    # The box's firewall knows environment traffic by the bridge it
+    # arrives on.
+    test "puts every network on a Foreman bridge" do
+      networks = [{"default", "storefront-2_default"}, {"back", "storefront-2_back"}]
+      yaml = Overlay.compose(params(%{networks: networks}))
+
+      for {key, docker_name} <- networks do
+        name = Overlay.bridge_name(@env_id, docker_name)
+
+        assert yaml =~
+                 ~s(  "#{key}":\n    driver_opts:\n      "com.docker.network.bridge.name": "#{name}"\n)
+      end
+
+      assert yaml =~ ~r/^networks:\n/m
+    end
+
+    test "leaves networks out when the environment has none" do
+      refute Overlay.compose(params()) =~ "networks:"
+    end
+  end
+
+  describe "bridge_name/2" do
+    test "fits a Linux interface name and starts with the Foreman prefix" do
+      name = Overlay.bridge_name(@env_id, "storefront-2_default")
+      assert String.starts_with?(name, Overlay.bridge_prefix())
+      assert byte_size(name) <= 15
+      assert name =~ ~r/\A[a-z0-9-]+\z/
+    end
+
+    test "is stable, and differs per environment and network" do
+      name = Overlay.bridge_name(@env_id, "storefront-2_default")
+      assert Overlay.bridge_name(@env_id, "storefront-2_default") == name
+      refute Overlay.bridge_name(@env_id, "storefront-2_back") == name
+
+      refute Overlay.bridge_name("11111111-2222-3333-4444-555555555555", "storefront-2_default") ==
+               name
+    end
+
+    # Renaming a network (name: in compose) makes a new Docker network
+    # while the old one still holds its bridge.
+    test "follows the network's Docker name, not its key" do
+      refute Overlay.bridge_name(@env_id, "storefront-2_default") ==
+               Overlay.bridge_name(@env_id, "storefront-2_private")
     end
   end
 
