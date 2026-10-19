@@ -21,10 +21,14 @@ env:
   ELIXIR_VERSION: "1.20.4"
   OTP_VERSION: "29.1.1"
 
+# Every job runs on the self-hosted runners, which share one host and one
+# Docker daemon: nothing may publish a fixed port or use a fixed container
+# or image name. Postgres is reached at its container's own address.
+
 jobs:
   protocol:
     if: github.event_name != 'schedule'
-    runs-on: ubuntu-24.04
+    runs-on: [self-hosted, Linux, X64]
     defaults:
       run:
         working-directory: apps/foreman_protocol
@@ -50,7 +54,7 @@ jobs:
 
   agent:
     if: github.event_name != 'schedule'
-    runs-on: ubuntu-24.04
+    runs-on: [self-hosted, Linux, X64]
     defaults:
       run:
         working-directory: apps/foreman_agent
@@ -77,7 +81,7 @@ jobs:
   # The agent against a real Docker daemon and the real devcontainer CLI.
   agent-docker:
     if: github.event_name != 'schedule'
-    runs-on: ubuntu-24.04
+    runs-on: [self-hosted, Linux, X64]
     defaults:
       run:
         working-directory: apps/foreman_agent
@@ -107,7 +111,7 @@ jobs:
 
   control-plane:
     if: github.event_name != 'schedule'
-    runs-on: ubuntu-24.04
+    runs-on: [self-hosted, Linux, X64]
     strategy:
       fail-fast: false
       matrix:
@@ -118,13 +122,13 @@ jobs:
     env:
       MIX_ENV: test
       FOREMAN_DB: ${{ matrix.db }}
-      DATABASE_URL: ecto://postgres:postgres@localhost/foreman_test
     services:
       postgres:
-        image: ${{ matrix.db == 'postgres' && 'postgres:18' || '' }}
+        # The official image from its ECR Public mirror, since Docker Hub
+        # rate-limits anonymous pulls.
+        image: ${{ matrix.db == 'postgres' && 'public.ecr.aws/docker/library/postgres:18' || '' }}
         env:
           POSTGRES_PASSWORD: postgres
-        ports: ["5432:5432"]
         options: >-
           --health-cmd pg_isready
           --health-interval 2s
@@ -142,6 +146,12 @@ jobs:
             apps/foreman/deps
             apps/foreman/_build
           key: cp-${{ matrix.db }}-${{ env.ELIXIR_VERSION }}-${{ env.OTP_VERSION }}-${{ hashFiles('apps/foreman/mix.lock') }}
+      - name: Point the tests at Postgres
+        if: matrix.db == 'postgres'
+        run: >-
+          echo "DATABASE_URL=ecto://postgres:postgres@$(docker inspect -f
+          '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}'
+          ${{ job.services.postgres.id }})/foreman_test" >> "$GITHUB_ENV"
       - run: mix deps.get
       - run: mix format --check-formatted
       - run: mix compile --warnings-as-errors
@@ -151,7 +161,7 @@ jobs:
 
   feature:
     if: github.event_name != 'schedule'
-    runs-on: ubuntu-24.04
+    runs-on: [self-hosted, Linux, X64]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
@@ -164,14 +174,15 @@ jobs:
 
   images:
     if: github.event_name != 'schedule'
-    runs-on: ubuntu-24.04
+    runs-on: [self-hosted, Linux, X64]
+    env:
+      RUN: foreman-ci-${{ github.run_id }}-${{ github.run_attempt }}
     services:
       postgres:
-        image: postgres:18
+        image: public.ecr.aws/docker/library/postgres:18
         env:
           POSTGRES_PASSWORD: postgres
           POSTGRES_DB: foreman
-        ports: ["5432:5432"]
         options: >-
           --health-cmd pg_isready
           --health-interval 2s
@@ -180,13 +191,22 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Build the control plane image
-        run: docker build -f docker/control-plane.Dockerfile -t foreman .
+        run: docker build -f docker/control-plane.Dockerfile -t "$RUN" .
       - name: Build the control plane image for Postgres
-        run: docker build -f docker/control-plane.Dockerfile --build-arg FOREMAN_DB=postgres -t foreman:pg .
-      # Both images, started with only what docs/setup says to set, have to
-      # migrate and answer /healthz (which checks the database).
+        run: docker build -f docker/control-plane.Dockerfile --build-arg FOREMAN_DB=postgres -t "$RUN-pg" .
+      # Both images, started with only what docs/setup says to set (host
+      # networking included), have to migrate and answer /healthz (which
+      # checks the database).
       - name: Boot both control plane images
+        env:
+          POSTGRES: ${{ job.services.postgres.id }}
         run: |
+          free_port() {
+            while :; do
+              port=$(shuf -i 20000-60999 -n 1)
+              ss -Htln "sport = :$port" | grep -q . || { echo "$port"; return; }
+            done
+          }
           run() {
             name=$1 port=$2 image=$3
             shift 3
@@ -195,33 +215,42 @@ jobs:
               -e FOREMAN_ENCRYPTION_KEY="$(openssl rand -base64 32)" \
               -e PHX_HOST=localhost -e PORT="$port" "$@" "$image"
           }
-          run cp-sqlite 4001 foreman
-          run cp-pg 4002 foreman:pg \
-            -e DATABASE_URL=ecto://postgres:postgres@localhost:5432/foreman -e DATABASE_SSL=false
+          db=$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "$POSTGRES")
+          sqlite_port=$(free_port)
+          pg_port=$(free_port)
+          run "$RUN-sqlite" "$sqlite_port" "$RUN"
+          run "$RUN-pg" "$pg_port" "$RUN-pg" \
+            -e DATABASE_URL="ecto://postgres:postgres@$db:5432/foreman" -e DATABASE_SSL=false
 
-          for port in 4001 4002; do
+          for port in "$sqlite_port" "$pg_port"; do
             for _ in $(seq 60); do
               curl -fsS "http://localhost:$port/healthz" && echo " :$port" && continue 2
               sleep 1
             done
-            docker logs cp-sqlite; docker logs cp-pg
+            docker logs "$RUN-sqlite"; docker logs "$RUN-pg"
             exit 1
           done
       - name: The SQLite image refuses a DATABASE_URL
         run: |
           status=0
-          timeout 60 docker run --rm \
+          timeout 60 docker run --rm --name "$RUN-refused" \
             -e SECRET_KEY_BASE="$(openssl rand -base64 48)" \
             -e FOREMAN_ENCRYPTION_KEY="$(openssl rand -base64 32)" \
             -e PHX_HOST=localhost -e DATABASE_URL=ecto://postgres:postgres@localhost/foreman \
-            foreman > refused.log 2>&1 || status=$?
+            "$RUN" > refused.log 2>&1 || status=$?
           cat refused.log
           [ "$status" -ne 0 ] && [ "$status" -ne 124 ] && grep -q "built for SQLite" refused.log
       - name: Build the box image
-        run: docker build -f docker/box.Dockerfile --target box -t foreman-box .
+        run: docker build -f docker/box.Dockerfile --target box -t "$RUN-box" .
+      # A hosted VM would be thrown away; this daemon is shared and kept.
+      - name: Remove the containers and images
+        if: always()
+        run: |
+          docker rm -f "$RUN-sqlite" "$RUN-pg" "$RUN-refused" 2>/dev/null || true
+          docker image rm -f "$RUN" "$RUN-pg" "$RUN-box" 2>/dev/null || true
 
   security:
-    runs-on: ubuntu-24.04
+    runs-on: [self-hosted, Linux, X64]
     # gitleaks lists a pull request's commits through the API.
     permissions:
       contents: read
