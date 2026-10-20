@@ -196,6 +196,17 @@ defmodule ForemanAgent.EnvTest do
     {:ok, %{status: 0, output: result}}
   end
 
+  # The runner reads stderr and stdout through one pipe, so a long log
+  # line on stderr can be split by the outcome the CLI writes to stdout.
+  defp up_result(:interleaved, run_opts, container) do
+    {:ok, %{output: outcome}} = up_result(:success, run_opts, container)
+    log = raw_log([String.duplicate("Compiling 214 files (.ex)\n", 3000)])
+    [head, tail] = split_at(log, 40_000)
+    stream = head <> outcome <> tail
+    run_opts[:on_output].(stream)
+    {:ok, %{status: 0, output: stream}}
+  end
+
   defp up_result(:error, _run_opts, _container) do
     {:ok,
      %{
@@ -290,6 +301,9 @@ defmodule ForemanAgent.EnvTest do
   defp raw_log(lines) do
     Enum.map_join(lines, &(JSON.encode!(%{"type" => "raw", "level" => 3, "text" => &1}) <> "\n"))
   end
+
+  defp split_at(binary, at),
+    do: [binary_part(binary, 0, at), binary_part(binary, at, byte_size(binary) - at)]
 
   defp receive_all(acc) do
     receive do
@@ -644,6 +658,14 @@ defmodule ForemanAgent.EnvTest do
       stub_tools(outcome: :error)
       assert {:error, message} = Env.run("env.create", payload(), ctx)
       assert message =~ "build failed"
+    end
+
+    test "finds the outcome when it lands inside a long log line", %{ctx: ctx} do
+      stub_tools(outcome: :interleaved)
+
+      assert {:ok, result} = Env.run("env.create", payload(), ctx)
+      assert result["remote_user"] == "vscode"
+      assert result["remote_workspace_folder"] == "/workspaces/storefront"
     end
 
     test "says when devcontainer up exits without reporting a result", %{ctx: ctx} do
