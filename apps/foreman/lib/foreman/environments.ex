@@ -607,9 +607,29 @@ defmodule Foreman.Environments do
 
       attrs ->
         replaced_device(env, attrs[:tailscale_device_id])
-        env |> Environment.state_changeset(attrs) |> Repo.update!()
+
+        env
+        |> Environment.state_changeset(attrs)
+        |> Repo.update!()
+        |> Map.put(:stale_notice, stale_notice?(op, env))
     end
   end
+
+  # The files on the box were sent with the secrets that applied before
+  # this up, so their notice says secrets changed (see
+  # `Commands.notices/3`), and this up has just applied them.
+  defp stale_notice?(%{status: "succeeded", action: action, args: args}, env)
+       when action in @up do
+    case args do
+      %{"secret_hashes" => hashes} when is_map(hashes) ->
+        env.created_once and Secrets.changed_names(env.applied_secret_hashes, hashes) != []
+
+      _ ->
+        false
+    end
+  end
+
+  defp stale_notice?(_op, _env), do: false
 
   # Came back as a new node (its Tailscale state was lost), so the old
   # device is offline and holding the environment's name.
@@ -637,9 +657,10 @@ defmodule Foreman.Environments do
 
     if op.action == "destroy" and op.status == "succeeded", do: cleanup_tailnet(env)
 
-    # Secrets changed while it came up: the files it got are already stale.
-    if op.action in @up and op.status == "succeeded" and env.pending_restart and
-         env.desired_state == "running",
+    # Secrets changed while it came up, so the files it got are already
+    # stale; or it applied secrets its files still say have changed.
+    if op.action in @up and op.status == "succeeded" and
+         (env.pending_restart or env.stale_notice) and env.desired_state == "running",
        do: enqueue(env, "secrets_write", %{}, nil)
 
     Server.kick(env.id)

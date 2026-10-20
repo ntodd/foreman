@@ -424,6 +424,61 @@ defmodule Foreman.EnvironmentsTest do
       env = Repo.reload!(env)
       refute env.pending_restart
       assert env.pending_changes == []
+
+      # The files it has still say secrets changed; send them again without.
+      assert_receive {:dispatch, %Command{type: "env.secrets.write"} = rewrite}
+      refute rewrite.payload.files["notices"] =~ "secrets changed"
+    end
+
+    test "a stop and start takes the secrets-changed notice back out", %{
+      scope: scope,
+      env: env,
+      box: box
+    } do
+      {:ok, _} =
+        Secrets.put_secret(scope, "environment", Repo.reload!(env), %{
+          "name" => "NEON_API_KEY",
+          "value" => "n1"
+        })
+
+      assert_receive {:dispatch, %Command{type: "env.secrets.write"} = write}
+      succeed(box, write)
+
+      {:ok, _} = Environments.stop(scope, Repo.reload!(env))
+      assert_receive {:dispatch, %Command{type: "env.stop"} = stop}
+      succeed(box, stop)
+
+      # Start sends the files first, while the old secrets are still the
+      # applied ones, so they carry the notice.
+      {:ok, _} = Environments.start(scope, Repo.reload!(env))
+      assert_receive {:dispatch, %Command{type: "env.secrets.write"} = before_start}
+      assert before_start.payload.files["notices"] =~ "secrets changed (NEON_API_KEY)"
+      succeed(box, before_start)
+
+      assert_receive {:dispatch, %Command{type: "env.start"} = start}
+      succeed(box, start, @up_result)
+      refute Repo.reload!(env).pending_restart
+
+      assert_receive {:dispatch, %Command{type: "env.secrets.write"} = rewrite}
+      refute rewrite.payload.files["notices"] =~ "secrets changed"
+    end
+
+    test "a start with nothing changed doesn't send the files again", %{
+      scope: scope,
+      env: env,
+      box: box
+    } do
+      {:ok, _} = Environments.stop(scope, Repo.reload!(env))
+      assert_receive {:dispatch, %Command{type: "env.stop"} = stop}
+      succeed(box, stop)
+
+      {:ok, _} = Environments.start(scope, Repo.reload!(env))
+      assert_receive {:dispatch, %Command{type: "env.secrets.write"} = write}
+      succeed(box, write)
+      assert_receive {:dispatch, %Command{type: "env.start"} = start}
+      succeed(box, start, @up_result)
+
+      refute_receive {:dispatch, %Command{type: "env.secrets.write"}}
     end
 
     test "setting a secret back to what's applied clears pending restart", %{

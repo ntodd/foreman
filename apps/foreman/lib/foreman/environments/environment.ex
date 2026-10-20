@@ -38,6 +38,9 @@ defmodule Foreman.Environments.Environment do
     field :created_once, :boolean, default: false
     field :token_pushed_at, :utc_datetime_usec
     field :destroyed_at, :utc_datetime_usec
+    # Set by `Environments.record_result/1` when an up applied secrets the
+    # files on the box still say have changed.
+    field :stale_notice, :boolean, virtual: true, default: false
     timestamps()
   end
 
