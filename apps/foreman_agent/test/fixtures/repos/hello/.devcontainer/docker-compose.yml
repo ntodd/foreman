@@ -6,7 +6,7 @@ services:
     volumes:
       - ../..:/workspaces:cached
     ports:
-      - "14000:4000"
+      - "4000"
   sidecar:
     image: alpine:3.22
     command: ["sh", "-c", "echo sidecar token=$$SIDECAR_TOKEN; exec sleep 1000000"]
@@ -14,4 +14,4 @@ services:
     environment:
       SIDECAR_TOKEN: ${SIDECAR_TOKEN:-unset}
     ports:
-      - "16379:6379"
+      - "6379"
