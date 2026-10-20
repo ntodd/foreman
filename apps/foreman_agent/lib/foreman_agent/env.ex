@@ -1157,15 +1157,31 @@ defmodule ForemanAgent.Env do
     output
     |> String.split("\n")
     |> Enum.reverse()
-    |> Enum.find_value(fn line ->
-      with "{" <> _ <- line,
-           {:ok, %{"outcome" => _} = outcome} <- JSON.decode(line) do
-        outcome
-      else
-        _ -> nil
-      end
-    end)
+    |> Enum.find_value(&outcome_in/1)
   end
+
+  # The CLI writes its outcome to stdout as a line of its own, but stderr
+  # comes through the same pipe, so a long log line can be split around
+  # it. The outcome still ends the line it lands in.
+  defp outcome_in(line) do
+    with [_ | _] = matches <- :binary.matches(line, ~s({"outcome":)),
+         {at, _} = List.last(matches),
+         {:ok, %{"outcome" => _} = outcome} <-
+           JSON.decode(binary_part(line, at, byte_size(line) - at)) do
+      outcome
+    else
+      _ -> outcome_line(line)
+    end
+  end
+
+  defp outcome_line("{" <> _ = line) do
+    case JSON.decode(line) do
+      {:ok, %{"outcome" => _} = outcome} -> outcome
+      _ -> nil
+    end
+  end
+
+  defp outcome_line(_line), do: nil
 
   # The CLI's --log-format json lines carry a "text" field; anything else
   # (build output from docker) passes through as is. Debug-level entries
