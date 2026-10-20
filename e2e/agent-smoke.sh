@@ -14,8 +14,22 @@ set -eu
 tarball=${1:?usage: $0 path/to/foreman_agent.tar.gz}
 [ -f "$tarball" ] || { echo "no such file: $tarball" >&2; exit 1; }
 
-# Docker Hub's official images, from their ECR Public mirror.
+# Docker Hub's official images, from a mirror: ECR Public's, or Google's
+# when ECR refuses (it limits anonymous pulls by IP, and runners share IPs).
 images="ubuntu:22.04 ubuntu:24.04 debian:12 debian:13"
+mirrors="public.ecr.aws/docker/library mirror.gcr.io/library"
+
+# Prints the reference it pulled.
+pull() {
+  for mirror in $mirrors; do
+    if docker pull -q "$mirror/$1" >/dev/null; then
+      echo "$mirror/$1"
+      return
+    fi
+    echo "couldn't pull $1 from $mirror" >&2
+  done
+  return 1
+}
 
 # ed25519 is what release signatures and the agent's identity use; starting
 # :ssl is what connecting to the control plane needs.
@@ -33,8 +47,9 @@ trap 'exit 130' INT TERM
 
 for image in $images; do
   echo "== $image"
+  ref=$(pull "$image") || { echo "FAILED: couldn't pull $image" >&2; exit 1; }
   # shellcheck disable=SC2016
-  id=$(docker create --rm -e LANG=C.UTF-8 "public.ecr.aws/docker/library/$image" sh -euc '
+  id=$(docker create --rm -e LANG=C.UTF-8 "$ref" sh -euc '
     # Every server has OpenSSL (openssh needs it); a stock container may not.
     if ! ldconfig -p | grep -q "libcrypto\.so\.3 "; then
       apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends openssl >/dev/null
