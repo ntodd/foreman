@@ -77,6 +77,37 @@ defmodule Foreman.Operations do
     |> Repo.all()
   end
 
+  @doc """
+  Restarts Housekeeping's clock for operations about to be resent after an
+  outage: an agent that restarted runs them from the start.
+  """
+  def restart_clock([]), do: :ok
+
+  def restart_clock(ids) do
+    Repo.update_all(
+      from(o in Operation, where: o.id in ^ids and o.status in ["dispatched", "running"]),
+      set: [dispatched_at: DateTime.utc_now()]
+    )
+
+    :ok
+  end
+
+  @doc """
+  Records that someone asked to stop the operation. The `op.cancel` can be
+  lost with the connection, so a resend sends it again rather than the
+  operation. `withdraw_cancel/1` takes it back when the cancel couldn't be
+  sent at all.
+  """
+  def request_cancel(%Operation{id: id}), do: set_cancel_requested(id, DateTime.utc_now())
+  def withdraw_cancel(%Operation{id: id}), do: set_cancel_requested(id, nil)
+
+  defp set_cancel_requested(id, at) do
+    Repo.update_all(from(o in Operation, where: o.id == ^id), set: [cancel_requested_at: at])
+    :ok
+  end
+
+  def cancel_requested?(%Operation{cancel_requested_at: at}), do: not is_nil(at)
+
   def environments_with_queued(box_id) do
     from(o in Operation,
       where: o.box_id == ^box_id and o.status == "queued" and not is_nil(o.environment_id),
@@ -121,10 +152,14 @@ defmodule Foreman.Operations do
   """
   def finish(op_id, status, result, error, apply) do
     case get(op_id) do
+      # Housekeeping cancels what it gives up on, so "cancelled" for a timed
+      # out operation is its own cancel coming back: the timeout stays, and
+      # isn't taken for someone cancelling a stop to keep it running.
       %Operation{} = op ->
-        if Operation.finished?(op) and not timed_out?(op),
-          do: :already,
-          else: do_finish(op_id, status, result, error, apply)
+        if (Operation.finished?(op) and not timed_out?(op)) or
+             (timed_out?(op) and error == "cancelled"),
+           do: :already,
+           else: do_finish(op_id, status, result, error, apply)
 
       nil ->
         :unknown
@@ -175,16 +210,27 @@ defmodule Foreman.Operations do
   failed operation, so a real result can't land between the failure and
   its effect on the environment. Returns `{:ok, op, applied}` or
   `:finished`.
+
+  `dispatched_before:` only fails it if it was still dispatched before
+  then, checked in the same statement: Housekeeping works from a list read
+  earlier, and a reconnect may have restarted the clock since.
   """
-  def timed_out(%Operation{id: id} = op, error, apply) do
+  def timed_out(%Operation{id: id} = op, error, apply, opts \\ []) do
     now = DateTime.utc_now()
+
+    query =
+      from(o in Operation, where: o.id == ^id and o.status in ["queued", "dispatched", "running"])
+
+    query =
+      case opts[:dispatched_before] do
+        nil -> query
+        cutoff -> from(o in query, where: o.dispatched_at < ^cutoff)
+      end
 
     {:ok, outcome} =
       Repo.transact(fn ->
         {count, _} =
-          from(o in Operation,
-            where: o.id == ^id and o.status in ["queued", "dispatched", "running"]
-          )
+          query
           |> Repo.update_all(
             set: [
               status: "failed",

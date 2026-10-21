@@ -16,6 +16,10 @@ defmodule ForemanWeb.AgentChannel do
     with {:ok, join} <- ForemanProtocol.cast_join(payload),
          true <- ForemanProtocol.compatible?(join.protocol_version) || {:error, :protocol},
          %Boxes.Box{revoked_at: nil} = box <- Boxes.get_box(box_id) do
+      # Before registering: once registered the box is online, and
+      # Housekeeping would judge the operations about to be resent by when
+      # they were first sent.
+      :ok = Agents.restart_clocks(box_id, join.in_flight)
       :ok = Agents.register(box_id)
       box = Boxes.agent_joined(box, join)
       Logger.metadata(box_id: box_id)

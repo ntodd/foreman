@@ -58,18 +58,22 @@ defmodule Foreman.Jobs.Housekeeping do
               o.dispatched_at < ^cutoff
       )
 
+    # The list is from before the loop, and a reconnect may have restarted an
+    # operation's clock since: it's failed only if it's still overdue, and
+    # cancelled on the box only once it has been.
     for op <- stale, Boxes.online?(op.box_id) do
-      # Stop whatever is still running on the box, so the next operation
-      # doesn't run alongside it.
-      Agents.cancel_operation(op, nil)
-
-      with {:ok, op, env} <-
+      with {:ok, failed, env} <-
              Operations.timed_out(
                op,
                "no result after #{@stale_hours} hours",
-               &Environments.record_result/1
-             ),
-           do: Environments.after_result(op, env)
+               &Environments.record_result/1,
+               dispatched_before: cutoff
+             ) do
+        # Stop whatever is still running on the box before the next
+        # operation goes out, so they don't run side by side.
+        Agents.cancel_operation(op, nil)
+        Environments.after_result(failed, env)
+      end
     end
   end
 

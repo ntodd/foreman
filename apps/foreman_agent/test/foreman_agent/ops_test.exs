@@ -155,6 +155,40 @@ defmodule ForemanAgent.OpsTest do
                    @timeout
   end
 
+  # After a restart, a cancel can arrive before the control plane's resend
+  # of the operation it's for.
+  test "a cancel for an operation it doesn't know stops it running later", %{ops: ops} do
+    cmd = stop_cmd(@env1)
+    target = cmd.op_id
+
+    Ops.submit(ops, command("op.cancel", %{target_op_id: target}))
+
+    assert_receive {:event, "op.result", %{op_id: ^target, status: "error", error: "cancelled"}},
+                   @timeout
+
+    assert :duplicate = Ops.submit(ops, cmd)
+
+    assert_receive {:event, "op.result", %{op_id: ^target, status: "error", error: "cancelled"}},
+                   @timeout
+
+    refute_receive {:started, ^target, _}, 200
+  end
+
+  test "a cancel for an operation that finished leaves its result alone", %{ops: ops} do
+    cmd = stop_cmd(@env1)
+    target = cmd.op_id
+    Ops.submit(ops, cmd)
+    assert_receive {:started, ^target, pid}, @timeout
+    finish(pid)
+    assert_receive {:event, "op.result", %{op_id: ^target, status: "ok"}}, @timeout
+
+    Ops.submit(ops, command("op.cancel", %{target_op_id: target}))
+    refute_receive {:event, "op.result", %{op_id: ^target}}, 200
+
+    assert :duplicate = Ops.submit(ops, cmd)
+    assert_receive {:event, "op.result", %{op_id: ^target, status: "ok"}}, @timeout
+  end
+
   test "in_flight lists running and queued op ids", %{ops: ops} do
     a = stop_cmd(@env1)
     b = command("env.start", %{env_id: @env1, slug: "x"})

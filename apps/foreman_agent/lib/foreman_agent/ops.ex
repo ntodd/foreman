@@ -10,8 +10,9 @@ defmodule ForemanAgent.Ops do
     at a time, in arrival order. Box commands run straight away.
   - **Cancellable:** `op.cancel` kills a running operation's process and
     every process its commands started (`ForemanAgent.Runner.Tree`), or
-    drops a queued one. The environment's next operation waits until the
-    cancelled one's processes are gone.
+    drops a queued one. One it doesn't know is recorded as cancelled, so it
+    won't run if it turns up later. The environment's next operation waits
+    until the cancelled one's processes are gone.
 
   Each operation runs in its own process and reports `op.accepted`,
   `op.log` and `op.result` events to the sink.
@@ -234,7 +235,20 @@ defmodule ForemanAgent.Ops do
         |> remember(target, event)
 
       nil ->
-        state
+        tombstone(state, target)
+    end
+  end
+
+  # After a restart, a cancel can arrive before the control plane's resend
+  # of the operation it's for. Recorded as cancelled, the resend gets that
+  # result instead of running. One that already finished keeps its result.
+  defp tombstone(state, target) do
+    if Map.has_key?(state.done, target) do
+      state
+    else
+      event = result_event(target, {:error, "cancelled"})
+      state.sink.(event)
+      remember(state, target, event)
     end
   end
 

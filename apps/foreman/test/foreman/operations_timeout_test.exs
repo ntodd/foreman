@@ -78,6 +78,50 @@ defmodule Foreman.OperationsTimeoutTest do
     refute op.args["timed_out"]
   end
 
+  # Housekeeping cancels what it gives up on. That cancel coming back isn't
+  # news, and mustn't be read as someone cancelling a stop to keep the
+  # environment running.
+  test "the cancel Housekeeping sent doesn't replace its timeout", ctx do
+    env = Repo.update!(Ecto.Changeset.change(ctx.env, observed_state: "running"))
+    {:ok, _} = Environments.stop(ctx.scope, env)
+    assert_receive {:dispatch, %Command{type: "env.stop"} = stop}
+    op = Operations.get!(stop.op_id)
+
+    {:ok, op, _} =
+      Operations.timed_out(op, "no result after 3 hours", &Environments.record_result/1)
+
+    assert Repo.reload!(env).desired_state == "stopped"
+
+    :ok = report(ctx.box, op.id, %{status: "error", error: "cancelled"})
+    assert %{status: "failed", error: "no result after 3 hours"} = Operations.get!(op.id)
+    assert Repo.reload!(env).desired_state == "stopped"
+  end
+
+  test "giving up waits if the clock was restarted since the operation was read", ctx do
+    stale = start(ctx)
+    long_ago = DateTime.add(DateTime.utc_now(), -4 * 3600)
+    Repo.update!(Ecto.Changeset.change(stale, dispatched_at: long_ago))
+    :ok = Operations.restart_clock([stale.id])
+
+    cutoff = DateTime.add(DateTime.utc_now(), -3 * 3600)
+
+    assert Operations.timed_out(stale, "no result after 3 hours", fn _ -> nil end,
+             dispatched_before: cutoff
+           ) == :finished
+
+    assert Operations.get!(stale.id).status == "dispatched"
+  end
+
+  test "a cancel request is recorded without touching the operation's args", ctx do
+    op = start(ctx)
+    {:ok, op} = Operations.timed_out(op, "no result after 3 hours")
+
+    :ok = Operations.request_cancel(op)
+    op = Operations.get!(op.id)
+    assert op.args["timed_out"]
+    assert Operations.cancel_requested?(op)
+  end
+
   test "giving up doesn't overwrite a result that landed after the operation was read", ctx do
     stale = start(ctx)
     :ok = report(ctx.box, stale.id, %{status: "error", error: "cancelled"})
