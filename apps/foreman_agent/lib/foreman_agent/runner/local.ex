@@ -12,6 +12,11 @@ defmodule ForemanAgent.Runner.Local do
   @default_keep 65_536
   # How long a timed-out command gets to exit after SIGTERM.
   @grace 5_000
+  # muontrap leaves the command its own stdin, which carries the acks that
+  # let it forward more output. A command that reads stdin (the devcontainer
+  # CLI does, during lifecycle commands) swallows them; muontrap then stops
+  # forwarding, and drops what's left once the command exits.
+  @empty_stdin ~s(exec "$0" "$@" </dev/null)
 
   @impl true
   def run(command, args, opts) do
@@ -31,7 +36,9 @@ defmodule ForemanAgent.Runner.Local do
           ] ++ Keyword.take(opts, [:cd])
 
         {collector, status} =
-          with_timeout(opts[:timeout], fn -> MuonTrap.cmd(path, args, cmd_opts) end)
+          with_timeout(opts[:timeout], fn ->
+            MuonTrap.cmd("/bin/sh", ["-c", @empty_stdin, path | args], cmd_opts)
+          end)
 
         {:ok, %{status: status, output: Collector.output(collector)}}
     end

@@ -92,6 +92,23 @@ defmodule ForemanAgent.Runner.LocalTest do
     end
   end
 
+  describe "stdin" do
+    # MuonTrap's own stdin carries the acks that let it forward more output.
+    # The devcontainer CLI reads stdin during lifecycle commands, and a
+    # command that inherited it would swallow them and stall its output.
+    test "a command that reads stdin gets none and its output keeps flowing" do
+      # sh gives a background job /dev/null for stdin, so the reader is the
+      # foreground one.
+      script = "head -c 200000 /dev/zero | tr '\\0' x & cat >/dev/null; wait"
+
+      assert {:ok, %{status: status, output: output}} =
+               Local.run("sh", ["-c", script], keep: 262_144, timeout: 10_000)
+
+      assert {status, byte_size(output)} == {0, 200_000}
+      assert output == String.duplicate("x", 200_000)
+    end
+  end
+
   defp collect(acc \\ []) do
     receive do
       {:chunk, chunk} -> collect([chunk | acc])
