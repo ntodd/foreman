@@ -101,12 +101,17 @@ defmodule Foreman.Agents do
         dispatched_at: DateTime.utc_now()
       })
 
+    # Recorded before it's sent: a reconnect between the two would otherwise
+    # resend the operation itself.
+    :ok = Operations.request_cancel(target)
+
     case dispatch(target.box_id, cmd) do
       :ok ->
-        {:ok, _} = Operations.request_cancel(target)
         :ok
 
       {:error, :offline} ->
+        :ok = Operations.withdraw_cancel(target)
+
         Operations.mark(op, "failed",
           error: "the box is offline",
           finished_at: DateTime.utc_now()
@@ -204,19 +209,31 @@ defmodule Foreman.Agents do
   end
 
   @doc """
+  Called as an agent joins, before the box counts as online: restarts
+  Housekeeping's clock for the environment operations it's about to be
+  resent and doesn't have (`in_flight` is what it still has queued or
+  running). It lost those in a restart and runs them from the start. The
+  ones it kept have been running all along, so they keep their clock, or a
+  connection that keeps dropping would keep a hung operation alive.
+  """
+  def restart_clocks(box_id, in_flight) do
+    box_id
+    |> Operations.active_for_box()
+    |> Enum.filter(&(&1.environment_id && &1.id not in in_flight))
+    |> Enum.map(& &1.id)
+    |> Operations.restart_clock()
+  end
+
+  @doc """
   Called when an agent joins: resend what was in flight and dispatch
   what's queued. Box commands (gc, stats, an update) aren't resent; their
   results usually follow straight after the join, from the agent's
   outbox. Housekeeping fails the ones that never arrive.
   """
   def agent_connected(box) do
-    resent = Enum.filter(Operations.active_for_box(box.id), & &1.environment_id)
-
-    # Before the resends go out, so Housekeeping can't run in between and
-    # judge them by when they were first sent.
-    :ok = Operations.restart_clock(Enum.map(resent, & &1.id))
-
-    for op <- resent, do: Environments.Server.resend(op.environment_id, op.id)
+    for op <- Operations.active_for_box(box.id),
+        op.environment_id,
+        do: Environments.Server.resend(op.environment_id, op.id)
 
     for env_id <- Operations.environments_with_queued(box.id),
         do: Environments.Server.kick(env_id)

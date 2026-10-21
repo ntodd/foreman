@@ -23,6 +23,7 @@ defmodule Foreman.Operations.Operation do
     field :dispatched_at, :utc_datetime_usec
     field :started_at, :utc_datetime_usec
     field :finished_at, :utc_datetime_usec
+    field :cancel_requested_at, :utc_datetime_usec
     timestamps()
   end
 

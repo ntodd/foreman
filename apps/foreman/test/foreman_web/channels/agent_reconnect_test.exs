@@ -123,6 +123,23 @@ defmodule ForemanWeb.AgentReconnectTest do
       refute_push "command", %{"type" => "op.cancel"}
     end
 
+    # A blip, not a restart: the agent says it's still on it, so it's been
+    # running all along and a reconnect doesn't buy it more time.
+    test "an operation the agent kept running keeps its clock", ctx do
+      op = sent_then_offline(ctx)
+      offline(ctx.box)
+
+      Repo.update!(
+        Ecto.Changeset.change(op, dispatched_at: DateTime.add(DateTime.utc_now(), -4 * 3600))
+      )
+
+      _socket = join_box(ctx.box, %{"in_flight" => [op.id]})
+      {"env.logs", _} = next_command()
+
+      :ok = Foreman.Jobs.Housekeeping.perform(%Oban.Job{})
+      assert Operations.get!(op.id).status == "failed"
+    end
+
     test "a cancel lost in the outage is sent again instead of the operation", ctx do
       op = sent_then_offline(ctx)
       :ok = Agents.cancel_operation(op, ctx.user.id)
