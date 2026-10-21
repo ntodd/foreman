@@ -87,7 +87,7 @@ defmodule ForemanWeb.PagesTest do
     assert html =~ "64 CPUs"
   end
 
-  test "with Tailscale, a started environment shows SSH and an Open in VS Code link", %{
+  test "with Tailscale, a started environment shows SSH and Open in VS Code and Zed links", %{
     conn: conn,
     user: user,
     repo: repo,
@@ -114,6 +114,12 @@ defmodule ForemanWeb.PagesTest do
              view,
              ~s|a[href="vscode://vscode-remote/ssh-remote+vscode@#{env.slug}/workspaces/storefront"]|,
              "Open in VS Code"
+           )
+
+    assert has_element?(
+             view,
+             ~s|a[href="zed://ssh/vscode@#{env.slug}/workspaces/storefront"]|,
+             "Open in Zed"
            )
   end
 
