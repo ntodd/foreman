@@ -6,15 +6,24 @@ three-hour timeout, and results held in the agent's outbox until acknowledged. I
 failures: disconnects, agent crashes and time passing. The header lists the code each action
 follows.
 
-Run it with [Quint](https://quint-lang.org) 0.33 (`npx @informalsystems/quint` works without
+`updates.qnt` models agent self-update and rollback on one box: `agent.update`, the install and
+restart into the new release, systemd's restarts and start limit, the connection's watchdog,
+the rollback unit, and the control plane settling the update. The new release's behaviour is
+picked at the start (good, crashes at boot, crashes slowly without joining, never joins, or
+joins and then crashes), and the network comes and goes.
+
+Run them with [Quint](https://quint-lang.org) 0.33 (`npx @informalsystems/quint` works without
 installing anything):
 
 ```sh
 quint run ops.qnt --invariant=allInvariants --max-samples=30000 --max-steps=40
-./check.sh   # the code as it is, and v0.4.3 before the fixes below
+quint run updates.qnt --invariant=allInvariants --max-samples=30000 --max-steps=80
+./check.sh   # what both say about the code as it is, and with and without the fixes
 ```
 
-## What it found
+## Operations (`ops.qnt`)
+
+### What it found
 
 Against v0.4.3 it broke three invariants. The fixes are in the code, and the `FIX_*` switches
 model them (on by default; off reproduces v0.4.3).
@@ -52,6 +61,32 @@ This is evidence under the assumptions below, not a proof that the code is right
   needing a kick, command build failures, the gap between claiming an op and sending it, Ops
   restarting on its own (the agent supervises it one for one), and the done-map's 500 entries.
 
+## Agent updates (`updates.qnt`)
+
+The code as it is breaks three invariants. The `FIX_*` switches are proposed fixes, off by
+default.
+
+| Invariant | Code as it is | Fix |
+|---|---|---|
+| `neverStranded` | Violated: #24. A release that joins and then crashes (on its first command, say) is confirmed at the join, which deletes `previous`. Its crash loop hits the start limit, and the rollback unit has nothing to go back to. The agent stays down until someone fixes the box. | `FIX_CONFIRM` |
+| `badNeverKept` | Violated: #24, the same path. A release that misbehaves gets confirmed. | `FIX_CONFIRM`: confirm once the release has stayed up and joined for a few minutes, and have the control plane count the update as done when the agent confirms, not at its first join. |
+| `rollbackInTime` | Violated: #24. A release that dies every couple of minutes without joining is never rolled back. Every start restarts the watchdog's clock (`max(installed_at, running_since)`), and a crash every two minutes is too slow for the start limit (5 in 120s). | `FIX_WATCHDOG`: time the release by how long it has run unjoined since the install, added up across restarts and kept in `update-pending`. |
+| `boundedRetries` | Holds: a bad version is installed at most twice. | |
+| `succeededSticks` | Holds. | |
+
+The two obvious fixes aren't enough together. With `FIX_CONFIRM` and `FIX_WATCHDOG`, the
+watchdog can roll back right after a fast crash loop (unjoined time from a network outage,
+then crashes). Its exit then lands on a used-up start limit, and the rollback unit, with
+`previous` already used, gives up: the box is stranded on the good release. Counting starts
+instead of run time has the same problem. `FIX_ROLLBACK_UNIT` closes it: the rollback unit
+resets the failure and starts the agent again even when there's nothing to switch to.
+
+With all three, `allInvariants` holds over 300,000 runs of up to 100 steps; any two leave
+something broken.
+
+Not modelled: a release that crashes long after it's confirmed, the disk filling during a
+download (#39), and `install.sh` re-runs (#32).
+
 ## Not modelled anywhere
 
-Agent updates and rollback (#24), and the environment lifecycle (#23, #38).
+The environment lifecycle (#23, #38).
