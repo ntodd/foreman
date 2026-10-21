@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 #
-# Checks what ops.qnt says about the code: the invariants the current code
-# breaks (they should still break, until the code is fixed and the model
-# updated to match), and that every invariant holds with the fixes on.
+# Checks what ops.qnt says: every invariant holds for the code as it is,
+# and without the fixes for #31 and #95 (the code as of v0.4.3) the ones
+# they fixed break again, so the model still tells the difference.
 #
 #   ./check.sh            QUINT="quint" to use an installed one
 #   SAMPLES=100000 ./check.sh
@@ -16,8 +16,8 @@ tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
 
 variant() {
-  sed -e "s/pure val FIX_RESEND_CLOCK = false/pure val FIX_RESEND_CLOCK = $1/" \
-      -e "s/pure val FIX_CANCEL = false/pure val FIX_CANCEL = $2/" ops.qnt >"$tmp/ops_$1_$2.qnt"
+  sed -e "s/pure val FIX_RESEND_CLOCK = [a-z]*/pure val FIX_RESEND_CLOCK = $1/" \
+      -e "s/pure val FIX_CANCEL = [a-z]*/pure val FIX_CANCEL = $2/" ops.qnt >"$tmp/ops_$1_$2.qnt"
   echo "$tmp/ops_$1_$2.qnt"
 }
 
@@ -44,16 +44,16 @@ expect() {
   fi
 }
 
-current=$(variant false false)
-echo "Current code:"
-expect "$current" noPrematureTimeout violated
-expect "$current" noResendAfterCancel violated
-expect "$current" noStartAfterStop violated
-expect "$current" atMostOncePerLife ok
-expect "$current" noStuckWhenQuiet ok
-expect "$current" succeededMeansRan ok
+echo "The code as it is:"
+expect ops.qnt allInvariants ok
 
-echo "With FIX_RESEND_CLOCK and FIX_CANCEL:"
-expect "$(variant true true)" allInvariants ok
+old=$(variant false false)
+echo "As of v0.4.3, before the fixes for #31 and #95:"
+expect "$old" noPrematureTimeout violated
+expect "$old" noResendAfterCancel violated
+expect "$old" noStartAfterStop violated
+expect "$old" atMostOncePerLife ok
+expect "$old" noStuckWhenQuiet ok
+expect "$old" succeededMeansRan ok
 
 exit $failed

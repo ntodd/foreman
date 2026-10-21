@@ -94,6 +94,48 @@ defmodule ForemanWeb.AgentReconnectTest do
     end
   end
 
+  describe "operations across an outage" do
+    # Sent while the agent is connected (a registry entry stands in for its
+    # channel), then the box goes away before anything comes back.
+    defp sent_then_offline(ctx) do
+      {:ok, _} = Registry.register(Foreman.Registry, {:agent, ctx.box.id}, nil)
+      {:ok, _} = Environments.logs(ctx.scope, ctx.env)
+      assert_receive {:dispatch, %{type: "env.logs", op_id: op_id}}
+      Operations.get!(op_id)
+    end
+
+    defp offline(box), do: Registry.unregister(Foreman.Registry, {:agent, box.id})
+
+    test "a resent operation gets Housekeeping's full three hours", ctx do
+      op = sent_then_offline(ctx)
+      offline(ctx.box)
+
+      Repo.update!(
+        Ecto.Changeset.change(op, dispatched_at: DateTime.add(DateTime.utc_now(), -15 * 3600))
+      )
+
+      _socket = join_box(ctx.box)
+      {"env.logs", op_id} = next_command()
+      assert op_id == op.id
+
+      :ok = Foreman.Jobs.Housekeeping.perform(%Oban.Job{})
+      assert Operations.get!(op.id).status == "dispatched"
+      refute_push "command", %{"type" => "op.cancel"}
+    end
+
+    test "a cancel lost in the outage is sent again instead of the operation", ctx do
+      op = sent_then_offline(ctx)
+      :ok = Agents.cancel_operation(op, ctx.user.id)
+      assert_receive {:dispatch, %{type: "op.cancel"}}
+      offline(ctx.box)
+
+      _socket = join_box(ctx.box)
+      assert_push "command", %{"type" => "op.cancel", "payload" => %{"target_op_id" => target}}
+      assert target == op.id
+      refute_push "command", %{"type" => "env.logs"}
+    end
+  end
+
   describe "box commands across a reconnect" do
     test "a result that arrives after the agent joins again isn't marked failed", ctx do
       admin = Scope.for_user(user_fixture(role: "admin"))

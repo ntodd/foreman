@@ -77,10 +77,16 @@ defmodule Foreman.Environments.Server do
 
   defp do_resend(env_id, op_id) do
     case Operations.get(op_id) do
+      # Someone asked for it to stop, and the cancel may have been lost with
+      # the connection. Sending the operation again would run it.
       %{status: status} = op when status in ["dispatched", "running"] ->
-        env = Repo.get!(Environment, env_id)
-        if op.action in @needs_files, do: rewrite_secrets(env)
-        resend_op(op, env)
+        if Operations.cancel_requested?(op) do
+          Agents.cancel_operation(op, nil)
+        else
+          env = Repo.get!(Environment, env_id)
+          if op.action in @needs_files, do: rewrite_secrets(env)
+          resend_op(op, env)
+        end
 
       _ ->
         :ok

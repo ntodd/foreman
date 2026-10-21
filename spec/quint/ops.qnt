@@ -22,8 +22,8 @@
 //     is in flight.
 //   - The agent's done-map is unbounded (the real one keeps 500).
 //
-// The FIX_* switches turn on proposed fixes. With both off this is the code
-// as of v0.4.3.
+// The FIX_* switches are the fixes for #31 and #95, on as in the code.
+// With both off this is the code as of v0.4.3.
 module ops {
   // ------------------------------------------------------------------ parameters
   pure val N_OPS = 3
@@ -31,19 +31,19 @@ module ops {
   pure val MAX_TIME = 9
   // #31: agent_connected restarts Housekeeping's clock (dispatched_at) for
   // what it's about to resend, in the same step that sees the box online.
-  pure val FIX_RESEND_CLOCK = false
-  // A cancel survives a reconnect: the control plane remembers it was asked
-  // for, a resend sends the cancel instead of the command, and the agent
-  // records a cancel for an op it doesn't know (a tombstone in its
-  // done-map) and reports it cancelled.
-  pure val FIX_CANCEL = false
+  pure val FIX_RESEND_CLOCK = true
+  // #95: a cancel survives a reconnect. The control plane remembers it was
+  // asked for (args.cancel_requested), a resend sends the cancel instead of
+  // the command, and the agent records a cancel for an op it doesn't know (a
+  // tombstone in its done-map) and reports it cancelled.
+  pure val FIX_CANCEL = true
 
   pure val OPS = 0.to(N_OPS - 1)
 
   // ------------------------------------------------------------------ types
   type Status = Queued | Dispatched | Running | Succeeded | Failed | Cancelled
   type Outcome = Ok | Err | Killed            // Killed: reported with the error "cancelled"
-  // cancelRequested only exists with FIX_CANCEL; the code keeps no such record.
+  // cancelRequested is args.cancel_requested (FIX_CANCEL).
   type OpRec = { status: Status, timedOut: bool, dispatchedAt: int, cancelRequested: bool }
   type ToAgent = Cmd(int) | CancelMsg(int)
   type ToCP = Accepted(int) | Result({ op: int, out: Outcome })

@@ -103,6 +103,7 @@ defmodule Foreman.Agents do
 
     case dispatch(target.box_id, cmd) do
       :ok ->
+        {:ok, _} = Operations.request_cancel(target)
         :ok
 
       {:error, :offline} ->
@@ -209,9 +210,13 @@ defmodule Foreman.Agents do
   outbox. Housekeeping fails the ones that never arrive.
   """
   def agent_connected(box) do
-    for op <- Operations.active_for_box(box.id),
-        op.environment_id,
-        do: Environments.Server.resend(op.environment_id, op.id)
+    resent = Enum.filter(Operations.active_for_box(box.id), & &1.environment_id)
+
+    # Before the resends go out, so Housekeeping can't run in between and
+    # judge them by when they were first sent.
+    :ok = Operations.restart_clock(Enum.map(resent, & &1.id))
+
+    for op <- resent, do: Environments.Server.resend(op.environment_id, op.id)
 
     for env_id <- Operations.environments_with_queued(box.id),
         do: Environments.Server.kick(env_id)

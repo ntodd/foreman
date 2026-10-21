@@ -77,6 +77,40 @@ defmodule Foreman.Operations do
     |> Repo.all()
   end
 
+  @doc """
+  Restarts Housekeeping's clock for operations about to be resent after an
+  outage: an agent that restarted runs them from the start.
+  """
+  def restart_clock([]), do: :ok
+
+  def restart_clock(ids) do
+    Repo.update_all(
+      from(o in Operation, where: o.id in ^ids and o.status in ["dispatched", "running"]),
+      set: [dispatched_at: DateTime.utc_now()]
+    )
+
+    :ok
+  end
+
+  @doc """
+  Records that someone asked to stop the operation. The `op.cancel` can be
+  lost with the connection, so a resend sends it again rather than the
+  operation.
+  """
+  def request_cancel(%Operation{id: id}) do
+    Repo.transact(fn ->
+      op = get!(id)
+
+      {:ok,
+       Repo.update!(
+         Ecto.Changeset.change(op, args: Map.put(op.args || %{}, "cancel_requested", true))
+       )}
+    end)
+  end
+
+  def cancel_requested?(%Operation{args: %{"cancel_requested" => true}}), do: true
+  def cancel_requested?(%Operation{}), do: false
+
   def environments_with_queued(box_id) do
     from(o in Operation,
       where: o.box_id == ^box_id and o.status == "queued" and not is_nil(o.environment_id),
