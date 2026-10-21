@@ -29,8 +29,10 @@ module ops {
   pure val N_OPS = 3
   pure val STALE = 3
   pure val MAX_TIME = 9
-  // #31: agent_connected restarts Housekeeping's clock (dispatched_at) for
-  // what it's about to resend, in the same step that sees the box online.
+  // #31: the join restarts Housekeeping's clock (dispatched_at), before the
+  // box counts as online, for what's about to be resent and isn't in the
+  // agent's in_flight (what it lost in a restart). What it kept keeps its
+  // clock.
   pure val FIX_RESEND_CLOCK = true
   // #95: a cancel survives a reconnect. The control plane remembers it was
   // asked for (args.cancel_requested), a resend sends the cancel instead of
@@ -77,6 +79,11 @@ module ops {
     ranTwice: bool,
     resentAfterCancel: bool,
     startedAfterStop: bool,
+    // witnesses: the paths the properties are about do happen
+    startedEver: Set[int],
+    everTimedOut: bool,
+    everTombstoned: bool,
+    everRerun: bool,
   }
 
   var st: State
@@ -131,6 +138,10 @@ module ops {
     ranTwice: false,
     resentAfterCancel: false,
     startedAfterStop: false,
+    startedEver: Set(),
+    everTimedOut: false,
+    everTombstoned: false,
+    everRerun: false,
   }
 
   // ------------------------------------------------------------------ control plane
@@ -207,7 +218,8 @@ module ops {
       st' = { ...st,
         ops: st.ops.set(k, { ...st.ops.get(k), status: Failed, timedOut: true }),
         toAgent: st.toAgent.append(CancelMsg(k)),
-        prematureTimeout: st.prematureTimeout or not(heldLongEnough) },
+        prematureTimeout: st.prematureTimeout or not(heldLongEnough),
+        everTimedOut: true },
     }
   }
 
@@ -243,6 +255,7 @@ module ops {
   // agent_connected resends whatever the control plane has in flight.
   action connect = {
     val inFlight = activeOps(st)
+    val lost = inFlight.exclude(st.known)   // not in the join's in_flight
     all {
       st.agentUp,
       not(st.online),
@@ -252,7 +265,7 @@ module ops {
         resendPending: inFlight,
         ops: if (FIX_RESEND_CLOCK)
                st.ops.keys().mapBy(k =>
-                 if (inFlight.contains(k)) { ...st.ops.get(k), dispatchedAt: st.now } else st.ops.get(k))
+                 if (lost.contains(k)) { ...st.ops.get(k), dispatchedAt: st.now } else st.ops.get(k))
              else st.ops },
     }
   }
@@ -298,7 +311,7 @@ module ops {
           else if (s2.queue.indices().exists(i => s2.queue[i] == k))
             emitResult({ ...s2, queue: s2.queue.select(x => x != k) }, k, Killed)
           else if (FIX_CANCEL and not(s2.done.keys().contains(k)))
-            emitResult(s2, k, Killed)
+            { ...emitResult(s2, k, Killed), everTombstoned: true }
           else
             s2   // unknown or finished: nothing to stop
     },
@@ -316,7 +329,9 @@ module ops {
       slot: Run(k),
       startedThisLife: st.startedThisLife.union(Set(k)),
       ranTwice: st.ranTwice or st.startedThisLife.contains(k),
-      startedAfterStop: st.startedAfterStop or st.agentToldToStop.contains(k) },
+      startedAfterStop: st.startedAfterStop or st.agentToldToStop.contains(k),
+      startedEver: st.startedEver.union(Set(k)),
+      everRerun: st.everRerun or (st.startedEver.contains(k) and not(st.startedThisLife.contains(k))) },
   }
 
   action agentFinish = {
@@ -382,8 +397,22 @@ module ops {
   val succeededMeansRan = st.ops.keys().forall(k =>
     st.ops.get(k).status == Succeeded implies st.ranOk.contains(k))
 
+  // A reconnect never gives an op the agent kept running more time: its clock
+  // never starts later than when the agent took it on. Otherwise a
+  // connection that keeps dropping keeps a hung op alive forever.
+  val noEndlessExtension = st.ops.keys().forall(k =>
+    (active(st.ops.get(k)) and st.known.contains(k) and st.heldSince.keys().contains(k))
+      implies st.ops.get(k).dispatchedAt <= st.heldSince.get(k))
+
+  // Witnesses, expected to be violated: each says a path the properties are
+  // about is reachable, so they don't pass for want of it.
+  val noTimeouts = not(st.everTimedOut)
+  val noTombstones = not(st.everTombstoned)
+  val noReruns = not(st.everRerun)
+
   val allInvariants = and {
     noPrematureTimeout,
+    noEndlessExtension,
     atMostOncePerLife,
     cancelSticks,
     noStuckWhenQuiet,

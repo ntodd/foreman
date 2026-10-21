@@ -46,6 +46,10 @@ expect() {
 
 echo "The code as it is:"
 expect ops.qnt allInvariants ok
+echo "Reachable (witnesses, so the above isn't passing for want of them):"
+expect ops.qnt noTimeouts violated
+expect ops.qnt noTombstones violated
+expect ops.qnt noReruns violated
 
 old=$(variant false false)
 echo "As of v0.4.3, before the fixes for #31 and #95:"
