@@ -6,9 +6,10 @@
 # fixes for #31 and #95 (the code as of v0.4.3) the ones they fixed break
 # again, so the model still tells the difference.
 #
-# updates.qnt: the code as it is (v0.4.3 here) breaks the invariants #24 is
-# about, and the three proposed fixes together make every one hold, while
-# any two of them leave something broken.
+# updates.qnt, for systemd before 254 and from 254: the code as it is
+# (v0.4.3 here) breaks the invariants #24 is about, and the three proposed
+# fixes together make every one hold. Before 254 leaving out any of them
+# breaks something again.
 #
 #   ./check.sh            QUINT="quint" to use an installed one
 #   SAMPLES=100000 ./check.sh
@@ -33,15 +34,18 @@ variant() {
   echo "$out"
 }
 
-# Prints ok or violated; anything else is an error.
+# Prints ok or violated (on any of three seeds); anything else is an error.
 check() {
-  local out
-  out=$($quint run "$1" --invariant="$2" --max-samples="$samples" --max-steps="$3" --seed=1 2>&1 || true)
-  case $out in
-    *"No violation"*) echo ok ;;
-    *"Invariant violated"*) echo violated ;;
-    *) echo "quint failed on $2:" >&2; echo "$out" >&2; exit 2 ;;
-  esac
+  local out seed
+  for seed in 1 2 3; do
+    out=$($quint run "$1" --invariant="$2" --max-samples="$samples" --max-steps="$3" --seed=$seed 2>&1 || true)
+    case $out in
+      *"No violation"*) ;;
+      *"Invariant violated"*) echo violated; return ;;
+      *) echo "quint failed on $2:" >&2; echo "$out" >&2; exit 2 ;;
+    esac
+  done
+  echo ok
 }
 
 failed=0
@@ -74,17 +78,31 @@ expect "$old" noStuckWhenQuiet ok
 expect "$old" succeededMeansRan ok
 
 steps=80
-echo "updates.qnt, the code as it is:"
-expect updates.qnt neverStranded violated
-expect updates.qnt badNeverKept violated
-expect updates.qnt rollbackInTime violated
-expect updates.qnt boundedRetries ok
-expect updates.qnt succeededSticks ok
+for systemd in false true; do
+  if [ "$systemd" = true ]; then label="systemd 254 and later"; else label="systemd before 254"; fi
+  model=$(variant updates.qnt SYSTEMD_254=$systemd)
+  fixed=$(variant updates.qnt SYSTEMD_254=$systemd FIX_CONFIRM=true FIX_WATCHDOG=true FIX_ROLLBACK_UNIT=true)
 
-echo "updates.qnt with FIX_CONFIRM, FIX_WATCHDOG and FIX_ROLLBACK_UNIT:"
-expect "$(variant updates.qnt FIX_CONFIRM=true FIX_WATCHDOG=true FIX_ROLLBACK_UNIT=true)" allInvariants ok
+  echo "updates.qnt, $label, the code as it is:"
+  expect "$model" backOnline violated
+  expect "$model" badNeverKept violated
+  if [ "$systemd" = true ]; then
+    expect "$model" updateSettles ok
+  else
+    expect "$model" updateSettles violated
+  fi
+  expect "$model" boundedInstalls ok
+  expect "$model" succeededSticks ok
 
-echo "updates.qnt without FIX_ROLLBACK_UNIT (the watchdog's exit can still hit the start limit):"
-expect "$(variant updates.qnt FIX_CONFIRM=true FIX_WATCHDOG=true FIX_ROLLBACK_UNIT=false)" neverStranded violated
+  echo "updates.qnt, $label, with FIX_CONFIRM, FIX_WATCHDOG and FIX_ROLLBACK_UNIT:"
+  expect "$fixed" allInvariants ok
+  expect "$fixed" noRollbacks violated
+  expect "$fixed" noUpdates violated
+done
+
+echo "updates.qnt, systemd before 254, leaving one fix out:"
+expect "$(variant updates.qnt FIX_CONFIRM=false FIX_WATCHDOG=true FIX_ROLLBACK_UNIT=true)" badNeverKept violated
+expect "$(variant updates.qnt FIX_CONFIRM=true FIX_WATCHDOG=false FIX_ROLLBACK_UNIT=true)" updateSettles violated
+expect "$(variant updates.qnt FIX_CONFIRM=true FIX_WATCHDOG=true FIX_ROLLBACK_UNIT=false)" backOnline violated
 
 exit $failed

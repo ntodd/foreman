@@ -63,29 +63,58 @@ This is evidence under the assumptions below, not a proof that the code is right
 
 ## Agent updates (`updates.qnt`)
 
-The code as it is breaks three invariants. The `FIX_*` switches are proposed fixes, off by
-default.
+`SYSTEMD_254` picks systemd's behaviour. From 254 (Ubuntu 24.04 has 255), a failed exit of a
+`Restart=always` unit runs `OnFailure` every time; before it (Ubuntu 22.04 has 249, Debian 12
+has 252), only once the start limit is hit. Foreman supports both, and `check.sh` checks both.
+The `FIX_*` switches are proposed fixes for #24, off by default.
 
 | Invariant | Code as it is | Fix |
 |---|---|---|
-| `neverStranded` | Violated: #24. A release that joins and then crashes (on its first command, say) is confirmed at the join, which deletes `previous`. Its crash loop hits the start limit, and the rollback unit has nothing to go back to. The agent stays down until someone fixes the box. | `FIX_CONFIRM` |
-| `badNeverKept` | Violated: #24, the same path. A release that misbehaves gets confirmed. | `FIX_CONFIRM`: confirm once the release has stayed up and joined for a few minutes, and have the control plane count the update as done when the agent confirms, not at its first join. |
-| `rollbackInTime` | Violated: #24. A release that dies every couple of minutes without joining is never rolled back. Every start restarts the watchdog's clock (`max(installed_at, running_since)`), and a crash every two minutes is too slow for the start limit (5 in 120s). | `FIX_WATCHDOG`: time the release by how long it has run unjoined since the install, added up across restarts and kept in `update-pending`. |
-| `boundedRetries` | Holds: a bad version is installed at most twice. | |
+| `backOnline` | Violated on both. A release that joins and then crashes (on its first command, say) is confirmed at the join, which deletes `previous`. Its crash loop hits the start limit, and the rollback unit has nothing to go back to. The agent stays down until someone fixes the box. | `FIX_CONFIRM` |
+| `badNeverKept` | Violated on both, the same path: a release that misbehaves gets confirmed. | `FIX_CONFIRM`: confirm once this run has been up for a few minutes since it first joined, and have the control plane count the update as done when the agent confirms (it hears at once, or from the next join, which says whether an update is still pending), not at the first join. |
+| `updateSettles` | Violated before 254. A release that dies every couple of minutes without joining is never rolled back: every start restarts the watchdog's clock (`max(installed_at, running_since)`), and a crash every two minutes is too slow for the start limit (5 in 120s). From 254, `OnFailure` on the first crash catches it. | `FIX_WATCHDOG`: roll back an unconfirmed release once it has run five minutes unjoined since the install, added up across restarts, or, checked at boot before it connects, has started more than three times since. Both are kept in `update-pending`. |
+| `boundedInstalls` | Holds: a bad version is installed at most twice. | |
 | `succeededSticks` | Holds. | |
 
-The two obvious fixes aren't enough together. With `FIX_CONFIRM` and `FIX_WATCHDOG`, the
-watchdog can roll back right after a fast crash loop (unjoined time from a network outage,
-then crashes). Its exit then lands on a used-up start limit, and the rollback unit, with
-`previous` already used, gives up: the box is stranded on the good release. Counting starts
-instead of run time has the same problem. `FIX_ROLLBACK_UNIT` closes it: the rollback unit
-resets the failure and starts the agent again even when there's nothing to switch to.
+`backOnline` (with the network up, the agent is back online within a bound) and
+`updateSettles` (an installed update is confirmed or rolled back within a bound) are progress
+properties. They replaced two in the first version that Codex showed could pass by
+construction. `noRollbacks` and `noUpdates` are witnesses, expected to be violated.
 
-With all three, `allInvariants` holds over 300,000 runs of up to 100 steps; any two leave
-something broken.
+Getting to a fix that holds took several rounds, each found by the model or by review:
 
-Not modelled: a release that crashes long after it's confirmed, the disk filling during a
-download (#39), and `install.sh` re-runs (#32).
+- Confirming at the end of probation measured from the latest join never confirms on a flaky
+  network; measured as uptime from the start, it confirms a release that sat unjoined through
+  an outage and joins just as probation ends. Measuring from the first join of this run works.
+- Before 254, a release that joins and crashes about once a minute never hits the start limit
+  (systemd's window starts with its first start, so 2 or 3 starts land in each) and never trips
+  the watchdog (it joins). Capping starts since the install catches it, but only as a check at
+  boot: the watchdog only looks while the agent isn't joined, and this release is joined by its
+  first check, 20 seconds in. A 200,000-run search found that one after 20,000 runs had passed.
+- The watchdog can now roll back right after a fast crash loop, and its exit lands on a used-up
+  start limit. The rollback unit, with `previous` already used, gives up and leaves the box down
+  on the good release. `FIX_ROLLBACK_UNIT` closes that: the rollback unit resets the failure and
+  starts the agent again even when there's nothing to switch to.
+
+With all three, `allInvariants` holds on both systemd versions over 400,000 runs of up to 100
+steps. Before 254, leaving any one out breaks something; from 254, `FIX_CONFIRM` alone holds.
+
+### Assumptions and limits
+
+- What happens within seconds happens before the clock moves: systemd's restart, a crash at
+  boot, a join, the watchdog's 30-second check, the rollback unit, and an idle agent restarting
+  into an update. `RestartSec=3` is left out.
+- A release that joins and then crashes does so within a minute of first joining; probation is
+  longer. One that crashes after it's confirmed isn't modelled.
+- The network drops at most three times per run.
+- The fixes need work the model only assumes: the probation timer, an `update_pending` field in
+  the join so the control plane hears about a confirmation it missed, persisting run time and
+  starts in `update-pending` (checkpoints lose the last interval before a crash), and a new
+  rollback unit, which self-update can't install: boxes need `install.sh` again.
+- Codex noted a simpler watchdog passes too: time from the install alone, without the `max`.
+  It rolls back a good release on a box that was off for five minutes after an update, which is
+  the case the `max` is there for.
+- Not modelled: the disk filling during a download (#39) and `install.sh` re-runs (#32).
 
 ## Not modelled anywhere
 
