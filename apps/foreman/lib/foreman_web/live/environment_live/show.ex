@@ -291,6 +291,9 @@ defmodule ForemanWeb.EnvironmentLive.Show do
     {:vscode, "//vscode-remote/ssh-remote+#{env.remote_user}@#{env.slug}#{env.workspace_folder}"}
   end
 
+  # Zed's remote development, over the same Tailscale SSH.
+  defp zed_url(env), do: {:zed, "//ssh/#{env.remote_user}@#{env.slug}#{env.workspace_folder}"}
+
   @impl true
   def render(assigns) do
     ~H"""
@@ -430,12 +433,13 @@ defmodule ForemanWeb.EnvironmentLive.Show do
               />
               <div :if={tailscale?()} class="flex flex-wrap items-center gap-2">
                 <.button href={vscode_url(@env)} size="sm" icon="hero-code-bracket-square-mini">Open in VS Code</.button>
+                <.button href={zed_url(@env)} size="sm" icon="hero-code-bracket-square-mini">Open in Zed</.button>
                 <span class="text-xs text-ink-3">Apps listen on
                 <span class="font-mono">http://{@env.slug}:PORT</span>
                 on the tailnet. Nothing publishes ports.</span>
               </div>
               <p :if={not tailscale?()} id="tailscale-off" class="text-xs text-ink-3">
-                SSH and VS Code need the environment on your tailnet. Set
+                SSH, VS Code and Zed need the environment on your tailnet. Set
                 <span class="font-mono">FOREMAN_TAILSCALE_CLIENT_ID</span>
                 and <span class="font-mono">FOREMAN_TAILSCALE_CLIENT_SECRET</span>
                 on Foreman, then rebuild.
