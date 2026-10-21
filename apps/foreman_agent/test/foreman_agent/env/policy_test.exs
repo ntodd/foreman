@@ -205,6 +205,26 @@ defmodule ForemanAgent.Env.PolicyTest do
     assert message =~ "Tailscale"
   end
 
+  test "refuses the devcontainer CLI's own labels on a service, which change what it checks" do
+    for labels <- [
+          %{"devcontainer.local_folder" => "/srv/foreman/envs/e1/workspace/storefront"},
+          ["devcontainer.metadata=[]"]
+        ] do
+      assert {:error, [message]} =
+               Policy.check(compose(%{"app" => %{"labels" => labels}}), %{}, ctx())
+
+      assert message =~ "service 'app'"
+      assert message =~ "devcontainer."
+    end
+
+    assert {:ok, []} =
+             Policy.check(
+               compose(%{"app" => %{"labels" => %{"com.example.team" => "web"}}}),
+               %{},
+               ctx(%{privileged: :allow})
+             )
+  end
+
   describe "the resolved configuration (features included)" do
     defp resolved(features, merged \\ %{}) do
       %{

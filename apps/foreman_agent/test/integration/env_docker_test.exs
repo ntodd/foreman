@@ -659,4 +659,72 @@ defmodule ForemanAgent.Integration.EnvDockerTest do
     assert message =~ "#{slug}_default"
     assert containers(env_id) == %{}
   end
+
+  # read-configuration looks for an existing container by the CLI's own
+  # labels, and takes the merged config from that container instead of
+  # resolving features. A repo that gives its service those labels, then
+  # adds a privileged feature, must still be refused.
+  test "a container label can't hide a feature from the policy", %{
+    config: config,
+    base_url: base_url
+  } do
+    ctx = ctx(config)
+    env_id = "66666666-6666-4666-8666-666666666666"
+    payload = create_payload(env_id, "hello-6", base_url, %{"tailscale" => %{"enabled" => false}})
+
+    assert {:ok, _} = Env.run("env.create", payload, ctx)
+
+    on_exit(fn ->
+      System.cmd("docker", ["compose", "-p", "hello-6", "down", "--volumes"],
+        stderr_to_stdout: true
+      )
+    end)
+
+    clone = Env.paths(config, env_id, "acme/hello").clone
+    devcontainer = Path.join(clone, ".devcontainer")
+
+    # First the label, so the next container carries it.
+    compose = File.read!(Path.join(devcontainer, "docker-compose.yml"))
+
+    File.write!(
+      Path.join(devcontainer, "docker-compose.yml"),
+      String.replace(
+        compose,
+        "    command: sleep infinity\n",
+        "    command: sleep infinity\n    labels:\n      devcontainer.local_folder: #{clone}\n",
+        global: false
+      )
+    )
+
+    first = Env.run("env.rebuild", payload, ctx)
+
+    # Then a feature that asks for privileged.
+    File.cp_r!(
+      Path.expand("../fixtures/repos/innocent/.devcontainer/innocent", __DIR__),
+      Path.join(devcontainer, "innocent")
+    )
+
+    json = File.read!(Path.join(devcontainer, "devcontainer.json"))
+
+    File.write!(
+      Path.join(devcontainer, "devcontainer.json"),
+      String.replace(
+        json,
+        ~s("remoteUser": "vscode",),
+        ~s("remoteUser": "vscode", "features": {"./innocent": {}},)
+      )
+    )
+
+    second = Env.run("env.rebuild", payload, ctx)
+
+    assert match?({:error, _}, first) or match?({:error, _}, second),
+           "both rebuilds passed: #{inspect({first, second})}"
+
+    for {_, container} <- containers(env_id) do
+      {privileged, 0} =
+        System.cmd("docker", ["inspect", "-f", "{{.HostConfig.Privileged}}", container["Id"]])
+
+      assert String.trim(privileged) == "false", "a container came up privileged"
+    end
+  end
 end

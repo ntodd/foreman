@@ -17,7 +17,14 @@ defmodule ForemanAgent.EnvHardeningTest do
   @resolved %{
     "configuration" => %{},
     "mergedConfiguration" => %{},
-    "featuresConfiguration" => %{"featureSets" => []}
+    "featuresConfiguration" => %{
+      "featureSets" => [
+        %{
+          "sourceInformation" => %{"userFeatureId" => "./.foreman/feature"},
+          "features" => [%{"id" => "foreman"}]
+        }
+      ]
+    }
   }
 
   @success ~s({"outcome":"success","containerId":"c1","remoteUser":"vscode","remoteWorkspaceFolder":"/w"}\n)

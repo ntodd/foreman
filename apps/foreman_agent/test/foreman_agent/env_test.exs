@@ -75,6 +75,14 @@ defmodule ForemanAgent.EnvTest do
     cmd.payload
   end
 
+  # What read-configuration reports for the feature the agent adds.
+  defp foreman_feature_set do
+    %{
+      "sourceInformation" => %{"type" => "file-path", "userFeatureId" => "./.foreman/feature"},
+      "features" => [%{"id" => "foreman", "capAdd" => ["NET_ADMIN", "NET_RAW"]}]
+    }
+  end
+
   # A runner that behaves like git, docker compose and the devcontainer CLI.
   defp stub_tools(opts \\ []) do
     test_pid = self()
@@ -91,7 +99,7 @@ defmodule ForemanAgent.EnvTest do
       Keyword.get(opts, :resolved, %{
         "configuration" => %{},
         "mergedConfiguration" => %{"capAdd" => ["NET_ADMIN", "NET_RAW"]},
-        "featuresConfiguration" => %{"featureSets" => []}
+        "featuresConfiguration" => %{"featureSets" => [foreman_feature_set()]}
       })
 
     stub(RunnerMock, :run, fn command, args, run_opts ->
@@ -374,6 +382,11 @@ defmodule ForemanAgent.EnvTest do
 
       assert rc_opts[:env] == up_opts[:env]
 
+      # Its own id label, which no container has, so the CLI resolves the
+      # features from the config rather than reading an old container's.
+      assert "foreman.check=" <> nonce = arg(rc_args, "--id-label")
+      assert byte_size(nonce) >= 16
+
       override = meta |> Path.join("devcontainer.json") |> File.read!() |> JSON.decode!()
       refute Map.has_key?(override, "initializeCommand")
 
@@ -625,6 +638,7 @@ defmodule ForemanAgent.EnvTest do
           "mergedConfiguration" => %{"privileged" => true},
           "featuresConfiguration" => %{
             "featureSets" => [
+              foreman_feature_set(),
               %{
                 "sourceInformation" => %{"userFeatureId" => "ghcr.io/acme/features/sneaky:1"},
                 "features" => [%{"id" => "sneaky", "privileged" => true}]
@@ -637,6 +651,25 @@ defmodule ForemanAgent.EnvTest do
       assert {:error, message} = Env.run("env.create", payload(), ctx)
       assert message =~ "ghcr.io/acme/features/sneaky:1"
       refute Enum.any?(runs(), &match?({"devcontainer", ["up" | _], _}, &1))
+    end
+
+    test "refuses when the CLI didn't resolve the features it was given", %{ctx: ctx} do
+      # The merged config came from somewhere else (an existing container's
+      # labels, say), so what the features ask for wasn't checked.
+      stub_tools(
+        resolved: %{
+          "configuration" => %{},
+          "mergedConfiguration" => %{},
+          "featuresConfiguration" => %{"featureSets" => []}
+        }
+      )
+
+      assert {:error, message} = Env.run("env.create", payload(), ctx)
+      assert message =~ "couldn't check"
+      refute Enum.any?(runs(), &match?({"devcontainer", ["up" | _], _}, &1))
+
+      stub_tools(resolved: %{"configuration" => %{}, "mergedConfiguration" => %{}})
+      assert {:error, _} = Env.run("env.create", payload(), ctx)
     end
 
     test "requires a compose-based devcontainer", %{ctx: ctx} do

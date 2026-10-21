@@ -98,7 +98,14 @@ defmodule ForemanAgent.Integration.ComposePolicyTest do
           resolved = %{
             "configuration" => %{},
             "mergedConfiguration" => %{},
-            "featuresConfiguration" => %{"featureSets" => []}
+            "featuresConfiguration" => %{
+              "featureSets" => [
+                %{
+                  "sourceInformation" => %{"userFeatureId" => "./.foreman/feature"},
+                  "features" => [%{"id" => "foreman"}]
+                }
+              ]
+            }
           }
 
           {:ok, %{status: 0, output: JSON.encode!(resolved) <> "\n"}}

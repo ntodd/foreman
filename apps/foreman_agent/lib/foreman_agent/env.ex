@@ -993,8 +993,23 @@ defmodule ForemanAgent.Env do
 
   # Features can ask for privileges in their own metadata, which only the
   # CLI resolves. Ask it what the devcontainer will get before running it.
+  #
+  # Given no id label, read-configuration looks for a container by the
+  # CLI's default labels, which a repo can give a service, and then takes
+  # the merged config from that container instead of resolving features.
+  # A label no container has makes it resolve them from the config every
+  # time, and the result has to show it did.
   defp check_resolved(config_args, env, paths, spec, ctx) do
-    args = ["read-configuration", "--include-merged-configuration" | config_args]
+    nonce = 18 |> :crypto.strong_rand_bytes() |> Base.url_encode64(padding: false)
+
+    args =
+      [
+        "read-configuration",
+        "--include-merged-configuration",
+        "--id-label",
+        "foreman.check=#{nonce}"
+      ] ++
+        config_args
 
     with {:ok, %{status: status, output: output}} <-
            run_tool(
@@ -1019,19 +1034,33 @@ defmodule ForemanAgent.Env do
           end
         end)
 
-      if status != 0 or is_nil(resolved) do
-        {:error, "devcontainer read-configuration failed: #{last_lines(output)}"}
-      else
-        case Policy.check_resolved(resolved, policy_ctx(paths, spec, ctx.config)) do
-          {:ok, warnings} ->
-            Enum.each(warnings, &ctx.log.("info", "Warning: #{&1}\n"))
-            {:ok, warnings}
+      cond do
+        status != 0 or is_nil(resolved) ->
+          {:error, "devcontainer read-configuration failed: #{last_lines(output)}"}
 
-          {:error, refused} ->
-            {:error, refusal(refused)}
-        end
+        not resolved_feature?(resolved, @feature_ref) ->
+          {:error,
+           "couldn't check what the devcontainer's features ask for: " <>
+             "the devcontainer CLI didn't resolve them"}
+
+        true ->
+          case Policy.check_resolved(resolved, policy_ctx(paths, spec, ctx.config)) do
+            {:ok, warnings} ->
+              Enum.each(warnings, &ctx.log.("info", "Warning: #{&1}\n"))
+              {:ok, warnings}
+
+            {:error, refused} ->
+              {:error, refusal(refused)}
+          end
       end
     end
+  end
+
+  defp resolved_feature?(resolved, ref) do
+    sets = get_in(resolved, ["featuresConfiguration", "featureSets"])
+
+    is_list(sets) and
+      Enum.any?(sets, &(get_in(&1, ["sourceInformation", "userFeatureId"]) == ref))
   end
 
   defp up(paths, spec, prepared, config_args, env, ctx, opts) do
