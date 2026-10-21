@@ -578,6 +578,7 @@ defmodule ForemanAgent.EnvTest do
           "mergedConfiguration" => %{"privileged" => true},
           "featuresConfiguration" => %{
             "featureSets" => [
+              foreman_feature_set(),
               %{
                 "sourceInformation" => %{"userFeatureId" => ref},
                 "features" => [%{"id" => "root", "privileged" => true}]
