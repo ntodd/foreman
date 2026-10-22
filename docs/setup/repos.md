@@ -207,6 +207,61 @@ base images rather than relying on `:latest`.
   boxes and collide between copies (and the box refuses them).
 - **`ports:`** can stay; the overlay strips them.
 
+## What trips a port up
+
+Each of these broke a real repo moving onto Foreman. None of them is an
+error you'd see from the box's checks.
+
+- **The remote user doesn't run as the uid you set.** The devcontainer CLI
+  changes the remote user's uid and gid to the host user's that runs it,
+  which is the agent's own user (`foreman`, a system account `install.sh`
+  creates, so its uid is below 1000 and varies by box; `id foreman` shows
+  it). A Dockerfile's `useradd -u 1000` or common-utils'
+  `userUid` doesn't survive that. HOME is fine (the CLI re-owns it), but
+  anything else the image chowns to the user, `/usr/local/bundle` or a
+  browser cache like `/ms-playwright`, isn't writable at runtime. Make
+  those directories writable by any uid (`chmod -R a+rwX`) instead of
+  chowning them.
+- **A named volume for HOME keeps stale state.** Mounting a volume at the
+  user's home keeps sign-ins (`~/.claude`, `~/.codex`, gh) through a
+  rebuild, which is worth having. It also keeps lock files, sockets and
+  pid files that the old container's processes left, and a new container
+  can take those for a runtime that's still running. Clear them at start
+  when nothing is running, as the Orca feature's `orca-serve` does.
+- **A committed `devcontainer-lock.json` pins features.** The agent uses it
+  when the repo has one, so a feature's new version never installs until
+  the lockfile moves: run `devcontainer upgrade --workspace-folder .` and
+  commit it. Without a lockfile the agent passes `--no-lockfile`.
+- **Only the devcontainer service is on the tailnet.** Bind dev servers to
+  `0.0.0.0`. A sidecar a laptop needs to reach (a database console, a CDN
+  stand-in, Selenium's VNC) needs a relay from the devcontainer, such as
+  `setsid nohup socat TCP-LISTEN:<port>,fork,reuseaddr TCP:<service>:<port>
+  >/dev/null 2>&1 </dev/null &` in `postStartCommand`. URLs a laptop opens
+  should default to the environment's name, which is also
+  `COMPOSE_PROJECT_NAME`: `${APP_DEV_HOST:-${COMPOSE_PROJECT_NAME:-localhost}}`
+  in compose, plus whatever the framework needs to accept that host (Rails'
+  `config.hosts`, say).
+- **Reaching the tailnet from inside goes through a proxy.** The feature's
+  Tailscale runs in userspace, so the container's own outbound traffic
+  doesn't go over the tailnet. Tailnet hosts are reachable through its
+  SOCKS proxy: `curl --proxy socks5h://127.0.0.2:1055 http://<host>:<port>/`.
+- **Lifecycle commands in object form run in parallel, and their output is
+  held until each finishes.** Two entries that write the same file (two
+  `bundle config` calls, an `npm install` next to a `mix assets.setup` that
+  runs `npm ci`) race. A slow entry shows nothing in the environment's log
+  until it ends, so it looks like a hang. Put anything that downloads under
+  a `timeout`, let it print, and don't install `@latest` of tools whose
+  dependencies you've baked into the image at a fixed version.
+- **The login shell is whatever `/etc/passwd` says.** Tailscale SSH and
+  `docker exec` use it, not VS Code's terminal setting. With common-utils,
+  `installZsh` isn't enough: set `configureZshAsDefaultShell` too.
+- **Prepend to PATH, don't replace it.** `"remoteEnv": { "PATH":
+  "/home/<user>/.local/bin:${containerEnv:PATH}" }`. Replacing it drops
+  directories features added (nvm's, say).
+- **The dotfiles install command takes no arguments.** The CLI runs it as a
+  file, so `script/setup --force` fails with exit 126. Point it at a script
+  in the dotfiles repo that runs the real one with its flags.
+
 ## Secrets: which kind
 
 | Where the value is read | How it reaches it | After a change |
