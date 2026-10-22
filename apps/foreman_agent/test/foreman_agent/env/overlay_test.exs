@@ -44,6 +44,15 @@ defmodule ForemanAgent.Env.OverlayTest do
       assert db =~ ~s("foreman.feature_version": "")
     end
 
+    test "marks the devcontainer service, and only it" do
+      yaml = Overlay.compose(params())
+
+      [app, db] = String.split(yaml, ~r/\n  "db":\n/)
+      assert app =~ ~s("foreman.devcontainer": "true")
+      # Empty on the rest, which overrides a label the repo sets.
+      assert db =~ ~s("foreman.devcontainer": "")
+    end
+
     test "labels the devcontainer with no feature when the agent can't read its own" do
       yaml = Overlay.compose(params(%{feature_version: nil}))
       assert length(Regex.scan(~r/"foreman.feature_version": ""/, yaml)) == 2

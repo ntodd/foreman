@@ -5,7 +5,7 @@ defmodule ForemanAgent.Env.Overlay do
   - a compose overlay that strips published ports, turns off restart
     policies (the agent orders starts after a reboot, once secrets are back
     on tmpfs), labels every service with the environment (and the
-    devcontainer with the Foreman feature it's built with), mounts the
+    devcontainer as such, with the Foreman feature it's built with), mounts the
     secrets directory and the Tailscale state volume, and puts every
     network on a bridge named for Foreman (`fm-...`), which is how the
     box's firewall tells environment traffic from other containers'
@@ -52,6 +52,9 @@ defmodule ForemanAgent.Env.Overlay do
           q(params.slug),
           "\n",
           feature_label(service, params),
+          "      \"foreman.devcontainer\": ",
+          q(if(service == params.devcontainer_service, do: "true", else: "")),
+          "\n",
           if(service == params.devcontainer_service,
             do: devcontainer_service(params, tailscale?),
             else: []
