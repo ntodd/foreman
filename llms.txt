@@ -1,0 +1,23 @@
+# Foreman
+
+> Foreman runs each copy of a repo as its own devcontainer environment on boxes you own: a control plane (Phoenix) sends commands to an agent on each box, which clones the repo and brings up its compose-based devcontainer, unprivileged, with Tailscale, secrets, git identity and GitHub credentials layered on.
+
+If you're getting a repo ready to run on Foreman, read "Making a repo work with Foreman" first, especially "What trips a port up": the remote user doesn't run as the uid the image sets, HOME volumes keep stale state, committed lockfiles pin features, and only the devcontainer service is on the tailnet.
+
+## Getting a repo ready
+
+- [Making a repo work with Foreman](docs/setup/repos.md): what Foreman adds, what a box refuses, what to remove, what trips a port up, secrets, coming from Codespaces
+
+## Running Foreman
+
+- [Personal setup](docs/setup/personal.md): one person, one or more boxes
+- [Team setup](docs/setup/team.md)
+- [Tailscale](docs/setup/tailscale.md): how environments join the tailnet and the box firewall
+- [GitHub App](docs/setup/github-app.md)
+- [Private images on GHCR](docs/setup/ghcr-machine-user.md)
+- [Upgrading](docs/setup/upgrading.md)
+
+## How it works
+
+- [Architecture](docs/architecture.md)
+- [Security model](docs/security.md)
