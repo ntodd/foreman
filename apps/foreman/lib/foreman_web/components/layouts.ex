@@ -226,6 +226,7 @@ defmodule ForemanWeb.Layouts do
       <.flash
         id="client-error"
         kind={:error}
+        autohide={nil}
         title="Lost the connection"
         phx-disconnected={
           show(%JS{}, ".phx-client-error #client-error", "flex")
@@ -240,6 +241,7 @@ defmodule ForemanWeb.Layouts do
       <.flash
         id="server-error"
         kind={:error}
+        autohide={nil}
         title="Something went wrong"
         phx-disconnected={
           show(%JS{}, ".phx-server-error #server-error", "flex")
