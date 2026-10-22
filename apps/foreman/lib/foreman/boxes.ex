@@ -150,6 +150,8 @@ defmodule Foreman.Boxes do
   def online?(box_id), do: Registry.lookup(Foreman.Registry, {:agent, box_id}) != []
 
   def agent_joined(%Box{} = box, join) do
+    last_seen = box.last_seen_at
+
     box =
       box
       |> Ecto.Changeset.change(
@@ -167,6 +169,7 @@ defmodule Foreman.Boxes do
       |> Repo.update!()
 
     broadcast(box, :online)
+    Foreman.Activity.box_joined(box, last_seen)
     box
   end
 
@@ -260,8 +263,9 @@ defmodule Foreman.Boxes do
 
   def agent_left(box_id) do
     if box = get_box(box_id) do
-      box |> Ecto.Changeset.change(last_seen_at: DateTime.utc_now()) |> Repo.update!()
+      box = box |> Ecto.Changeset.change(last_seen_at: DateTime.utc_now()) |> Repo.update!()
       broadcast(box, :offline)
+      Foreman.Jobs.BoxOfflineNotice.enqueue(box)
     end
 
     :ok

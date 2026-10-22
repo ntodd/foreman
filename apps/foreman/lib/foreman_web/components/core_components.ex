@@ -85,8 +85,17 @@ defmodule ForemanWeb.CoreComponents do
         <.icon :if={@kind == :error} name="hero-exclamation-triangle-micro" class="size-3.5" />
       </span>
       <div class="min-w-0 flex-1">
-        <p :if={@title} class="font-semibold text-ink">{@title}</p>
-        <p class="text-ink-2">{msg}</p>
+        <p :if={notice_title(msg, @title)} class="font-semibold text-ink">
+          {notice_title(msg, @title)}
+        </p>
+        <p class="line-clamp-3 text-ink-2 [overflow-wrap:anywhere]">{notice_text(msg)}</p>
+        <.link
+          :if={notice_path(msg)}
+          navigate={notice_path(msg)}
+          class="mt-1 inline-block font-medium text-ink underline-offset-2 hover:underline"
+        >
+          Open
+        </.link>
       </div>
       <button
         type="button"
@@ -122,6 +131,15 @@ defmodule ForemanWeb.CoreComponents do
     </script>
     """
   end
+
+  # A flash is a string, or a notice map from ForemanWeb.ActivityNotice
+  # with its own title and a link.
+  defp notice_title(%{title: title}, _title), do: title
+  defp notice_title(_msg, title), do: title
+  defp notice_text(%{text: text}), do: text
+  defp notice_text(msg), do: msg
+  defp notice_path(%{path: path}), do: path
+  defp notice_path(_msg), do: nil
 
   @doc """
   Renders a button with navigation support.

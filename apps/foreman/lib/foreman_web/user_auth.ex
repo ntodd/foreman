@@ -100,6 +100,7 @@ defmodule ForemanWeb.UserAuth do
     if socket.assigns.current_scope.user do
       if Phoenix.LiveView.connected?(socket) do
         Phoenix.PubSub.subscribe(Foreman.PubSub, "user:#{socket.assigns.current_scope.user.id}")
+        Foreman.Activity.subscribe(socket.assigns.current_scope)
       end
 
       {:cont,
@@ -145,7 +146,31 @@ defmodule ForemanWeb.UserAuth do
     end
   end
 
+  # Activity on a box, shown as a notice on whatever page this is. Halted
+  # either way: pages refresh from their own topics, and most don't take
+  # stray messages.
+  defp handle_user_event({:activity, %Foreman.Activity{} = event}, socket) do
+    %Scope{user: user} = socket.assigns.current_scope
+
+    with true <- Foreman.Activity.visible?(event, user),
+         false <- showing?(socket, event),
+         {kind, message} <- ForemanWeb.ActivityNotice.flash(event) do
+      {:halt, Phoenix.LiveView.put_flash(socket, kind, message)}
+    else
+      _ -> {:halt, socket}
+    end
+  end
+
   defp handle_user_event(_message, socket), do: {:cont, socket}
+
+  # The page about the environment or box already shows it, live.
+  defp showing?(%{view: ForemanWeb.EnvironmentLive.Show, assigns: %{env: %{id: id}}}, event),
+    do: event.env_id == id
+
+  defp showing?(%{view: ForemanWeb.BoxLive.Show, assigns: %{box: %{id: id}}}, event),
+    do: event.box_id == id and is_nil(event.env_id)
+
+  defp showing?(_socket, _event), do: false
 
   defp reload(socket) do
     {:halt, Phoenix.LiveView.redirect(socket, to: socket.assigns[:current_path] || ~p"/")}
