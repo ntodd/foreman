@@ -824,9 +824,15 @@ defmodule ForemanAgent.Env do
 
   defp devcontainer_up(paths, spec, prepared, p, ctx, opts) do
     with_docker_config(paths, Map.get(p, :registry_auth), fn docker_config ->
+      # COMPOSE_REMOVE_ORPHANS: a service the repo dropped from its compose
+      # files would otherwise leave its container behind, and the
+      # environment would read as partial. Only here, where the CLI passes
+      # every compose file; a compose run with fewer would count the
+      # services it doesn't see as orphans.
       env =
         ctx
         |> compose_env(spec.slug, Map.get(p, :compose_env, %{}))
+        |> Map.put("COMPOSE_REMOVE_ORPHANS", "true")
         |> then(&if(docker_config, do: Map.put(&1, "DOCKER_CONFIG", docker_config), else: &1))
 
       config_args = [
