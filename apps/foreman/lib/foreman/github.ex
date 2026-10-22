@@ -260,7 +260,12 @@ defmodule Foreman.GitHub do
 
         _scoped ->
           repos = Enum.uniq([repo.name | repo.extra_repos])
-          permissions = Repos.Repo.permissions(repo)
+
+          permissions =
+            Repos.TokenPermissions.request(
+              Repos.Repo.permissions(repo),
+              repo.owner.installation_permissions
+            )
 
           with {:ok, %{token: scoped}} <-
                  client().scope_user_token(app(), token, repo.owner.login, repos, permissions) do
@@ -317,7 +322,8 @@ defmodule Foreman.GitHub do
               login: account["login"],
               kind: account["type"],
               github_id: account["id"],
-              installation_id: installation["id"]
+              installation_id: installation["id"],
+              installation_permissions: installation["permissions"]
             })
 
           sync_installation(app, owner, installation["id"])
@@ -481,7 +487,13 @@ defmodule Foreman.GitHub do
         "issues" => "write",
         "metadata" => "read",
         "members" => "read",
-        "workflows" => "write"
+        "workflows" => "write",
+        "actions" => "write",
+        "checks" => "write",
+        "statuses" => "write",
+        "deployments" => "write",
+        "discussions" => "write",
+        "pages" => "write"
       },
       "default_events" => []
     }

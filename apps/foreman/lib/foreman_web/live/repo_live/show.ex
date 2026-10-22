@@ -9,6 +9,7 @@ defmodule ForemanWeb.RepoLive.Show do
   import ForemanWeb.ForemanComponents
 
   alias Foreman.{Accounts, Environments, Repos, Scope}
+  alias Foreman.Repos.TokenPermissions
   alias ForemanProtocol.Feature
 
   @impl true
@@ -23,6 +24,7 @@ defmodule ForemanWeb.RepoLive.Show do
      |> assign(:disabled_features, disabled_features(setting))
      |> assign(:page_title, repo.full_name)
      |> assign(:settings_form, to_form(settings_params(repo), as: :settings))
+     |> assign(:token_choices, Repos.Repo.permissions(repo))
      |> assign(
        :override_form,
        to_form(override_params(setting), as: :override)
@@ -74,6 +76,7 @@ defmodule ForemanWeb.RepoLive.Show do
          socket
          |> assign(:repo, Repos.get_repo!(repo.id))
          |> assign(:settings_form, to_form(settings_params(repo), as: :settings))
+         |> assign(:token_choices, Repos.Repo.permissions(repo))
          |> put_flash(
            :info,
            "Saved. Running environments get a token with the new scope when they next start, or within four hours. New limits apply when an environment is rebuilt."
@@ -81,7 +84,12 @@ defmodule ForemanWeb.RepoLive.Show do
 
       {:error, %Ecto.Changeset{} = changeset} ->
         {:noreply,
-         assign(socket, :settings_form, to_form(%{changeset | action: :update}, as: :settings))}
+         socket
+         |> assign(:settings_form, to_form(%{changeset | action: :update}, as: :settings))
+         |> assign(
+           :token_choices,
+           TokenPermissions.choices(params["token_permissions"] || socket.assigns.token_choices)
+         )}
 
       {:error, :unauthorized} ->
         {:noreply, socket}
@@ -263,6 +271,11 @@ defmodule ForemanWeb.RepoLive.Show do
             />
             <.input field={@settings_form[:default_branch]} label="Default branch" />
           </div>
+          <.token_permissions
+            choices={@token_choices}
+            granted={@repo.owner.installation_permissions}
+            owner={@repo.owner.login}
+          />
           <.input
             field={@settings_form[:extra_repos]}
             label="Extra repos the scoped token can reach"
@@ -304,6 +317,68 @@ defmodule ForemanWeb.RepoLive.Show do
         current_scope={@current_scope}
       />
     </Layouts.app>
+    """
+  end
+
+  attr :choices, :map, required: true
+  attr :granted, :map, default: nil
+  attr :owner, :string, required: true
+
+  defp token_permissions(assigns) do
+    assigns =
+      assign(
+        assigns,
+        :short,
+        for(
+          {name, _label, _levels} <- TokenPermissions.catalog(),
+          TokenPermissions.short?(name, assigns.choices[name], assigns.granted),
+          do: name
+        )
+      )
+
+    ~H"""
+    <fieldset id="token-permissions">
+      <legend class="label">What the scoped token can do</legend>
+      <p class="mb-3 text-xs text-ink-3">
+        On this repo and its extra repos. Metadata (read) is always included. The broad token ignores these.
+      </p>
+      <div class="grid gap-x-8 gap-y-2 sm:grid-cols-2">
+        <div
+          :for={{name, label, _levels} <- TokenPermissions.catalog()}
+          id={"permission-#{name}"}
+          class="flex items-center justify-between gap-3"
+        >
+          <label
+            for={"token-permission-#{name}"}
+            class="flex min-w-0 flex-wrap items-center gap-2 text-sm text-ink"
+          >
+            {label}
+            <.badge :if={name in @short} color="amber" size="sm" data-role="not-granted">
+              App lacks it
+            </.badge>
+          </label>
+          <div class="relative w-28 shrink-0">
+            <select
+              id={"token-permission-#{name}"}
+              name={"settings[token_permissions][#{name}]"}
+              class="input h-8 text-sm"
+            >
+              {Phoenix.HTML.Form.options_for_select(
+                Enum.map(TokenPermissions.levels(name), &{String.capitalize(&1), &1}),
+                @choices[name]
+              )}
+            </select>
+            <.icon
+              name="hero-chevron-up-down-micro"
+              class="pointer-events-none absolute right-2.5 top-1/2 size-4 -translate-y-1/2 text-ink-3"
+            />
+          </div>
+        </div>
+      </div>
+      <p :if={@short != []} class="mt-3 text-xs text-warning">
+        The GitHub App's installation on {@owner} doesn't have the flagged permissions, so tokens leave them out (or get read only). Add them to the App's permissions on GitHub and accept them on the installation; Foreman picks them up at the next sync.
+      </p>
+    </fieldset>
     """
   end
 end

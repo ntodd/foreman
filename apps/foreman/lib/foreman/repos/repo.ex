@@ -7,13 +7,6 @@ defmodule Foreman.Repos.Repo do
   use Foreman.Schema
 
   @token_modes ~w(scoped broad)
-  @permission_levels ~w(read write)
-  @default_permissions %{
-    "contents" => "write",
-    "pull_requests" => "write",
-    "issues" => "write",
-    "metadata" => "read"
-  }
 
   schema "repos" do
     belongs_to :owner, Foreman.Repos.Owner
@@ -39,10 +32,9 @@ defmodule Foreman.Repos.Repo do
     timestamps()
   end
 
-  def default_permissions, do: @default_permissions
-
-  def permissions(%__MODULE__{token_permissions: nil}), do: @default_permissions
-  def permissions(%__MODULE__{token_permissions: p}), do: p
+  @doc "The repo's token permission choices, filled in from the defaults."
+  def permissions(%__MODULE__{token_permissions: p}),
+    do: Foreman.Repos.TokenPermissions.choices(p)
 
   def sync_changeset(repo, attrs) do
     repo
@@ -94,14 +86,21 @@ defmodule Foreman.Repos.Repo do
         else: [tailscale_tags: "must look like tag:name"]
     end)
     |> validate_change(:token_permissions, fn :token_permissions, perms ->
-      valid =
-        is_map(perms) and
-          Enum.all?(perms, fn {k, v} ->
-            is_binary(k) and Regex.match?(~r/\A[a-z_]{1,50}\z/, k) and v in @permission_levels
-          end)
-
-      if valid, do: [], else: [token_permissions: "must map permission names to read or write"]
+      Foreman.Repos.TokenPermissions.validate(perms)
     end)
+    |> clear_default_permissions()
+  end
+
+  # Choices that match the defaults are stored as nil, so the repo follows
+  # later defaults.
+  defp clear_default_permissions(changeset) do
+    perms = get_change(changeset, :token_permissions)
+
+    if changeset.valid? and is_map(perms) and
+         Foreman.Repos.TokenPermissions.choices(perms) ==
+           Foreman.Repos.TokenPermissions.defaults(),
+       do: force_change(changeset, :token_permissions, nil),
+       else: changeset
   end
 
   def has_devcontainer?(%__MODULE__{devcontainer_path: path}), do: is_binary(path)

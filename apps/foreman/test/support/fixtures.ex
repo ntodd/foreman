@@ -32,7 +32,8 @@ defmodule Foreman.Fixtures do
     %Foreman.Repos.Owner{
       login: Map.get(attrs, :login, "owner#{unique()}"),
       kind: Map.get(attrs, :kind, "User"),
-      installation_id: Map.get(attrs, :installation_id, unique())
+      installation_id: Map.get(attrs, :installation_id, unique()),
+      installation_permissions: Map.get(attrs, :installation_permissions)
     }
     |> Repo.insert!()
   end
