@@ -116,19 +116,32 @@ defmodule ForemanWeb.RepoLive.Index do
                 name={if repo.private, do: "hero-lock-closed-mini", else: "hero-globe-alt-mini"}
                 class="size-4 shrink-0 text-ink-3"
               />
-              <div class="min-w-0 flex-1">
-                <p class="truncate text-sm font-medium text-ink">{repo.full_name}</p>
-                <p class="truncate text-xs text-ink-3">
-                  {repo.default_branch}
-                  <span :if={repo.devcontainer_path}>· {repo.devcontainer_path}</span>
-                  <span :if={repo.manual}>· added by hand</span>
-                </p>
+              <%!-- Badges drop under the name on phones, so the name keeps the row's width. --%>
+              <div class="flex min-w-0 flex-1 flex-col gap-1.5 sm:flex-row sm:items-center sm:gap-3">
+                <div class="min-w-0 flex-1">
+                  <p class="truncate text-sm font-medium text-ink">{repo.full_name}</p>
+                  <p class="truncate text-xs text-ink-3">
+                    {repo.default_branch}
+                    <span :if={repo.devcontainer_path}>· {repo.devcontainer_path}</span>
+                    <span :if={repo.manual}>· added by hand</span>
+                  </p>
+                </div>
+                <div
+                  :if={
+                    repo.devcontainer_error || is_nil(repo.devcontainer_path) ||
+                      repo.token_mode == "broad"
+                  }
+                  class="flex flex-wrap items-center gap-1.5"
+                >
+                  <.badge :if={repo.devcontainer_error} color="amber" size="sm">
+                    {repo.devcontainer_error}
+                  </.badge>
+                  <.badge :if={is_nil(repo.devcontainer_path)} size="sm">No devcontainer</.badge>
+                  <.badge :if={repo.token_mode == "broad"} color="amber" size="sm">
+                    Broad token
+                  </.badge>
+                </div>
               </div>
-              <.badge :if={repo.devcontainer_error} color="amber" size="sm">
-                {repo.devcontainer_error}
-              </.badge>
-              <.badge :if={is_nil(repo.devcontainer_path)} size="sm">No devcontainer</.badge>
-              <.badge :if={repo.token_mode == "broad"} color="amber" size="sm">Broad token</.badge>
               <.icon name="hero-chevron-right-mini" class="size-4 text-ink-3" />
             </.link>
           </li>
@@ -150,7 +163,7 @@ defmodule ForemanWeb.RepoLive.Index do
 
       <.panel :if={Foreman.Scope.admin?(@current_scope)} title="Add a repo by name">
         <:subtitle>For public repos outside the app's installations.</:subtitle>
-        <.form for={@add_form} id="add-repo" phx-submit="add" class="flex items-end gap-2">
+        <.form for={@add_form} id="add-repo" phx-submit="add" class="flex items-start gap-2">
           <div class="flex-1"><.input field={@add_form[:full_name]} placeholder="owner/name" /></div>
           <.button type="submit">Add</.button>
         </.form>

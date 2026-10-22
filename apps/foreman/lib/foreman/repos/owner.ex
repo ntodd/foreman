@@ -10,6 +10,7 @@ defmodule Foreman.Repos.Owner do
     field :kind, :string, default: "User"
     field :github_id, :integer
     field :installation_id, :integer
+    field :installation_permissions, :map
     field :registry_host, :string
     field :registry_username, :string
     field :registry_token, Foreman.Encrypted.Binary, redact: true
@@ -23,7 +24,7 @@ defmodule Foreman.Repos.Owner do
 
   def changeset(owner, attrs) do
     owner
-    |> cast(attrs, [:login, :kind, :github_id, :installation_id])
+    |> cast(attrs, [:login, :kind, :github_id, :installation_id, :installation_permissions])
     |> validate_required([:login])
     |> validate_format(:login, ~r/\A[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})\z/)
     |> unique_constraint(:login)
