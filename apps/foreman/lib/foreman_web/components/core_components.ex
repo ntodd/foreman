@@ -53,6 +53,11 @@ defmodule ForemanWeb.CoreComponents do
   attr :flash, :map, default: %{}, doc: "the map of flash messages to display"
   attr :title, :string, default: nil
   attr :kind, :atom, values: [:info, :error], doc: "used for styling and flash lookup"
+
+  attr :autohide, :any,
+    default: 6000,
+    doc: "ms before it dismisses itself (paused while hovered); nil to stay until clicked"
+
   attr :rest, :global, doc: "the arbitrary HTML attributes to add to the flash container"
 
   slot :inner_block, doc: "the optional inner block that renders the flash message"
@@ -65,6 +70,8 @@ defmodule ForemanWeb.CoreComponents do
       :if={msg = render_slot(@inner_block) || Phoenix.Flash.get(@flash, @kind)}
       id={@id}
       phx-click={JS.push("lv:clear-flash", value: %{key: @kind}) |> hide("##{@id}")}
+      phx-hook=".AutoHide"
+      data-autohide={@autohide}
       role={if @kind == :error, do: "alert", else: "status"}
       class="pointer-events-auto flex w-full max-w-sm cursor-pointer items-start gap-3 rounded-xl border border-line bg-raised p-3.5 pr-3 text-sm shadow-overlay animate-fade-up"
       {@rest}
@@ -89,6 +96,30 @@ defmodule ForemanWeb.CoreComponents do
         <.icon name="hero-x-mark-micro" class="size-4" />
       </button>
     </div>
+    <script :type={Phoenix.LiveView.ColocatedHook} name=".AutoHide">
+      // Dismisses the notice the way a click does, after data-autohide ms
+      // (none: it stays).
+      // Hovering pauses it so a long message can be read; a new message in
+      // the same notice starts the wait over.
+      export default {
+        mounted() {
+          this.el.addEventListener("mouseenter", () => this.stop())
+          this.el.addEventListener("mouseleave", () => this.start())
+          this.start()
+        },
+        updated() { this.start() },
+        destroyed() { this.stop() },
+        start() {
+          this.stop()
+          if (!this.el.dataset.autohide || this.el.matches(":hover")) return
+          this.timer = setTimeout(
+            () => this.liveSocket.execJS(this.el, this.el.getAttribute("phx-click")),
+            Number(this.el.dataset.autohide)
+          )
+        },
+        stop() { clearTimeout(this.timer) }
+      }
+    </script>
     """
   end
 
