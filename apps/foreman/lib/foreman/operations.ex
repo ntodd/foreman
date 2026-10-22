@@ -186,6 +186,7 @@ defmodule Foreman.Operations do
 
     Redactions.delete(op_id)
     broadcast(op)
+    Foreman.Activity.operation_finished(op)
     {:ok, op, applied}
   end
 
@@ -253,6 +254,7 @@ defmodule Foreman.Operations do
       {op, applied} ->
         Redactions.delete(id)
         broadcast(op)
+        Foreman.Activity.operation_finished(op)
         {:ok, op, applied}
 
       :finished ->
