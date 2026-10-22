@@ -343,7 +343,7 @@ defmodule ForemanAgent.EnvTest do
 
       # The repo's compose files are read before compose reads anything
       # (ComposeScan), so compose itself runs twice: services, then policy.
-      [git, _services, _policy, read_config, up, _tailscale] = runs()
+      [git, services, policy, read_config, up, _tailscale] = runs()
 
       {"git", git_args, git_opts} = git
 
@@ -371,6 +371,14 @@ defmodule ForemanAgent.EnvTest do
       refute Enum.any?(up_args, &(&1 =~ "neon_secret"))
       assert up_opts[:env]["NEON_API_KEY"] == "neon_secret"
       assert up_opts[:env]["COMPOSE_PROJECT_NAME"] == "storefront-2"
+
+      # A service the repo's compose files no longer have goes on the next
+      # up. Only there: a compose run with fewer files would count the
+      # missing services as orphans.
+      assert up_opts[:env]["COMPOSE_REMOVE_ORPHANS"] == "true"
+
+      for {_, _, opts} <- [services, policy],
+          do: refute(Map.has_key?(opts[:env], "COMPOSE_REMOVE_ORPHANS"))
 
       # What features ask for is checked first, against the same config.
       {"devcontainer", ["read-configuration" | rc_args], rc_opts} = read_config
