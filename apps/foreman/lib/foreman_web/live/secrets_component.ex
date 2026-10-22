@@ -51,8 +51,8 @@ defmodule ForemanWeb.SecretsComponent do
           >
             <.icon name="hero-key-mini" class="size-4 shrink-0 text-ink-3" />
             <div class="min-w-0 flex-1">
-              <p class="truncate font-mono text-[13px] font-medium text-ink">{secret.name}</p>
-              <p class="truncate text-xs text-ink-3">
+              <p class="break-all font-mono text-[13px] font-medium text-ink">{secret.name}</p>
+              <p class="text-xs text-ink-3">
                 <span :if={secret.repo_ids != []}>{repo_names(secret.repo_ids, @repos)} · </span>
                 Updated {Calendar.strftime(secret.updated_at, "%b %-d, %Y")}<span :if={
                   secret.updated_by
@@ -96,10 +96,10 @@ defmodule ForemanWeb.SecretsComponent do
               field={@form[:value]}
               type="textarea"
               label={if @editing, do: "New value for #{@editing}", else: "Value"}
-              placeholder="Stored encrypted; it can't be shown again"
+              placeholder="Stored encrypted; can't be shown again"
               autocomplete="off"
               spellcheck="false"
-              class="input min-h-[2.25rem] font-mono"
+              class="input min-h-[2.25rem] font-mono placeholder:font-sans"
               rows="1"
             />
           </div>

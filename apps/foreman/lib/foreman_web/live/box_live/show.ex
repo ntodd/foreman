@@ -267,32 +267,40 @@ defmodule ForemanWeb.BoxLive.Show do
           </.panel>
 
           <.panel title="Environments" padded={false}>
-            <table :if={@envs != []} class="w-full text-sm">
-              <thead class="border-b border-line text-left text-xs text-ink-3">
-                <tr>
-                  <th class="px-5 py-2 font-medium">Environment</th>
-                  <th class="px-3 py-2 font-medium">State</th>
-                  <th class="px-3 py-2 text-right font-medium">CPUs</th>
-                  <th class="px-3 py-2 text-right font-medium">Memory</th>
-                  <th class="px-5 py-2 font-medium">Counted from</th>
-                </tr>
-              </thead>
-              <tbody class="divide-y divide-line">
-                <tr :for={env <- @envs}>
-                  <td class="px-5 py-2.5">
-                    <.link
-                      navigate={~p"/environments/#{env.id}"}
-                      class="font-mono font-medium text-ink hover:text-accent-ink"
-                    >{env.slug}</.link>
-                  </td>
-                  <td class="px-3 py-2.5"><.state_badge state={env.observed_state} size="sm" /></td>
-                  <% p = Capacity.provisioned(env, env.repo) %>
-                  <td class="px-3 py-2.5 text-right tabular-nums">{Float.round(p.cpus * 1.0, 1)}</td>
-                  <td class="px-3 py-2.5 text-right tabular-nums">{gib(p.memory_mb)} GiB</td>
-                  <td class="px-5 py-2.5 text-xs text-ink-2">{source(p.source)}</td>
-                </tr>
-              </tbody>
-            </table>
+            <div :if={@envs != []} class="overflow-x-auto">
+              <table class="w-full text-sm">
+                <thead class="border-b border-line text-left text-xs text-ink-3">
+                  <tr>
+                    <th class="px-5 py-2 font-medium">Environment</th>
+                    <th class="px-3 py-2 font-medium">State</th>
+                    <th class="px-3 py-2 text-right font-medium">CPUs</th>
+                    <th class="px-3 py-2 text-right font-medium">Memory</th>
+                    <th class="hidden px-5 py-2 font-medium sm:table-cell">Counted from</th>
+                  </tr>
+                </thead>
+                <tbody class="divide-y divide-line">
+                  <tr :for={env <- @envs}>
+                    <td class="whitespace-nowrap px-5 py-2.5">
+                      <.link
+                        navigate={~p"/environments/#{env.id}"}
+                        class="font-mono font-medium text-ink hover:text-accent-ink"
+                      >{env.slug}</.link>
+                    </td>
+                    <td class="px-3 py-2.5"><.state_badge state={env.observed_state} size="sm" /></td>
+                    <% p = Capacity.provisioned(env, env.repo) %>
+                    <td class="px-3 py-2.5 text-right tabular-nums">
+                      {Float.round(p.cpus * 1.0, 1)}
+                    </td>
+                    <td class="whitespace-nowrap px-3 py-2.5 text-right tabular-nums">
+                      {gib(p.memory_mb)} GiB
+                    </td>
+                    <td class="hidden px-5 py-2.5 text-xs text-ink-2 sm:table-cell">
+                      {source(p.source)}
+                    </td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
             <p :if={@envs == []} class="px-5 py-6 text-sm text-ink-3">No environments on this box.</p>
           </.panel>
 
