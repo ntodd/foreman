@@ -41,7 +41,9 @@ config :foreman,
   env: :test,
   github_client: Foreman.GitHub.ClientMock,
   tailscale_client: Foreman.Tailscale.ClientMock,
-  agent_release_public_key: nil
+  agent_release_public_key: nil,
+  # Tests check for releases through Req.Test, never at boot.
+  update_check: false
 
 config :logger, level: :warning
 config :phoenix, :plug_init_mode, :runtime

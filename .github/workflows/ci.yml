@@ -172,7 +172,7 @@ jobs:
         with:
           node-version: "22"
       - name: ShellCheck
-        run: shellcheck -s sh features/src/foreman/install.sh features/src/foreman/scripts/* apps/foreman/priv/agent/install.sh scripts/publish-agent-release.sh e2e/*.sh e2e/firewall/test.sh e2e/linux/run.sh e2e/linux/bin/gh
+        run: shellcheck -s sh features/src/foreman/install.sh features/src/foreman/scripts/* apps/foreman/priv/agent/install.sh scripts/publish-agent-release.sh e2e/*.sh e2e/firewall/test.sh e2e/linux/run.sh e2e/linux/bin/gh docker/foreman-update e2e/updater/run.sh
       - name: Test the feature in a real devcontainer
         run: npx --yes @devcontainers/cli@0.89.0 features test --features foreman --base-image mcr.microsoft.com/devcontainers/base:debian --skip-scenarios features
 
@@ -319,6 +319,27 @@ jobs:
         run: |
           e2e/linux/run.sh --down || true
           docker image rm -f "$E2E_PROJECT-cp" "$E2E_PROJECT-box" 2>/dev/null || true
+
+  # A control plane host that boots systemd, runs the control plane from
+  # docker/compose.yml and installs the updater: refused requests, an
+  # update, and a rollback that restores the data volume.
+  e2e-updater:
+    if: github.event_name != 'schedule'
+    runs-on: [self-hosted, Linux, X64]
+    timeout-minutes: 40
+    env:
+      E2E_PROJECT: foreman-update-e2e-${{ github.run_id }}-${{ github.run_attempt }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - run: e2e/updater/run.sh
+      - name: Logs
+        if: failure()
+        run: e2e/updater/run.sh --logs
+      - name: Remove the host and its images
+        if: always()
+        run: |
+          e2e/updater/run.sh --down || true
+          docker image rm -f "$E2E_PROJECT-cp:0.9.1" "$E2E_PROJECT-cp:0.9.2" "$E2E_PROJECT-cp:0.9.3" "$E2E_PROJECT-box" 2>/dev/null || true
 
   security:
     runs-on: [self-hosted, Linux, X64]

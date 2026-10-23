@@ -31,6 +31,11 @@ services:
       - "127.0.0.1:4000:4000"
     volumes:
       - foreman-data:/var/lib/foreman
+      # Updating from the Deployment page: the control plane asks for a
+      # version in request/, and the host's updater (docker/foreman-update)
+      # reports in status/. Without the updater installed, these stay empty.
+      - /var/lib/foreman-update/request:/var/lib/foreman-update/request
+      - /var/lib/foreman-update/status:/var/lib/foreman-update/status:ro
 
 volumes:
   foreman-data:

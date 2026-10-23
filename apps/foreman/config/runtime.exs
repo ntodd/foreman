@@ -64,7 +64,10 @@ if config_env() != :test do
       tags: list.("FOREMAN_TAILSCALE_TAGS"),
       deployment_tag: deployment_tag
     },
-    tailnet_sweep: System.get_env("FOREMAN_TAILNET_SWEEP", "true") != "false"
+    tailnet_sweep: System.get_env("FOREMAN_TAILNET_SWEEP", "true") != "false",
+    update_check: System.get_env("FOREMAN_UPDATE_CHECK", "true") != "false",
+    update_repo: System.get_env("FOREMAN_UPDATE_REPO", "ntodd/foreman"),
+    update_dir: System.get_env("FOREMAN_UPDATE_DIR", "/var/lib/foreman-update")
 end
 
 if config_env() == :prod do

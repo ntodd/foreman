@@ -31,7 +31,14 @@ defmodule Foreman.Application do
       {DynamicSupervisor, name: Foreman.Environments.Supervisor, strategy: :one_for_one},
       {Oban, Application.fetch_env!(:foreman, Oban)},
       Foreman.Setup,
-      ForemanWeb.Endpoint
+      ForemanWeb.Endpoint,
+      # So a control plane that just updated says so without waiting for
+      # the next scheduled check.
+      %{
+        id: :check_for_updates,
+        start: {Task, :start_link, [&check_for_updates/0]},
+        restart: :temporary
+      }
     ]
 
     Supervisor.start_link(children, strategy: :one_for_one, name: Foreman.Supervisor)
@@ -41,6 +48,10 @@ defmodule Foreman.Application do
   def config_change(changed, _new, removed) do
     ForemanWeb.Endpoint.config_change(changed, removed)
     :ok
+  end
+
+  defp check_for_updates do
+    if Foreman.Updates.enabled?(), do: Foreman.Updates.check()
   end
 
   # Releases migrate on boot; in dev and test, mix does it.

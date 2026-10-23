@@ -211,6 +211,15 @@ Upgrading the control plane is a pull and a restart, and each box then
 updates its agent to the one the new image carries; see
 [upgrading.md](upgrading.md) for the steps, backups and rolling back.
 
+To update from the Deployment page instead, install the updater on the
+desktop once ([upgrading.md](upgrading.md#from-the-deployment-page)):
+
+```sh
+img=$(sudo docker inspect -f '{{.Config.Image}}' foreman)
+sudo docker run --rm --entrypoint cat "$img" /app/updater/foreman-update |
+  sudo sh -s -- install docker/compose.yml
+```
+
 ## Settings
 
 | Variable | Default | |
@@ -234,6 +243,9 @@ updates its agent to the one the new image carries; see
 | `FOREMAN_AGENT_RELEASE_DIR` | system temp dir | Where published releases are kept; set it to a persistent path |
 | `FOREMAN_BASE_URL` | `https://PHX_HOST` | The URL agents and GitHub are given |
 | `FOREMAN_FORCE_SSL`, `FOREMAN_SECURE_COOKIES` | `true` | Leave on behind `tailscale serve` |
+| `FOREMAN_UPDATE_CHECK` | `true` | `false` stops checking GitHub for new releases |
+| `FOREMAN_UPDATE_REPO` | `ntodd/foreman` | Where to look for them |
+| `FOREMAN_UPDATE_DIR` | `/var/lib/foreman-update` | Shared with the host's updater; compose.yml mounts it |
 
 With none of `FOREMAN_ADMINS`, `FOREMAN_ALLOWED_USERS` and
 `FOREMAN_ALLOWED_ORG` set, the first person to sign in becomes the admin

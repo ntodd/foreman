@@ -95,6 +95,28 @@ gaps" section is the place to start.
   only in CI, so a compromised control plane can't push agent code. A
   failing new release is rolled back by a systemd `OnFailure` unit.
 
+### The control plane and its host
+
+The control plane runs as an unprivileged user in its container, with
+no Docker socket. Updating it from the Deployment page goes through
+`foreman-update` on the host, which runs as root
+([upgrading.md](setup/upgrading.md#from-the-deployment-page)):
+
+- The container writes to one directory, `/var/lib/foreman-update/request`,
+  and reads the updater's status from another, mounted read-only. It
+  can't touch the backups, the updater or its config.
+- The updater reads at most a line from `request/version`, never through
+  a symlink, and never repeats what it read. It acts only on an `X.Y.Z`
+  newer than the running version, pulled from the repository the running
+  image came from. So a compromised control plane can ask for a newer
+  release, or nothing: not another image, not a downgrade, not a command.
+- The updater replaces itself with the copy in the new image, read from
+  the pulled image and not the running container, which the control
+  plane could have changed. The copy in the image is root's.
+- Images aren't signed. The updater trusts the registry as `docker
+  compose pull` does; anyone who can push a release image to it can run
+  code as the control plane, the same as for an upgrade by hand.
+
 ### Repo content and the box
 
 The repo, and anything running in an environment, is treated as hostile

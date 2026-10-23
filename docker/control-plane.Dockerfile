@@ -51,6 +51,9 @@ ENV LANG=en_US.UTF-8 LANGUAGE=en_US:en LC_ALL=en_US.UTF-8 MIX_ENV=prod PHX_SERVE
 
 RUN useradd --system --create-home --home-dir /var/lib/foreman foreman
 WORKDIR /app
+# The host's updater (docker/foreman-update) installs and refreshes itself
+# from here. Root's, so the control plane can't change what root runs.
+COPY docker/foreman-update /app/updater/foreman-update
 COPY --from=build --chown=foreman:foreman /src/apps/foreman/_build/prod/rel/foreman ./
 USER foreman
 ENV DATABASE_PATH=/var/lib/foreman/foreman.db
@@ -59,3 +62,7 @@ ENV DATABASE_PATH=/var/lib/foreman/foreman.db
 HEALTHCHECK --interval=30s --timeout=5s --start-period=60s \
   CMD curl -fsS -o /dev/null "http://127.0.0.1:${PORT:-4000}/healthz" || exit 1
 CMD ["/app/bin/foreman", "start"]
+# What the updater compares versions by. Last, so a new version only
+# changes this layer.
+ARG FOREMAN_VERSION=0.1.0
+LABEL org.opencontainers.image.version=${FOREMAN_VERSION}

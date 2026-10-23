@@ -1,0 +1,363 @@
+#!/bin/sh
+# Updates the Foreman control plane on this host when an admin asks for it
+# on the Deployment page.
+#
+# The control plane runs in a container and can't replace itself. It
+# writes the version it wants to /var/lib/foreman-update/request/version;
+# a systemd path unit notices, and this script, as root:
+#
+#   1. takes the version only if it's X.Y.Z and newer than the one running
+#   2. pulls it from the running image's repository (with -pg for Postgres)
+#   3. stops the control plane and backs up its data volume (SQLite)
+#   4. pins the version in the .env beside compose.yml and starts it again
+#   5. waits for /healthz, and if it never answers, puts the backup and
+#      the previous version back
+#
+# A version is all the control plane can send: the image repository is
+# the one already running, and nothing else in the request is read.
+# Progress goes to /var/lib/foreman-update/status/state.json, which the
+# control plane reads through a read-only mount.
+#
+# Install it from the image the control plane runs, as root:
+#
+#   img=$(docker inspect -f '{{.Config.Image}}' foreman)
+#   docker run --rm --entrypoint cat "$img" /app/updater/foreman-update |
+#     sh -s -- install /opt/foreman/compose.yml
+#
+# Then:
+#
+#   foreman-update status    the last run
+#   foreman-update run       what the path unit runs
+set -eu
+
+UPDATER_VERSION=1
+DIR=/var/lib/foreman-update
+CONF=/etc/foreman/update.conf
+BIN=/usr/local/sbin/foreman-update
+IN_IMAGE=/app/updater/foreman-update
+UNITS=/etc/systemd/system
+
+SERVICE=foreman
+KEEP_BACKUPS=3
+HEALTH_TIMEOUT=300
+COMPOSE_FILE=""
+
+log() { echo "foreman-update: $*"; }
+die() {
+  log "$*" >&2
+  exit 1
+}
+
+dc() { docker compose -f "$COMPOSE_FILE" "$@"; }
+
+# The control plane's container, running or not.
+container() { dc ps -a -q "$SERVICE" 2>/dev/null | head -n 1; }
+
+json() { printf '%s' "$1" | tr -d '\000-\037' | sed 's/\\/\\\\/g; s/"/\\"/g'; }
+
+# state STATE MESSAGE: what the Deployment page shows.
+state() {
+  tmp=$DIR/status/.state.json.$$
+  printf '{"state":"%s","from":"%s","to":"%s","message":"%s","at":"%s","updater":%s}\n' \
+    "$1" "$(json "${from:-}")" "$(json "${to:-}")" "$(json "$2")" \
+    "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$UPDATER_VERSION" > "$tmp"
+  chmod 0644 "$tmp"
+  mv -f "$tmp" "$DIR/status/state.json"
+  log "$1: $2"
+}
+
+# The image ref without its tag or digest.
+repo_of() {
+  ref=${1%%@*}
+  case ${ref##*/} in
+    *:*) echo "${ref%:*}" ;;
+    *) echo "$ref" ;;
+  esac
+}
+
+version_of() { docker image inspect -f '{{index .Config.Labels "org.opencontainers.image.version"}}' "$1" 2>/dev/null || true; }
+db_of() { docker image inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "$1" 2>/dev/null | sed -n 's/^FOREMAN_DB=//p'; }
+
+is_version() { printf '%s\n' "$1" | grep -Eqx '[0-9]{1,4}\.[0-9]{1,4}\.[0-9]{1,4}'; }
+# newer A B: A is a higher version than B.
+newer() { [ "$1" != "$2" ] && [ "$(printf '%s\n%s\n' "$1" "$2" | sort -V | tail -n 1)" = "$1" ]; }
+
+# The requested version, or nothing. The request directory is the
+# container's, so this reads at most a line from a regular file (never a
+# symlink), never repeats what it read, and empties the directory.
+take_request() {
+  req=$DIR/request/version
+  wanted=""
+  if [ -f "$req" ] && [ ! -L "$req" ]; then
+    wanted=$(head -c 32 "$req" | head -n 1 | tr -d '\r')
+  fi
+  find "$DIR/request" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +
+  printf '%s' "$wanted"
+}
+
+env_file() { echo "$(dirname "$COMPOSE_FILE")/.env"; }
+
+# Pins FOREMAN_IMAGE in compose's .env, keeping every other line.
+set_image() {
+  envfile=$(env_file)
+  tmp=$envfile.foreman-update.$$
+  {
+    if [ -f "$envfile" ]; then grep -v '^FOREMAN_IMAGE=' "$envfile" || true; fi
+    echo "FOREMAN_IMAGE=$1"
+  } > "$tmp"
+  if [ -f "$envfile" ]; then chmod "$(stat -c %a "$envfile")" "$tmp"; fi
+  mv -f "$tmp" "$envfile"
+}
+
+# Where the data volume is, as docker run -v wants it.
+data_mount() {
+  docker inspect -f '{{range .Mounts}}{{if eq .Destination "/var/lib/foreman"}}{{if .Name}}{{.Name}}{{else}}{{.Source}}{{end}}{{end}}{{end}}' "$1"
+}
+
+backup() {
+  name=foreman-data-$from-$(date -u +%Y%m%dT%H%M%SZ).tgz
+  docker run --rm --network none --user 0 --entrypoint tar \
+    -v "$data:/data:ro" -v "$DIR/backups:/backup" "$old_image" \
+    --numeric-owner -czf "/backup/$name" -C /data . || return 1
+  echo "$name"
+}
+
+restore() {
+  docker run --rm --network none --user 0 --entrypoint sh \
+    -v "$data:/data" -v "$DIR/backups:/backup:ro" "$old_image" \
+    -c 'find /data -mindepth 1 -delete && tar --numeric-owner -xzf "/backup/$1" -C /data' sh "$1"
+}
+
+# healthy IMAGE: the control plane runs IMAGE and /healthz answers, within
+# HEALTH_TIMEOUT. Gives up early on a container that keeps exiting.
+healthy() {
+  waited=0
+  while [ "$waited" -lt "$HEALTH_TIMEOUT" ]; do
+    c=$(container)
+    if [ -n "$c" ]; then
+      [ "$(docker inspect -f '{{.Config.Image}}' "$c")" = "$1" ] || return 1
+      [ "$(docker inspect -f '{{.RestartCount}}' "$c")" -lt 3 ] || return 1
+      # Exited for good: nothing will restart it.
+      case $(docker inspect -f '{{.State.Status}} {{.HostConfig.RestartPolicy.Name}}' "$c") in
+        "exited no" | "exited " | dead*) return 1 ;;
+      esac
+      docker exec "$c" sh -c 'curl -fsS -o /dev/null "http://127.0.0.1:${PORT:-4000}/healthz"' >/dev/null 2>&1 &&
+        return 0
+    fi
+    sleep 2
+    waited=$((waited + 2))
+  done
+  return 1
+}
+
+# Replaces this script with the one the new image carries, so the updater
+# moves with the releases. Read from the image, not the running container,
+# which the control plane could have changed.
+refresh_self() {
+  tmp=$BIN.new.$$
+  if docker run --rm --network none --entrypoint cat "$1" "$IN_IMAGE" > "$tmp" 2>/dev/null &&
+    [ -s "$tmp" ] && sh -n "$tmp"; then
+    chmod 0755 "$tmp"
+    mv -f "$tmp" "$BIN"
+  else
+    rm -f "$tmp"
+    log "kept this updater: $1 doesn't carry one"
+  fi
+}
+
+prune_backups() {
+  # shellcheck disable=SC2012 # our own file names, no newlines
+  ls -1t "$DIR"/backups/foreman-data-*.tgz 2>/dev/null | tail -n +"$((KEEP_BACKUPS + 1))" | xargs -r rm -f --
+}
+
+load_conf() {
+  [ -f "$CONF" ] || die "$CONF is missing; run: foreman-update install /path/to/compose.yml"
+  # shellcheck source=/dev/null
+  . "$CONF"
+  [ -f "$COMPOSE_FILE" ] || die "$COMPOSE_FILE (COMPOSE_FILE in $CONF) doesn't exist"
+}
+
+run() {
+  load_conf
+  echo "$UPDATER_VERSION" > "$DIR/status/updater"
+  [ -e "$DIR/request/version" ] || [ -L "$DIR/request/version" ] || exit 0
+
+  from="" to=""
+  to=$(take_request)
+  if ! is_version "$to"; then
+    to=""
+    state failed "The request wasn't a version."
+    exit 1
+  fi
+
+  ctr=$(container)
+  [ -n "$ctr" ] || {
+    state failed "The control plane's container isn't there; nothing changed."
+    exit 1
+  }
+  old_image=$(docker inspect -f '{{.Config.Image}}' "$ctr")
+  from=$(version_of "$old_image")
+  db=$(db_of "$old_image")
+  is_version "$from" || {
+    state failed "Couldn't tell which version $old_image is; nothing changed."
+    exit 1
+  }
+  newer "$to" "$from" || {
+    state failed "$to isn't newer than $from; nothing changed."
+    exit 1
+  }
+
+  suffix=""
+  [ "$db" = postgres ] && suffix=-pg
+  new_image=$(repo_of "$old_image"):$to$suffix
+
+  state running "Pulling $new_image."
+  docker pull -q "$new_image" > /dev/null || {
+    state failed "Couldn't pull $new_image; nothing changed."
+    exit 1
+  }
+  if [ "$(version_of "$new_image")" != "$to" ] || [ "$(db_of "$new_image")" != "$db" ]; then
+    state failed "$new_image isn't Foreman $to for ${db:-sqlite}; nothing changed."
+    exit 1
+  fi
+
+  data=$(data_mount "$ctr")
+  state running "Stopping $from to back it up."
+  dc stop "$SERVICE" || {
+    dc start "$SERVICE" || true
+    state failed "Couldn't stop $from to back it up; nothing changed."
+    exit 1
+  }
+  saved=""
+  if [ "$db" = postgres ]; then
+    log "Postgres: back up the database at your provider; this only keeps the previous version"
+  elif [ -z "$data" ]; then
+    dc start "$SERVICE"
+    state failed "The container has no /var/lib/foreman volume to back up; nothing changed."
+    exit 1
+  elif ! saved=$(backup); then
+    dc start "$SERVICE"
+    state failed "The backup failed; $from is running again and nothing changed."
+    exit 1
+  fi
+
+  cp -p "$(env_file)" "$DIR/backups/env.previous" 2>/dev/null || rm -f "$DIR/backups/env.previous"
+  set_image "$new_image"
+  state running "Starting $to."
+  if dc up -d --no-deps "$SERVICE" && healthy "$new_image"; then
+    refresh_self "$new_image"
+    echo "$UPDATER_VERSION" > "$DIR/status/updater"
+    prune_backups
+    state succeeded "Updated from $from to $to."
+    exit 0
+  fi
+
+  state running "$to didn't come up healthy; going back to $from."
+  dc logs --no-color --tail 50 "$SERVICE" 2>&1 | sed 's/^/  /' || true
+  dc stop "$SERVICE" || true
+  if [ -f "$DIR/backups/env.previous" ]; then
+    cp -p "$DIR/backups/env.previous" "$(env_file)"
+  else
+    set_image "$old_image"
+  fi
+  if [ -n "$saved" ] && ! restore "$saved"; then
+    state failed "$to didn't come up healthy, and restoring $saved failed. Restore it by hand (docs/setup/upgrading.md)."
+    exit 1
+  fi
+  if dc up -d --no-deps "$SERVICE" && healthy "$old_image"; then
+    state rolled_back "$to didn't come up healthy, so $from is back${saved:+ with its data as it was}. journalctl -u foreman-update has its logs."
+  else
+    state failed "$to didn't come up healthy, and neither did $from after going back. journalctl -u foreman-update has the logs."
+  fi
+  exit 1
+}
+
+install_updater() {
+  [ "$(id -u)" -eq 0 ] || die "run this as root (sudo)"
+  [ -n "${1:-}" ] || die "usage: foreman-update install /path/to/compose.yml [service]"
+  command -v systemctl > /dev/null 2>&1 || die "systemd is required"
+  docker compose version > /dev/null 2>&1 || die "Docker with Compose v2 is required"
+  COMPOSE_FILE=$(realpath "$1")
+  SERVICE=${2:-foreman}
+  [ -f "$COMPOSE_FILE" ] || die "$1 doesn't exist"
+
+  ctr=$(dc ps -q "$SERVICE" | head -n 1)
+  [ -n "$ctr" ] || die "start the control plane first: docker compose -f $COMPOSE_FILE up -d"
+  image=$(docker inspect -f '{{.Config.Image}}' "$ctr")
+  uid=$(docker exec "$ctr" id -u)
+  gid=$(docker exec "$ctr" id -g)
+
+  mkdir -p "$DIR/request" "$DIR/status" "$DIR/backups" "$(dirname "$CONF")"
+  chown root:root "$DIR" "$DIR/status" "$DIR/backups"
+  chmod 0755 "$DIR" "$DIR/status"
+  chmod 0700 "$DIR/backups"
+  # The control plane's only way in: it may write here, and nowhere else.
+  chown "$uid:$gid" "$DIR/request"
+  chmod 0700 "$DIR/request"
+
+  tmp=$BIN.new.$$
+  if ! docker run --rm --network none --entrypoint cat "$image" "$IN_IMAGE" > "$tmp" || [ ! -s "$tmp" ]; then
+    rm -f "$tmp"
+    die "$image doesn't carry the updater; update the control plane by hand first (docs/setup/upgrading.md)"
+  fi
+  chmod 0755 "$tmp"
+  mv -f "$tmp" "$BIN"
+
+  printf 'COMPOSE_FILE=%s\nSERVICE=%s\n' "$COMPOSE_FILE" "$SERVICE" > "$CONF"
+  chmod 0644 "$CONF"
+
+  cat > "$UNITS/foreman-update.path" << EOF
+[Unit]
+Description=Watch for Foreman update requests
+
+[Path]
+PathExists=$DIR/request/version
+Unit=foreman-update.service
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+  cat > "$UNITS/foreman-update.service" << EOF
+[Unit]
+Description=Update the Foreman control plane
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+# Root's registry logins (GHCR) are in its Docker config.
+Environment=HOME=/root
+ExecStart=$BIN run
+TimeoutStartSec=30min
+EOF
+
+  systemctl daemon-reload
+  systemctl enable --now foreman-update.path
+  echo "$UPDATER_VERSION" > "$DIR/status/updater"
+
+  if ! docker exec "$ctr" test -f "$DIR/status/updater"; then
+    log "installed, but the control plane can't see $DIR. Add these to its volumes in $COMPOSE_FILE"
+    log "(docker/compose.yml has them) and recreate it with: docker compose -f $COMPOSE_FILE up -d"
+    echo "      - $DIR/request:$DIR/request"
+    echo "      - $DIR/status:$DIR/status:ro"
+    exit 0
+  fi
+  docker exec "$ctr" sh -c "touch $DIR/request/.probe && rm $DIR/request/.probe" ||
+    die "the control plane can't write to $DIR/request"
+  log "installed; update from the Deployment page"
+}
+
+status() {
+  if [ -f "$DIR/status/state.json" ]; then cat "$DIR/status/state.json"; else echo "no updates yet"; fi
+}
+
+case "${1:-}" in
+  run) run ;;
+  install)
+    shift
+    install_updater "$@"
+    ;;
+  status) status ;;
+  *) die "usage: foreman-update install /path/to/compose.yml | run | status" ;;
+esac
