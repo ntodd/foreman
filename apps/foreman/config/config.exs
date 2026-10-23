@@ -36,7 +36,9 @@ config :foreman, Oban,
   repo: Foreman.Repo,
   queues: [default: 10, github: 5, tailscale: 2],
   plugins: [
-    {Oban.Plugins.Pruner, max_age: 7 * 24 * 60 * 60},
+    # Dispatch alone finishes a job a minute, so keep an hour of history:
+    # long enough for every worker's unique period, and the Jobs page.
+    {Oban.Plugins.Pruner, max_age: 60 * 60},
     {Oban.Plugins.Lifeline, rescue_after: :timer.minutes(30)},
     {Oban.Plugins.Cron,
      crontab: [
