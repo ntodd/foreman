@@ -377,13 +377,17 @@ Each user sets defaults for these, and can override any of them for a specific r
 | Setting | How it's delivered | When a change takes effect |
 |---|---|---|
 | Git name and email | `/run/foreman/gitconfig` | Immediately |
-| Dotfiles repo and install command | `--dotfiles-repository` / `--dotfiles-install-command` | On the next rebuild |
+| Dotfiles repo, install command and clone path | `--dotfiles-repository` / `--dotfiles-install-command` / `--dotfiles-target-path` | On the next rebuild, unless HOME is a volume (below) |
 
 The Foreman feature installs an `/etc/gitconfig` that includes `/run/foreman/gitconfig`. The agent writes that file with `user.name`, `user.email` and the credential helper setting.
 
 Because this is git config rather than an environment variable, every process sees it, including editors. Changes apply without a restart.
 
 This replaces the per-repo `git config` and dotfiles steps in `postCreateCommand`.
+
+The CLI clones dotfiles to `~/dotfiles` unless the clone path is set, so dotfiles that expect `~/.dotfiles` need it set. The CLI puts the path in its clone script unquoted, so Foreman only accepts a plain path under `~/` or an absolute one.
+
+The CLI installs dotfiles once per HOME: it skips them while `~/.devcontainer/.dotfilesMarker` exists. A repo that keeps HOME in a named volume keeps the marker across rebuilds, so a dotfiles change only reaches its environments when they're created, or after deleting the marker and rebuilding.
 
 If commits need signing, store an SSH signing key as a user secret.
 
@@ -508,7 +512,7 @@ What a repo needs to work well under Foreman:
 ## Data model (sketch)
 
 - `users`: GitHub id and login, encrypted user and refresh tokens, role, default git identity and dotfiles, and their own devcontainer features (ref => options).
-- `user_repo_settings`: user, repo, and optional git name, git email, dotfiles repo and dotfiles install command. Unset fields fall back to the user's defaults. Also the user's features turned off for the repo, by ref without a version.
+- `user_repo_settings`: user, repo, and optional git name, git email, dotfiles repo, dotfiles install command and dotfiles clone path. Unset fields fall back to the user's defaults. Also the user's features turned off for the repo, by ref without a version.
 - `owners`: GitHub org or user account, plus installation id.
 - `repos`:
   - owner, full name, default branch, devcontainer path

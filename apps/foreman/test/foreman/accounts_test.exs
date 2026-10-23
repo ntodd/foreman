@@ -208,6 +208,55 @@ defmodule Foreman.AccountsTest do
 
       assert errors_on(changeset).dotfiles_repository != []
     end
+
+    test "a repo can override where the dotfiles go" do
+      user = user_fixture()
+
+      {:ok, user} =
+        Accounts.update_preferences(Scope.for_user(user), %{
+          "dotfiles_repository" => "https://github.com/mona/dotfiles.git",
+          "dotfiles_target_path" => "~/.dotfiles"
+        })
+
+      repo = repo_fixture()
+      assert %{dotfiles_target_path: "~/.dotfiles"} = Accounts.effective_identity(user, repo)
+
+      {:ok, _} =
+        Accounts.put_repo_setting(Scope.for_user(user), repo, %{
+          "dotfiles_target_path" => "/home/mona/dots"
+        })
+
+      assert %{dotfiles_target_path: "/home/mona/dots"} = Accounts.effective_identity(user, repo)
+    end
+
+    # The devcontainer CLI puts the path in its clone script unquoted.
+    test "the dotfiles path is a plain home or absolute path" do
+      scope = Scope.for_user(user_fixture())
+
+      for path <- ["~/.dotfiles", "~/src/dotfiles", "/home/mona/.dotfiles", "~/dot_files-1"] do
+        assert {:ok, _} = Accounts.update_preferences(scope, %{"dotfiles_target_path" => path}),
+               path
+      end
+
+      for path <- [
+            "dotfiles",
+            "~",
+            "~/",
+            "~mona/dotfiles",
+            "~/../etc",
+            "/tmp/./x",
+            "~/dots; rm -rf ~",
+            "~/$(id)",
+            "~/a b",
+            "~/dots\n"
+          ] do
+        assert {:error, changeset} =
+                 Accounts.update_preferences(scope, %{"dotfiles_target_path" => path}),
+               inspect(path)
+
+        assert errors_on(changeset).dotfiles_target_path != []
+      end
+    end
   end
 
   describe "devcontainer features" do

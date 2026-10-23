@@ -22,7 +22,15 @@ defmodule Foreman.Validations do
     )
   end
 
-  @doc "Dotfiles must be a public https git URL; the install command is passed as one argv entry."
+  # `~/` or `/`, then path segments of plain characters, none `.` or `..`.
+  @dotfiles_path ~r/\A~?(?:\/(?!\.\.?(?:\/|\z))[A-Za-z0-9._-]+)+\z/
+
+  @doc """
+  Dotfiles must be a public https git URL; the install command is passed
+  as one argv entry. The devcontainer CLI puts the target path in its
+  clone script unquoted, so it's limited to a plain path under `~/` or
+  an absolute one.
+  """
   def validate_dotfiles(changeset) do
     changeset
     |> validate_format(:dotfiles_repository, ~r/\Ahttps:\/\/[^\s@]+\z/,
@@ -30,6 +38,10 @@ defmodule Foreman.Validations do
     )
     |> validate_length(:dotfiles_install_command, max: 500)
     |> validate_format(:dotfiles_install_command, ~r/\A[^\n\r\0]*\z/, message: "must be one line")
+    |> validate_length(:dotfiles_target_path, max: 200)
+    |> validate_format(:dotfiles_target_path, @dotfiles_path,
+      message: "must be a path under ~/ or an absolute path, of letters, digits, . _ - and /"
+    )
   end
 
   @doc """

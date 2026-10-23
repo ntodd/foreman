@@ -261,11 +261,9 @@ defmodule Foreman.Environments.Commands do
   defp dotfiles(%{dotfiles_repository: nil}), do: nil
 
   defp dotfiles(identity) do
-    put_present(
-      %{repository: identity.dotfiles_repository},
-      :install_command,
-      identity.dotfiles_install_command
-    )
+    %{repository: identity.dotfiles_repository}
+    |> put_present(:install_command, identity.dotfiles_install_command)
+    |> put_present(:target_path, identity.dotfiles_target_path)
   end
 
   # Protocol 3. An older agent would refuse the whole command, so its

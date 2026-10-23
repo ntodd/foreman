@@ -376,7 +376,13 @@ defmodule Foreman.Accounts do
   def effective_identity(%User{} = user, repo) do
     setting = get_repo_setting(user, repo) || %RepoSetting{}
 
-    for field <- [:git_name, :git_email, :dotfiles_repository, :dotfiles_install_command],
+    for field <- [
+          :git_name,
+          :git_email,
+          :dotfiles_repository,
+          :dotfiles_install_command,
+          :dotfiles_target_path
+        ],
         into: %{} do
       {field, blank_to_nil(Map.get(setting, field)) || blank_to_nil(Map.get(user, field))}
     end
