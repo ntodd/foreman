@@ -479,7 +479,7 @@ Anyone with Docker access on a box can read every secret of every environment on
 
 ## Agent self-update
 
-1. CI builds the agent release for each target architecture on a tag. It signs it with an ed25519 key that lives only in CI (`mix foreman_agent.sign`; the signature covers the version, target and SHA-256), builds the control plane images with the signed tarballs inside, and attaches the tarballs and signatures to a GitHub release. A control plane registers the agents its image carries at boot, checking each signature, and keeps the ones it already had. `scripts/publish-agent-release.sh` registers a GitHub release's agents by hand; the control plane never talks to GitHub for releases.
+1. CI builds the agent release for each target architecture on a tag. It signs it with an ed25519 key that lives only in CI (`mix foreman_agent.sign`; the signature covers the version, target and SHA-256), builds the control plane images with the signed tarballs inside, and attaches the tarballs and signatures to a GitHub release. A control plane registers the agents its image carries at boot, checking each signature, and keeps the ones it already had. `scripts/publish-agent-release.sh` registers a GitHub release's agents by hand; the control plane only asks GitHub which release is newest, and never downloads agents from it.
 2. A box follows the newest agent its control plane's image carries (for an image that carries none, the newest registered), unless an admin pins it to a version registered for its architecture. New boxes install the same version. A box whose agent runs another version receives `agent.update`.
 3. The agent downloads the release from the control plane and verifies the signature against the public key compiled into it.
 4. It unpacks to `/opt/foreman-agent/releases/<version>`, switches the `current` symlink (keeping the old target as `previous`) and writes an `update-pending` marker. It exits once nothing else is running and every result has been acknowledged (waiting up to an hour), and systemd restarts it on the new version. An update to the version already installed does nothing, and only one update runs at a time.
@@ -675,5 +675,13 @@ the plan above, the build wins.
   CLI recreates it.
 - **Destroy:** a git status check runs inside the container first; with
   uncommitted or unpushed work, the UI asks for the environment's name.
+- **Control plane self-update:** the control plane checks GitHub's
+  releases every five minutes. An admin's click writes the version to a
+  directory shared with the host, where `foreman-update` (a root script
+  run by a systemd path unit) pulls it, backs up the data volume,
+  recreates the container and rolls back if `/healthz` never answers.
+  The container has no Docker socket; a newer version number is all it
+  can ask for. See [security.md](security.md#the-control-plane-and-its-host)
+  and `e2e/updater/run.sh`.
 - **Not built yet:** idle auto-stop, per-service limits for sidecars,
   Incus isolation, webhooks (repos are polled).

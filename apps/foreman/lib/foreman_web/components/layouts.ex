@@ -94,6 +94,7 @@ defmodule ForemanWeb.Layouts do
 
         <:footer>
           <div class="space-y-3">
+            <.update_available :if={Foreman.Scope.admin?(@current_scope)} />
             <div class="flex items-center justify-between gap-2 px-1 sm:hidden">
               <span class="text-xs font-medium text-ink-3">Theme</span>
               <.theme_toggle id="sidebar-theme-toggle" />
@@ -287,6 +288,23 @@ defmodule ForemanWeb.Layouts do
       >
         <.icon name={icon} class="size-4" />
       </button>
+    </div>
+    """
+  end
+
+  # A newer Foreman release, for admins, linking to where they can update.
+  defp update_available(assigns) do
+    assigns = assign(assigns, :update, Foreman.Updates.available())
+
+    ~H"""
+    <div :if={@update} id="update-available" class="px-1">
+      <.link
+        navigate={~p"/admin"}
+        class="flex items-center gap-2 rounded-lg border border-line bg-subtle px-2.5 py-2 text-xs font-medium text-ink-2 transition-colors hover:text-ink"
+      >
+        <.icon name="hero-arrow-up-circle-mini" class="size-4 shrink-0 text-accent-ink" />
+        <span>Foreman {@update.version} is available</span>
+      </.link>
     </div>
     """
   end

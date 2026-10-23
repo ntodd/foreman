@@ -1,14 +1,18 @@
 defmodule ForemanWeb.AdminLive.Deployment do
   @moduledoc """
-  The deployment at a glance: GitHub and Tailscale, the database, owners
-  with their secrets and registry credentials, and agent releases.
+  The deployment at a glance: Foreman's version and updates, GitHub and
+  Tailscale, the database, owners with their secrets and registry
+  credentials, and agent releases.
   """
   use ForemanWeb, :live_view
 
   import ForemanWeb.ForemanComponents
 
   alias Foreman.Agents.Releases
-  alias Foreman.{GitHub, Repos, Tailscale}
+  alias Foreman.{GitHub, Repos, Tailscale, Updates}
+
+  # How often the page rereads the host's updater while it works.
+  @update_poll 2_000
 
   @impl true
   def mount(_params, _session, socket) do
@@ -18,8 +22,21 @@ defmodule ForemanWeb.AdminLive.Deployment do
      |> assign(:registry_owner, nil)
      |> assign(:registry_form, nil)
      |> assign(:checking, false)
-     |> load()}
+     |> assign(:checking_updates, false)
+     |> load()
+     |> load_update()}
   end
+
+  defp load_update(socket) do
+    updater = Updates.updater()
+
+    if connected?(socket) and updating?(updater),
+      do: Process.send_after(self(), :refresh_update, @update_poll)
+
+    assign(socket, latest: Updates.latest(), available: Updates.available(), updater: updater)
+  end
+
+  defp updating?(%{state: state}), do: state in ["pending", "running"]
 
   defp load(socket) do
     socket
@@ -87,7 +104,41 @@ defmodule ForemanWeb.AdminLive.Deployment do
     {:noreply, socket}
   end
 
+  def handle_event("update_foreman", _params, socket) do
+    %{version: version} = socket.assigns.available
+
+    case Updates.request(socket.assigns.current_scope, version) do
+      :ok ->
+        {:noreply, load_update(socket)}
+
+      {:error, reason} ->
+        {:noreply, socket |> put_flash(:error, update_error(reason)) |> load_update()}
+    end
+  end
+
+  def handle_event("check_for_updates", _params, socket) do
+    {:noreply,
+     socket
+     |> assign(:checking_updates, true)
+     |> start_async(:check_updates, fn -> Updates.check() end)}
+  end
+
+  defp update_error(:in_progress), do: "An update is already under way."
+  defp update_error(:no_updater), do: "The host's updater isn't installed."
+  defp update_error(:not_available), do: "That release is no longer the newest; check again."
+  defp update_error(:forbidden), do: "Only admins can update Foreman."
+  defp update_error(reason), do: "Couldn't ask the host to update: #{inspect(reason)}"
+
   @impl true
+  def handle_async(:check_updates, result, socket) do
+    socket = socket |> assign(:checking_updates, false) |> load_update()
+
+    case result do
+      {:ok, {:ok, _}} -> {:noreply, socket}
+      _ -> {:noreply, put_flash(socket, :error, "Couldn't check GitHub for releases.")}
+    end
+  end
+
   def handle_async(:check_registry, {:ok, {:ok, owner}}, socket) do
     {:noreply,
      socket
@@ -106,7 +157,25 @@ defmodule ForemanWeb.AdminLive.Deployment do
   end
 
   @impl true
+  def handle_info(:refresh_update, socket), do: {:noreply, load_update(socket)}
   def handle_info(_message, socket), do: {:noreply, socket}
+
+  # From the image the control plane runs: the updater installs the copy
+  # it carries.
+  defp install_command do
+    ~s|img=$(sudo docker inspect -f '{{.Config.Image}}' foreman) && | <>
+      ~s|sudo docker run --rm --entrypoint cat "$img" /app/updater/foreman-update | <>
+      ~s|\| sudo sh -s -- install /path/to/compose.yml|
+  end
+
+  defp last_update(%{state: "stale", to: to}),
+    do:
+      "The update to #{to} stopped reporting. journalctl -u foreman-update on the host says why."
+
+  defp last_update(%{message: message, at: %DateTime{} = at}),
+    do: "#{message} (#{Calendar.strftime(at, "%b %-d, %H:%M UTC")})"
+
+  defp last_update(%{message: message}), do: message
 
   defp expiring?(%{registry_token_expires_at: at}),
     do: DateTime.diff(at, DateTime.utc_now()) < 14 * 86_400
@@ -120,9 +189,92 @@ defmodule ForemanWeb.AdminLive.Deployment do
       <.header>
         Deployment
         <:subtitle>
-          How this Foreman is wired up. Running Foreman {Foreman.Config.version()}.
+          How this Foreman is wired up.
         </:subtitle>
       </.header>
+
+      <.panel id="foreman-update" title="Foreman">
+        <:subtitle>
+          Running Foreman {Foreman.Config.version()}.
+          <span :if={@latest && @latest.checked_at}>
+            Checked GitHub at {Calendar.strftime(@latest.checked_at, "%H:%M UTC")}.
+          </span>
+        </:subtitle>
+        <:actions>
+          <.button
+            id="check-for-updates"
+            size="sm"
+            variant="ghost"
+            phx-click="check_for_updates"
+            disabled={@checking_updates}
+          >{if @checking_updates, do: "Checking…", else: "Check now"}</.button>
+        </:actions>
+        <div class="space-y-3 text-sm">
+          <%= cond do %>
+            <% @updater.state == "pending" -> %>
+              <p class="text-ink">
+                <.badge color="amber" dot>Updating</.badge>
+                <span class="ml-1">Waiting for the host's updater to pick up {@updater.to}.</span>
+              </p>
+            <% @updater.state == "running" -> %>
+              <p class="text-ink">
+                <.badge color="amber" dot>Updating</.badge>
+                <span class="ml-1">{@updater.message}</span>
+              </p>
+              <p class="text-ink-2">
+                The page reconnects once {@updater.to} is up. Environments keep running.
+              </p>
+            <% @available -> %>
+              <p class="text-ink">
+                Foreman {@available.version} is available.
+                <a
+                  :if={@available.url}
+                  href={@available.url}
+                  class="font-medium text-accent-ink underline"
+                  target="_blank"
+                  rel="noopener"
+                >Release notes</a>
+              </p>
+              <%= if @updater.installed do %>
+                <.button
+                  id="update-foreman"
+                  variant="primary"
+                  size="sm"
+                  phx-click="update_foreman"
+                  data-confirm={"Update Foreman to #{@available.version} and restart it? The host backs up the data first, and goes back if #{@available.version} doesn't come up. Environments keep running; boxes reconnect, then update their agents."}
+                >Update and restart</.button>
+              <% else %>
+                <div id="install-updater" class="space-y-2">
+                  <p class="text-ink-2">
+                    To update from here, install the updater on this host once, with the path to the control plane's compose.yml (foreman-update; see docs/setup/upgrading.md):
+                  </p>
+                  <.command id="install-updater-command" command={install_command()} />
+                </div>
+              <% end %>
+            <% @latest && @latest.version -> %>
+              <p class="text-ink">
+                <.badge color="emerald" dot>Up to date</.badge>
+              </p>
+            <% true -> %>
+              <p class="text-ink-3">Not checked for releases yet.</p>
+          <% end %>
+
+          <p :if={@latest && @latest.error} class="text-ink-3">
+            The last check failed: {@latest.error}
+          </p>
+
+          <p
+            :if={@updater.state in ["succeeded", "failed", "rolled_back", "stale"]}
+            id="last-update"
+            class={[
+              @updater.state == "succeeded" && "text-ink-2",
+              @updater.state != "succeeded" && "text-danger"
+            ]}
+          >
+            {last_update(@updater)}
+          </p>
+        </div>
+      </.panel>
 
       <div class="grid gap-4 md:grid-cols-3">
         <.panel title="GitHub App">

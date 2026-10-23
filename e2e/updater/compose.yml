@@ -1,0 +1,20 @@
+# A control plane host for e2e/updater/run.sh: systemd as PID 1 and its
+# own Docker daemon (the box image), where the control plane runs from
+# docker/compose.yml and the updater is installed as on a real host.
+name: foreman-update-e2e
+
+services:
+  host:
+    image: ${E2E_BOX_IMAGE:-foreman-e2e-box}
+    privileged: true
+    tmpfs: [/run, /run/lock]
+    stop_grace_period: 30s
+    # Docker's storage can't be on the container's own overlayfs, and
+    # survives the host's restart.
+    volumes:
+      - host-docker:/var/lib/docker
+      - host-containerd:/var/lib/containerd
+
+volumes:
+  host-docker:
+  host-containerd:

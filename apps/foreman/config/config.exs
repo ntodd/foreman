@@ -48,7 +48,8 @@ config :foreman, Oban,
        {"7 * * * *", Foreman.Jobs.CleanupTailnet},
        {"*/5 * * * *", Foreman.Jobs.Housekeeping},
        {"23 * * * *", Foreman.Jobs.PruneMetrics},
-       {"* * * * *", Foreman.Jobs.Dispatch}
+       {"* * * * *", Foreman.Jobs.Dispatch},
+       {"*/5 * * * *", Foreman.Jobs.CheckForUpdates}
      ]}
   ]
 

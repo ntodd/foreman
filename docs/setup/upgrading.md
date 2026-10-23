@@ -3,7 +3,9 @@
 A release is one tag. It publishes control plane images that carry the
 agents built with them (see [personal.md](personal.md#1-make-the-release-keys-and-the-first-release)).
 Upgrading the control plane is a pull and a restart, and boxes then
-update their agents to the ones the new image carries.
+update their agents to the ones the new image carries. With the updater
+installed on its host, an admin does it from the Deployment page
+([below](#from-the-deployment-page)).
 
 ## What to keep
 
@@ -69,6 +71,71 @@ With Postgres, take a snapshot (Neon: a branch; RDS: a manual snapshot)
 before an upgrade, and restore from it the provider's way.
 
 ## Upgrading the control plane
+
+### From the Deployment page
+
+The control plane checks GitHub for releases every five minutes
+(`FOREMAN_UPDATE_CHECK=false` turns that off). When there's a newer
+one, admins see it in the sidebar, and the Deployment page has an
+**Update and restart** button once the host's updater is installed.
+
+The control plane can't replace its own container, so a small script on
+the host does it: `foreman-update`, run as root by a systemd path unit.
+The button writes the version to `/var/lib/foreman-update/request/`,
+which is mounted into the container, and the updater:
+
+1. takes it only if it's `X.Y.Z` and newer than the running version, and
+   pulls that version from the running image's repository (`-pg` for
+   Postgres). A version is all the control plane can ask for.
+2. stops the control plane and backs up the `foreman-data` volume to
+   `/var/lib/foreman-update/backups/` (it keeps the last three).
+3. pins the version in the `.env` beside `compose.yml` and starts it.
+4. waits up to five minutes for `/healthz`. If the new version doesn't
+   answer, it restores the backup and the previous version, so the
+   database is as it was before the update.
+
+The page follows along and reconnects once the new version is up.
+Environments keep running, and boxes then update their agents as below.
+Read the release notes first all the same; the updater doesn't hold a
+box back on its agent (step 3 below).
+
+Install the updater once, as root, from the image the control plane
+runs, with the path to its `compose.yml`:
+
+```sh
+img=$(sudo docker inspect -f '{{.Config.Image}}' foreman)
+sudo docker run --rm --entrypoint cat "$img" /app/updater/foreman-update |
+  sudo sh -s -- install /opt/foreman/compose.yml
+```
+
+It needs `compose.yml` to mount the update directory, as
+[`docker/compose.yml`](../../docker/compose.yml) now does. With an
+older copy of the file, copy the new one over it (or add its two
+`/var/lib/foreman-update` volumes) and recreate the container with
+`sudo docker compose up -d`; the installer says so if they're missing.
+Root's Docker login is what pulls the image, as with `docker compose
+pull`.
+
+After each update the updater replaces itself with the copy the new
+image carries. On the host:
+
+```sh
+sudo foreman-update status                # the last run
+sudo journalctl -u foreman-update         # what it did, and the new version's logs if it rolled back
+ls /var/lib/foreman-update/backups/       # the volume backups
+```
+
+On Postgres there's no volume to back up: take a snapshot first, as for
+an upgrade by hand. A failed update still goes back to the previous
+version, but the database keeps whatever the new version's migrations
+did.
+
+To remove it: `sudo systemctl disable --now foreman-update.path`, then
+delete `/usr/local/sbin/foreman-update`, the two
+`/etc/systemd/system/foreman-update.*` units and
+`/etc/foreman/update.conf`.
+
+### By hand
 
 1. Back up, as above.
 2. Read the release notes. They say which protocol the release speaks
