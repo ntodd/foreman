@@ -261,6 +261,11 @@ error you'd see from the box's checks.
 - **The dotfiles install command takes no arguments.** The CLI runs it as a
   file, so `script/setup --force` fails with exit 126. Point it at a script
   in the dotfiles repo that runs the real one with its flags.
+- **Dotfiles are cloned to `~/dotfiles`.** If they expect another path
+  (`~/.dotfiles`, say), set "Clone to" next to them in Settings.
+- **With HOME in a named volume, dotfiles install once.** The CLI skips
+  them while `~/.devcontainer/.dotfilesMarker` exists, and the volume
+  keeps it across rebuilds. To reinstall, delete it and rebuild.
 
 ## Secrets: which kind
 
