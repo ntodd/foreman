@@ -73,7 +73,7 @@ defmodule Foreman.MixProject do
       {:telemetry_metrics, "~> 1.0"},
       {:telemetry_poller, "~> 1.0"},
       {:jason, "~> 1.2"},
-      {:bandit, "~> 1.13"},
+      {:bandit, "~> 1.14"},
       {:req, "~> 0.5"},
       {:oban, "~> 2.24"},
       {:oban_web, "~> 2.13"},

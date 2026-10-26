@@ -1,17 +1,23 @@
 defmodule ForemanAgent.Integration.PortsDockerTest do
   @moduledoc """
   Reads listening ports and their processes from real containers, through
-  the real Engine API and the box's /proc. Linux only: elsewhere Docker
-  runs in a VM whose /proc the agent can't see. Run with:
+  the real Engine API and the box's /proc. It needs what an agent on a box
+  has: Linux, and Docker's processes in its own pid namespace. Elsewhere
+  Docker runs in a VM, or (on CI's runners) the tests run in a container
+  of their own, and neither can see the containers' pids. Run on a Linux
+  host with:
 
-      mix test --only docker
+      mix test --only host_pids
+
+  CI covers the same path through e2e/linux/run.sh, where the agent runs
+  on a box with its own Docker.
   """
   use ExUnit.Case, async: false
 
   alias ForemanAgent.{Config, Ports}
   alias ForemanAgent.Docker.Engine
 
-  @moduletag :docker
+  @moduletag :host_pids
   @moduletag timeout: 300_000
 
   unless match?({:unix, :linux}, :os.type()),
