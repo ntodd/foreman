@@ -67,16 +67,29 @@ defmodule ForemanAgent.Integration.ComposePolicyTest do
     %{config: config, ctx: %{config: config, runner: RunnerMock, docker: DockerMock, log: log}}
   end
 
+  defp docker(["compose" | rest] = args, opts, test_pid) do
+    send(test_pid, {:compose, rest})
+    env = System.get_env() |> Map.merge(opts[:env] || %{}) |> Map.delete("DOCKER_HOST")
+
+    {out, status} =
+      case System.get_env("FOREMAN_TEST_COMPOSE") do
+        nil -> System.cmd("docker", args, env: Enum.to_list(env), stderr_to_stdout: true)
+        compose -> System.cmd(compose, rest, env: Enum.to_list(env), stderr_to_stdout: true)
+      end
+
+    {:ok, %{status: status, output: out}}
+  end
+
+  # Listing connect hooks: there are none.
+  defp docker(["exec", "-u", _, "-w", _, _container, "sh", "-c", _], _opts, _test_pid),
+    do: {:ok, %{status: 0, output: ""}}
+
   # Real `docker compose`; everything else stubbed.
   defp stub_tools(devcontainer, compose_yaml, extra \\ %{}) do
     test_pid = self()
 
     stub(RunnerMock, :run, fn command, args, opts ->
       case {command, args} do
-        # Listing connect hooks: there are none.
-        {"docker", ["exec", "-u", _, "-w", _, _container, "sh", "-c", _]} ->
-          {:ok, %{status: 0, output: ""}}
-
         {"git", args} ->
           dest = List.last(args)
           File.mkdir_p!(Path.join(dest, ".git/info"))
@@ -86,17 +99,8 @@ defmodule ForemanAgent.Integration.ComposePolicyTest do
           for {rel, content} <- extra, do: File.write!(Path.join(dest, rel), content)
           {:ok, %{status: 0, output: ""}}
 
-        {"docker", ["compose" | rest]} ->
-          send(test_pid, {:compose, rest})
-          env = System.get_env() |> Map.merge(opts[:env] || %{}) |> Map.delete("DOCKER_HOST")
-
-          {out, status} =
-            case System.get_env("FOREMAN_TEST_COMPOSE") do
-              nil -> System.cmd("docker", args, env: Enum.to_list(env), stderr_to_stdout: true)
-              compose -> System.cmd(compose, rest, env: Enum.to_list(env), stderr_to_stdout: true)
-            end
-
-          {:ok, %{status: status, output: out}}
+        {"docker", args} ->
+          docker(args, opts, test_pid)
 
         {"devcontainer", ["read-configuration" | _]} ->
           resolved = %{
