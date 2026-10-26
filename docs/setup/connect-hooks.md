@@ -10,6 +10,9 @@ Foreman doesn't assume any tool. The buttons only show up when a
 feature in the environment installed a hook, and only to the
 environment's owner.
 
+Connect hooks need Foreman 0.4.8 or later, on the control plane and on
+the box's agent.
+
 ## Pairing Orca
 
 The Orca feature (`ghcr.io/ntodd/devcontainer-features/orca`, 1.1.0 or
