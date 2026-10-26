@@ -205,6 +205,10 @@ images and takes a few minutes. After that, `ssh vscode@storefront-1` (or
 whatever the devcontainer's remote user is) from any machine on the
 tailnet, or open it in VS Code from the environment's page.
 
+Tools that pair a client with a server in the environment, like Orca,
+can show their pairing code on the environment's page; see
+[connect-hooks.md](connect-hooks.md).
+
 ## Updates
 
 Upgrading the control plane is a pull and a restart, and each box then

@@ -33,6 +33,9 @@ defmodule Foreman.Environments.Environment do
     field :warnings, {:array, :string}, default: []
     field :host_requirements, :map
     field :feature_version, :string
+    # What `ForemanProtocol.Connect.cast_hooks/1` kept of the hooks the
+    # agent reported when it last came up.
+    field :connect_hooks, {:array, :map}, default: []
     field :tailscale_device_id, :string
     field :ts_authkey, Foreman.Encrypted.Binary, redact: true
     field :created_once, :boolean, default: false
@@ -105,6 +108,7 @@ defmodule Foreman.Environments.Environment do
       :warnings,
       :host_requirements,
       :feature_version,
+      :connect_hooks,
       :tailscale_device_id,
       :ts_authkey,
       :created_once,

@@ -26,6 +26,10 @@ defmodule ForemanAgent.EnvTest do
 
   @joined ~s({"BackendState":"Running","Self":{"ID":"nTest1CNTRL","HostName":"storefront-2"}})
 
+  @hook_dir "/usr/local/share/foreman/connect.d"
+  @describe ~s({"label":"Orca","actions":[{"id":"desktop","label":"Pair a desktop","confirm":"Orca restarts."}]})
+  @offer ~s({"value":"orca://pair?code=s3cretc0de","qr":false,"note":"Paste it into Orca."})
+
   setup :verify_on_exit!
 
   setup do
@@ -148,7 +152,7 @@ defmodule ForemanAgent.EnvTest do
           {:ok, %{status: status, output: output}}
 
         {"docker", ["exec" | rest]} ->
-          container_git(Keyword.get(opts, :git), rest, run_opts)
+          container_exec(rest, opts, run_opts)
 
         other ->
           flunk("unexpected command: #{inspect(other)}")
@@ -276,6 +280,31 @@ defmodule ForemanAgent.EnvTest do
     {:ok, %{status: 0, output: ""}}
   end
 
+  # Connect hooks, or git.
+  defp container_exec(["-u", _, "-w", _, _, "sh", "-c", _], opts, _run_opts),
+    do: connect_hooks(Keyword.get(opts, :connect), ["list"])
+
+  defp container_exec(
+         ["-u", _, "-w", _, _, "sh", "-c", _, "sh", _secs, @hook_dir <> "/" <> hook | args],
+         opts,
+         _run_opts
+       ),
+       do: connect_hooks(Keyword.get(opts, :connect), [hook | args])
+
+  defp container_exec(rest, opts, run_opts),
+    do: container_git(Keyword.get(opts, :git), rest, run_opts)
+
+  # `answer` takes ["list"] (the hooks the container has), or a hook's name
+  # and arguments, and returns {status, output}. Without one, there are no
+  # hooks.
+  defp connect_hooks(nil, ["list"]), do: {:ok, %{status: 0, output: ""}}
+  defp connect_hooks(nil, args), do: flunk("unexpected connect hook run: #{inspect(args)}")
+
+  defp connect_hooks(answer, args) do
+    {status, output} = answer.(args)
+    {:ok, %{status: status, output: output}}
+  end
+
   # `answer` takes git's arguments (after the -c options) and returns
   # {status, output}.
   defp container_git(nil, rest, _run_opts), do: flunk("unexpected docker exec: #{inspect(rest)}")
@@ -343,7 +372,7 @@ defmodule ForemanAgent.EnvTest do
 
       # The repo's compose files are read before compose reads anything
       # (ComposeScan), so compose itself runs twice: services, then policy.
-      [git, services, policy, read_config, up, _tailscale] = runs()
+      [git, services, policy, read_config, up, _tailscale, _connect] = runs()
 
       {"git", git_args, git_opts} = git
 
@@ -426,7 +455,8 @@ defmodule ForemanAgent.EnvTest do
       assert result["tailscale_node_id"] == "nTest1CNTRL"
 
       # Asked inside the devcontainer, after it's up.
-      {"docker", args, opts} = List.last(runs())
+      {"docker", args, opts} =
+        Enum.find(runs(), &match?({"docker", ["exec", "-u", "0" | _], _}, &1))
 
       assert args == [
                "exec",
@@ -524,7 +554,7 @@ defmodule ForemanAgent.EnvTest do
 
       assert {:ok, _} = Env.run("env.create", payload(%{"features" => orca}), ctx)
 
-      [_git, _services, _policy, {"devcontainer", rc_args, _}, {"devcontainer", up_args, _}, _ts] =
+      [_git, _services, _policy, {"devcontainer", rc_args, _}, {"devcontainer", up_args, _} | _] =
         runs()
 
       expected =
@@ -1645,7 +1675,8 @@ defmodule ForemanAgent.EnvTest do
                cmd == "docker" and Enum.take(args, -2) == ["stop", "app"]
              end)
 
-      assert {"devcontainer", _, _} = List.last(calls)
+      assert {"devcontainer", _, _} =
+               calls |> Enum.reject(&match?({"docker", ["exec" | _], _}, &1)) |> List.last()
     end
 
     # Sidecars are recreated by compose directly, before the CLI's up.
@@ -1761,7 +1792,8 @@ defmodule ForemanAgent.EnvTest do
                args == ["compose", "-p", "storefront-2", "stop"]
              end)
 
-      assert {"devcontainer", _, _} = List.last(calls)
+      assert {"devcontainer", _, _} =
+               calls |> Enum.reject(&match?({"docker", ["exec" | _], _}, &1)) |> List.last()
     end
   end
 
@@ -1922,6 +1954,276 @@ defmodule ForemanAgent.EnvTest do
                Env.run("env.git_status", %{env_id: @env_id, slug: "storefront-2"}, ctx)
 
       assert %{"branch" => "topic", "head" => nil, "base" => nil, "ahead" => 0} = result
+    end
+  end
+
+  describe "connect hooks" do
+    defp orca_hooks(extra \\ fn _ -> nil end) do
+      fn args ->
+        extra.(args) ||
+          case args do
+            ["list"] -> {0, "orca\n"}
+            ["orca", "describe"] -> {0, @describe <> "\n"}
+            ["orca", "run", "desktop"] -> {0, "restarting orca\n" <> @offer <> "\n"}
+          end
+      end
+    end
+
+    defp connect_payload(action \\ "desktop"),
+      do: %{env_id: @env_id, slug: "storefront-2", hook: "orca", action: action}
+
+    test "an up reports the hooks the container has, as its remote user", %{ctx: ctx} do
+      stub_tools(connect: orca_hooks())
+
+      assert {:ok, result} = Env.run("env.create", payload(), ctx)
+
+      assert result["connect"] == [
+               %{
+                 "name" => "orca",
+                 "label" => "Orca",
+                 "actions" => [
+                   %{
+                     "id" => "desktop",
+                     "label" => "Pair a desktop",
+                     "confirm" => "Orca restarts."
+                   }
+                 ]
+               }
+             ]
+
+      execs = for {"docker", ["exec" | args], opts} <- runs(), do: {args, opts}
+      [{list, list_opts}, {describe, describe_opts}] = Enum.take(execs, -2)
+
+      assert ["-u", "vscode", "-w", "/workspaces/storefront", "abc123", "sh", "-c", _] = list
+
+      assert [
+               "-u",
+               "vscode",
+               "-w",
+               "/workspaces/storefront",
+               "abc123",
+               "sh",
+               "-c",
+               wrapper,
+               "sh",
+               "30",
+               hook,
+               "describe"
+             ] = describe
+
+      assert hook == @hook_dir <> "/orca"
+      # Bounded inside the container too: a timeout here only stops docker exec.
+      assert wrapper =~ "timeout"
+      assert list_opts[:timeout] && describe_opts[:timeout]
+    end
+
+    test "a container without hooks reports none", %{ctx: ctx} do
+      stub_tools()
+      assert {:ok, %{"connect" => []}} = Env.run("env.create", payload(), ctx)
+    end
+
+    test "takes the last line of a describe, after whatever the hook printed first", %{ctx: ctx} do
+      stub_tools(
+        connect:
+          orca_hooks(fn
+            ["orca", "describe"] -> {0, "warming up\n" <> @describe <> "\n\n"}
+            _ -> nil
+          end)
+      )
+
+      assert {:ok, %{"connect" => [%{"name" => "orca"}]}} =
+               Env.run("env.create", payload(), ctx)
+    end
+
+    test "leaves out a hook whose describe fails or doesn't fit, and says so", %{ctx: ctx} do
+      stub_tools(
+        connect:
+          orca_hooks(fn
+            ["list"] -> {0, "broken\nnoisy\nNot-A-Name\norca\n"}
+            ["broken", "describe"] -> {1, "boom\n"}
+            ["noisy", "describe"] -> {0, ~s({"label":"Noisy","actions":"all of them"})}
+            _ -> nil
+          end)
+      )
+
+      assert {:ok, %{"connect" => [%{"name" => "orca"}]}} =
+               Env.run("env.create", payload(), ctx)
+
+      log = Enum.join(logged())
+      assert log =~ "connect hook broken"
+      assert log =~ "connect hook noisy"
+      refute log =~ "Not-A-Name"
+    end
+
+    test "a container it can't list hooks in reports none", %{ctx: ctx} do
+      stub_tools(
+        connect:
+          orca_hooks(fn
+            ["list"] -> {126, "OCI runtime exec failed: exec: \"sh\": not found\n"}
+            _ -> nil
+          end)
+      )
+
+      assert {:ok, %{"connect" => []}} = Env.run("env.create", payload(), ctx)
+    end
+
+    test "a start reports them too, and so does restarting everything", %{ctx: ctx} do
+      stub_tools(connect: orca_hooks())
+      {:ok, _} = Env.run("env.create", payload(), ctx)
+
+      start = %{env_id: @env_id, slug: "storefront-2", compose_env: %{}}
+      assert {:ok, %{"connect" => [%{"name" => "orca"}]}} = Env.run("env.start", start, ctx)
+
+      restart = Map.merge(start, %{mode: "all", changed: []})
+      assert {:ok, %{"connect" => [%{"name" => "orca"}]}} = Env.run("env.restart", restart, ctx)
+
+      # Every up reports them, so a result without them is an older agent's.
+      affected = Map.merge(start, %{mode: "affected", changed: ["APP_SECRET"]})
+      assert {:ok, %{"connect" => [%{"name" => "orca"}]}} = Env.run("env.restart", affected, ctx)
+    end
+
+    test "env.connect runs the action and hands back the offer, without logging it", %{ctx: ctx} do
+      stub_tools(connect: orca_hooks())
+      {:ok, _} = Env.run("env.create", payload(), ctx)
+      _ = runs()
+      _ = logged()
+      stub_running_container()
+
+      assert {:ok, result} = Env.run("env.connect", connect_payload(), ctx)
+
+      assert result == %{
+               "offer" => %{
+                 "value" => "orca://pair?code=s3cretc0de",
+                 "qr" => false,
+                 "note" => "Paste it into Orca."
+               }
+             }
+
+      [{"docker", args, opts}] = runs()
+
+      assert [
+               "exec",
+               "-u",
+               "vscode",
+               "-w",
+               "/workspaces/storefront",
+               "abc123",
+               "sh",
+               "-c",
+               _,
+               "sh",
+               secs,
+               hook,
+               "run",
+               "desktop"
+             ] = args
+
+      assert hook == @hook_dir <> "/orca"
+      # The container's own timeout goes first, then docker exec's.
+      assert String.to_integer(secs) * 1000 < opts[:timeout]
+      assert opts[:timeout] >= :timer.minutes(3)
+      refute Enum.join(logged()) =~ "s3cretc0de"
+      refute_received {:log, _, _}
+    end
+
+    test "env.connect shows a failing hook's own explanation, and nothing else", %{ctx: ctx} do
+      stub_tools(
+        connect:
+          orca_hooks(fn
+            ["orca", "run", "desktop"] ->
+              {1, "code: s3cretc0de\n" <> ~s({"error":"no pairing offer after 120s"}) <> "\n"}
+
+            _ ->
+              nil
+          end)
+      )
+
+      {:ok, _} = Env.run("env.create", payload(), ctx)
+      stub_running_container()
+
+      assert {:error, message} = Env.run("env.connect", connect_payload(), ctx)
+      assert message =~ "orca"
+      assert message =~ "no pairing offer after 120s"
+      refute message =~ "s3cretc0de"
+    end
+
+    # It could have printed the secret before it failed.
+    test "env.connect doesn't repeat what a failing hook printed", %{ctx: ctx} do
+      stub_tools(
+        connect:
+          orca_hooks(fn
+            ["orca", "run", "desktop"] -> {1, "code: s3cretc0de\ncleanup failed\n"}
+            _ -> nil
+          end)
+      )
+
+      {:ok, _} = Env.run("env.create", payload(), ctx)
+      stub_running_container()
+
+      assert {:error, message} = Env.run("env.connect", connect_payload(), ctx)
+      assert message =~ "connect hook orca failed"
+      refute message =~ "s3cretc0de"
+      refute message =~ "cleanup"
+    end
+
+    test "env.connect doesn't repeat output it can't read: it could hold the secret", %{ctx: ctx} do
+      stub_tools(
+        connect:
+          orca_hooks(fn
+            ["orca", "run", "desktop"] -> {0, "code: s3cretc0de\n"}
+            _ -> nil
+          end)
+      )
+
+      {:ok, _} = Env.run("env.create", payload(), ctx)
+      stub_running_container()
+
+      assert {:error, message} = Env.run("env.connect", connect_payload(), ctx)
+      assert message =~ "orca"
+      refute message =~ "s3cretc0de"
+    end
+
+    # The wrapper the agent runs hooks under, run here for real.
+    test "a hook runs under timeout, and doesn't run at all without it", %{tmp_dir: tmp} do
+      wrapper = Env.hook_wrapper()
+
+      empty = Path.join(tmp, "no-timeout")
+      File.mkdir_p!(empty)
+
+      {out, status} =
+        System.cmd("/bin/sh", ["-c", wrapper, "sh", "5", "/bin/echo", "ran"],
+          env: [{"PATH", empty}],
+          stderr_to_stdout: true
+        )
+
+      assert status != 0
+      refute out =~ "ran"
+      assert {:ok, %{"error" => error}} = out |> String.trim() |> JSON.decode()
+      assert error =~ "timeout"
+
+      if timeout = System.find_executable("timeout") do
+        bin = Path.join(tmp, "bin")
+        File.mkdir_p!(bin)
+        File.ln_s!(timeout, Path.join(bin, "timeout"))
+        started = System.monotonic_time(:millisecond)
+
+        {_out, status} =
+          System.cmd("/bin/sh", ["-c", wrapper, "sh", "1", "/bin/sleep", "30"],
+            env: [{"PATH", bin <> ":/bin:/usr/bin"}]
+          )
+
+        assert status != 0
+        assert System.monotonic_time(:millisecond) - started < 10_000
+      end
+    end
+
+    test "env.connect needs the environment running", %{ctx: ctx} do
+      stub_tools(connect: orca_hooks())
+      {:ok, _} = Env.run("env.create", payload(), ctx)
+      stub(DockerMock, :list_containers, fn _ -> {:ok, []} end)
+
+      assert {:error, message} = Env.run("env.connect", connect_payload(), ctx)
+      assert message =~ "isn't running"
     end
   end
 

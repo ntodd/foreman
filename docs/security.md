@@ -239,6 +239,20 @@ to the box it runs on (up to the limits in "Known gaps").
   showing it, which covers container logs the agent had no values for.
 - Registry credentials go to a throwaway `DOCKER_CONFIG` for one build,
   never argv, and are deleted afterwards.
+- Connect hooks ([connect-hooks.md](setup/connect-hooks.md)) are code
+  from the environment, so the agent runs them inside the devcontainer
+  as its remote user, with a timeout inside the container as well as on
+  `docker exec` (stopping `docker exec` doesn't stop what it started). It takes only a hook name and an
+  action id that are short lowercase names, and holds what they print
+  to a few short single-line fields (`ForemanProtocol.Connect`), checked
+  again by the control plane. A hook's result is usually a credential
+  for the environment (a pairing code). The agent keeps everything an action prints
+  out of the operation's log and its error, except a short
+  `{"error": ...}` the hook writes for that purpose. The
+  control plane takes it out of the result before recording the
+  operation and broadcasts it only to the page that asked. Only the
+  environment's owner can run an action, not an admin, and the audit
+  log records the hook and action, never the result.
 
 ### Environments and the tailnet
 

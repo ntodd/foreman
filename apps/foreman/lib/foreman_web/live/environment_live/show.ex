@@ -30,6 +30,7 @@ defmodule ForemanWeb.EnvironmentLive.Show do
      |> assign(:later, false)
      |> assign(:sync, nil)
      |> assign(:sync_op, nil)
+     |> assign(:connect, nil)
      |> assign(:loaded_state, nil)
      |> load()
      |> check_branch()}
@@ -127,6 +128,39 @@ defmodule ForemanWeb.EnvironmentLive.Show do
   end
 
   def handle_event("later", _params, socket), do: {:noreply, assign(socket, :later, true)}
+
+  # A connect hook's action. Its result is a secret for whoever asked, so
+  # it comes to this page alone and is dropped when the dialog closes.
+  def handle_event("connect", %{"hook" => hook, "action" => action}, socket) do
+    %{current_scope: scope, env: env} = socket.assigns
+
+    case Environments.connect(scope, env, hook, action) do
+      # Subscribed to its result already.
+      {:ok, op} ->
+        Operations.subscribe(op.id)
+
+        {:noreply,
+         assign(socket, :connect, %{
+           op_id: op.id,
+           title: connect_title(env.connect_hooks, hook, action),
+           hook_label: connect_hook_label(env.connect_hooks, hook),
+           status: :waiting,
+           offer: nil,
+           error: nil
+         })}
+
+      {:error, reason} ->
+        {:noreply, put_flash(socket, :error, error_message(reason))}
+    end
+  end
+
+  def handle_event("close_connect", _params, socket) do
+    if connect = socket.assigns.connect do
+      Environments.unsubscribe_offer(connect.op_id)
+    end
+
+    {:noreply, assign(socket, :connect, nil)}
+  end
 
   def handle_event("cancel_op", %{"id" => id}, socket) do
     %{current_scope: scope, env: env} = socket.assigns
@@ -227,6 +261,14 @@ defmodule ForemanWeb.EnvironmentLive.Show do
 
   def handle_info({:op_log, _op_id, _data}, socket), do: {:noreply, socket}
 
+  def handle_info(
+        {:connect_offer, op_id, offer},
+        %{assigns: %{connect: %{op_id: op_id}}} = socket
+      ),
+      do: {:noreply, update(socket, :connect, &%{&1 | status: :ready, offer: offer})}
+
+  def handle_info({:connect_offer, _op_id, _offer}, socket), do: {:noreply, socket}
+
   def handle_info({:operation, op}, socket) do
     finished? = Foreman.Operations.Operation.finished?(op)
 
@@ -234,6 +276,7 @@ defmodule ForemanWeb.EnvironmentLive.Show do
       socket
       |> then(&if(finished?, do: destroy_check_done(&1, op), else: &1))
       |> then(&if(finished?, do: branch_check_done(&1, op), else: &1))
+      |> then(&if(finished?, do: connect_done(&1, op), else: &1))
 
     {:noreply, load(socket)}
   end
@@ -263,6 +306,17 @@ defmodule ForemanWeb.EnvironmentLive.Show do
 
   defp destroy_check_done(socket, _op), do: socket
 
+  # A success is followed by the offer itself.
+  defp connect_done(
+         %{assigns: %{connect: %{op_id: id, status: :waiting}}} = socket,
+         %{id: id} = op
+       )
+       when op.status != "succeeded" do
+    update(socket, :connect, &%{&1 | status: :failed, error: op.error || op.status})
+  end
+
+  defp connect_done(socket, _op), do: socket
+
   defp branch_check_done(%{assigns: %{sync_op: id}} = socket, %{id: id} = op) do
     socket = assign(socket, :sync_op, nil)
 
@@ -290,6 +344,24 @@ defmodule ForemanWeb.EnvironmentLive.Show do
   # -- view helpers --------------------------------------------------------------------
 
   defp tailscale?, do: Foreman.Tailscale.configured?()
+
+  # The hook's actions are for the environment's owner: what they hand
+  # back is access to it.
+  defp connect_hooks(env, scope) do
+    if env.user_id == Foreman.Scope.user_id(scope), do: env.connect_hooks || [], else: []
+  end
+
+  defp connect_ready?(env, online), do: online and env.observed_state == "running"
+
+  defp connect_hook_label(hooks, name),
+    do: Enum.find_value(hooks || [], name, &(&1["name"] == name && &1["label"]))
+
+  defp connect_title(hooks, name, action) do
+    Enum.find_value(hooks || [], action, fn hook ->
+      hook["name"] == name &&
+        Enum.find_value(hook["actions"], &(&1["id"] == action && &1["label"]))
+    end)
+  end
 
   # <.link> only takes http(s) and a few other schemes as strings.
   defp vscode_url(env) do
@@ -484,6 +556,34 @@ defmodule ForemanWeb.EnvironmentLive.Show do
                 and <span class="font-mono">FOREMAN_TAILSCALE_CLIENT_SECRET</span>
                 on Foreman, then rebuild.
               </p>
+              <div
+                :if={connect_hooks(@env, @current_scope) != []}
+                id="connect-hooks"
+                class="space-y-3 border-t border-line pt-4"
+              >
+                <div
+                  :for={hook <- connect_hooks(@env, @current_scope)}
+                  class="flex flex-wrap items-center gap-2"
+                >
+                  <span class="mr-1 text-xs font-medium text-ink-2">{hook["label"]}</span>
+                  <.button
+                    :for={action <- hook["actions"]}
+                    id={"connect-#{hook["name"]}-#{action["id"]}"}
+                    size="sm"
+                    icon="hero-qr-code-mini"
+                    phx-click="connect"
+                    phx-value-hook={hook["name"]}
+                    phx-value-action={action["id"]}
+                    data-confirm={action["confirm"]}
+                    disabled={not connect_ready?(@env, @online)}
+                  >
+                    {action["label"]}
+                  </.button>
+                </div>
+                <p :if={not connect_ready?(@env, @online)} class="text-xs text-ink-3">
+                  Available while the environment is running.
+                </p>
+              </div>
             </div>
             <p :if={is_nil(@env.remote_user)} class="text-sm text-ink-3">
               Connection details appear once the environment has started.
@@ -581,6 +681,34 @@ defmodule ForemanWeb.EnvironmentLive.Show do
           <pre id="op-log" phx-hook="LogTail" class="log-view h-[28rem] p-4 md:rounded-br-xl">{@log}<span :if={@log == ""} class="text-studio-ink-2">No output yet.</span></pre>
         </div>
       </.panel>
+
+      <.modal :if={@connect} id="connect-modal" show on_cancel={JS.push("close_connect")}>
+        <h2 id="connect-modal-title" class="text-lg font-semibold text-ink">{@connect.title}</h2>
+        <p :if={@connect.status != :failed} class="mt-1 text-sm text-ink-2">
+          This is a credential for {@env.slug}. It's shown here once and not kept.
+        </p>
+
+        <div class="mt-5 space-y-4">
+          <p :if={@connect.status == :waiting} class="flex items-center gap-2 text-sm text-ink-2">
+            <.icon name="hero-arrow-path" class="size-4 motion-safe:animate-spin" />
+            Waiting for {@connect.hook_label}…
+          </p>
+          <.callout :if={@connect.status == :failed} kind="warning">
+            {@connect.error}
+          </.callout>
+          <div :if={@connect.status == :ready} class="space-y-4">
+            <div :if={@connect.offer["qr"]} id="connect-qr" class="flex justify-center">
+              <.qr_code value={@connect.offer["value"]} />
+            </div>
+            <.command id="connect-value" command={@connect.offer["value"]} />
+            <p :if={@connect.offer["note"]} class="text-sm text-ink-2">{@connect.offer["note"]}</p>
+          </div>
+        </div>
+
+        <div class="mt-6 flex justify-end">
+          <.button id="connect-modal-close" phx-click="close_connect">Done</.button>
+        </div>
+      </.modal>
 
       <.modal :if={@destroy_check} id="destroy-modal" show on_cancel={JS.push("cancel_destroy")}>
         <h2 id="destroy-modal-title" class="text-lg font-semibold text-ink">Destroy {@env.slug}?</h2>
@@ -737,6 +865,56 @@ defmodule ForemanWeb.EnvironmentLive.Show do
         {@sync.ahead} ahead<span :if={@sync.behind == 0}> of <span class="font-mono">origin/{@branch}</span></span>
       </span>
     </span>
+    """
+  end
+
+  attr :value, :string, required: true
+
+  # Drawn here from the encoder's matrix, as one path with no styles, so
+  # it needs nothing the page's CSP doesn't allow.
+  defp qr_code(assigns) do
+    case qr_matrix(assigns.value) do
+      {:ok, matrix} ->
+        qr_svg(assign(assigns, :matrix, matrix))
+
+      :error ->
+        ~H"""
+        <p class="text-sm text-ink-3">This one can't be drawn as a QR code; copy it instead.</p>
+        """
+    end
+  end
+
+  # ForemanProtocol.Connect keeps values to what a QR code holds; this is
+  # in case that and the encoder ever disagree, which mustn't crash the
+  # page with the value in hand.
+  defp qr_matrix(value) do
+    %EQRCode.Matrix{matrix: matrix} = EQRCode.encode(value)
+    {:ok, matrix}
+  rescue
+    _ -> :error
+  end
+
+  defp qr_svg(%{matrix: matrix} = assigns) do
+    size = tuple_size(matrix)
+
+    d =
+      for {row, y} <- matrix |> Tuple.to_list() |> Enum.with_index(),
+          {1, x} <- row |> Tuple.to_list() |> Enum.with_index(),
+          into: "",
+          do: "M#{x + 4} #{y + 4}h1v1h-1z"
+
+    assigns = assign(assigns, d: d, view: size + 8)
+
+    ~H"""
+    <svg
+      viewBox={"0 0 #{@view} #{@view}"}
+      class="size-64 rounded-lg bg-white"
+      shape-rendering="crispEdges"
+      role="img"
+      aria-label="QR code"
+    >
+      <path d={@d} fill="#000" />
+    </svg>
     """
   end
 

@@ -21,7 +21,7 @@ defmodule ForemanAgent.Env do
   alias ForemanAgent.Config
   alias ForemanAgent.Env.{Affected, ComposeScan, Overlay, Policy}
   alias ForemanAgent.SafeFS
-  alias ForemanProtocol.{Feature, Jsonc}
+  alias ForemanProtocol.{Connect, Feature, Jsonc}
 
   require Logger
 
@@ -38,6 +38,12 @@ defmodule ForemanAgent.Env do
   @up_timeout :timer.minutes(165)
   @logs_timeout :timer.minutes(5)
   @tailscale_timeout :timer.seconds(15)
+  # A hook's describe is a listing; its actions can restart a server. Each
+  # is bounded inside the container (seconds), and docker exec a little
+  # after: stopping docker exec doesn't stop what it started there.
+  @describe_seconds 30
+  @connect_seconds 240
+  @hook_grace :timer.seconds(15)
   @join_poll 500
 
   # A start or restart rebuilds a container built with an older Foreman
@@ -68,6 +74,7 @@ defmodule ForemanAgent.Env do
 
   def run("env.logs", p, ctx), do: logs(p, ctx)
   def run("env.git_status", p, ctx), do: git_status(p, ctx)
+  def run("env.connect", p, ctx), do: connect(p, ctx)
 
   # -- paths ---------------------------------------------------------------
 
@@ -100,7 +107,7 @@ defmodule ForemanAgent.Env do
          {:ok, prepared} <- prepare(paths, spec, p.compose_env, ctx),
          {:ok, result} <- devcontainer_up(paths, spec, prepared, p, ctx, opts) do
       save_spec(paths, spec, prepared, result)
-      {:ok, put_node_id(result, spec, ctx)}
+      {:ok, result |> put_node_id(spec, ctx) |> put_connect_hooks(ctx)}
     end
   end
 
@@ -113,7 +120,8 @@ defmodule ForemanAgent.Env do
            {:ok, rebuild} <- feature_rebuild(ctx, p.env_id, prepared, opts),
            {:ok, result} <- devcontainer_up(paths, spec, prepared, p, ctx, rebuild: rebuild) do
         save_spec(paths, spec, prepared, result)
-        {:ok, if(opts[:node_id], do: put_node_id(result, spec, ctx), else: result)}
+        result = if opts[:node_id], do: put_node_id(result, spec, ctx), else: result
+        {:ok, put_connect_hooks(result, ctx)}
       end
     end
   end
@@ -1318,7 +1326,10 @@ defmodule ForemanAgent.Env do
   defp restart(%{mode: "all"} = p, ctx) do
     with {:ok, _} <- stop(p, ctx),
          {:ok, result} <- start(p, ctx) do
-      {:ok, %{"restarted" => "all", "feature_version" => result["feature_version"]}}
+      {:ok,
+       result
+       |> Map.take(["connect"])
+       |> Map.merge(%{"restarted" => "all", "feature_version" => result["feature_version"]})}
     end
   end
 
@@ -1349,7 +1360,13 @@ defmodule ForemanAgent.Env do
          # since it owns the image and labels.
          {:ok, result} <- devcontainer_up(paths, spec, prepared, p, ctx, rebuild: rebuild) do
       {:ok,
-       %{"restarted" => sidecars ++ [service], "feature_version" => result["feature_version"]}}
+       result
+       |> put_connect_hooks(ctx)
+       |> Map.take(["connect"])
+       |> Map.merge(%{
+         "restarted" => sidecars ++ [service],
+         "feature_version" => result["feature_version"]
+       })}
     end
   end
 
@@ -1551,6 +1568,16 @@ defmodule ForemanAgent.Env do
     end
   end
 
+  defp running_container(ctx, env_id, service) do
+    case devcontainer_container(ctx, env_id, service) do
+      {:error, "the environment isn't running" <> _} ->
+        {:error, "the environment isn't running; start it first"}
+
+      other ->
+        other
+    end
+  end
+
   defp devcontainer_container(ctx, env_id, service) do
     case ctx.docker.list_containers(["foreman.env_id=#{env_id}"]) do
       {:ok, containers} ->
@@ -1566,6 +1593,146 @@ defmodule ForemanAgent.Env do
       {:error, reason} ->
         {:error, "couldn't list containers: #{inspect(reason)}"}
     end
+  end
+
+  # -- connect hooks -------------------------------------------------------
+
+  # The executables in the hooks directory, by name. Missing is none.
+  @list_hooks ~s(cd #{Connect.dir()} 2>/dev/null || exit 0
+for f in *; do [ -f "$f" ] && [ -x "$f" ] && printf '%s\\n' "$f"; done
+exit 0)
+
+  # Runs a hook under `timeout`, or not at all: stopping docker exec
+  # doesn't stop what it started in the container.
+  @with_timeout ~S"""
+  t=$1; shift
+  command -v timeout >/dev/null 2>&1 || {
+    echo '{"error":"the container has no timeout command (coreutils or busybox)"}'
+    exit 125
+  }
+  exec timeout -k 5 "$t" "$@"
+  """
+
+  @doc false
+  def hook_wrapper, do: @with_timeout
+
+  # The hooks the devcontainer has (see `ForemanProtocol.Connect`), as
+  # "connect" in every up's result, so a result without it is from an older
+  # agent, which can't run them. A hook that doesn't describe itself is left
+  # out and logged; a container that can't be asked has none.
+  defp put_connect_hooks(%{"container_id" => container, "remote_user" => user} = result, ctx)
+       when is_binary(container) and is_binary(user) do
+    list = &container_exec(ctx, result, &1, :timer.seconds(@describe_seconds))
+    exec = &run_hook(ctx, result, &1, @describe_seconds)
+
+    case list.(["sh", "-c", @list_hooks]) do
+      {:ok, output} ->
+        names = output |> String.split("\n", trim: true) |> Enum.filter(&Connect.name?/1)
+
+        hooks =
+          names
+          |> Enum.sort()
+          |> Enum.take(Connect.max_hooks())
+          |> Enum.flat_map(&describe_hook(&1, exec, ctx))
+
+        Map.put(result, "connect", hooks)
+
+      {:error, _} ->
+        Map.put(result, "connect", [])
+    end
+  end
+
+  defp put_connect_hooks(result, _ctx), do: Map.put(result, "connect", [])
+
+  defp describe_hook(name, exec, ctx) do
+    with {:ok, output} <- exec.([hook_path(name), "describe"]) |> describe_failed(name),
+         {:ok, describe} <- last_json(output),
+         {:ok, hook} <- Connect.cast_hook(name, describe) do
+      [hook]
+    else
+      {:error, reason} ->
+        ctx.log.("info", "connect hook #{name}: #{reason}\n")
+        []
+    end
+  end
+
+  # Runs a hook's action. What it prints is usually a secret, so none of it
+  # goes to the operation's log or its error: a hook that fails can explain
+  # itself with {"error": "..."} as its last line, and that alone is shown.
+  defp connect(p, ctx) do
+    with {:ok, spec} <- load_spec(ctx.config, p.env_id),
+         {:ok, container} <- running_container(ctx, p.env_id, spec.devcontainer_service),
+         where = %{
+           "container_id" => container,
+           "remote_user" => spec.remote_user,
+           "remote_workspace_folder" => spec.remote_workspace_folder
+         },
+         {:ok, output} <-
+           run_hook(ctx, where, [hook_path(p.hook), "run", p.action], @connect_seconds)
+           |> run_failed(p.hook),
+         {:ok, offer} <- connect_result(output, p.hook) do
+      {:ok, %{"offer" => offer}}
+    end
+  end
+
+  defp connect_result(output, hook) do
+    with {:ok, json} <- last_json(output),
+         {:ok, offer} <- Connect.cast_offer(json) do
+      {:ok, offer}
+    else
+      {:error, reason} -> {:error, "connect hook #{hook} didn't print a result: #{reason}"}
+    end
+  end
+
+  defp hook_path(name), do: Path.join(Connect.dir(), name)
+
+  # A describe is a listing, so its output can say what went wrong.
+  defp describe_failed({:ok, output}, _name), do: {:ok, output}
+  defp describe_failed({:error, output}, _name), do: {:error, "failed: #{last_lines(output)}"}
+
+  defp run_failed({:ok, output}, _name), do: {:ok, output}
+
+  defp run_failed({:error, output}, name) do
+    with {:ok, json} <- last_json(output),
+         {:ok, error} <- Connect.cast_error(json) do
+      {:error, "connect hook #{name} failed: #{error}"}
+    else
+      _ -> {:error, "connect hook #{name} failed"}
+    end
+  end
+
+  defp run_hook(ctx, where, args, seconds) do
+    exec = ["sh", "-c", @with_timeout, "sh", Integer.to_string(seconds) | args]
+    container_exec(ctx, where, exec, :timer.seconds(seconds) + @hook_grace)
+  end
+
+  defp last_json(output) do
+    line = output |> String.split("\n") |> Enum.map(&String.trim/1) |> Enum.reject(&(&1 == ""))
+
+    case List.last(line) do
+      nil ->
+        {:error, "no output"}
+
+      line ->
+        case JSON.decode(line) do
+          {:ok, %{} = json} -> {:ok, json}
+          _ -> {:error, "its last line isn't a JSON object"}
+        end
+    end
+  end
+
+  # As the devcontainer's remote user, in the workspace, like a shell there.
+  defp container_exec(ctx, where, args, timeout) do
+    exec =
+      ["exec", "-u", where["remote_user"]] ++
+        ["-w", where["remote_workspace_folder"] || "/", where["container_id"]] ++ args
+
+    cmd(ctx, ctx.config.docker, exec,
+      env: %{},
+      quiet: true,
+      timeout: timeout,
+      label: "connect hook"
+    )
   end
 
   # -- helpers -------------------------------------------------------------

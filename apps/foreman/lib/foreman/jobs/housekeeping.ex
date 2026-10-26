@@ -19,6 +19,9 @@ defmodule Foreman.Jobs.Housekeeping do
   alias Foreman.Operations.{Operation, Redactions}
 
   @stale_hours 3
+  # A connect hook's action is bounded at four minutes on the box; one that
+  # never came back is from an agent that can't run it (an older one).
+  @connect_minutes 10
   # Box commands (stats, inventory, cancel) are quick; their results come
   # straight after a reconnect if they come at all. A gc runs several
   # prunes, each allowed half an hour on the box.
@@ -48,14 +51,27 @@ defmodule Foreman.Jobs.Housekeeping do
   end
 
   defp fail_stale_environment_ops do
-    cutoff = DateTime.add(DateTime.utc_now(), -@stale_hours * 3600)
+    fail_stale_environment_ops(
+      DateTime.add(DateTime.utc_now(), -@stale_hours * 3600),
+      "no result after #{@stale_hours} hours",
+      dynamic([o], o.action != "connect")
+    )
 
+    fail_stale_environment_ops(
+      DateTime.add(DateTime.utc_now(), -@connect_minutes * 60),
+      "no result after #{@connect_minutes} minutes",
+      dynamic([o], o.action == "connect")
+    )
+  end
+
+  defp fail_stale_environment_ops(cutoff, message, which) do
     stale =
       Repo.all(
         from o in Operation,
           where:
             o.status in ["dispatched", "running"] and not is_nil(o.environment_id) and
-              o.dispatched_at < ^cutoff
+              o.dispatched_at < ^cutoff,
+          where: ^which
       )
 
     # The list is from before the loop, and a reconnect may have restarted an
@@ -65,7 +81,7 @@ defmodule Foreman.Jobs.Housekeeping do
       with {:ok, failed, env} <-
              Operations.timed_out(
                op,
-               "no result after #{@stale_hours} hours",
+               message,
                &Environments.record_result/1,
                dispatched_before: cutoff
              ) do

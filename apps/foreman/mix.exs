@@ -80,6 +80,7 @@ defmodule Foreman.MixProject do
       {:cloak, "~> 1.1"},
       {:cloak_ecto, "~> 1.3"},
       {:hammer, "~> 7.5"},
+      {:eqrcode, "~> 0.2.1"},
       {:boundary, "~> 0.11.0", runtime: false},
       {:credo, "~> 1.7", only: [:dev, :test], runtime: false},
       {:sobelow, "~> 0.16.0", only: [:dev, :test], runtime: false},

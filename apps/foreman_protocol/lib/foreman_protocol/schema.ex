@@ -241,6 +241,12 @@ defmodule ForemanProtocol.Schema do
   defp cast_value(v, :option_name, p),
     do: match(v, @option_name, p, "must be a feature option name")
 
+  defp cast_value(v, :connect_name, p) do
+    if ForemanProtocol.Connect.name?(v),
+      do: {:ok, v},
+      else: err(p, "must be a short lowercase name")
+  end
+
   defp cast_value(v, :feature_ref, p) do
     if ForemanProtocol.Feature.valid_ref?(v),
       do: {:ok, v},
