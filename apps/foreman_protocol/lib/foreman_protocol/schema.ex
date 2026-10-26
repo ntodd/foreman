@@ -201,6 +201,21 @@ defmodule ForemanProtocol.Schema do
   defp cast_value(v, :integer, _p) when is_integer(v) and v >= 0, do: {:ok, v}
   defp cast_value(_v, :integer, p), do: err(p, "must be a non-negative integer")
 
+  defp cast_value(v, :port, _p) when is_integer(v) and v in 1..65_535, do: {:ok, v}
+  defp cast_value(_v, :port, p), do: err(p, "must be a port number")
+
+  # A process name the agent read inside an environment, which the
+  # environment controls: short, and nothing that draws on a terminal.
+  defp cast_value(v, :process, p) when is_binary(v) do
+    cond do
+      v == "" -> err(p, "can't be blank")
+      byte_size(v) > 64 -> err(p, "is too long")
+      not String.valid?(v) -> err(p, "must be UTF-8")
+      String.match?(v, ~r/[[:cntrl:]]/u) -> err(p, "must not contain control characters")
+      true -> {:ok, v}
+    end
+  end
+
   defp cast_value(v, :positive_number, _p) when is_number(v) and v > 0, do: {:ok, v}
   defp cast_value(_v, :positive_number, p), do: err(p, "must be a positive number")
 

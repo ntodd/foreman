@@ -1,6 +1,7 @@
 defmodule ForemanWeb.EnvironmentLive.Show do
   @moduledoc """
-  One environment: how to connect, its state and actions, the
+  One environment: how to connect and the ports listening in it, its
+  state and actions, the
   restart-now-or-later choice after a secrets change, its operations
   with live logs, its own secrets, and a destroy that checks git first.
   """
@@ -8,7 +9,7 @@ defmodule ForemanWeb.EnvironmentLive.Show do
 
   import ForemanWeb.ForemanComponents
 
-  alias Foreman.{Boxes, Capacity, Environments, Operations}
+  alias Foreman.{Boxes, Capacity, Environments, Operations, Ports}
 
   @impl true
   def mount(%{"id" => id}, _session, socket) do
@@ -53,6 +54,7 @@ defmodule ForemanWeb.EnvironmentLive.Show do
     |> assign(:feature_update, Environments.feature_update(env))
     |> assign(:provisioned, Capacity.provisioned(env, env.repo))
     |> assign(:usage, Foreman.Capacity.Tracker.latest_usage(env.id))
+    |> assign(:ports, Ports.for_environment(env.id))
     |> select_default_op()
     |> then(&if(came_up?(previous, env), do: check_branch(&1), else: &1))
   end
@@ -238,6 +240,9 @@ defmodule ForemanWeb.EnvironmentLive.Show do
 
   def handle_info({:environment, _id}, socket), do: {:noreply, load(socket)}
 
+  def handle_info({:ports, env_id, ports}, %{assigns: %{env: %{id: env_id}}} = socket),
+    do: {:noreply, assign(socket, :ports, ports)}
+
   # An agent that joins can ship a newer feature.
   def handle_info({:box, _event, box_id}, %{assigns: %{env: %{box_id: box_id}}} = socket),
     do: {:noreply, load(socket)}
@@ -293,6 +298,12 @@ defmodule ForemanWeb.EnvironmentLive.Show do
 
   # Zed's remote development, over the same Tailscale SSH.
   defp zed_url(env), do: {:zed, "//ssh/#{env.remote_user}@#{env.slug}#{env.workspace_folder}"}
+
+  # The box only reports a running environment's ports, but a box that
+  # went offline can't say they stopped. nil: the box hasn't said (an
+  # older agent, or one that couldn't read the environment).
+  defp show_ports?(env, online, ports),
+    do: tailscale?() and online and env.observed_state == "running" and is_list(ports)
 
   @impl true
   def render(assigns) do
@@ -434,9 +445,38 @@ defmodule ForemanWeb.EnvironmentLive.Show do
               <div :if={tailscale?()} class="flex flex-wrap items-center gap-2">
                 <.button href={vscode_url(@env)} size="sm" icon="hero-code-bracket-square-mini">Open in VS Code</.button>
                 <.button href={zed_url(@env)} size="sm" icon="hero-code-bracket-square-mini">Open in Zed</.button>
-                <span class="text-xs text-ink-3">Apps listen on
-                <span class="font-mono">http://{@env.slug}:PORT</span>
+                <span
+                  :if={not show_ports?(@env, @online, @ports)}
+                  id={if(tailscale?(), do: "ports-hint")}
+                  class="text-xs text-ink-3"
+                >Apps listen on <span class="font-mono">http://{@env.slug}:PORT</span>
                 on the tailnet. Nothing publishes ports.</span>
+              </div>
+              <div :if={show_ports?(@env, @online, @ports)} id="ports" class="space-y-1.5">
+                <p class="text-xs font-medium text-ink-2">Listening on the tailnet</p>
+                <ul :if={@ports != []} class="divide-y divide-line rounded-lg border border-line">
+                  <li
+                    :for={port <- @ports}
+                    id={"port-#{port.port}"}
+                    class="flex items-center justify-between gap-3 px-3 py-2"
+                  >
+                    <a
+                      href={"http://#{@env.slug}:#{port.port}"}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      class="inline-flex min-w-0 items-center gap-1.5 font-mono text-xs font-medium text-accent-ink underline-offset-2 hover:underline"
+                    >
+                      <span class="truncate">{@env.slug}:{port.port}</span>
+                      <.icon name="hero-arrow-top-right-on-square-micro" class="size-3.5 shrink-0" />
+                    </a>
+                    <span :if={port[:process]} class="truncate font-mono text-xs text-ink-3">
+                      {port.process}
+                    </span>
+                  </li>
+                </ul>
+                <p :if={@ports == []} id="ports-none" class="text-xs text-ink-3">
+                  Nothing is listening yet. Start a server and it shows up here, at <span class="font-mono">http://{@env.slug}:PORT</span>.
+                </p>
               </div>
               <p :if={not tailscale?()} id="tailscale-off" class="text-xs text-ink-3">
                 SSH, VS Code and Zed need the environment on your tailnet. Set

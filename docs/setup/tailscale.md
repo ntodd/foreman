@@ -3,6 +3,8 @@
 Every environment joins the tailnet as its own node, named after the
 environment (`storefront-2`), with Tailscale SSH on. Nothing publishes ports:
 you reach `storefront-2:4000` and `ssh vscode@storefront-2` over the tailnet.
+The environment's page lists the ports listening in it, with links, as
+servers start and stop.
 
 ## The OAuth client
 

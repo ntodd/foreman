@@ -58,6 +58,17 @@ defmodule ForemanProtocol.Event do
           {:object, cpu_percent: {:number, default: 0}, memory_mb: {:number, default: 0}}},
          default: %{}}
     ],
+    # The TCP ports listening in each running environment's devcontainer
+    # that its tailnet address reaches, when they change and after every
+    # join. `process` is the listener's name (its comm) when the agent
+    # could find it. An empty list means nothing is listening; an
+    # environment that isn't running is left out.
+    "box.ports" => [
+      environments:
+        {{:map_of, :uuid,
+          {:list, {:object, port: {:port, required: true}, process: {:process, []}}}},
+         required: true}
+    ],
     # Host-wide usage, sampled every few seconds. `at` is the agent's
     # Unix time in seconds; cpu_percent is of the whole box (0-100).
     "box.metrics" => [
