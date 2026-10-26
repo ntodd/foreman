@@ -28,6 +28,7 @@ defmodule Foreman.Application do
       Foreman.Operations.Redactions,
       Foreman.Operations.LogBuffer,
       Foreman.Capacity.Tracker,
+      Foreman.Ports,
       {DynamicSupervisor, name: Foreman.Environments.Supervisor, strategy: :one_for_one},
       {Oban, Application.fetch_env!(:foreman, Oban)},
       Foreman.Setup,

@@ -224,6 +224,19 @@ defmodule ForemanWeb.AgentChannelTest do
       assert_receive {:box_metrics, _, %{cpu: 42.0, memory_used: 2_000}}
     end
 
+    test "records the box's environments' listening ports", %{socket: socket, box: box} do
+      env = environment_fixture(box: box)
+      Foreman.Environments.subscribe(env.id)
+
+      {:ok, ports} =
+        Event.new("box.ports", %{environments: %{env.id => [%{port: 4000, process: "beam.smp"}]}})
+
+      ref = push(socket, "event", Event.to_wire(ports))
+      assert_reply ref, :ok
+      assert_receive {:ports, _, [%{port: 4000, process: "beam.smp"}]}
+      assert Foreman.Ports.for_environment(env.id) == [%{port: 4000, process: "beam.smp"}]
+    end
+
     test "records per-environment usage for the box's own environments", %{
       socket: socket,
       box: box

@@ -36,9 +36,130 @@ defmodule ForemanAgent.ReporterTest do
     Reporter.report_now()
     send(pid, :stats)
     send(pid, :metrics)
+    send(pid, :ports)
 
     refute_receive {:DOWN, ^ref, _, _, _}, 500
     assert Process.alive?(pid)
+  end
+
+  describe "listening ports" do
+    @e1 "6f1c1d1e-9a3b-4c1f-8f5e-2d7a9b0c1e2f"
+    @header "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode\n"
+
+    setup do
+      proc = Path.join(System.tmp_dir!(), "reporter-ports-#{System.unique_integer([:positive])}")
+      File.mkdir_p!(Path.join(proc, "77/net"))
+      previous = ForemanAgent.Config.get()
+      ForemanAgent.Config.put(%{previous | proc: proc})
+
+      stub(RunnerMock, :run, fn _cmd, _args, _opts -> {:ok, %{status: 0, output: ""}} end)
+      stub(DockerMock, :info, fn -> {:ok, %{}} end)
+
+      stub(DockerMock, :list_containers, fn _ ->
+        {:ok,
+         [
+           %{
+             "Id" => "aaa111aaa111",
+             "State" => "running",
+             "Labels" => %{
+               "foreman.env_id" => @e1,
+               "foreman.slug" => "a-1",
+               "foreman.devcontainer" => "true"
+             }
+           }
+         ]}
+      end)
+
+      stub(DockerMock, :inspect_container, fn _ -> {:ok, %{"State" => %{"Pid" => 77}}} end)
+      stub(DockerMock, :stats, fn _ -> {:error, :gone} end)
+      stub(DockerMock, :top, fn _ -> {:ok, []} end)
+      listen(proc, [])
+
+      :ok = ForemanAgent.Outbox.attach(self())
+      _ = ports_events()
+
+      on_exit(fn ->
+        ForemanAgent.Config.put(previous)
+        File.rm_rf!(proc)
+      end)
+
+      %{proc: proc}
+    end
+
+    defp listen(proc, ports) do
+      lines =
+        for port <- ports, into: @header do
+          hex = port |> Integer.to_string(16) |> String.pad_leading(4, "0")
+
+          "   0: 00000000:#{hex} 00000000:0000 0A 00000000:00000000 00:00000000 00000000  1000        0 #{port} 1\n"
+        end
+
+      File.write!(Path.join(proc, "77/net/tcp"), lines)
+    end
+
+    defp ports_events do
+      receive do
+        {:outbox_deliver, %{type: "box.ports", payload: payload}, _} -> [payload | ports_events()]
+        {:outbox_deliver, _, _} -> ports_events()
+      after
+        200 -> []
+      end
+    end
+
+    test "are reported after a join, then only when they change", %{proc: proc} do
+      pid = start_supervised!(Reporter)
+
+      Reporter.report_now()
+      assert [%{environments: %{@e1 => []}}] = ports_events()
+
+      send(pid, :ports)
+      assert ports_events() == []
+
+      listen(proc, [5000])
+      send(pid, :ports)
+      assert [%{environments: %{@e1 => [%{port: 5000}]}}] = ports_events()
+
+      send(pid, :ports)
+      assert ports_events() == []
+
+      # The control plane may have restarted and forgotten; a join resends.
+      Reporter.report_now()
+      assert [%{environments: %{@e1 => [%{port: 5000}]}}] = ports_events()
+
+      listen(proc, [])
+      send(pid, :ports)
+      assert [%{environments: %{@e1 => []}}] = ports_events()
+    end
+
+    # A control plane that lost them without the agent rejoining (its
+    # store restarted) has them back within a minute.
+    test "are sent again every minute even when they haven't changed", %{proc: proc} do
+      pid = start_supervised!(Reporter)
+      listen(proc, [5000])
+      Reporter.report_now()
+      assert [%{environments: %{@e1 => [%{port: 5000}]}}] = ports_events()
+
+      send(pid, :ports)
+      assert ports_events() == []
+
+      :sys.replace_state(pid, &%{&1 | ports_sent_at: &1.ports_sent_at - 60_000})
+      send(pid, :ports)
+      assert [%{environments: %{@e1 => [%{port: 5000}]}}] = ports_events()
+
+      send(pid, :ports)
+      assert ports_events() == []
+    end
+
+    test "Docker going away skips a report rather than sending an empty one" do
+      pid = start_supervised!(Reporter)
+      Reporter.report_now()
+      _ = ports_events()
+
+      stub(DockerMock, :list_containers, fn _ -> {:error, :econnrefused} end)
+      send(pid, :ports)
+      assert ports_events() == []
+      assert Process.alive?(pid)
+    end
   end
 
   describe "the box firewall" do

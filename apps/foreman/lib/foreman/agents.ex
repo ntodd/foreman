@@ -182,6 +182,10 @@ defmodule Foreman.Agents do
     )
   end
 
+  def handle_event(box_id, %Event{type: "box.ports", payload: %{environments: envs}}) do
+    Foreman.Ports.record(box_id, envs)
+  end
+
   def handle_event(box_id, %Event{type: "box.firewall", payload: firewall}) do
     Boxes.record_firewall(box_id, firewall)
   end

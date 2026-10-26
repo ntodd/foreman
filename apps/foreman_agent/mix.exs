@@ -41,7 +41,7 @@ defmodule ForemanAgent.MixProject do
       {:credo, "~> 1.7", only: [:dev, :test], runtime: false},
       {:mox, "~> 1.3", only: :test},
       {:plug, "~> 1.18", only: :test},
-      {:bandit, "~> 1.13", only: :test}
+      {:bandit, "~> 1.14", only: :test}
     ]
   end
 

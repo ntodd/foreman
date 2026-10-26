@@ -17,6 +17,7 @@ defmodule ForemanAgent.Config do
             docker: "docker",
             git: "git",
             docker_socket: "/var/run/docker.sock",
+            proc: "/proc",
             allowed_git_hosts: ["github.com"],
             insecure_git_hosts: [],
             policy_rules: %{},

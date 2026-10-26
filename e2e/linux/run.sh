@@ -240,6 +240,21 @@ box docker exec -u vscode "$app" env -i HOME=/home/vscode bash -lc 'echo "$FOREM
   fail "a clean login shell doesn't get the container's environment"
 echo "ok: a clean login shell gets the container's environment, from a file only vscode can read"
 
+say "the agent finds the ports listening in the environment"
+# A server as the devcontainer's user, the way one started over SSH runs,
+# and the installed agent release reading it from the box's /proc.
+box docker exec -d -u vscode "$app" perl -MIO::Socket::INET -e \
+  'my $s = IO::Socket::INET->new(LocalPort => 4321, Listen => 5, Proto => "tcp", ReuseAddr => 1) or die; sleep 3600'
+agent_ports() {
+  box runuser -u foreman -- env RELEASE_TMP=/tmp /opt/foreman-agent/current/bin/foreman_agent eval \
+    '{:ok, _} = Application.ensure_all_started(:req)
+     ctx = %{config: ForemanAgent.Config.get(), docker: ForemanAgent.Docker.Engine}
+     {report, _} = ForemanAgent.Ports.collect(ctx, %{})
+     IO.inspect(report)'
+}
+port_named() { agent_ports | grep -q "%{port: $1, process: \"$2\"}"; }
+wait_for "port 4321 reported, named perl" 60 port_named 4321 perl
+
 say "a secret change reaches new shells, and marks the environment pending restart"
 cp_eval 'E2E.secret("hello-1", "SIDECAR_TOKEN", "linux-secret-1")'
 wait_for "secret in a login shell" 120 sh -c "$compose exec -T box docker exec -u vscode $app bash -lc 'echo \$SIDECAR_TOKEN' | grep -q linux-secret-1"

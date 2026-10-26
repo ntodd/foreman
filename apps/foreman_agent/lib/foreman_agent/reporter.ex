@@ -3,12 +3,13 @@ defmodule ForemanAgent.Reporter do
   Reports the box's inventory (every 15 seconds, when it changes), host
   metrics (every 5 seconds) and stats (every 30 seconds) to the control
   plane, an `env.state` event for each environment whose state changed in
-  between, and the box's firewall when it changes from what the join
-  said.
+  between, the box's firewall when it changes from what the join said,
+  and the ports listening in its environments (checked every 5 seconds,
+  sent when they change and every minute).
   """
   use GenServer
 
-  alias ForemanAgent.{Config, Firewall, Handler, HostMetrics, Outbox, Stats}
+  alias ForemanAgent.{Config, Firewall, Handler, HostMetrics, Outbox, Ports, Stats}
   alias ForemanProtocol.Event
 
   require Logger
@@ -16,6 +17,12 @@ defmodule ForemanAgent.Reporter do
   @inventory_every 15_000
   @stats_every 30_000
   @metrics_every 5_000
+  # Reading a container's sockets is cheap, and someone who just started
+  # a server is waiting for its link.
+  @ports_every 5_000
+  # Sent unchanged this often too, so a control plane that lost them
+  # without the agent rejoining has them back.
+  @ports_resend 60_000
 
   def start_link(opts), do: GenServer.start_link(__MODULE__, opts, name: __MODULE__)
 
@@ -25,8 +32,19 @@ defmodule ForemanAgent.Reporter do
   def init(_opts) do
     Process.send_after(self(), :inventory, @inventory_every)
     Process.send_after(self(), :stats, @stats_every)
+    Process.send_after(self(), :ports, @ports_every)
     send(self(), :metrics)
-    {:ok, %{states: %{}, last: nil, cpu: nil, firewall: nil}}
+
+    {:ok,
+     %{
+       states: %{},
+       last: nil,
+       cpu: nil,
+       firewall: nil,
+       ports: nil,
+       ports_sent_at: nil,
+       port_names: %{}
+     }}
   end
 
   # Each report is best effort: a failure (Docker restarting, no file
@@ -39,6 +57,7 @@ defmodule ForemanAgent.Reporter do
     # Sent again after every join: the firewall may have changed and
     # changed back since this process last looked.
     state = safely("firewall", state, &firewall(%{&1 | firewall: nil}))
+    state = safely("ports", state, &ports(%{&1 | ports: nil}))
     safely("stats", state, &tap(&1, fn _ -> stats() end))
     {:noreply, state}
   end
@@ -53,6 +72,11 @@ defmodule ForemanAgent.Reporter do
   def handle_info(:stats, state) do
     Process.send_after(self(), :stats, @stats_every)
     {:noreply, safely("stats", state, &tap(&1, fn _ -> stats() end))}
+  end
+
+  def handle_info(:ports, state) do
+    Process.send_after(self(), :ports, @ports_every)
+    {:noreply, safely("ports", state, &ports/1)}
   end
 
   def handle_info(:metrics, state) do
@@ -118,6 +142,25 @@ defmodule ForemanAgent.Reporter do
       report ->
         push("box.firewall", report)
         %{state | firewall: report}
+    end
+  end
+
+  defp ports(state) do
+    case Ports.collect(Handler.ctx(fn _, _ -> :ok end), state.port_names) do
+      {:error, message} ->
+        Logger.warning(message)
+        state
+
+      {report, names} ->
+        now = System.monotonic_time(:millisecond)
+        state = %{state | port_names: names}
+
+        if report != state.ports or now - state.ports_sent_at >= @ports_resend do
+          push("box.ports", %{environments: report})
+          %{state | ports: report, ports_sent_at: now}
+        else
+          state
+        end
     end
   end
 
