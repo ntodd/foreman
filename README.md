@@ -57,6 +57,10 @@ The design, and the decisions behind it, are in
   shows it with a red alert. Services go in the compose file as
   sidecars instead; see
   [docs/setup/repos.md](docs/setup/repos.md#docker-inside-an-environment).
+- Pairing clients from the environment's page. A devcontainer feature
+  can install a connect hook (Orca's does), and the page then shows a
+  pairing code or QR code to the environment's owner, once. See
+  [docs/setup/connect-hooks.md](docs/setup/connect-hooks.md).
 - Capacity reporting per box: used and provisioned CPU and memory, with
   contention warnings. Boxes allow overcommit by default and can be set
   to warn or refuse.

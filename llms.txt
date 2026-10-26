@@ -7,6 +7,7 @@ If you're getting a repo ready to run on Foreman, read "Making a repo work with 
 ## Getting a repo ready
 
 - [Making a repo work with Foreman](docs/setup/repos.md): what Foreman adds, what a box refuses, what to remove, what trips a port up, secrets, coming from Codespaces
+- [Pairing clients from the environment page](docs/setup/connect-hooks.md): pairing Orca, and writing a connect hook for a devcontainer feature
 
 ## Running Foreman
 

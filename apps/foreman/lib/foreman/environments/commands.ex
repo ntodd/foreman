@@ -16,6 +16,14 @@ defmodule Foreman.Environments.Commands do
   require Logger
 
   @spec build(Operation.t(), Environment.t()) :: {:ok, Command.t(), map()} | {:error, String.t()}
+  def build(%Operation{action: "connect"} = op, %Environment{} = env) do
+    command(
+      op,
+      "env.connect",
+      Map.merge(base(env), %{hook: op.args["hook"], action: op.args["action"]})
+    )
+  end
+
   def build(%Operation{} = op, %Environment{} = env) do
     env = Repo.preload(env, [:user, :box, repo: :owner])
 

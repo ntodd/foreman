@@ -105,6 +105,7 @@ Each agent joins topic `agent:<agent_id>`. Commands are a fixed vocabulary; ther
 | `env.secrets.write` | Rewrite the environment's tmpfs secrets directory |
 | `env.logs` | Stream container or build logs |
 | `env.git_status` | Dirty tree / unpushed commits check before destroy; the clone's HEAD and merge base, which the environment page compares with the branch on GitHub |
+| `env.connect` | Run an action of a connect hook a feature installed (pairing a client, say) and return its result, which the control plane shows once and doesn't store; see [connect-hooks.md](setup/connect-hooks.md) |
 | `box.inventory` | Report environments found via Docker labels |
 | `box.stats` | Report CPU, memory and disk, per environment and in total |
 | `box.gc` | Prune unused images, build cache and orphaned volumes |
@@ -112,7 +113,7 @@ Each agent joins topic `agent:<agent_id>`. Commands are a fixed vocabulary; ther
 
 Every command carries an `op_id`. The agent records in-flight `op_id`s, so a command retried after a reconnect is not run twice. Long operations keep running if the socket drops. The agent sends their progress and result once it reconnects.
 
-The agent sends its version and protocol version when it joins. The control plane accepts protocol N and N-1, and only sends a protocol-N field to agents that reported N, so upgrade the control plane before the agents (an older control plane refuses newer agents). Protocol 2 added `keep` to `env.secrets.write`. Protocol 3 added `features` (a user's own devcontainer features) to `env.create` and `env.rebuild`, where an environment on an older agent builds without them, `pull` to `env.rebuild`, which isn't offered on older agents, and the `gpu` policy rule. The join's optional `feature_version` came without a new protocol: control planes before it refuse agents that send it. Once boxes run agents on a protocol, the control plane can't be rolled back past the release that introduced it: an older control plane refuses them at join.
+The agent sends its version and protocol version when it joins. The control plane accepts protocol N and N-1, and only sends a protocol-N field to agents that reported N, so upgrade the control plane before the agents (an older control plane refuses newer agents). Protocol 2 added `keep` to `env.secrets.write`. Protocol 3 added `features` (a user's own devcontainer features) to `env.create` and `env.rebuild`, where an environment on an older agent builds without them, `pull` to `env.rebuild`, which isn't offered on older agents, and the `gpu` policy rule. The join's optional `feature_version` came without a new protocol: control planes before it refuse agents that send it. So did `env.connect` and the `connect` field of up results: the control plane only sends `env.connect` for hooks an agent reported, which older agents never do. Once boxes run agents on a protocol, the control plane can't be rolled back past the release that introduced it: an older control plane refuses them at join.
 
 ### Reconciliation
 

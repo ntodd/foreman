@@ -73,6 +73,10 @@ defmodule ForemanAgent.Integration.ComposePolicyTest do
 
     stub(RunnerMock, :run, fn command, args, opts ->
       case {command, args} do
+        # Listing connect hooks: there are none.
+        {"docker", ["exec", "-u", _, "-w", _, _container, "sh", "-c", _]} ->
+          {:ok, %{status: 0, output: ""}}
+
         {"git", args} ->
           dest = List.last(args)
           File.mkdir_p!(Path.join(dest, ".git/info"))

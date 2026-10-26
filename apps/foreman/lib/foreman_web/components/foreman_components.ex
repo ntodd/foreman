@@ -358,6 +358,7 @@ defmodule ForemanWeb.ForemanComponents do
   def action_label("restart_all"), do: "Restart everything"
   def action_label("secrets_write"), do: "Update secrets"
   def action_label("git_status"), do: "Check git status"
+  def action_label("connect"), do: "Connect hook action"
   def action_label("logs"), do: "Fetch container logs"
   def action_label("box.inventory"), do: "Refresh inventory"
   def action_label("box.stats"), do: "Refresh stats"

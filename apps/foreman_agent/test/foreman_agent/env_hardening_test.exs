@@ -119,6 +119,10 @@ defmodule ForemanAgent.EnvHardeningTest do
 
         {"docker", ["exec", "-u", "0", _container, "tailscale" | _]} ->
           {:ok, %{status: 0, output: ~s({"BackendState":"Running","Self":{"ID":"nTest1CNTRL"}})}}
+
+        # Listing connect hooks: there are none.
+        {"docker", ["exec", "-u", _, "-w", _, _container, "sh", "-c", _]} ->
+          {:ok, %{status: 0, output: ""}}
       end
     end)
   end

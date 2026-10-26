@@ -18,6 +18,7 @@ defmodule Foreman.Environments do
 
   alias Foreman.Boxes.Box
   alias Foreman.Environments.{Environment, Server}
+  alias ForemanProtocol.Connect
   alias Foreman.Repos.Repo, as: GitRepo
   alias Foreman.{Agents, Audit, Capacity, GitHub, Operations, Repo, Scope, Secrets}
 
@@ -269,6 +270,53 @@ defmodule Foreman.Environments do
     end
   end
 
+  @doc """
+  Runs an action of one of the environment's connect hooks (see
+  `ForemanProtocol.Connect`), such as pairing a client. Its result is
+  usually a credential for the environment, so only its owner can ask, and
+  the result isn't recorded with the operation: it comes to the calling
+  process alone, as `{:connect_offer, op_id, offer}`, subscribed before the
+  operation can go out so it can't miss it.
+  """
+  def connect(%Scope{} = scope, %Environment{} = env, hook, action) do
+    cond do
+      env.user_id != Scope.user_id(scope) ->
+        {:error, :unauthorized}
+
+      not Connect.action?(env.connect_hooks || [], hook, action) ->
+        {:error, "#{env.slug} doesn't offer that action."}
+
+      not is_nil(env.destroyed_at) or env.observed_state != "running" ->
+        {:error, "#{env.slug} has to be running for that."}
+
+      not Foreman.Boxes.online?(env.box_id) ->
+        {:error, "#{env.slug}'s box is offline."}
+
+      true ->
+        args = %{"hook" => hook, "action" => action}
+        id = Ecto.UUID.generate()
+        Phoenix.PubSub.subscribe(Foreman.PubSub, offer_topic(id))
+        op = enqueue(env, "connect", args, scope.user, dedupe: false, id: id)
+        Audit.log(scope, "environment.connect", env, args)
+        {:ok, op}
+    end
+  end
+
+  @doc "Stops receiving a connect operation's result (see `connect/4`)."
+  def unsubscribe_offer(op_id),
+    do: Phoenix.PubSub.unsubscribe(Foreman.PubSub, offer_topic(op_id))
+
+  @doc false
+  def deliver_offer(op_id, offer),
+    do:
+      Phoenix.PubSub.broadcast(
+        Foreman.PubSub,
+        offer_topic(op_id),
+        {:connect_offer, op_id, offer}
+      )
+
+  defp offer_topic(op_id), do: "connect_offer:" <> op_id
+
   @doc "Runs the create again, for an environment whose first create failed."
   def retry(scope, env), do: action(scope, env, :create)
 
@@ -503,18 +551,19 @@ defmodule Foreman.Environments do
   defp allowed?(_env, _action), do: {:error, "the environment has been destroyed"}
 
   @doc false
-  def enqueue(env, action, args, user) do
+  def enqueue(env, action, args, user, opts \\ []) do
     existing =
-      Repo.one(
-        from o in Foreman.Operations.Operation,
-          where: o.environment_id == ^env.id and o.action == ^action and o.status == "queued",
-          limit: 1
-      )
+      Keyword.get(opts, :dedupe, true) &&
+        Repo.one(
+          from o in Foreman.Operations.Operation,
+            where: o.environment_id == ^env.id and o.action == ^action and o.status == "queued",
+            limit: 1
+        )
 
     op =
       existing ||
         Operations.create!(%{
-          id: Ecto.UUID.generate(),
+          id: Keyword.get_lazy(opts, :id, &Ecto.UUID.generate/0),
           environment_id: env.id,
           box_id: env.box_id,
           user_id: user && user.id,
@@ -537,6 +586,7 @@ defmodule Foreman.Environments do
   defp command_type("restart_all"), do: "env.restart"
   defp command_type("secrets_write"), do: "env.secrets.write"
   defp command_type("git_status"), do: "env.git_status"
+  defp command_type("connect"), do: "env.connect"
   defp command_type("logs"), do: "env.logs"
 
   def update_limits(%Scope{} = scope, %Environment{} = env, attrs) do
@@ -691,6 +741,9 @@ defmodule Foreman.Environments do
     # Absent from an older agent, which could have built it with anything.
     |> Map.put(:feature_version, version(result["feature_version"]))
     |> put_if(:tailscale_device_id, node_id(result["tailscale_node_id"]))
+    # Every up from an agent that runs hooks reports them; one that doesn't
+    # is older (a box rolled back) and can't run them.
+    |> Map.put(:connect_hooks, connect_hooks(result["connect"]))
     |> then(&if(action in @fresh_build, do: Map.put(&1, :ts_authkey, nil), else: &1))
   end
 
@@ -748,6 +801,9 @@ defmodule Foreman.Environments do
        do: %{status_message: "secrets_write failed: #{error || status}", token_pushed_at: nil}
 
   defp result_attrs(_op, _env), do: %{}
+
+  defp connect_hooks(hooks) when is_list(hooks), do: Connect.cast_hooks(hooks)
+  defp connect_hooks(_), do: []
 
   defp changed_since(nil, _env), do: []
 

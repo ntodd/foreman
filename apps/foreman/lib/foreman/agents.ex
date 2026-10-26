@@ -142,6 +142,8 @@ defmodule Foreman.Agents do
   def handle_event(box_id, %Event{type: "op.result", payload: payload}) do
     case owns_op(box_id, payload.op_id) do
       :ok ->
+        {payload, offer} = take_offer(payload)
+
         case Operations.finish(
                payload.op_id,
                payload.status,
@@ -149,9 +151,17 @@ defmodule Foreman.Agents do
                payload[:error],
                &Environments.record_result/1
              ) do
-          {:ok, op, env} -> Environments.after_result(op, env)
-          :already -> :ok
-          :unknown -> :ok
+          {:ok, op, env} ->
+            if offer && op.status == "succeeded",
+              do: Environments.deliver_offer(op.id, offer)
+
+            Environments.after_result(op, env)
+
+          :already ->
+            :ok
+
+          :unknown ->
+            :ok
         end
 
       # Nothing to record it against (pruned, or from another control
@@ -211,6 +221,24 @@ defmodule Foreman.Agents do
         {:error, :not_yours}
     end
   end
+
+  # A connect hook's result (`ForemanProtocol.Connect`) is a secret: it's
+  # taken out before the operation is recorded, and only broadcast. One
+  # that doesn't fit fails the operation without saying what it was.
+  defp take_offer(%{result: %{"offer" => offer} = result} = payload) do
+    payload = %{payload | result: Map.delete(result, "offer")}
+
+    case ForemanProtocol.Connect.cast_offer(offer) do
+      {:ok, offer} ->
+        {payload, offer}
+
+      {:error, reason} ->
+        error = "the connect hook's result can't be shown: #{reason}"
+        {Map.merge(payload, %{status: "error", error: error}), nil}
+    end
+  end
+
+  defp take_offer(payload), do: {payload, nil}
 
   @doc """
   Called as an agent joins, before the box counts as online: restarts

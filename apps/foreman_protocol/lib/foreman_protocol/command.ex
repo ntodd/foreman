@@ -71,6 +71,10 @@ defmodule ForemanProtocol.Command do
     ],
     "env.logs" => @env ++ [service: {:service_name, []}, tail: {:integer, default: 200}],
     "env.git_status" => @env,
+    # Runs an action of a connect hook the environment reported (see
+    # `ForemanProtocol.Connect`). Sent only to agents that reported hooks.
+    "env.connect" =>
+      @env ++ [hook: {:connect_name, required: true}, action: {:connect_name, required: true}],
     "box.inventory" => [],
     "box.stats" => [],
     "box.gc" => [],
