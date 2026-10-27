@@ -37,12 +37,7 @@ defmodule ForemanWeb.ActivityNotice do
   def flash(%Activity{kind: :box_online} = e), do: {:info, notice(e, "Back online")}
   def flash(%Activity{kind: :box_offline} = e), do: {:error, notice(e, "Went offline")}
 
-  def flash(%Activity{kind: :box_reboot_required, box: box} = e) do
-    case Foreman.Boxes.reboot_needed(box) do
-      :livepatched -> {:info, notice(e, "Needs a reboot (kernel livepatched)")}
-      _ -> {:info, notice(e, "Needs a reboot")}
-    end
-  end
+  def flash(%Activity{kind: :box_reboot_required} = e), do: {:info, notice(e, "Needs a reboot")}
 
   defp done("create"), do: "Created and running"
   defp done("start"), do: "Started"

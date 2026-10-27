@@ -216,21 +216,13 @@ defmodule Foreman.Boxes do
   end
 
   @doc """
-  Whether a box needs a reboot: `:required`, `:livepatched` (only kernel
-  packages asked for it, and a livepatch covers the running kernel until
-  then), or nil. Nil too for an agent that doesn't report it.
+  `:required` when a box's agent reports the reboot flag, else nil (nil
+  too for an agent that doesn't report it). A livepatch doesn't change
+  that: an applied one doesn't say the pending kernel's fixes are in, and
+  Livepatch clients that check coverage remove the flag themselves.
   """
-  def reboot_needed(%Box{reboot_required: true} = box) do
-    packages = box.reboot_packages || []
-
-    if box.livepatch == true and packages != [] and Enum.all?(packages, &kernel_package?/1),
-      do: :livepatched,
-      else: :required
-  end
-
+  def reboot_needed(%Box{reboot_required: true}), do: :required
   def reboot_needed(%Box{}), do: nil
-
-  defp kernel_package?(name), do: String.starts_with?(name, "linux-")
 
   @policy_labels %{
     "privileged" =>

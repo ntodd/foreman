@@ -267,14 +267,15 @@ encrypted with it can't be read without it.
 
 ## Rebooting boxes
 
-A box whose updates need a reboot (a new kernel, libc, systemd) shows
-**Reboot required** on its card and its page, with the packages that
-asked for it, and everyone who can see the box gets a notice when it
-starts needing one. The agent reads `/run/reboot-required`, which
-update-notifier writes on Debian and Ubuntu (`apt install
-update-notifier-common` on a Debian box that lacks it). With Livepatch
-enabled, a reboot only the kernel asked for shows as **Reboot
-(livepatched)**: the running kernel is patched, so it can wait.
+A box whose updates asked for a reboot (a new kernel, libc, systemd)
+shows **Reboot required** on its card and its page, with the packages
+that asked, and everyone who can see the box gets a notice when it
+starts needing one. The agent reads `/run/reboot-required`, the flag
+Debian's packages use for this. Ubuntu writes it for the usual
+suspects; on Debian it depends on the package, so a Debian box may not
+flag every update that needs a reboot. With Livepatch on, the page says
+so, but the reboot stays required: a Livepatch client that has
+confirmed the running kernel is covered clears the flag itself.
 
 Reboot the box when its environments can stop for a few minutes:
 

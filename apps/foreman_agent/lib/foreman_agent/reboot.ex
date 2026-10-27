@@ -2,21 +2,22 @@ defmodule ForemanAgent.Reboot do
   @moduledoc """
   Whether the box needs a reboot, for `box.reboot`.
 
-  On Debian and Ubuntu, a package whose update needs one (a kernel, libc,
-  systemd) runs update-notifier's hook, which writes `/run/reboot-required`
-  and adds the package to `/run/reboot-required.pkgs`. A reboot clears
-  both. Without update-notifier-common installed nothing writes them, and
-  the box never reports a reboot.
+  Debian's convention: a package whose update needs a reboot writes
+  `/run/reboot-required` and adds itself to `/run/reboot-required.pkgs`,
+  and a reboot clears both. On Ubuntu update-notifier's hooks do it for
+  the kernel, libc and the like; on Debian it's up to each package (a
+  kernel through linux-base, dbus-broker), so coverage varies. The flag is
+  a request, not a check: it says something asked for a reboot.
 
   Livepatch (or kpatch) loads its patches as kernel livepatch modules,
   listed under `/sys/kernel/livepatch` with an `enabled` flag, which the
-  agent can read without root. One that's enabled means the running
-  kernel is patched, so a reboot that's only for a new kernel can wait.
+  agent can read without root. That's shown beside the reboot, not used
+  to excuse it: it says a patch is in, not which fixes.
   """
 
   alias ForemanAgent.Config
 
-  # The list is for people to read on the box's page.
+  # The list is only for people to read on the box's page.
   @max_packages 50
 
   @spec report(Config.t()) :: %{required: boolean(), packages: [String.t()], livepatch: boolean()}

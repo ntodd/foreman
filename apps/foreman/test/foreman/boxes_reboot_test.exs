@@ -36,10 +36,14 @@ defmodule Foreman.BoxesRebootTest do
 
     :ok = report(box, false)
     :ok = report(box, true, ["linux-image-6.8.0-90-generic"], true)
-    assert_receive {:activity, %Activity{kind: :box_reboot_required} = event}
+    assert_receive {:activity, %Activity{kind: :box_reboot_required}}
+  end
 
-    assert {:info, %{text: "Needs a reboot (kernel livepatched)"}} =
-             ActivityNotice.flash(event)
+  # A box already waiting on a reboot when its agent first reports it is
+  # news too.
+  test "tells them on the first report, if it needs one", %{box: box} do
+    :ok = report(box, true, ["libc6"])
+    assert_receive {:activity, %Activity{kind: :box_reboot_required}}
   end
 
   describe "reboot_needed/1" do
@@ -48,33 +52,16 @@ defmodule Foreman.BoxesRebootTest do
       assert Boxes.reboot_needed(%Boxes.Box{reboot_required: nil}) == nil
     end
 
-    test "covered by Livepatch only when every package is the kernel's" do
-      kernel = ["linux-image-6.8.0-90-generic", "linux-base"]
-
-      assert Boxes.reboot_needed(%Boxes.Box{
-               reboot_required: true,
-               reboot_packages: kernel,
-               livepatch: true
-             }) == :livepatched
-
-      assert Boxes.reboot_needed(%Boxes.Box{
-               reboot_required: true,
-               reboot_packages: ["libc6" | kernel],
-               livepatch: true
-             }) == :required
-
-      assert Boxes.reboot_needed(%Boxes.Box{
-               reboot_required: true,
-               reboot_packages: kernel,
-               livepatch: false
-             }) == :required
-
-      # Without the list there's no telling what it's for.
-      assert Boxes.reboot_needed(%Boxes.Box{
-               reboot_required: true,
-               reboot_packages: [],
-               livepatch: true
-             }) == :required
+    # A livepatch doesn't say the pending kernel is covered, and Livepatch
+    # clients that can tell remove the flag themselves.
+    test ":required whenever the flag is there, livepatch or not" do
+      for livepatch <- [true, false, nil], packages <- [[], ["linux-image-6.8.0-90-generic"]] do
+        assert Boxes.reboot_needed(%Boxes.Box{
+                 reboot_required: true,
+                 reboot_packages: packages,
+                 livepatch: livepatch
+               }) == :required
+      end
     end
   end
 end

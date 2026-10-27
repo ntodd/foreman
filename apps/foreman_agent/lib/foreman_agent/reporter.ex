@@ -149,8 +149,8 @@ defmodule ForemanAgent.Reporter do
     end
   end
 
-  # A box running an agent older than the control plane's box.reboot
-  # refuses it, and the outbox drops the reply.
+  # A control plane older than box.reboot refuses it, and the connection
+  # ignores the reply.
   defp reboot(state) do
     case Reboot.report(Config.get()) do
       same when same == state.reboot ->

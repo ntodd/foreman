@@ -176,13 +176,8 @@ defmodule ForemanWeb.ForemanComponents do
     assigns = assign(assigns, :needed, Foreman.Boxes.reboot_needed(assigns.box))
 
     ~H"""
-    <.badge
-      :if={@needed}
-      color={if @needed == :required, do: "amber", else: "sky"}
-      size="sm"
-      data-role="reboot-alert"
-    >
-      {if @needed == :required, do: "Reboot required", else: "Reboot (livepatched)"}
+    <.badge :if={@needed} color="amber" size="sm" data-role="reboot-alert">
+      Reboot required
     </.badge>
     """
   end
@@ -194,18 +189,13 @@ defmodule ForemanWeb.ForemanComponents do
     assigns = assign(assigns, :needed, Foreman.Boxes.reboot_needed(assigns.box))
 
     ~H"""
-    <.callout
-      :if={@needed}
-      kind={if @needed == :required, do: "warning", else: "info"}
-      id="box-reboot-alert"
-    >
+    <.callout :if={@needed} kind="warning" id="box-reboot-alert">
       <p class="text-[15px] font-semibold">This box needs a reboot</p>
       <p class="mt-1">
-        {if @needed == :required,
-          do:
-            "Updates installed on the box only take effect once it restarts. Its environments stop while it's down, and come back up on their own once the agent rejoins.",
-          else:
-            "Only kernel packages asked for it, and Livepatch covers the running kernel until then, so it can wait for a convenient time."}
+        Updates installed on the box only take effect once it restarts. Its environments stop while it's down, and come back up on their own once the agent rejoins.
+      </p>
+      <p :if={@box.livepatch} class="mt-1">
+        Livepatch is applied to the running kernel, which may cover some kernel fixes until then. It doesn't cover other packages, and a Livepatch client that confirms coverage clears this flag itself.
       </p>
       <p :if={@box.reboot_packages != []} class="mt-2 text-xs">
         For: <span class="font-mono break-all">{Enum.join(@box.reboot_packages, ", ")}</span>

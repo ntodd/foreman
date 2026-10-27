@@ -303,9 +303,8 @@ defmodule ForemanWeb.PagesTest do
     assert has_element?(view, "#box-#{box.id} [data-role=reboot-alert]", "Reboot required")
   end
 
-  # Livepatch covers the running kernel until the reboot, so a box whose
-  # only pending packages are the kernel's isn't urgent.
-  test "a kernel-only reboot on a livepatched box is marked as covered", %{
+  # Livepatch is shown, but doesn't make the reboot any less required.
+  test "a box with a livepatch still needs its reboot, and says Livepatch is on", %{
     conn: conn,
     user: user
   } do
@@ -314,15 +313,16 @@ defmodule ForemanWeb.PagesTest do
         owner_user_id: user.id,
         name: "patched",
         reboot_required: true,
-        reboot_packages: ["linux-image-6.8.0-90-generic", "linux-base"],
+        reboot_packages: ["linux-image-6.8.0-90-generic"],
         livepatch: true
       )
 
     {:ok, view, _html} = live(conn, ~p"/boxes/#{box.id}")
+    assert has_element?(view, "#box-reboot-alert", "needs a reboot")
     assert has_element?(view, "#box-reboot-alert", "Livepatch")
 
     {:ok, view, _html} = live(conn, ~p"/boxes")
-    assert has_element?(view, "#box-#{box.id} [data-role=reboot-alert]", "Reboot (livepatched)")
+    assert has_element?(view, "#box-#{box.id} [data-role=reboot-alert]", "Reboot required")
   end
 
   test "a box that doesn't need a reboot shows nothing", %{conn: conn, user: user} do
