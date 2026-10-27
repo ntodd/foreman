@@ -51,7 +51,8 @@ defmodule ForemanAgent.Updater do
         with :ok <- verify_signature(payload, target, config.release_public_key),
              :ok <- clear_downloads(root),
              log.("info", "Downloading agent #{payload.version} for #{target}\n"),
-             :ok <- fetch(payload.url, download, Keyword.get(opts, :req_options, [])),
+             url = download_url(payload.url, config.url),
+             :ok <- fetch(url, download, Keyword.get(opts, :req_options, [])),
              :ok <- verify_digest(download, payload.sha256),
              :ok <- extract(download, Path.join([root, "releases", payload.version])),
              :ok <- swap(root, payload.version) do
@@ -181,6 +182,19 @@ defmodule ForemanAgent.Updater do
       :ok -> :ok
       {:error, reason} -> {:error, "couldn't create #{dir}: #{:file.format_error(reason)}"}
     end
+  end
+
+  # The control plane builds the URL from its public base URL, which a box
+  # can't always reach (on a host where Traefik holds :443, say). The agent
+  # already talks to the control plane at FOREMAN_URL, so download from
+  # there too. The signature doesn't cover the URL, so this is safe.
+  defp download_url(url, nil), do: url
+
+  defp download_url(url, agent_url) do
+    origin = URI.parse(agent_url)
+
+    %{URI.parse(url) | scheme: origin.scheme, host: origin.host, port: origin.port}
+    |> URI.to_string()
   end
 
   defp fetch(url, path, req_options) do
