@@ -273,9 +273,10 @@ that asked, and everyone who can see the box gets a notice when it
 starts needing one. The agent reads `/run/reboot-required`, the flag
 Debian's packages use for this. Ubuntu writes it for the usual
 suspects; on Debian it depends on the package, so a Debian box may not
-flag every update that needs a reboot. With Livepatch on, the page says
-so, but the reboot stays required: a Livepatch client that has
-confirmed the running kernel is covered clears the flag itself.
+flag every update that needs a reboot. With a kernel livepatch enabled,
+the page says so, but the reboot stays required: a livepatch doesn't
+show which fixes are in. Depending on its version and settings, a
+Livepatch client that has confirmed coverage may clear the flag itself.
 
 Reboot the box when its environments can stop for a few minutes:
 

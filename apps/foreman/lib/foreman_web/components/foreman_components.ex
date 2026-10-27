@@ -195,7 +195,7 @@ defmodule ForemanWeb.ForemanComponents do
         Updates installed on the box only take effect once it restarts. Its environments stop while it's down, and come back up on their own once the agent rejoins.
       </p>
       <p :if={@box.livepatch} class="mt-1">
-        Livepatch is applied to the running kernel, which may cover some kernel fixes until then. It doesn't cover other packages, and a Livepatch client that confirms coverage clears this flag itself.
+        An enabled kernel livepatch (Livepatch or kpatch) was detected. That doesn't establish that the pending updates are covered, so the reboot stays required.
       </p>
       <p :if={@box.reboot_packages != []} class="mt-2 text-xs">
         For: <span class="font-mono break-all">{Enum.join(@box.reboot_packages, ", ")}</span>
