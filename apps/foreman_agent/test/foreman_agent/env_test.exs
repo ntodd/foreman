@@ -1378,6 +1378,32 @@ defmodule ForemanAgent.EnvTest do
       assert result["tailscale_node_id"] == "nTest1CNTRL"
     end
 
+    # devcontainer up resolves the repo's features again, and a private one
+    # needs the registry credentials a create had.
+    for {type, extra} <- [{"env.start", %{}}, {"env.restart", %{mode: "all", changed: []}}] do
+      test "#{type} hands registry credentials to the devcontainer CLI", %{ctx: ctx} do
+        stub_tools()
+        {:ok, _} = Env.run("env.create", payload(), ctx)
+        _ = runs()
+        auth = [%{host: "ghcr.io", username: "machine", token: "ghp_registry"}]
+
+        payload =
+          Map.merge(
+            %{env_id: @env_id, slug: "storefront-2", compose_env: %{}, registry_auth: auth},
+            unquote(Macro.escape(extra))
+          )
+
+        assert {:ok, _} = Env.run(unquote(type), payload, ctx)
+
+        [{"devcontainer", _, rc_opts}, {"devcontainer", args, opts}] =
+          Enum.filter(runs(), &match?({"devcontainer", _, _}, &1))
+
+        refute Enum.any?(args, &(&1 =~ "ghp_registry"))
+        assert is_binary(opts[:env]["DOCKER_CONFIG"])
+        assert rc_opts[:env]["DOCKER_CONFIG"] == opts[:env]["DOCKER_CONFIG"]
+      end
+    end
+
     test "fails clearly for an environment this box never prepared", %{ctx: ctx} do
       assert {:error, message} =
                Env.run(
@@ -1677,6 +1703,34 @@ defmodule ForemanAgent.EnvTest do
 
       assert {"devcontainer", _, _} =
                calls |> Enum.reject(&match?({"docker", ["exec" | _], _}, &1)) |> List.last()
+    end
+
+    # A sidecar on a private image that isn't on the box yet is pulled by
+    # that recreate, before the CLI's up.
+    test "affected hands registry credentials to the sidecars it recreates", %{ctx: ctx} do
+      auth = [%{host: "ghcr.io", username: "machine", token: "ghp_registry"}]
+
+      assert {:ok, _} =
+               Env.run(
+                 "env.restart",
+                 %{
+                   env_id: @env_id,
+                   slug: "storefront-2",
+                   mode: "affected",
+                   changed: ["NEON_API_KEY"],
+                   compose_env: %{},
+                   registry_auth: auth
+                 },
+                 ctx
+               )
+
+      {"docker", args, opts} =
+        Enum.find(runs(), fn {cmd, args, _} -> cmd == "docker" and "--force-recreate" in args end)
+
+      refute Enum.any?(args, &(&1 =~ "ghp_registry"))
+      docker_config = opts[:env]["DOCKER_CONFIG"]
+      assert is_binary(docker_config)
+      refute File.exists?(docker_config)
     end
 
     # Sidecars are recreated by compose directly, before the CLI's up.

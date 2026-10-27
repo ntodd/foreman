@@ -1354,7 +1354,7 @@ defmodule ForemanAgent.Env do
 
     with {:ok, outdated} <- feature_rebuild(ctx, p.env_id, prepared, []),
          rebuild = service in affected or outdated,
-         :ok <- recreate_checked(ctx, spec.slug, files, env, sidecars, prepared),
+         :ok <- recreate_sidecars(ctx, paths, spec.slug, files, env, sidecars, prepared, p),
          {:ok, _} <- compose(ctx, spec.slug, ["stop", service]),
          # Recreating the devcontainer itself means the CLI has to do it,
          # since it owns the image and labels.
@@ -1368,6 +1368,15 @@ defmodule ForemanAgent.Env do
          "feature_version" => result["feature_version"]
        })}
     end
+  end
+
+  # The recreate pulls a sidecar's image if the box doesn't have it, so it
+  # gets the registry credentials the CLI's up does.
+  defp recreate_sidecars(ctx, paths, slug, files, env, sidecars, prepared, p) do
+    with_docker_config(paths, Map.get(p, :registry_auth), fn docker_config ->
+      env = if docker_config, do: Map.put(env, "DOCKER_CONFIG", docker_config), else: env
+      recreate_checked(ctx, slug, files, env, sidecars, prepared)
+    end)
   end
 
   # Compose recreates sidecars itself, so they get the same checks as

@@ -13,7 +13,8 @@ defmodule ForemanProtocol do
   # env.rebuild can `pull` (fast-forward the clone) first; the gpu
   # policy rule; the join reports the box's firewall (`firewall`,
   # `firewall_default_bridge`), and box.firewall when it changes.
-  @version 3
+  # 4: env.start and env.restart can carry `registry_auth`.
+  @version 4
 
   @doc "The protocol version this build speaks."
   def version, do: @version

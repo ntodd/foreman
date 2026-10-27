@@ -16,6 +16,12 @@ defmodule ForemanProtocol.Command do
 
   @env [env_id: {:uuid, required: true}, slug: {:slug, required: true}]
 
+  @registry_auth {{:list,
+                   {:object,
+                    host: {:hostname, required: true},
+                    username: {:string, required: true},
+                    token: {:string, required: true}}}, []}
+
   @up_spec @env ++
              [
                repo: {:repo, required: true},
@@ -38,12 +44,7 @@ defmodule ForemanProtocol.Command do
                  {{:object,
                    enabled: {:boolean, default: false}, tags: {{:list, :ts_tag}, default: []}},
                   default: %{}},
-               registry_auth:
-                 {{:list,
-                   {:object,
-                    host: {:hostname, required: true},
-                    username: {:string, required: true},
-                    token: {:string, required: true}}}, []}
+               registry_auth: @registry_auth
              ]
 
   @specs %{
@@ -51,14 +52,18 @@ defmodule ForemanProtocol.Command do
     # `pull`: fast-forward the clone to its branch first. Protocol 3, and
     # absent unless set.
     "env.rebuild" => @up_spec ++ [pull: {:boolean, []}],
-    "env.start" => @env ++ [compose_env: {:env_map, default: %{}}],
+    # `registry_auth`: devcontainer up resolves the repo's features again.
+    # Protocol 4, and absent unless set.
+    "env.start" => @env ++ [compose_env: {:env_map, default: %{}}, registry_auth: @registry_auth],
     "env.stop" => @env,
     "env.restart" =>
       @env ++
         [
           mode: {{:enum, ["affected", "all"]}, required: true},
           changed: {{:list, :env_name}, default: []},
-          compose_env: {:env_map, default: %{}}
+          compose_env: {:env_map, default: %{}},
+          # Protocol 4, and absent unless set (see env.start).
+          registry_auth: @registry_auth
         ],
     "env.destroy" => @env,
     # `keep`: files to leave as they are rather than delete for being

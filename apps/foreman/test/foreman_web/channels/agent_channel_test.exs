@@ -85,7 +85,7 @@ defmodule ForemanWeb.AgentChannelTest do
       assert box.firewall_default_bridge == "reaches_tailnet"
     end
 
-    test "an agent from before the firewall leaves it unknown", %{box: box} do
+    test "an agent that doesn't report the firewall leaves it unknown", %{box: box} do
       box |> Ecto.Changeset.change(firewall: "active") |> Repo.update!()
       {:ok, socket} = connect(AgentSocket, %{}, connect_info: signed_connect_info(box))
 
@@ -93,7 +93,7 @@ defmodule ForemanWeb.AgentChannelTest do
                subscribe_and_join(
                  socket,
                  "agent:#{box.id}",
-                 join_payload(%{"protocol_version" => 2})
+                 join_payload(%{"protocol_version" => 3})
                )
 
       assert Repo.reload!(box).firewall == nil

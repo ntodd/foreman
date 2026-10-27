@@ -33,7 +33,12 @@ defmodule Foreman.Environments.Commands do
 
       "start" ->
         with_secrets(env, fn s ->
-          command(op, "env.start", base(env) |> Map.put(:compose_env, s.values))
+          payload =
+            base(env)
+            |> Map.put(:compose_env, s.values)
+            |> put_present(:registry_auth, up_registry_auth(env))
+
+          command(op, "env.start", payload)
         end)
 
       "stop" ->
@@ -77,8 +82,11 @@ defmodule Foreman.Environments.Commands do
 
   defp base(env), do: %{env_id: env.id, slug: env.slug}
 
-  defp restart(env, mode, changed, s),
-    do: base(env) |> Map.merge(%{mode: mode, changed: changed, compose_env: s.values})
+  defp restart(env, mode, changed, s) do
+    base(env)
+    |> Map.merge(%{mode: mode, changed: changed, compose_env: s.values})
+    |> put_present(:registry_auth, up_registry_auth(env))
+  end
 
   defp with_secrets(env, fun) do
     secrets = secrets(env)
@@ -288,6 +296,13 @@ defmodule Foreman.Environments.Commands do
   end
 
   defp registry_auth(_), do: nil
+
+  # A start or restart runs devcontainer up too, which resolves the repo's
+  # features again. Protocol 4: an older agent refuses the field there.
+  defp up_registry_auth(%{box: %{protocol_version: v}} = env) when is_integer(v) and v >= 4,
+    do: registry_auth(env.repo.owner)
+
+  defp up_registry_auth(_env), do: nil
 
   defp put_present(map, _key, nil), do: map
   defp put_present(map, _key, ""), do: map
