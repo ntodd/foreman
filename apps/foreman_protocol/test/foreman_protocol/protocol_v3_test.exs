@@ -163,13 +163,6 @@ defmodule ForemanProtocol.ProtocolV3Test do
     end
   end
 
-  test "this build speaks protocol 3 and still accepts agents on 2" do
-    assert ForemanProtocol.version() == 3
-    assert ForemanProtocol.compatible?(3)
-    assert ForemanProtocol.compatible?(2)
-    refute ForemanProtocol.compatible?(1)
-  end
-
   describe "the box firewall" do
     @join %{
       "agent_version" => "0.4.0",

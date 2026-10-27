@@ -1378,6 +1378,32 @@ defmodule ForemanAgent.EnvTest do
       assert result["tailscale_node_id"] == "nTest1CNTRL"
     end
 
+    # devcontainer up resolves the repo's features again, and a private one
+    # needs the registry credentials a create had.
+    for {type, extra} <- [{"env.start", %{}}, {"env.restart", %{mode: "all", changed: []}}] do
+      test "#{type} hands registry credentials to the devcontainer CLI", %{ctx: ctx} do
+        stub_tools()
+        {:ok, _} = Env.run("env.create", payload(), ctx)
+        _ = runs()
+        auth = [%{host: "ghcr.io", username: "machine", token: "ghp_registry"}]
+
+        payload =
+          Map.merge(
+            %{env_id: @env_id, slug: "storefront-2", compose_env: %{}, registry_auth: auth},
+            unquote(Macro.escape(extra))
+          )
+
+        assert {:ok, _} = Env.run(unquote(type), payload, ctx)
+
+        [{"devcontainer", _, rc_opts}, {"devcontainer", args, opts}] =
+          Enum.filter(runs(), &match?({"devcontainer", _, _}, &1))
+
+        refute Enum.any?(args, &(&1 =~ "ghp_registry"))
+        assert is_binary(opts[:env]["DOCKER_CONFIG"])
+        assert rc_opts[:env]["DOCKER_CONFIG"] == opts[:env]["DOCKER_CONFIG"]
+      end
+    end
+
     test "fails clearly for an environment this box never prepared", %{ctx: ctx} do
       assert {:error, message} =
                Env.run(
