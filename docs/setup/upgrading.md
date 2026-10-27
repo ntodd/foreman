@@ -228,7 +228,9 @@ protocol 2 came in with 0.2.1, and protocol 3 (your own devcontainer
 features, Pull and rebuild, the `gpu` policy rule, and agents reporting
 the box firewall) with 0.4.0. Protocol 4 (registry credentials on start
 and restart, so environments with private features can start without a
-rebuild) came in with 0.4.10.
+rebuild) came in with 0.4.10. A 0.4.10 control plane refuses agents on
+protocol 2 (older than 0.4.0), and a refused box can't update from it, so
+update those boxes to 0.4.0 or later before upgrading past 0.4.9.
 
 Following starts with 0.3.0, and 0.3.0 is the first release with
 images, so rolling back from it means building the older version

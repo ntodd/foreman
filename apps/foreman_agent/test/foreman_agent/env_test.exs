@@ -1705,6 +1705,34 @@ defmodule ForemanAgent.EnvTest do
                calls |> Enum.reject(&match?({"docker", ["exec" | _], _}, &1)) |> List.last()
     end
 
+    # A sidecar on a private image that isn't on the box yet is pulled by
+    # that recreate, before the CLI's up.
+    test "affected hands registry credentials to the sidecars it recreates", %{ctx: ctx} do
+      auth = [%{host: "ghcr.io", username: "machine", token: "ghp_registry"}]
+
+      assert {:ok, _} =
+               Env.run(
+                 "env.restart",
+                 %{
+                   env_id: @env_id,
+                   slug: "storefront-2",
+                   mode: "affected",
+                   changed: ["NEON_API_KEY"],
+                   compose_env: %{},
+                   registry_auth: auth
+                 },
+                 ctx
+               )
+
+      {"docker", args, opts} =
+        Enum.find(runs(), fn {cmd, args, _} -> cmd == "docker" and "--force-recreate" in args end)
+
+      refute Enum.any?(args, &(&1 =~ "ghp_registry"))
+      docker_config = opts[:env]["DOCKER_CONFIG"]
+      assert is_binary(docker_config)
+      refute File.exists?(docker_config)
+    end
+
     # Sidecars are recreated by compose directly, before the CLI's up.
     test "affected checks the networks around the sidecars it recreates too", %{ctx: ctx} do
       stub_tools(
