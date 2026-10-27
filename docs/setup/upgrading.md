@@ -292,3 +292,25 @@ sudo systemctl reset-failed foreman-agent && sudo systemctl start foreman-agent
 ```
 
 Then pin the box to that version until the new one is fixed.
+
+### Boxes with a loopback `FOREMAN_URL`
+
+An agent downloads a new release from the control plane at its own
+`FOREMAN_URL`, the same address it connects to, not the control
+plane's public URL. That matters on a box that reaches the control
+plane some other way, like `http://127.0.0.1:4000` on the control
+plane's own host when something else (Traefik, say) holds port 443
+there.
+
+Agents before 0.4.9 downloaded from the public URL, so on such a box
+the update fails (often with `TLS client alert: Bad Certificate`) and
+rolls back. Reinstall it once by hand with the same `--url` it was
+installed with (and any `--policy` or `--default-bridge-reaches-tailnet`
+it had); an enrolled box needs no token:
+
+```sh
+curl -fsSL http://127.0.0.1:4000/agent/install.sh | sudo sh -s -- --url http://127.0.0.1:4000
+```
+
+From 0.4.9 on, its updates come from the Deployment page like any
+other box's.
