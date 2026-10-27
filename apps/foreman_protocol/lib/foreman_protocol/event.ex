@@ -46,6 +46,14 @@ defmodule ForemanProtocol.Event do
       firewall: {{:enum, ~w(active outdated missing)}, required: true},
       firewall_default_bridge: {{:enum, ~w(filtered reaches_tailnet)}, []}
     ],
+    # Whether the box needs a reboot (its /run/reboot-required), the
+    # packages that asked for it, and whether a livepatch is applied to
+    # the running kernel. After every join and when it changes.
+    "box.reboot" => [
+      required: {:boolean, required: true},
+      packages: {{:list, :string}, default: []},
+      livepatch: {:boolean, default: false}
+    ],
     "box.stats" => [
       capacity:
         {{:object,

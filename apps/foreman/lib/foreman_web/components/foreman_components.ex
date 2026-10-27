@@ -169,6 +169,41 @@ defmodule ForemanWeb.ForemanComponents do
     """
   end
 
+  @doc "The chip on a box card when the box needs a reboot."
+  attr :box, :map, required: true
+
+  def box_reboot_badge(assigns) do
+    assigns = assign(assigns, :needed, Foreman.Boxes.reboot_needed(assigns.box))
+
+    ~H"""
+    <.badge :if={@needed} color="amber" size="sm" data-role="reboot-alert">
+      Reboot required
+    </.badge>
+    """
+  end
+
+  @doc "The box page's alert for a box that needs a reboot, with what asked for it."
+  attr :box, :map, required: true
+
+  def box_reboot_alert(assigns) do
+    assigns = assign(assigns, :needed, Foreman.Boxes.reboot_needed(assigns.box))
+
+    ~H"""
+    <.callout :if={@needed} kind="warning" id="box-reboot-alert">
+      <p class="text-[15px] font-semibold">This box needs a reboot</p>
+      <p class="mt-1">
+        Updates installed on the box only take effect once it restarts. Its environments stop while it's down, and come back up on their own once the agent rejoins.
+      </p>
+      <p :if={@box.livepatch} class="mt-1">
+        An enabled kernel livepatch (Livepatch or kpatch) was detected. That doesn't establish that the pending updates are covered, so the reboot stays required.
+      </p>
+      <p :if={@box.reboot_packages != []} class="mt-2 text-xs">
+        For: <span class="font-mono break-all">{Enum.join(@box.reboot_packages, ", ")}</span>
+      </p>
+    </.callout>
+    """
+  end
+
   @doc "A labelled capacity bar: used (or provisioned) of total."
   attr :label, :string, required: true
   attr :value, :any, required: true

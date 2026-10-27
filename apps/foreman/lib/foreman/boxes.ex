@@ -190,6 +190,40 @@ defmodule Foreman.Boxes do
     :ok
   end
 
+  @doc """
+  Records whether a box needs a reboot, as its agent reports it after
+  every join and when it changes. A box that starts needing one is news
+  (`Foreman.Activity.box_reboot_required/1`); the same report again isn't.
+  """
+  def record_reboot(box_id, reboot) do
+    if box = get_box(box_id) do
+      newly? = reboot.required and box.reboot_required != true
+
+      box =
+        box
+        |> Ecto.Changeset.change(
+          reboot_required: reboot.required,
+          reboot_packages: reboot.packages,
+          livepatch: reboot.livepatch
+        )
+        |> Repo.update!()
+
+      broadcast(box, :updated)
+      if newly?, do: Foreman.Activity.box_reboot_required(box)
+    end
+
+    :ok
+  end
+
+  @doc """
+  `:required` when a box's agent reports the reboot flag, else nil (nil
+  too for an agent that doesn't report it). A livepatch doesn't change
+  that: an applied one doesn't say the pending kernel's fixes are in, and
+  Livepatch clients that check coverage remove the flag themselves.
+  """
+  def reboot_needed(%Box{reboot_required: true}), do: :required
+  def reboot_needed(%Box{}), do: nil
+
   @policy_labels %{
     "privileged" =>
       "privileged containers (docker-in-docker, privileged: true, SYS_ADMIN and the like)",

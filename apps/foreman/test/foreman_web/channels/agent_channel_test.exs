@@ -206,6 +206,18 @@ defmodule ForemanWeb.AgentChannelTest do
       assert box.firewall_default_bridge == "filtered"
     end
 
+    test "records whether the box needs a reboot", %{socket: socket, box: box} do
+      {:ok, reboot} =
+        Event.new("box.reboot", %{required: true, packages: ["libc6"], livepatch: true})
+
+      ref = push(socket, "event", Event.to_wire(reboot))
+      assert_reply ref, :ok
+      box = Repo.reload!(box)
+      assert box.reboot_required
+      assert box.reboot_packages == ["libc6"]
+      assert box.livepatch
+    end
+
     test "records host metrics", %{socket: socket, box: box} do
       Foreman.Metrics.subscribe(box.id)
 
