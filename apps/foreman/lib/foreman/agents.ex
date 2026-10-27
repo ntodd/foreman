@@ -200,6 +200,10 @@ defmodule Foreman.Agents do
     Boxes.record_firewall(box_id, firewall)
   end
 
+  def handle_event(box_id, %Event{type: "box.reboot", payload: reboot}) do
+    Boxes.record_reboot(box_id, reboot)
+  end
+
   def handle_event(box_id, %Event{type: "box.metrics", payload: sample}) do
     Metrics.record_box(box_id, sample)
   end

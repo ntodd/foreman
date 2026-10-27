@@ -285,6 +285,52 @@ defmodule ForemanWeb.PagesTest do
     refute has_element?(view, "[data-role=policy-alert]")
   end
 
+  test "a box that needs a reboot says so on its page and its card", %{conn: conn, user: user} do
+    box =
+      box_fixture(
+        owner_user_id: user.id,
+        name: "stale",
+        reboot_required: true,
+        reboot_packages: ["libc6", "linux-image-6.8.0-90-generic"],
+        livepatch: true
+      )
+
+    {:ok, view, _html} = live(conn, ~p"/boxes/#{box.id}")
+    assert has_element?(view, "#box-reboot-alert", "needs a reboot")
+    assert has_element?(view, "#box-reboot-alert", "libc6")
+
+    {:ok, view, _html} = live(conn, ~p"/boxes")
+    assert has_element?(view, "#box-#{box.id} [data-role=reboot-alert]", "Reboot required")
+  end
+
+  # Livepatch covers the running kernel until the reboot, so a box whose
+  # only pending packages are the kernel's isn't urgent.
+  test "a kernel-only reboot on a livepatched box is marked as covered", %{
+    conn: conn,
+    user: user
+  } do
+    box =
+      box_fixture(
+        owner_user_id: user.id,
+        name: "patched",
+        reboot_required: true,
+        reboot_packages: ["linux-image-6.8.0-90-generic", "linux-base"],
+        livepatch: true
+      )
+
+    {:ok, view, _html} = live(conn, ~p"/boxes/#{box.id}")
+    assert has_element?(view, "#box-reboot-alert", "Livepatch")
+
+    {:ok, view, _html} = live(conn, ~p"/boxes")
+    assert has_element?(view, "#box-#{box.id} [data-role=reboot-alert]", "Reboot (livepatched)")
+  end
+
+  test "a box that doesn't need a reboot shows nothing", %{conn: conn, user: user} do
+    box = box_fixture(owner_user_id: user.id, name: "fresh", reboot_required: false)
+    {:ok, view, _html} = live(conn, ~p"/boxes/#{box.id}")
+    refute has_element?(view, "#box-reboot-alert")
+  end
+
   # Without its firewall, code in a box's environments reaches the
   # tailnet as the box, with the box's grants.
   test "a box whose firewall isn't loaded gets an alert everywhere it's shown", %{

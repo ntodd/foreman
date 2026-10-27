@@ -79,6 +79,9 @@ defmodule Foreman.Fixtures do
         policy: Map.get(attrs, :policy, ForemanProtocol.Policy.defaults()),
         firewall: Map.get(attrs, :firewall),
         firewall_default_bridge: Map.get(attrs, :firewall_default_bridge),
+        reboot_required: Map.get(attrs, :reboot_required),
+        reboot_packages: Map.get(attrs, :reboot_packages, []),
+        livepatch: Map.get(attrs, :livepatch),
         agent_version: "0.1.0",
         protocol_version: 1,
         feature_version: Map.get(attrs, :feature_version)

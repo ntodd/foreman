@@ -265,6 +265,25 @@ To change the key on purpose (because it leaked, say):
 Don't drop the old key before step 4 has finished. Anything still
 encrypted with it can't be read without it.
 
+## Rebooting boxes
+
+A box whose updates need a reboot (a new kernel, libc, systemd) shows
+**Reboot required** on its card and its page, with the packages that
+asked for it, and everyone who can see the box gets a notice when it
+starts needing one. The agent reads `/run/reboot-required`, which
+update-notifier writes on Debian and Ubuntu (`apt install
+update-notifier-common` on a Debian box that lacks it). With Livepatch
+enabled, a reboot only the kernel asked for shows as **Reboot
+(livepatched)**: the running kernel is patched, so it can wait.
+
+Reboot the box when its environments can stop for a few minutes:
+
+```sh
+sudo reboot
+```
+
+Environments come back up once the agent rejoins, and the alert clears.
+
 ## When an agent update fails
 
 An update counts as failed when the box doesn't come back on the new

@@ -28,6 +28,8 @@ defmodule ForemanAgent.Config do
             firewall_rules: nil,
             firewall_marker: "/run/foreman-firewall/loaded",
             firewall_info: "/etc/foreman-agent/firewall.info",
+            reboot_required: "/run/reboot-required",
+            livepatch_dir: "/sys/kernel/livepatch",
             join_token: nil,
             connect: true,
             tailscale_join_wait: :timer.seconds(30)

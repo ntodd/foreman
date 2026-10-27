@@ -3,7 +3,7 @@ defmodule Foreman.Activity do
   What happened on a box, sent to everyone who can see it, whatever page
   they're on: an environment's create, start, stop, rebuild, restart or
   destroy finishing, an agent update finishing, and a box joining, going
-  offline or coming back.
+  offline or coming back, and a box starting to need a reboot.
 
   Every LiveView subscribes (`ForemanWeb.UserAuth`) and shows an event as
   a notice. Pages keep their own topics for refreshing what they show;
@@ -33,7 +33,7 @@ defmodule Foreman.Activity do
   ]
 
   @type t :: %__MODULE__{
-          kind: :operation | :box_joined | :box_online | :box_offline,
+          kind: :operation | :box_joined | :box_online | :box_offline | :box_reboot_required,
           action: String.t() | nil,
           status: String.t() | nil,
           error: String.t() | nil,
@@ -124,6 +124,10 @@ defmodule Foreman.Activity do
 
   @doc "Called once a box has stayed offline for `offline_after_s/0`."
   def box_offline(%Box{} = box), do: broadcast(@boxes, box_event(:box_offline, box))
+
+  @doc "Called when a box's agent first reports that it needs a reboot."
+  def box_reboot_required(%Box{} = box),
+    do: broadcast(@boxes, box_event(:box_reboot_required, box))
 
   defp box_event(kind, box),
     do: %__MODULE__{kind: kind, subject: box.name, box_id: box.id, box: box}

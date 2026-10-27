@@ -158,6 +158,30 @@ defmodule ForemanProtocol.EventTest do
     end
   end
 
+  describe "box.reboot" do
+    test "says whether the box needs a reboot, what for, and whether a livepatch is in" do
+      assert {:ok, ev} =
+               Event.new("box.reboot", %{
+                 "required" => true,
+                 "packages" => ["linux-image-6.8.0-90-generic"],
+                 "livepatch" => true
+               })
+
+      assert ev.payload == %{
+               required: true,
+               packages: ["linux-image-6.8.0-90-generic"],
+               livepatch: true
+             }
+    end
+
+    test "defaults to no packages and no livepatch, and needs `required`" do
+      assert {:ok, %{payload: %{packages: [], livepatch: false}}} =
+               Event.new("box.reboot", %{"required" => false})
+
+      assert {:error, _} = Event.new("box.reboot", %{})
+    end
+  end
+
   test "env.state reports an observed state change" do
     assert {:ok, _} = Event.new("env.state", %{env_id: @env_id, state: "stopped"})
     assert {:error, _} = Event.new("env.state", %{env_id: @env_id, state: "exploded"})

@@ -4,12 +4,13 @@ defmodule ForemanAgent.Reporter do
   metrics (every 5 seconds) and stats (every 30 seconds) to the control
   plane, an `env.state` event for each environment whose state changed in
   between, the box's firewall when it changes from what the join said,
+  whether the box needs a reboot (after every join and when it changes),
   and the ports listening in its environments (checked every 5 seconds,
   sent when they change and every minute).
   """
   use GenServer
 
-  alias ForemanAgent.{Config, Firewall, Handler, HostMetrics, Outbox, Ports, Stats}
+  alias ForemanAgent.{Config, Firewall, Handler, HostMetrics, Outbox, Ports, Reboot, Stats}
   alias ForemanProtocol.Event
 
   require Logger
@@ -41,6 +42,7 @@ defmodule ForemanAgent.Reporter do
        last: nil,
        cpu: nil,
        firewall: nil,
+       reboot: nil,
        ports: nil,
        ports_sent_at: nil,
        port_names: %{}
@@ -57,6 +59,7 @@ defmodule ForemanAgent.Reporter do
     # Sent again after every join: the firewall may have changed and
     # changed back since this process last looked.
     state = safely("firewall", state, &firewall(%{&1 | firewall: nil}))
+    state = safely("reboot", state, &reboot(%{&1 | reboot: nil}))
     state = safely("ports", state, &ports(%{&1 | ports: nil}))
     safely("stats", state, &tap(&1, fn _ -> stats() end))
     {:noreply, state}
@@ -66,7 +69,8 @@ defmodule ForemanAgent.Reporter do
   def handle_info(:inventory, state) do
     Process.send_after(self(), :inventory, @inventory_every)
     state = safely("inventory", state, &inventory/1)
-    {:noreply, safely("firewall", state, &firewall/1)}
+    state = safely("firewall", state, &firewall/1)
+    {:noreply, safely("reboot", state, &reboot/1)}
   end
 
   def handle_info(:stats, state) do
@@ -142,6 +146,19 @@ defmodule ForemanAgent.Reporter do
       report ->
         push("box.firewall", report)
         %{state | firewall: report}
+    end
+  end
+
+  # A box running an agent older than the control plane's box.reboot
+  # refuses it, and the outbox drops the reply.
+  defp reboot(state) do
+    case Reboot.report(Config.get()) do
+      same when same == state.reboot ->
+        state
+
+      report ->
+        push("box.reboot", report)
+        %{state | reboot: report}
     end
   end
 

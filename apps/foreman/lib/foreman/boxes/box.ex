@@ -26,6 +26,9 @@ defmodule Foreman.Boxes.Box do
     field :policy, :map
     field :firewall, :string
     field :firewall_default_bridge, :string
+    field :reboot_required, :boolean
+    field :reboot_packages, {:array, :string}, default: []
+    field :livepatch, :boolean
     field :last_seen_at, :utc_datetime_usec
     field :revoked_at, :utc_datetime_usec
     timestamps()

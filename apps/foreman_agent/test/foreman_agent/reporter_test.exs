@@ -221,4 +221,60 @@ defmodule ForemanAgent.ReporterTest do
       assert [%{firewall: "outdated"}] = firewall_events()
     end
   end
+
+  describe "whether the box needs a reboot" do
+    setup do
+      tmp = Path.join(System.tmp_dir!(), "reporter-reboot-#{System.unique_integer([:positive])}")
+      File.mkdir_p!(tmp)
+      previous = ForemanAgent.Config.get()
+
+      ForemanAgent.Config.put(%{
+        previous
+        | reboot_required: Path.join(tmp, "reboot-required"),
+          livepatch_dir: Path.join(tmp, "livepatch")
+      })
+
+      stub(RunnerMock, :run, fn _cmd, _args, _opts -> {:ok, %{status: 0, output: ""}} end)
+      stub(DockerMock, :list_containers, fn _ -> {:ok, []} end)
+      stub(DockerMock, :info, fn -> {:ok, %{}} end)
+      :ok = ForemanAgent.Outbox.attach(self())
+      _ = reboot_events()
+
+      on_exit(fn ->
+        ForemanAgent.Config.put(previous)
+        File.rm_rf!(tmp)
+      end)
+
+      %{tmp: tmp}
+    end
+
+    defp reboot_events do
+      receive do
+        {:outbox_deliver, %{type: "box.reboot", payload: payload}, _} ->
+          [payload | reboot_events()]
+
+        {:outbox_deliver, _, _} ->
+          reboot_events()
+      after
+        200 -> []
+      end
+    end
+
+    test "is reported after a join, and when it changes", %{tmp: tmp} do
+      pid = start_supervised!(Reporter)
+      Reporter.report_now()
+      assert [%{required: false}] = reboot_events()
+
+      send(pid, :inventory)
+      assert reboot_events() == []
+
+      File.write!(Path.join(tmp, "reboot-required"), "*** System restart required ***\n")
+      File.write!(Path.join(tmp, "reboot-required.pkgs"), "libc6\n")
+      send(pid, :inventory)
+      assert [%{required: true, packages: ["libc6"]}] = reboot_events()
+
+      Reporter.report_now()
+      assert [%{required: true}] = reboot_events()
+    end
+  end
 end
