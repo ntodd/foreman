@@ -4,6 +4,11 @@
 # one alone. Nothing runs: no Docker, no GitHub, no tailnet.
 #
 #   cd apps/foreman && PORT=4100 mix run --no-start ../../e2e/demo.exs
+#
+# DEMO=personal keeps only mona, her box and her environments: one person
+# on one box, in tmp/demo-personal.
+#
+#   cd apps/foreman && DEMO=personal PORT=4101 mix run --no-start ../../e2e/demo.exs
 #   node e2e/screenshots.mjs              (from the repo root, in another shell)
 alias Foreman.{Accounts, Operations, Repo, Repos, Scope, Secrets}
 alias Foreman.Boxes.Box
@@ -11,7 +16,8 @@ alias Foreman.Capacity.Tracker
 alias Foreman.Environments.Environment
 import Ecto.Query
 
-root = Path.expand("../tmp/demo", __DIR__)
+personal = System.get_env("DEMO") == "personal"
+root = Path.expand(if(personal, do: "../tmp/demo-personal", else: "../tmp/demo"), __DIR__)
 File.rm_rf!(root)
 File.mkdir_p!(root)
 
@@ -76,7 +82,7 @@ end
 storefront = repo.("storefront", %{"cpus" => 4, "memory" => "8gb"})
 api = repo.("api", %{"cpus" => 2, "memory" => "4gb"})
 docs = repo.("docs", %{"cpus" => 1, "memory" => "2gb"})
-_mobile = repo.("mobile", %{"cpus" => 4, "memory" => "8gb"})
+mobile = repo.("mobile", %{"cpus" => 4, "memory" => "8gb"})
 owner = Repos.get_owner_by_login("acme")
 
 for {scope_name, subject, name, value} <- [
@@ -170,6 +176,13 @@ _sf3 =
   })
 
 _api3 = env.(api, 3, sam, box_b, "main", "running", 60 * 30, %{})
+_mobile1 = env.(mobile, 1, mona, desktop, "offline-sync", "partial", 60 * 8, %{})
+
+_docs2 =
+  env.(docs, 2, sam, box_b, "new-theme", "error", 40, %{
+    services: ["app"],
+    status_message: "devcontainer up failed: the build exited with code 1"
+  })
 
 build_log = fn env ->
   containers =
@@ -238,9 +251,16 @@ op.(
 
 op.(sf2, "create", "succeeded", 95, 81, build_log.(sf2))
 
+if personal do
+  others = [jordan.id, sam.id]
+  Repo.delete_all(from o in Foreman.Operations.Operation, where: o.user_id in ^others)
+  Repo.delete_all(from e in Environment, where: e.user_id in ^others)
+  Repo.delete_all(from b in Box, where: b.owner_user_id in ^others)
+end
+
 # Stand-in agents: registered like a connected agent's channel process, so
 # the boxes show as online. They drop whatever is sent to them.
-for b <- [desktop, box_a, box_b] do
+for b <- if(personal, do: [desktop], else: [desktop, box_a, box_b]) do
   spawn(fn ->
     Foreman.Agents.register(b.id)
     Stream.repeatedly(fn -> receive do: (_ -> :ok) end) |> Stream.run()
@@ -302,7 +322,7 @@ end
 
 times = Enum.to_list((now - 7 * 86_400)..(now - 86_400)//60) ++ Enum.to_list((now - 86_400)..now//5)
 
-for {b, mem_frac} <- [{desktop, 0.28}, {box_a, 0.41}, {box_b, 0.18}] do
+for {b, mem_frac} <- [{desktop, 0.28}, {box_a, 0.41}, {box_b, 0.18}], not personal or b.id == desktop.id do
   times
   |> Enum.map(&box_sample.(b, &1, mem_frac))
   |> Enum.chunk_every(2_000)
