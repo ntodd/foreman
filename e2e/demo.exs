@@ -30,6 +30,8 @@ Application.put_env(
 )
 
 Application.put_env(:phoenix, :serve_endpoints, true, persistent: true)
+# Nothing to upgrade: the screenshots shouldn't show an update banner.
+Application.put_env(:foreman, :update_check, false)
 # Only so the UI shows the tailnet SSH command; nothing calls Tailscale.
 Application.put_env(:foreman, :tailscale, %{
   client_id: "demo",

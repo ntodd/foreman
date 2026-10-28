@@ -1,93 +1,104 @@
 # Foreman
 
-A self-hosted replacement for GitHub Codespaces. Pick a repo with a
-compose-based devcontainer, pick one of your own machines, and Foreman
-clones it, builds the devcontainer, delivers its secrets and joins it to
-your tailnet. Run as many copies of a repo side by side as you like;
-nothing publishes ports.
+Foreman is a self-hosted stand-in for GitHub Codespaces. You point it at a
+repo with a compose-based devcontainer and one of your own machines. It
+clones the repo there, builds the devcontainer, hands it its secrets and
+puts it on your tailnet. Run as many copies of the same repo side by side
+as you like. None of them publish a port.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/images/environments-dark.png">
-  <img alt="The Environments page: three boxes with CPU and memory bars, and seven environments across them, running, stopped, creating, and one waiting on a restart" src="docs/images/environments-light.png">
+  <img alt="The Environments page: three boxes with CPU and memory bars, a state filter and a box filter, and nine environments in a table, the signed-in user's under My environments and the rest under Others, each with its owner's avatar, box and state" src="docs/images/environments-light.png">
 </picture>
 
-```mermaid
-flowchart TB
-    browser["Browser"] -->|LiveView| cp["Control plane<br>Phoenix, tailnet-only<br>SQLite or Postgres"]
-    cp <-->|"WebSocket<br>agents dial out<br>ed25519-signed"| desktop["agent (desktop)"]
-    cp <--> boxa["agent (box-a)"]
-    cp <--> boxb["agent (box-b)"]
-    desktop -->|"Docker + @devcontainers/cli"| envs["environments"]
-    envs -->|tailscaled| tailnet(("tailnet"))
-    laptops["laptops<br>ssh, editors, browsers"] --> tailnet
-```
+## How it works
 
-- **Control plane** (`apps/foreman`): Phoenix + LiveView. Owns users,
-  repos, boxes, environments, secrets and the audit log.
-- **Agent** (`apps/foreman_agent`): an Elixir release on each box. Dials
-  out to the control plane, runs `git`, `docker compose` and the
-  devcontainer CLI, and updates itself.
-- **Protocol** (`apps/foreman_protocol`): the commands and events between
-  them, validated by the same code on both sides.
-- **Feature** (`features/src/foreman`): a devcontainer feature the agent
-  adds to every environment: Tailscale (with Tailscale SSH), the secrets
-  shell hook, git identity and a GitHub credential helper.
+The control plane (`apps/foreman`) is a Phoenix app you reach only over
+your tailnet. It's what you use in the browser, and it keeps track of
+users, repos, boxes, environments, secrets and the audit log. It runs on
+SQLite for one person or Postgres for a team.
 
-The design, and the decisions behind it, are in
-[docs/architecture.md](docs/architecture.md). The security model is in
-[docs/security.md](docs/security.md).
+A machine that hosts environments is a box, and it runs the agent
+(`apps/foreman_agent`), an Elixir release. The agent dials out to the
+control plane over a WebSocket, so boxes need no open ports, and every
+message is signed with ed25519. When the control plane asks for an
+environment, the agent brings it up with `git`, `docker compose` and the
+devcontainer CLI. It updates itself when a new release comes out.
 
-## What it does
+On top of each repo's own config, Foreman adds a devcontainer feature
+(`features/src/foreman`). It installs Tailscale with Tailscale SSH, the
+shell hook that loads secrets, your git identity and a credential helper
+for GitHub. Your laptop reaches an environment over the tailnet, by name,
+with ssh, an editor or a browser.
 
-- Environments from any repo the GitHub App can see that has a
-  compose-based devcontainer. Named `<repo>-<n>` (personal) or
-  `<repo>-<login>-<n>` (team), and that name is the compose project,
-  the Tailscale hostname and `ssh <user>@<name>`.
-- Secrets at four scopes (owner, repo, user, environment), encrypted at
-  rest, write-only in the UI, delivered to a tmpfs on the box and loaded
-  by login shells. Changing one updates new shells immediately and offers
-  **Restart affected**, **Restart all** or **Later**.
-- A GitHub token per environment, scoped to its repo by default (a repo
-  can opt out to the user's own token), refreshed every few hours.
-- Git identity and dotfiles per user, overridable per repo.
-- Environments run unprivileged. Privileged containers (including
-  docker-in-docker), host namespaces, the Docker socket and host mounts
-  are refused, checked against features as well as the repo's own
-  files. A box can open one up as an exception, and the control plane
-  shows it with a red alert. Services go in the compose file as
-  sidecars instead; see
-  [docs/setup/repos.md](docs/setup/repos.md#docker-inside-an-environment).
-- Pairing clients from the environment's page. A devcontainer feature
-  can install a connect hook (Orca's does), and the page then shows a
-  pairing code or QR code to the environment's owner, once. See
-  [docs/setup/connect-hooks.md](docs/setup/connect-hooks.md).
-- Capacity reporting per box: used and provisioned CPU and memory, with
-  contention warnings. Boxes allow overcommit by default and can be set
-  to warn or refuse.
-- Boxes enroll with a one-time token, survive reboots (the control plane
-  restores secrets and restarts environments), and update their agents
-  from signed releases. A release is one tag: control plane images on
-  GHCR that carry the matching agents, which boxes then follow.
+The commands and events the two sides exchange live in
+`apps/foreman_protocol`, so both ends validate messages with the same code.
 
-An environment right after one of its secrets changed. New shells
-already have the new value; running services keep the old one until you
-pick a restart.
+[docs/architecture.md](docs/architecture.md) explains the design and why
+it's built that way. [docs/security.md](docs/security.md) covers the
+security model.
+
+## What you get
+
+Any repo the GitHub App can see that has a compose-based devcontainer can
+become an environment. Environments are named `<repo>-<n>` on a personal
+setup or `<repo>-<login>-<n>` on a team one. That one name is the compose
+project, the Tailscale hostname and what you type after `ssh <user>@`.
+
+Secrets come at four levels: owner, repo, user and environment. They're
+encrypted at rest and can't be read back in the UI. On the box they land
+on a tmpfs, and login shells load them from there. When one changes, new
+shells see it right away and Foreman asks whether to restart the affected
+services, restart everything, or leave it for later.
+
+Each environment gets its own GitHub token, scoped to its repo, and
+Foreman refreshes it every few hours. A repo can opt to use the person's
+own token instead. Git identity and dotfiles are set per person, with
+per-repo overrides.
+
+Environments run unprivileged. Foreman refuses privileged containers
+(docker-in-docker included), host namespaces, the Docker socket and host
+mounts, and it checks devcontainer features as well as the repo's own
+files. A box can allow one of these as an exception, and the control
+plane flags that box in red. Anything that needs its own daemon belongs
+in the compose file as a sidecar;
+[docs/setup/repos.md](docs/setup/repos.md#docker-inside-an-environment)
+shows how.
+
+A devcontainer feature can ship a connect hook (Orca's does). The
+environment page then shows the owner a pairing code or QR code, once.
+See [docs/setup/connect-hooks.md](docs/setup/connect-hooks.md).
+
+Boxes report used and provisioned CPU and memory and warn about
+contention. They allow overcommit by default and can be set to warn or
+refuse instead. A box joins with a one-time token. After a reboot the
+control plane puts its secrets back and restarts its environments. Boxes
+update their agents from signed releases, and a release is a single tag:
+it builds the control plane images on GHCR with the matching agents
+inside, and the boxes follow.
+
+## A look around
+
+An environment just after one of its secrets changed. New shells already
+have the new value. Running services keep the old one until you pick a
+restart.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/images/environment-dark.png">
-  <img alt="An environment page: a Secrets changed callout with Restart affected, Restart all and Later, the Tailscale SSH command, an Open in VS Code button, and the create log" src="docs/images/environment-light.png">
+  <img alt="An environment page: Stop and an Actions menu in the header, a Secrets changed callout with Restart affected, Restart all and Later, the Tailscale SSH command, and Open in VS Code and Open in Zed buttons" src="docs/images/environment-light.png">
 </picture>
 
-Boxes, with live CPU and memory trends next to what's provisioned.
+The Boxes page puts live CPU and memory trends next to what's provisioned.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/images/boxes-dark.png">
   <img alt="The Boxes page: three online boxes, each with a live CPU and memory trend line and provisioned CPU and memory bars" src="docs/images/boxes-light.png">
 </picture>
 
-A box over the last day: CPU and memory as the box total over each
-environment's share, disk, and load against the core count. Ranges run
-from 15 minutes to 7 days, and the charts update every 5 seconds.
+A box over the last day. CPU and memory stack each environment's share
+under the box total. Disk sits next to them, and load is drawn against the
+core count. Ranges go from 15 minutes to 7 days, and the charts update
+every 5 seconds.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/images/box-dark.png">
@@ -101,12 +112,12 @@ Your own secrets. Values are encrypted and can't be read back.
   <img alt="The Secrets page: two secrets with Replace and delete, and a form to add one, optionally limited to some repos" src="docs/images/secrets-light.png">
 </picture>
 
-The screenshots use made-up data; `e2e/demo.exs` and
-`e2e/screenshots.mjs` regenerate them (see [e2e/README.md](e2e/README.md)).
+The screenshots use made-up data. `e2e/demo.exs` and `e2e/screenshots.mjs`
+regenerate them; see [e2e/README.md](e2e/README.md).
 
 ## Running it
 
-| | |
+| Setup | Guide |
 |---|---|
 | Personal (a Linux desktop, SQLite) | [docs/setup/personal.md](docs/setup/personal.md) |
 | Team (EC2 + Postgres/Neon, a box per developer) | [docs/setup/team.md](docs/setup/team.md) |
@@ -115,47 +126,3 @@ The screenshots use made-up data; `e2e/demo.exs` and
 | Tailscale | [docs/setup/tailscale.md](docs/setup/tailscale.md) |
 | Private registry (GHCR) credentials | [docs/setup/ghcr-machine-user.md](docs/setup/ghcr-machine-user.md) |
 | Moving a repo off Codespaces | [docs/setup/repos.md](docs/setup/repos.md) |
-
-## Developing
-
-Tool versions are in `mise.toml` (Erlang 29, Elixir 1.20, Node 22).
-
-```sh
-mise install
-
-# Control plane (SQLite by default; FOREMAN_DB=postgres for Postgres)
-cd apps/foreman
-mix setup
-mix phx.server          # http://localhost:4000, with a dev sign-in
-
-# Agent, against a local control plane and Docker Desktop
-cd apps/foreman_agent
-FOREMAN_URL=http://localhost:4000 FOREMAN_JOIN_TOKEN=fj_... mix run --no-halt
-```
-
-Each app has `mix precommit` (format, credo, tests; sobelow too for the
-control plane).
-
-### Tests
-
-| | |
-|---|---|
-| `cd apps/foreman_protocol && mix test` | Message contracts, signatures, redaction |
-| `cd apps/foreman_agent && mix test` | Agent logic with fakes for Docker and the CLIs |
-| `cd apps/foreman_agent && mix test --only docker` | The agent against real Docker and the devcontainer CLI: two copies side by side, secrets, restart affected, rebuild, pull and rebuild, destroy, a tampered compose file and a feature asking for privileged both refused |
-| `cd apps/foreman && mix test` | Control plane (run with `FOREMAN_DB=postgres` too) |
-| `devcontainer features test ... features` | The feature in a real devcontainer |
-| `e2e/` | Full runs through the UI and on an emulated Linux box; see [e2e/README.md](e2e/README.md) |
-
-## Layout
-
-```
-apps/
-  foreman/            Phoenix control plane
-  foreman_agent/      agent release
-  foreman_protocol/   shared commands, events, auth and redaction
-features/src/foreman  the devcontainer feature
-docker/               release images (control plane, emulated box)
-e2e/                  end-to-end runs
-docs/                 architecture, security, setup
-```
