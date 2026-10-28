@@ -22,3 +22,4 @@ If you're getting a repo ready to run on Foreman, read "Making a repo work with 
 
 - [Architecture](docs/architecture.md)
 - [Security model](docs/security.md)
+- [Developing Foreman](docs/development.md): tool versions, running the control plane and agent locally, the test suites
