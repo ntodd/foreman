@@ -72,7 +72,7 @@ defmodule ForemanWeb.EnvironmentBranchSyncTest do
 
     assert has_element?(
              view,
-             "#rebuild-menu",
+             "#env-actions",
              "3 new commits to pull, but the clone has 2 of its own"
            )
   end
@@ -84,7 +84,7 @@ defmodule ForemanWeb.EnvironmentBranchSyncTest do
     view = open_with_status(conn, env, %{})
 
     assert has_element?(view, "#branch-sync", "Up to date")
-    assert has_element?(view, "#rebuild-menu", "Nothing to pull")
+    assert has_element?(view, "#env-actions", "Nothing to pull")
   end
 
   test "says when the clone has another branch checked out", %{conn: conn, env: env, box: box} do

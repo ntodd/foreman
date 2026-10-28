@@ -434,11 +434,20 @@ defmodule ForemanWeb.EnvironmentLive.Show do
           >
             Stop
           </.button>
-          <.dropdown id="rebuild-menu" label="Rebuild" icon="hero-wrench-screwdriver-mini">
+          <.dropdown id="env-actions" label="Actions">
+            <.dropdown_item
+              :if={@env.observed_state in ~w(running partial)}
+              title="Restart"
+              icon="hero-arrow-path-mini"
+              phx-click={JS.push("action") |> hide_dropdown("env-actions")}
+              phx-value-do="restart_all"
+            >
+              Stops the containers, then starts them again. Nothing is rebuilt.
+            </.dropdown_item>
             <.dropdown_item
               title="Rebuild"
               icon="hero-wrench-screwdriver-mini"
-              phx-click={JS.push("action") |> hide_dropdown("rebuild-menu")}
+              phx-click={JS.push("action") |> hide_dropdown("env-actions")}
               phx-value-do="rebuild"
               data-confirm={"Rebuild #{@env.slug}? Containers are recreated from a fresh build; the workspace, volumes and tailnet identity are kept."}
             >
@@ -447,7 +456,7 @@ defmodule ForemanWeb.EnvironmentLive.Show do
             <.dropdown_item
               title="Pull and rebuild"
               icon="hero-arrow-down-tray-mini"
-              phx-click={JS.push("action") |> hide_dropdown("rebuild-menu")}
+              phx-click={JS.push("action") |> hide_dropdown("env-actions")}
               phx-value-do="pull_rebuild"
               disabled={not pull_supported?(@env)}
               data-confirm={"Pull and rebuild #{@env.slug}? The clone is fast-forwarded to origin/#{@env.branch}, then containers are recreated from a fresh build."}
@@ -460,8 +469,16 @@ defmodule ForemanWeb.EnvironmentLive.Show do
                 <.pull_note sync={@sync} />
               </:note>
             </.dropdown_item>
+            <.dropdown_separator />
+            <.dropdown_item
+              title="Destroy"
+              icon="hero-trash-mini"
+              variant="danger"
+              phx-click={JS.push("check_destroy") |> hide_dropdown("env-actions")}
+            >
+              Deletes the containers, volumes and workspace from {@env.box.name}. Checks for unsaved work first.
+            </.dropdown_item>
           </.dropdown>
-          <.button phx-click="check_destroy" icon="hero-trash-mini" size="sm" variant="danger_outline">Destroy</.button>
         </:actions>
       </.header>
 

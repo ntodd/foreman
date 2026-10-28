@@ -210,9 +210,10 @@ The feature goes into the image, and the CLI builds the image only when it creat
   - Points `gh` at the same token file.
 - **Ownership:** Tailscale bootstrap now belongs to the feature. Repo-level copies (`install-tailscale.sh`, `tailscale-up.sh`, the shared `devcontainer-authkey` mount) go away.
 
-### Stop, rebuild, destroy
+### Stop, restart, rebuild, destroy
 
 - **Stop:** `docker compose stop`. Sidecars get a graceful shutdown; for example, a Neon Local sidecar deletes its branch on stop.
+- **Restart:** a stop followed by a normal start, as one operation. Nothing is rebuilt.
 - **Rebuild:** `devcontainer up --remove-existing-container`. Named volumes, the clone and the Tailscale identity survive.
 - **Pull and rebuild:** a rebuild that first fast-forwards the clone to `origin/<branch>`. git runs inside the devcontainer (started first if it's stopped), as the remote user with the environment's own credential helper, never on the box. It refuses, before anything is torn down, if the tree has uncommitted changes, the clone has commits the branch doesn't, another branch is checked out, or the fast-forward fails; the environment stays running and the page shows why. The policy check then runs on the pulled config as on every start.
 - **Destroy:**

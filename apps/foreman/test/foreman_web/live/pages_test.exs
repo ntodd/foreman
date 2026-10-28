@@ -200,7 +200,7 @@ defmodule ForemanWeb.PagesTest do
     {:ok, _} = Registry.register(Foreman.Registry, {:agent, box.id}, nil)
 
     {:ok, view, _html} = live(conn, ~p"/environments/#{env.id}")
-    view |> element("button", "Destroy") |> render_click()
+    view |> element("#env-actions [role=menuitem]", "Destroy") |> render_click()
     assert render(view) =~ "Checking for unsaved work"
 
     assert_receive {:dispatch, %{type: "env.git_status", op_id: op_id}}

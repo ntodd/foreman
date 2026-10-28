@@ -1070,8 +1070,8 @@ defmodule ForemanWeb.CoreComponents do
 
   ## Examples
 
-      <.dropdown id="rebuild-menu" label="Rebuild" icon="hero-wrench-screwdriver-mini">
-        <.dropdown_item title="Rebuild" phx-click={JS.push("rebuild") |> hide_dropdown("rebuild-menu")}>
+      <.dropdown id="env-actions" label="Actions">
+        <.dropdown_item title="Rebuild" phx-click={JS.push("rebuild") |> hide_dropdown("env-actions")}>
           Recreates the containers.
         </.dropdown_item>
       </.dropdown>
@@ -1122,6 +1122,7 @@ defmodule ForemanWeb.CoreComponents do
   """
   attr :title, :string, required: true
   attr :icon, :string, default: nil
+  attr :variant, :string, default: nil, values: [nil, "danger"]
   attr :rest, :global, include: ~w(disabled name value)
   slot :inner_block, required: true
   slot :note
@@ -1136,16 +1137,29 @@ defmodule ForemanWeb.CoreComponents do
     >
       <span
         :if={@icon}
-        class="mt-0.5 grid size-7 shrink-0 place-items-center rounded-md border border-line bg-canvas text-ink-2 shadow-xs transition-colors group-hover:text-ink group-disabled:text-ink-3"
+        class={[
+          "mt-0.5 grid size-7 shrink-0 place-items-center rounded-md border border-line bg-canvas shadow-xs transition-colors group-disabled:text-ink-3",
+          if(@variant == "danger", do: "text-danger", else: "text-ink-2 group-hover:text-ink")
+        ]}
       >
         <.icon name={@icon} class="size-4" />
       </span>
       <span class="min-w-0">
-        <span class="block text-sm font-medium text-ink group-disabled:text-ink-3">{@title}</span>
+        <span class={[
+          "block text-sm font-medium group-disabled:text-ink-3",
+          if(@variant == "danger", do: "text-danger", else: "text-ink")
+        ]}>{@title}</span>
         <span class="mt-0.5 block text-xs leading-relaxed text-ink-3">{render_slot(@inner_block)}</span>
         <span :for={note <- @note} class="mt-1.5 block text-xs font-medium">{render_slot(note)}</span>
       </span>
     </button>
+    """
+  end
+
+  @doc "A rule between groups of `dropdown_item`s."
+  def dropdown_separator(assigns) do
+    ~H"""
+    <div role="separator" class="mx-1 my-1.5 border-t border-line"></div>
     """
   end
 
