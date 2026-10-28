@@ -434,6 +434,16 @@ defmodule ForemanWeb.EnvironmentLive.Show do
           >
             Stop
           </.button>
+          <.button
+            :if={@env.observed_state in ~w(running partial)}
+            id="env-restart"
+            phx-click="action"
+            phx-value-do="restart_all"
+            icon="hero-arrow-path-mini"
+            size="sm"
+          >
+            Restart
+          </.button>
           <.dropdown id="rebuild-menu" label="Rebuild" icon="hero-wrench-screwdriver-mini">
             <.dropdown_item
               title="Rebuild"
