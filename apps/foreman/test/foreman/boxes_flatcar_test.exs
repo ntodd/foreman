@@ -115,6 +115,28 @@ defmodule Foreman.BoxesFlatcarTest do
       end
     end
 
+    # The key is only for the box's first boot, which has to come before
+    # the join token expires; a key that outlived it would be a way onto
+    # the tailnet for anyone holding the config.
+    test "the key expires with the join token, and is gone once the box enrolls", %{
+      admin: admin
+    } do
+      tailscale(%{})
+      raw = token(admin)
+
+      expect(ClientMock, :create_auth_key, fn _creds, %{expiry_seconds: expiry} ->
+        assert expiry in 3500..3600
+        {:ok, %{key: "tskey-auth-box", id: "k1"}}
+      end)
+
+      {:ok, _, _} = Boxes.flatcar_ignition(raw, %{"arch" => "amd64"})
+
+      {:ok, _box} =
+        Boxes.enroll(raw, %{"public_key" => Base.encode64(:crypto.strong_rand_bytes(32))})
+
+      assert [%{tailscale_auth_key: nil}] = Repo.all(Foreman.Boxes.JoinToken)
+    end
+
     test "tags boxes tag:foreman-box unless told otherwise", %{admin: admin} do
       tailscale(%{})
 

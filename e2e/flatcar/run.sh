@@ -309,6 +309,14 @@ echo "ok: created in $(($(date +%s) - start))s"
 app=$(box 'docker ps -q --filter label=foreman.env_id --filter label=com.docker.compose.service=app')
 [ -n "$app" ] || fail "no app container"
 [ "$(box "docker exec $app id -u vscode")" = "$(box 'id -u foreman')" ] || fail "the container user isn't the agent's uid"
+# The machine the box's VM runs on is off-limits to environments: the
+# control plane published there answers the box, not them.
+box "curl -fs -m 5 -o /dev/null http://$E2E_GUEST_HOST:$E2E_CP_PORT/healthz" || fail "the box can't reach the control plane"
+box "docker exec $app curl -fs -m 5 -o /dev/null http://$E2E_GUEST_HOST:$E2E_CP_PORT/healthz" &&
+  fail "an environment reached the machine the box runs on"
+box "docker exec $app curl -s -m 15 -o /dev/null -w '%{http_code}' https://github.com" | grep -q '^[23]' ||
+  fail "an environment can't reach the internet"
+echo "ok: environments reach the internet, not the machine the box runs on"
 box "docker exec -u root $app sh -c 'touch /run/foreman/x'" 2>/dev/null && fail "the secrets mount is writable"
 cp_eval 'E2E.secret("hello-1", "SIDECAR_TOKEN", "flatcar-secret-1")'
 i=0

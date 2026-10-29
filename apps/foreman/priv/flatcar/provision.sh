@@ -57,5 +57,7 @@ curl -fsSL --retry 5 -o "$script" "$FOREMAN_URL/agent/install.sh"
 } | while IFS= read -r line; do console "$line"; done
 [ "$(cat "$status")" = 0 ] || { say "the install script failed"; exit 1; }
 
-rm -f "$env"
+# Spent: the token, and the config that carried it and the key (on bare
+# metal and on a Mac it stays in the OEM partition).
+rm -f "$env" /oem/config.ign
 say "enrolled; this box shows as online in Foreman"

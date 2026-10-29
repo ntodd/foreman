@@ -94,7 +94,11 @@ defmodule Foreman.Boxes do
            true <- is_nil(token.used_at) and DateTime.compare(token.expires_at, now) == :gt,
            {:ok, public_key} <- decode_key(attrs["public_key"]),
            {:ok, box} <- upsert_enrolled_box(token, public_key, attrs) do
-        token |> Ecto.Changeset.change(used_at: now, box_id: box.id) |> Repo.update!()
+        # The box's Tailscale key was for its first boot, which this is.
+        token
+        |> Ecto.Changeset.change(used_at: now, box_id: box.id, tailscale_auth_key: nil)
+        |> Repo.update!()
+
         Audit.log(nil, "box.enroll", box, %{"hostname" => attrs["hostname"]})
         disconnect(box)
         {:ok, box}
@@ -154,23 +158,22 @@ defmodule Foreman.Boxes do
   defp box_tailscale_key(%JoinToken{tailscale_auth_key: key}) when is_binary(key), do: {:ok, key}
 
   defp box_tailscale_key(token) do
-    if Foreman.Tailscale.configured?() do
-      Repo.transact(fn ->
-        case Repo.reload!(token) do
-          %JoinToken{tailscale_auth_key: key} when is_binary(key) -> {:ok, key}
-          token -> mint_box_key(token)
-        end
-      end)
-    else
-      {:ok, nil}
-    end
+    if Foreman.Tailscale.configured?(), do: mint_box_key(token), else: {:ok, nil}
   end
 
+  # Minted outside a transaction (it's a call to Tailscale), then kept
+  # only if no other request stored one first: the token's key is the
+  # first one stored, and a key minted by a request that lost the race
+  # expires unused.
   defp mint_box_key(token) do
-    case Foreman.Tailscale.create_box_auth_key(token.box_name) do
+    expiry = max(DateTime.diff(token.expires_at, DateTime.utc_now()), 600)
+
+    case Foreman.Tailscale.create_box_auth_key(token.box_name, expiry) do
       {:ok, %{key: key}} ->
-        token |> Ecto.Changeset.change(tailscale_auth_key: key) |> Repo.update!()
-        {:ok, key}
+        from(t in JoinToken, where: t.id == ^token.id and is_nil(t.tailscale_auth_key))
+        |> Repo.update_all(set: [tailscale_auth_key: key])
+
+        {:ok, Repo.reload!(token).tailscale_auth_key}
 
       {:error, reason} ->
         {:error, {:tailscale, reason}}

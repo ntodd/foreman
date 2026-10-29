@@ -81,6 +81,18 @@ defmodule Foreman.BoxesRestartTest do
     assert %{status: "succeeded", finished_at: %DateTime{}} = Operations.get!(op.id)
   end
 
+  # The page's copy of the box can be a boot behind: the command names
+  # the boot the agent last reported, or it would do nothing.
+  test "names the latest boot, not the caller's stale copy of the box", %{admin: admin, box: box} do
+    socket = join_box(box)
+    send_event(socket, "box.reboot", reboot_report(@boot))
+    stale = Boxes.get_box!(box.id)
+    send_event(socket, "box.reboot", reboot_report(@next_boot))
+
+    {:ok, _op} = Agents.run_box_command(admin, stale, "box.restart")
+    assert_push "command", %{"type" => "box.restart", "payload" => %{"boot_id" => @next_boot}}
+  end
+
   test "isn't offered for a box whose agent can't", %{admin: admin, box: box} do
     _socket = join_box(box)
     :ok = Boxes.record_reboot(box.id, reboot_report(@boot, false))

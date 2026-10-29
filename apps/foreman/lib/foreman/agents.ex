@@ -52,6 +52,9 @@ defmodule Foreman.Agents do
   protocol 5, or installed before the root unit that does it).
   """
   def run_box_command(%Scope{} = scope, box, "box.restart") do
+    # The boot the agent last reported, not the caller's copy of the box.
+    box = Boxes.get_box(box.id) || box
+
     cond do
       not Scope.admin?(scope) -> {:error, :unauthorized}
       not box.can_restart or is_nil(box.boot_id) -> {:error, :cannot_restart}

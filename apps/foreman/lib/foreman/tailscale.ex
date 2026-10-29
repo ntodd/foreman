@@ -91,8 +91,12 @@ defmodule Foreman.Tailscale do
     end
   end
 
-  @doc "A single-use, pre-authorized key for a Flatcar box to join the tailnet with."
-  def create_box_auth_key(box_name) do
+  @doc """
+  A single-use, pre-authorized key for a Flatcar box to join the tailnet
+  with, expiring after `expiry_seconds` (its join token's lifetime: the
+  box has to boot before the token expires anyway).
+  """
+  def create_box_auth_key(box_name, expiry_seconds) do
     case creds() do
       nil ->
         {:error, :not_configured}
@@ -101,7 +105,7 @@ defmodule Foreman.Tailscale do
         Client.impl().create_auth_key(creds, %{
           tags: box_tags(),
           description: "foreman box #{box_name}",
-          expiry_seconds: @key_expiry
+          expiry_seconds: expiry_seconds
         })
     end
   end
