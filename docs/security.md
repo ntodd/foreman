@@ -94,6 +94,48 @@ gaps" section is the place to start.
   that escape the release directory are refused. The signing key lives
   only in CI, so a compromised control plane can't push agent code. A
   failing new release is rolled back by a systemd `OnFailure` unit.
+  The release carries the devcontainer CLI and the Node it runs on
+  (Node's official build, pinned by digest; the CLI from a lockfile), so
+  the signature covers them too, and a box runs no Node of its own.
+- Rebooting a box (`box.restart`, an admin's button): the agent can't
+  reboot anything itself. It writes `/run/foreman/restart`, which a root
+  path unit the install script set up watches, and that unit reboots
+  the box. The file is in the agent's runtime directory, above every
+  environment's secrets directory, so nothing in an environment can
+  write it. The command names the boot it's for, so a stale or replayed
+  one doesn't reboot the box again. A compromised control plane can
+  reboot boxes, which it could already disrupt in plenty of ways.
+
+### Flatcar boxes
+
+A Flatcar box ([flatcar.md](setup/flatcar.md)) sets itself up from a
+first-boot config the control plane makes for a join token:
+
+- The config holds the join token and the box's Tailscale key: a
+  single-use, pre-authorized key, tagged `tag:foreman-box` and expiring
+  in a day, minted once per token and stored encrypted with it. The box
+  deletes both once it has enrolled, and the launchers delete their
+  copies. Downloads of the config are no-store, and its endpoint takes
+  the join token like enrollment does: a bad one counts against the
+  client's enroll attempts.
+- The config's extensions (Compose, Tailscale) are checked against
+  digests pinned in Foreman. Their updates come from Flatcar's sysext
+  bakery over HTTPS, checked only against the bakery's own SHA256SUMS:
+  trusting the bakery is trusting Flatcar's builds, as the OS itself
+  does.
+- The launchers pin what they download: Flatcar's image and kernel
+  against the digests in its signed release files, and vfkit (on a Mac)
+  against its release's digest. vfkit is signed by Red Hat.
+- As a VM, a box is a boundary: code that escapes an environment lands
+  in the VM, not on the machine running it. On Linux, QEMU runs as the
+  `foreman-box` user under systemd's sandboxing (no capabilities, a
+  read-only system, `/dev/kvm` and the box's directory and nothing else)
+  with QEMU's seccomp sandbox, and user-mode networking, so the VM can't
+  reach this machine's network any differently than a process on it
+  could. On a Mac, vfkit runs as you, with Apple's hypervisor and vmnet's
+  NAT.
+- The box's own tailnet node is governed by the tailnet policy like any
+  machine's; give `tag:foreman-box` the control plane and nothing else.
 
 ### The control plane and its host
 
@@ -323,7 +365,9 @@ These are accepted for now, or need someone to try them:
    plane tailnet-only and its admins few.
 6. **The first install trusts the control plane.** `install.sh` checks
    the agent tarball against a SHA-256 the control plane sends, not the
-   release signature (updates after that are signature-checked).
+   release signature (updates after that are signature-checked). The
+   same goes for a Flatcar box's first-boot config and the launchers,
+   which the control plane serves.
 7. **Redaction is best effort.** Values shorter than six characters
    aren't redacted, and an encoded secret (base64, URL-encoded) isn't
    recognised. Logs are redacted a line at a time, so a value split
@@ -349,7 +393,8 @@ These are accepted for now, or need someone to try them:
     dependency, or a coding agent following injected instructions, gets
     the same power. Branch protection and rulesets still apply, because
     the token acts as the user.
-13. **Environments share the box's kernel.** The policy keeps
+13. **Environments share the box's kernel.** (A Flatcar box running
+    as a VM keeps that to the VM.) The policy keeps
     environments unprivileged, but a container escape (a kernel or runc
     bug) lands on the box: every environment's secrets there and the
     agent's key, which can ask the control plane for the secrets of
@@ -401,3 +446,9 @@ These are accepted for now, or need someone to try them:
   boxes, or admin pages and Oban Web.
 - Sign-in: the OAuth state and PKCE, open redirects in `return_to`, the
   dev sign-in route in a production build (it shouldn't be compiled in).
+- A Flatcar box's first-boot config: get one, or a Tailscale key,
+  without a valid join token; get the key minted more than once; get
+  something into the config through a box name or SSH key; reach the
+  host from inside a box's VM.
+- Reboot a box that isn't yours, or one that's already rebooting again,
+  through `box.restart`.

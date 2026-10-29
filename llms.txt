@@ -13,6 +13,8 @@ If you're getting a repo ready to run on Foreman, read "Making a repo work with 
 
 - [Personal setup](docs/setup/personal.md): one person, one or more boxes
 - [Team setup](docs/setup/team.md)
+- [Mac boxes](docs/setup/mac.md): a Flatcar VM on Apple's hypervisor, started at login
+- [Flatcar boxes](docs/setup/flatcar.md): a VM on Linux with KVM, or bare metal; first-boot config, the box's tailnet key, OS updates and reboots
 - [Tailscale](docs/setup/tailscale.md): how environments join the tailnet and the box firewall
 - [GitHub App](docs/setup/github-app.md)
 - [Private images on GHCR](docs/setup/ghcr-machine-user.md)

@@ -61,6 +61,12 @@ Boxes allow placement past capacity by default and show contention. A
 box that's tight on memory can be set to **warn** (ask first) or
 **refuse** on its page.
 
+A developer's Mac can be their box ([mac.md](mac.md)), and so can a
+Flatcar VM on a Linux machine ([flatcar.md](flatcar.md)), which keeps the
+box's environments, and their secrets, off the machine itself. With the
+Tailscale OAuth client set up, each Flatcar box joins the tailnet as
+`tag:foreman-box`.
+
 For shared machines, the plan is one Incus system container per
 developer, each with its own Docker and agent; the control plane sees
 each as a separate box. That isn't built yet.
