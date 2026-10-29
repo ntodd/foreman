@@ -13,7 +13,9 @@ defmodule ForemanAgent.Config do
             data_dir: "/var/lib/foreman-agent",
             envs_root: "/srv/foreman/envs",
             secrets_root: "/run/foreman/envs",
+            # load/0 resolves these with tools/2.
             devcontainer: "devcontainer",
+            node: "node",
             docker: "docker",
             git: "git",
             docker_socket: "/var/run/docker.sock",
@@ -45,6 +47,7 @@ defmodule ForemanAgent.Config do
     |> Map.put(:release_public_key, decode_key(env[:release_public_key] || @release_public_key))
     |> Map.update!(:feature_dir, &(&1 || default_feature_dir()))
     |> Map.update!(:firewall_rules, &(&1 || default_firewall_rules()))
+    |> Map.merge(tools(default_tools_dir(), Map.new([:devcontainer, :node], &{&1, env[&1]})))
   end
 
   @doc "The loaded config. Loaded on first use and cached."
@@ -90,6 +93,46 @@ defmodule ForemanAgent.Config do
     end)
   end
 
+  # Where install scripts before the bundled CLI put the one they installed
+  # with npm, and what they wrote to agent.env: a self-update keeps that
+  # file, and the release's own CLI replaces it.
+  @legacy_cli "/opt/foreman-agent/node/node_modules/.bin/devcontainer"
+
+  @doc """
+  The devcontainer CLI and Node the agent runs. A release carries both in
+  `dir` (priv/tools: `bin/devcontainer` and `node/bin/node`), so a box
+  needs no Node of its own. An override (`FOREMAN_DEVCONTAINER_CLI`,
+  `FOREMAN_NODE`) wins, except the path older install scripts wrote,
+  which gives way to the release's. Without them, both come from PATH.
+  """
+  @spec tools(Path.t() | nil, %{optional(:devcontainer | :node) => String.t() | nil}) ::
+          %{devcontainer: String.t(), node: String.t()}
+  def tools(dir, overrides) do
+    bundled_cli = bundled(dir, "bin/devcontainer")
+
+    cli =
+      case overrides[:devcontainer] do
+        @legacy_cli when is_binary(bundled_cli) -> bundled_cli
+        path when is_binary(path) and path != "" -> path
+        _ -> bundled_cli || "devcontainer"
+      end
+
+    node =
+      case overrides[:node] do
+        path when is_binary(path) and path != "" -> path
+        _ -> bundled(dir, "node/bin/node") || "node"
+      end
+
+    %{devcontainer: cli, node: node}
+  end
+
+  defp bundled(nil, _rel), do: nil
+
+  defp bundled(root, rel) do
+    path = Path.join(root, rel)
+    if File.regular?(path), do: path
+  end
+
   @doc "The version of the Foreman feature this agent installs, or nil if it can't be read."
   @spec feature_version(t()) :: String.t() | nil
   def feature_version(%__MODULE__{feature_dir: dir}) do
@@ -105,6 +148,8 @@ defmodule ForemanAgent.Config do
   @doc "Paths no environment may ever bind-mount."
   def protected_paths(%__MODULE__{} = c),
     do: [c.data_dir, c.envs_root, c.secrets_root, c.release_root]
+
+  defp default_tools_dir, do: Application.app_dir(:foreman_agent, "priv/tools")
 
   defp default_firewall_rules,
     do: Application.app_dir(:foreman_agent, "priv/firewall/foreman.nft")

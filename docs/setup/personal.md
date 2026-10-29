@@ -8,14 +8,14 @@ the database. Everything is reachable only on your tailnet.
 - Docker Engine with the Compose plugin, v2.30 or newer (boxes need
   v2.24; the control plane's compose file needs 2.30)
 - nftables (for the box's firewall; `apt install nftables`)
-- git, and Node 20+ (for the devcontainer CLI)
+- git
 - systemd
 - Tailscale, logged in to your tailnet
 
 On a fresh Ubuntu machine, install Docker from
-[Docker's apt repository](https://docs.docker.com/engine/install/ubuntu/),
-Node from [NodeSource](https://github.com/nodesource/distributions), and
-Tailscale with `curl -fsSL https://tailscale.com/install.sh | sh`.
+[Docker's apt repository](https://docs.docker.com/engine/install/ubuntu/)
+and Tailscale with `curl -fsSL https://tailscale.com/install.sh | sh`.
+The agent brings its own Node for the devcontainer CLI.
 
 If you have more than one Tailscale account, check the box joined the
 tailnet your laptops are on before going further:
@@ -179,7 +179,8 @@ curl -fsSL https://desktop.tail1234.ts.net/agent/install.sh | sudo sh -s -- --to
 ```
 
 The script checks the prerequisites, creates a `foreman` user in the
-`docker` group, installs the devcontainer CLI and the agent, writes a
+`docker` group, installs the agent (which carries the devcontainer CLI
+and the Node it runs on), writes a
 systemd unit (with a rollback unit for failed updates), and waits for
 the agent to enroll. It then deletes the spent token from the agent's
 settings. It also installs the box's firewall, `foreman-firewall.service`,

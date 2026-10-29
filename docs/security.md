@@ -146,7 +146,7 @@ to the box it runs on (up to the limits in "Known gaps").
   include's env files), folds them in where the path no longer shows,
   and quotes any it can't parse in its error. So before compose runs,
   the agent reads the repo's compose files itself (with a vendored
-  js-yaml, run by the box's Node: Erlang's yamerl resolves aliases to
+  js-yaml, run by the Node the agent release carries: Erlang's yamerl resolves aliases to
   lists and maps wrongly), follows includes and extends inside the
   clone, and checks every file compose would read.
   Merge keys are kept rather than merged, so every value a merge could

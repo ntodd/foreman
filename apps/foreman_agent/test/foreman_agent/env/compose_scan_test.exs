@@ -67,6 +67,18 @@ defmodule ForemanAgent.Env.ComposeScanTest do
     Enum.join(List.wrap(messages), "\n")
   end
 
+  test "reads with the Node it's given, and a missing one is an error, not a pass", ctx do
+    main = write(ctx.clone, ".devcontainer/docker-compose.yml", "services: {app: {image: alpine}}\n")
+
+    assert {:ok, _facts} = ComposeScan.scan(ctx.clone, [main], node: System.find_executable("node"))
+
+    assert {:error, message} =
+             ComposeScan.scan(ctx.clone, [main], node: Path.join(ctx.outside, "no-node"))
+
+    assert message =~ "Node"
+    assert message =~ Path.join(ctx.outside, "no-node")
+  end
+
   test "an ordinary compose file is fine", ctx do
     write(ctx.clone, ".devcontainer/app.env", "A=1\n")
 
