@@ -188,27 +188,27 @@ for n in CPUS MEMORY DISK; do
   case "$v" in *[!0-9]*) fail "--$(echo "$n" | tr '[:upper:]' '[:lower:]') takes a whole number" ;; esac
 done
 
-mkdir -p "$BIN" "$BOX" "$HOME/Library/LaunchAgents"
-
 sha256() { shasum -a 256 "$1" | cut -d' ' -f1; }
 sha512() { shasum -a 512 "$1" | cut -d' ' -f1; }
 
-if [ ! -x "$BIN/vfkit" ] || [ "$(sha256 "$BIN/vfkit")" != "$VFKIT_SHA256" ]; then
-  say "downloading vfkit $VFKIT_VERSION"
-  curl -fsSL -o "$BIN/vfkit.new" "https://github.com/crc-org/vfkit/releases/download/$VFKIT_VERSION/vfkit" </dev/null
-  [ "$(sha256 "$BIN/vfkit.new")" = "$VFKIT_SHA256" ] || { rm -f "$BIN/vfkit.new"; fail "vfkit doesn't match its digest"; }
-  chmod 0755 "$BIN/vfkit.new"
-  mv -f "$BIN/vfkit.new" "$BIN/vfkit"
-fi
+# vfkit, this script as the command that manages the box (the control
+# plane's current copy), and the launchd job that runs it.
+install_launcher() {
+  mkdir -p "$BIN" "$BOX" "$HOME/Library/LaunchAgents"
+  if [ ! -x "$BIN/vfkit" ] || [ "$(sha256 "$BIN/vfkit")" != "$VFKIT_SHA256" ]; then
+    say "downloading vfkit $VFKIT_VERSION"
+    curl -fsSL -o "$BIN/vfkit.new" "https://github.com/crc-org/vfkit/releases/download/$VFKIT_VERSION/vfkit" </dev/null
+    [ "$(sha256 "$BIN/vfkit.new")" = "$VFKIT_SHA256" ] || { rm -f "$BIN/vfkit.new"; fail "vfkit doesn't match its digest"; }
+    chmod 0755 "$BIN/vfkit.new"
+    mv -f "$BIN/vfkit.new" "$BIN/vfkit"
+  fi
 
-# This script, as the command that manages the box (and what launchd
-# runs): the control plane's current copy.
-self="$BIN/foreman-box"
-curl -fsSL -o "$self.new" "$FOREMAN_URL/agent/mac.sh" </dev/null || fail "couldn't reach $FOREMAN_URL"
-chmod 0755 "$self.new"
-mv -f "$self.new" "$self"
+  self="$BIN/foreman-box"
+  curl -fsSL -o "$self.new" "$FOREMAN_URL/agent/mac.sh" </dev/null || fail "couldn't reach $FOREMAN_URL"
+  chmod 0755 "$self.new"
+  mv -f "$self.new" "$self"
 
-cat > "$PLIST.new" <<EOF
+  cat > "$PLIST.new" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -233,11 +233,13 @@ cat > "$PLIST.new" <<EOF
 </dict>
 </plist>
 EOF
-mv -f "$PLIST.new" "$PLIST"
+  mv -f "$PLIST.new" "$PLIST"
+}
 
 if [ -f "$BOX/box.conf" ]; then
   # An update: the box and its disk stay as they are. (To start over with
   # a new token: foreman-box uninstall --yes, then this again.)
+  install_launcher
   if [ -n "$CPUS$MEMORY" ]; then
     { grep -v -e '^cpus=' -e '^memory=' "$BOX/box.conf"
       echo "cpus=${CPUS:-$(conf cpus)}"
@@ -266,15 +268,27 @@ else
   image_sha=$FLATCAR_IMAGE_SHA512_AMD64 kernel_sha=$FLATCAR_KERNEL_SHA512_AMD64 verity=$FLATCAR_VERITY_AMD64
 fi
 
+# A new box. Until it starts, a failure leaves nothing behind.
+fresh=""
+[ -e "$HOME_DIR" ] || fresh=1
 work="$HOME_DIR/install"
+# shellcheck disable=SC2329 # the EXIT trap runs it
+cleanup() {
+  rm -rf "$work"
+  if [ -n "$fresh" ]; then
+    rm -f "$PLIST"
+    rm -rf "$HOME_DIR"
+  fi
+}
+trap cleanup EXIT
 rm -rf "$work"
-mkdir -p "$work/config"
-trap 'rm -rf "$work"' EXIT
+mkdir -p "$work/config" "$BOX"
 
 # A key of its own for `foreman-box ssh`, and the box's MAC address.
 [ -f "$BOX/id_ed25519" ] || ssh-keygen -q -t ed25519 -N "" -C "foreman-box@$(hostname -s)" -f "$BOX/id_ed25519" </dev/null
 mac=$(od -An -N3 -tx1 /dev/urandom | tr -s ' ' ':' | sed 's/^/52:54:00/; s/:$//')
 
+# First, so a bad token fails before anything is downloaded.
 say "asking $FOREMAN_URL for the box's first-boot config"
 code=$(curl -sS -D "$work/headers" -o "$work/config/config.ign" -w '%{http_code}' \
   -X POST "$FOREMAN_URL/agent/flatcar/ignition" \
@@ -283,6 +297,8 @@ code=$(curl -sS -D "$work/headers" -o "$work/config/config.ign" -w '%{http_code}
 [ "$code" = 200 ] || fail "Foreman said $code: $(cat "$work/config/config.ign")"
 chmod 0600 "$work/config/config.ign"
 name=$(tr -d '\r' < "$work/headers" | sed -n 's/^[Xx]-[Ff]oreman-[Bb]ox: *//p' | tail -1)
+
+install_launcher
 
 images="$HOME_DIR/images/$FLATCAR_VERSION-$arch"
 mkdir -p "$images"
@@ -360,6 +376,8 @@ mac=$mac
 flatcar=$FLATCAR_VERSION
 EOF
 
+# The box exists from here on, and keeps trying whatever happens next.
+fresh=""
 say "starting the box ($CPUS CPUs, $MEMORY GiB); it sets itself up on its first boot"
 stop
 start
