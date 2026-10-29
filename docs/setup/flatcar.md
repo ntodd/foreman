@@ -68,10 +68,13 @@ qemu-efi-aarch64` on arm64); elsewhere, install them first. Then it:
 | `--disk GiB` | 100 | the disk's size; the file grows into it |
 | `--ssh-port N` | 2222 | where `foreman-box ssh` reaches the box, on 127.0.0.1 |
 
-The box reaches the network through QEMU's user-mode networking: it
-connects out through this machine, and nothing on this machine's network
-changes, Docker's included. Nothing can connect in, which a box doesn't
-need; the agent dials out. Freed memory goes back to the machine (the
+The box reaches the network through QEMU's user-mode networking (IPv4):
+it connects out through this machine, and nothing on this machine's
+network changes, Docker's included. Nothing can connect in, which a box
+doesn't need; the agent dials out. From inside the VM, this machine is
+the gateway, `10.0.2.2`, which reaches its loopback: a control plane on
+the same machine can listen on 127.0.0.1 and the box still reaches it.
+The box's firewall keeps environments from reaching it. Freed memory goes back to the machine (the
 balloon's free page reporting), so a box that ran a big build doesn't
 hold on to it.
 
@@ -156,16 +159,28 @@ partition doesn't boot, Flatcar goes back to the old one.
 
 ## Performance
 
-A VM costs little where it counts. From the measurements in
-[issue #131](https://github.com/ntodd/foreman/issues/131), four vCPUs
-against four cores:
+A VM costs little where it counts. Measured with the launchers as they
+ship, the box against Docker with the same four CPUs and 8 GB, on a
+clean `mix compile` of the control plane (deps and NIFs included), `npm
+ci --offline` of a React, Next, MUI, Jest and webpack tree, and fio:
 
-| | Docker on the host | Flatcar VM |
+| Linux, i7-12700 | Docker on the host | Flatcar VM (`vm.sh`) |
 |---|---|---|
-| Linux (KVM), clean `mix compile` | 35.6 s | 34.1 s |
-| Linux (KVM), `npm ci`, ~600 packages | 3.8 s | 4.6 s |
-| Linux (KVM), 4K random read | 435K IOPS | 304K IOPS |
-| Mac, clean `mix compile` (Docker Desktop, volume) | 19.0 s | 19.5 s |
-| Mac, `npm ci` (Docker Desktop, bind mount) | 35.8 s | 5.0 s |
+| `mix compile` | 36.3 s | 34.5 s |
+| `npm ci` | 3.6 s | 4.2 s |
+| 4K random read | 435K IOPS | 346K IOPS |
+| 4K random write | 398K IOPS | 360K IOPS |
+| 1 MB sequential write | 6.0 GB/s | 6.0 GB/s |
+| A 470 MB download | 65 MB/s | 67 MB/s |
 
-Flatcar on bare metal is just Linux, with no VM at all.
+| Mac, M4 Max | Docker Desktop, volume | Docker Desktop, bind mount | Flatcar VM (`mac.sh`) |
+|---|---|---|---|
+| `mix compile` | 19.0 s | 23.4 s | 19.4 s |
+| `npm ci` | 4.9 s | 28.5 s | 4.4 s |
+| 4K random read | 191K IOPS | 65K IOPS | 321K IOPS |
+| 4K random write | 156K IOPS | 51K IOPS | 270K IOPS |
+| 1 MB sequential write | 14.7 GB/s | 4.4 GB/s | 16.2 GB/s |
+
+The box's disk is a sparse file, so the first write to a part of it
+costs the host an allocation; rewrites run at full speed. Flatcar on
+bare metal is just Linux, with no VM at all.

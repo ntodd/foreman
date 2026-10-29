@@ -117,6 +117,11 @@ new="$dest.new.$$"
 rm -rf "$new"
 install -d -o foreman -g foreman "$new"
 tar -xzf "$tmp/agent.tar.gz" -C "$new"
+# The release carries the devcontainer CLI and the Node it runs on; this
+# script no longer installs them. One that doesn't (an agent older than
+# this script, served to a box pinned to it) wouldn't run environments.
+set -- "$new"/lib/foreman_agent-*/priv/tools/bin/devcontainer
+[ -x "$1" ] || { rm -rf "$new"; fail "agent $version doesn't carry the devcontainer CLI; install a newer agent (unpin this box in Foreman, or publish the release that came with this control plane)"; }
 chown -R foreman:foreman "$new"
 rm -rf "$dest.old"
 if [ -d "$dest" ]; then mv "$dest" "$dest.old"; fi
@@ -163,6 +168,40 @@ if [ -n "$DEFAULT_BRIDGE_FILTER" ]; then
   sed "s/\"docker0\"/\"$default_bridge\"/" "$1" > /etc/foreman-agent/firewall.nft.new
 else
   sed '/# default-bridge$/d' "$1" > /etc/foreman-agent/firewall.nft.new
+fi
+# A box in a VM (a Flatcar box from the Mac or Linux launcher) has the
+# machine it runs on as its gateway, and under QEMU's user-mode network
+# the gateway's address is that machine's loopback, where services expect
+# only local clients. Environments, and image builds unless the default
+# bridge is left out, don't reach it, apart from DNS (vmnet's resolver is
+# there).
+if systemd-detect-virt --vm --quiet 2>/dev/null; then
+  gateway=$(ip -4 route show default 2>/dev/null | awk '$1 == "default" && $2 == "via" { print $3; exit }')
+  case "$gateway" in *[!0-9.]*) gateway="" ;; esac
+  if [ -n "$gateway" ]; then
+    builds=""
+    if [ -n "$DEFAULT_BRIDGE_FILTER" ]; then builds="iifname \"$default_bridge\" jump environment"; fi
+    cat >> /etc/foreman-agent/firewall.nft.new <<EOF
+
+# This box is a VM; $gateway, its gateway, is the machine it runs on.
+table inet foreman_vm
+delete table inet foreman_vm
+
+table inet foreman_vm {
+	chain environment {
+		ip daddr $gateway udp dport 53 accept
+		ip daddr $gateway tcp dport 53 accept
+		ip daddr $gateway reject with icmpx type admin-prohibited
+	}
+
+	chain forward {
+		type filter hook forward priority filter - 10; policy accept;
+		iifname "fm-*" jump environment
+		$builds
+	}
+}
+EOF
+  fi
 fi
 "$nft" -c -f /etc/foreman-agent/firewall.nft.new || fail "nftables rejected the firewall rules"
 chmod 0644 /etc/foreman-agent/firewall.nft.new
@@ -306,8 +345,7 @@ EOF
 # reboot manager would then reboot the box whenever it liked. Foreman
 # shows the update as a reboot the box needs instead (the flag the agent
 # reports), and the box reboots when an admin asks.
-# shellcheck disable=SC1091
-os_id=$(. /etc/os-release 2>/dev/null && echo "${ID:-}")
+os_id=$(sed -n 's/^ID=//p' /etc/os-release /usr/lib/os-release 2>/dev/null | head -n 1 | tr -d '"')
 if [ "$os_id" = flatcar ]; then
   echo "foreman: Flatcar: OS updates wait for a reboot from Foreman"
   install -d -m 0755 /etc/flatcar

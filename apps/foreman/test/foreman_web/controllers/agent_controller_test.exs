@@ -118,6 +118,28 @@ defmodule ForemanWeb.AgentControllerTest do
              |> json_response(400)
     end
 
+    test "says so when Tailscale won't mint the box a key", %{conn: conn, token: token} do
+      Application.put_env(:foreman, :tailscale, %{
+        client_id: "c",
+        client_secret: "s",
+        tailnet: "-",
+        tags: []
+      })
+
+      on_exit(fn -> Application.delete_env(:foreman, :tailscale) end)
+
+      Mox.stub(Foreman.Tailscale.ClientMock, :create_auth_key, fn _, _ ->
+        {:error, {:http, 403, "nope"}}
+      end)
+
+      body =
+        conn
+        |> post(~p"/agent/flatcar/ignition", %{"join_token" => token, "arch" => "amd64"})
+        |> json_response(502)
+
+      assert body["error"] =~ "Tailscale"
+    end
+
     # The same budget as enrollment: a token is a token.
     test "bad tokens count against the client's enroll attempts", %{conn: conn, public: public} do
       for _ <- 1..10 do

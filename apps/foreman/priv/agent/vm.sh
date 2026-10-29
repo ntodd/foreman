@@ -43,6 +43,9 @@ SELF=/usr/local/sbin/$UNIT
 say() { echo "foreman-box: $*"; }
 fail() { echo "foreman-box: $*" >&2; exit 1; }
 
+# So a Ctrl-C runs the cleanup (an EXIT trap) too; dash skips it otherwise.
+trap 'exit 130' INT TERM HUP
+
 conf() { sed -n "s/^$1=//p" "$DIR/box.conf" 2>/dev/null | tail -1; }
 
 # -- the box's VM ------------------------------------------------------------
@@ -59,7 +62,7 @@ run() {
     -object iothread,id=io0 \
     -drive "if=none,id=disk0,file=$DIR/disk.img,format=raw,cache=none,aio=$(conf aio),discard=unmap,detect-zeroes=unmap" \
     -device "virtio-blk-pci,drive=disk0,iothread=io0,num-queues=$cpus" \
-    -netdev "user,id=net0,hostfwd=tcp:127.0.0.1:$(conf ssh_port)-:22" \
+    -netdev "user,id=net0,ipv6=off,hostfwd=tcp:127.0.0.1:$(conf ssh_port)-:22" \
     -device "virtio-net-pci,netdev=net0,mac=$(conf mac)" \
     -device virtio-rng-pci \
     -device virtio-balloon-pci,free-page-reporting=on \
@@ -70,7 +73,11 @@ run() {
     x86_64) set -- -machine q35,accel=kvm "$@" ;;
     aarch64) set -- -machine virt,accel=kvm,gic-version=host "$@" ;;
   esac
-  # The first-boot config, until the box has enrolled with it.
+  # The first-boot config, until the box has enrolled with it: it holds
+  # the join token and the box's Tailscale key.
+  if [ -f "$DIR/config.ign" ] && grep -aqs 'foreman-box: enrolled' "$DIR/serial.log" "$DIR/serial.log.1"; then
+    rm -f "$DIR/config.ign"
+  fi
   if [ -f "$DIR/config.ign" ]; then
     set -- "$@" -fw_cfg "name=opt/org.flatcar-linux/config,file=$DIR/config.ign"
   fi
@@ -258,27 +265,32 @@ firmware=$(find_firmware)
 [ -n "$firmware" ] || fail "no UEFI firmware for $qemu found"
 firmware_code=${firmware%%:*}
 firmware_vars=${firmware#*:}
-for tool in curl bunzip2 sha512sum perl ssh-keygen; do
+for tool in curl bunzip2 sha512sum perl ssh-keygen setpriv; do
   command -v "$tool" >/dev/null 2>&1 || fail "$tool is required"
 done
 
-install -d -m 0750 "$DIR"
+id "$USER_NAME" >/dev/null 2>&1 ||
+  useradd --system --home-dir "$DIR" --shell /usr/sbin/nologin "$USER_NAME"
+kvm_group=""
+if getent group kvm >/dev/null 2>&1; then
+  usermod -aG kvm "$USER_NAME"
+  kvm_group="SupplementaryGroups=kvm"
+fi
+install -d -m 0750 -o "$USER_NAME" -g "$USER_NAME" "$DIR"
 
-# io_uring where the kernel and QEMU have it, and direct I/O on the
-# filesystem the disk goes on; threads otherwise.
+# io_uring where the kernel lets QEMU's user have it (kernel.io_uring_disabled
+# can keep it from unprivileged users), with direct I/O on the filesystem
+# the disk goes on; threads otherwise.
 aio=threads
 probe="$DIR/.aio-probe"
 truncate -s 1M "$probe"
-if printf 'quit\n' | timeout 30 "$qemu_path" -nodefaults -display none -machine none -S -monitor stdio \
+chown "$USER_NAME" "$probe"
+if printf 'quit\n' | timeout 30 setpriv --reuid="$USER_NAME" --regid="$USER_NAME" --clear-groups \
+  "$qemu_path" -nodefaults -display none -machine none -S -monitor stdio \
   -drive "if=none,id=probe,file=$probe,format=raw,cache=none,aio=io_uring" >/dev/null 2>&1; then
   aio=io_uring
 fi
 rm -f "$probe"
-
-id "$USER_NAME" >/dev/null 2>&1 ||
-  useradd --system --home-dir "$DIR" --shell /usr/sbin/nologin "$USER_NAME"
-getent group kvm >/dev/null 2>&1 && usermod -aG kvm "$USER_NAME"
-install -d -m 0750 -o "$USER_NAME" -g "$USER_NAME" "$DIR"
 
 say "installing $SELF"
 curl -fsSL -o "$SELF.new" "$FOREMAN_URL/agent/vm.sh" </dev/null || fail "couldn't reach $FOREMAN_URL"
@@ -294,7 +306,7 @@ Wants=network-online.target
 [Service]
 User=$USER_NAME
 Group=$USER_NAME
-SupplementaryGroups=kvm
+$kvm_group
 Environment=FOREMAN_BOX_DIR=$DIR FOREMAN_BOX_UNIT=$UNIT
 ExecStart=$SELF run
 ExecStop=$SELF powerdown

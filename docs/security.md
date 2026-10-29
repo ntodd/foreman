@@ -112,10 +112,11 @@ A Flatcar box ([flatcar.md](setup/flatcar.md)) sets itself up from a
 first-boot config the control plane makes for a join token:
 
 - The config holds the join token and the box's Tailscale key: a
-  single-use, pre-authorized key, tagged `tag:foreman-box` and expiring
-  in a day, minted once per token and stored encrypted with it. The box
-  deletes both once it has enrolled, and the launchers delete their
-  copies. Downloads of the config are no-store, and its endpoint takes
+  single-use, pre-authorized key, tagged `tag:foreman-box`, minted once
+  per token and stored encrypted with it, and expiring with the token
+  (the box has to boot before the token expires anyway). Enrolling
+  clears it from the token. The box deletes the token, the key and the
+  config once it has enrolled, and the launchers delete their copies. Downloads of the config are no-store, and its endpoint takes
   the join token like enrollment does: a bad one counts against the
   client's enroll attempts.
 - The config's extensions (Compose, Tailscale) are checked against
@@ -130,10 +131,17 @@ first-boot config the control plane makes for a join token:
   in the VM, not on the machine running it. On Linux, QEMU runs as the
   `foreman-box` user under systemd's sandboxing (no capabilities, a
   read-only system, `/dev/kvm` and the box's directory and nothing else)
-  with QEMU's seccomp sandbox, and user-mode networking, so the VM can't
-  reach this machine's network any differently than a process on it
-  could. On a Mac, vfkit runs as you, with Apple's hypervisor and vmnet's
-  NAT.
+  with QEMU's seccomp sandbox, and user-mode networking without IPv6. On
+  a Mac, vfkit runs as you, with Apple's hypervisor and vmnet's NAT, and
+  everything it keeps (the disk, which holds the agent's key, and the
+  install's copy of the config) is readable by you alone.
+- The VM's gateway is the machine it runs on, and under QEMU's user-mode
+  network the gateway's address reaches that machine's loopback, where
+  services expect only local clients. The install script sees the box is
+  a VM and adds a table to its firewall that rejects environments' (and
+  image builds') traffic to the gateway, DNS aside. The box itself still
+  reaches it, which a control plane on the same machine relies on, so
+  code that gets root in the box can too.
 - The box's own tailnet node is governed by the tailnet policy like any
   machine's; give `tag:foreman-box` the control plane and nothing else.
 

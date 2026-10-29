@@ -48,6 +48,12 @@ PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
 say() { echo "foreman-box: $*"; }
 fail() { echo "foreman-box: $*" >&2; exit 1; }
 
+# The box's disk holds its agent's key, and the install its join token:
+# nothing here is for the Mac's other users.
+umask 077
+# So a Ctrl-C runs the cleanup (an EXIT trap) too.
+trap 'exit 130' INT TERM HUP
+
 # -- the box's VM ------------------------------------------------------------
 
 conf() { sed -n "s/^$1=//p" "$BOX/box.conf" 2>/dev/null | tail -1; }
@@ -66,7 +72,7 @@ address() {
     /^[ \t]*ip_address=/ { sub(/.*ip_address=/, ""); ip = $0 }
     /^[ \t]*hw_address=/ { sub(/.*hw_address=/, ""); match_hw = ($0 == hw) }
     /^[ \t]*lease=/ { sub(/.*lease=/, ""); if (match_hw && $0 > best) { best = $0; found = ip } }
-    END { if (found) print found }' /var/db/dhcpd_leases 2>/dev/null
+    END { if (found) print found }' /var/db/dhcpd_leases 2>/dev/null || true
 }
 
 # What launchd runs: the VM, booted from its disk.
@@ -93,20 +99,13 @@ start() {
     fail "launchd wouldn't start the box; run this in Terminal, logged in to the Mac"
 }
 
-# Asks the box to shut down, and waits for it before unloading the agent.
+# Unloads the job: launchd sends vfkit SIGTERM, vfkit asks the box to
+# power off and waits for it (the plist's ExitTimeOut). Asking the box
+# first would race launchd, which starts vfkit again when it exits.
 stop() {
-  if [ "$(vm_state)" = Running ]; then
-    rest -X POST -d '{"state":"Stop"}' http://localhost/vm/state >/dev/null 2>&1 || true
-    i=0
-    while [ "$(vm_state)" = Running ] && [ $i -lt 60 ]; do
-      sleep 1
-      i=$((i + 1))
-    done
-  fi
   if loaded; then launchctl bootout "gui/$(id -u)/$LABEL" 2>/dev/null || true; fi
-  # bootout returns before launchd lets go of the job.
   i=0
-  while loaded && [ $i -lt 20 ]; do
+  while { loaded || pgrep -f "vfkit.*$BOX/disk.img" >/dev/null; } && [ $i -lt 140 ]; do
     sleep 0.5
     i=$((i + 1))
   done
@@ -195,6 +194,7 @@ sha512() { shasum -a 512 "$1" | cut -d' ' -f1; }
 # plane's current copy), and the launchd job that runs it.
 install_launcher() {
   mkdir -p "$BIN" "$BOX" "$HOME/Library/LaunchAgents"
+  chmod 0700 "$HOME_DIR"
   if [ ! -x "$BIN/vfkit" ] || [ "$(sha256 "$BIN/vfkit")" != "$VFKIT_SHA256" ]; then
     say "downloading vfkit $VFKIT_VERSION"
     curl -fsSL -o "$BIN/vfkit.new" "https://github.com/crc-org/vfkit/releases/download/$VFKIT_VERSION/vfkit" </dev/null
