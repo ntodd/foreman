@@ -23,6 +23,11 @@ services:
       FOREMAN_AGENT_RELEASE_DIR: /var/lib/foreman/releases
       # e2e/lv-click.mjs connects from this machine.
       FOREMAN_EXTRA_ORIGINS: http://127.0.0.1:${E2E_CP_PORT:-4180}
+      # With a Tailscale OAuth client, the box joins the tailnet (as
+      # tag:foreman-box, or FOREMAN_TAILSCALE_BOX_TAGS).
+      FOREMAN_TAILSCALE_CLIENT_ID: ${FOREMAN_TAILSCALE_CLIENT_ID:-}
+      FOREMAN_TAILSCALE_CLIENT_SECRET: ${FOREMAN_TAILSCALE_CLIENT_SECRET:-}
+      FOREMAN_TAILSCALE_BOX_TAGS: ${FOREMAN_TAILSCALE_BOX_TAGS:-}
     ports:
       - "${E2E_BIND:-127.0.0.1}:${E2E_CP_PORT:-4180}:4000"
     volumes:

@@ -75,6 +75,34 @@ docker build -f docker/box.Dockerfile --target agent-tarball -o tmp/agent .
 e2e/agent-smoke.sh tmp/agent/foreman_agent.tar.gz
 ```
 
+## A Flatcar box, for real
+
+`flatcar/run.sh` makes a box the way a person would, with the launcher
+for the machine it runs on: `mac.sh` (vfkit) on macOS, `vm.sh` (QEMU and
+KVM, with sudo) on Linux. The control plane is the release image,
+published on this machine for the VM to reach. It checks that a bad
+token leaves nothing behind; the box's first boot, Ignition and
+enrollment; what's on the box (Flatcar, Compose and Tailscale from the
+bakery, the firewall and its reload check, the reboot unit, no Node, no
+failed units, the join token gone); an environment on it; the Reboot
+button (clicked through the LiveView with `lv-click.mjs`), which brings
+the box back on a new boot; the VM's process dying; the launcher run
+again; a Mac's sleep (the VM paused for 90 seconds); an agent update;
+destroy; and the launcher's stop, start and uninstall.
+
+```sh
+e2e/flatcar/run.sh                   # SKIP_BUILD=1 to reuse the images and agents
+E2E_OS_UPDATE=1 e2e/flatcar/run.sh   # also a Flatcar update (moves the box to beta)
+e2e/flatcar/run.sh --logs            # the control plane's logs and the box's console
+e2e/flatcar/run.sh --down            # remove the stack and the box
+```
+
+It runs the box under its own launchd label or systemd unit
+(`E2E_PROJECT`, default `foreman-flatcar`), so it doesn't touch a real
+box on the same machine. On macOS, run it from a logged-in session. With
+`FOREMAN_TAILSCALE_CLIENT_ID` and `FOREMAN_TAILSCALE_CLIENT_SECRET`, the
+box also joins the tailnet with a key the control plane mints.
+
 ## On a real tailnet
 
 The other runs don't have a tailnet, so they can't check Tailscale SSH.
