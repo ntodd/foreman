@@ -13,6 +13,12 @@
 #   e2e/flatcar/run.sh --down     remove the stack, its volumes and the box
 #   e2e/flatcar/run.sh --logs     the control plane's logs and the box's console
 #
+# With FOREMAN_TAILSCALE_CLIENT_ID and FOREMAN_TAILSCALE_CLIENT_SECRET (an
+# OAuth client that can make keys tagged tag:foreman-box), the control
+# plane mints the box a key and the run checks the box joined the
+# tailnet, and logs it out at the end; the box still reaches the control
+# plane through this machine.
+#
 # E2E_PROJECT (default foreman-flatcar) names the compose project, the
 # images and the box's launchd label or systemd unit, so a run doesn't
 # touch a real box on this machine. KEEP_BOX=1 leaves the box running.
@@ -282,6 +288,10 @@ box 'test ! -e /etc/foreman-box/provision.env && test ! -e /etc/foreman-box/tail
 box '! command -v node' >/dev/null || fail "the box has a Node of its own"
 box 'ls /opt/foreman-agent/current/lib/foreman_agent-*/priv/tools/bin/devcontainer' >/dev/null ||
   fail "the agent release has no devcontainer CLI"
+if [ -n "${FOREMAN_TAILSCALE_CLIENT_ID:-}" ]; then
+  box 'tailscale status --json' | grep -q '"BackendState": *"Running"' || fail "the box isn't on the tailnet"
+  echo "ok: on the tailnet as $(box 'tailscale status --json' | sed -n 's/.*"DNSName": *"\([^"]*\)".*/\1/p' | head -1)"
+fi
 [ "$(reboot_field can_restart)" = true ] || fail "the agent says it can't reboot the box"
 boot1=$(reboot_field boot)
 [ -n "$boot1" ] || fail "no boot id reported"
@@ -420,6 +430,7 @@ if [ "${KEEP_BOX:-}" = 1 ]; then
 fi
 
 say "uninstall"
+[ -z "${FOREMAN_TAILSCALE_CLIENT_ID:-}" ] || box 'sudo tailscale logout' || true
 foreman_box uninstall --yes
 if [ "$launcher" = mac ]; then
   [ ! -e "$box_home" ] || fail "the box's files are still there"

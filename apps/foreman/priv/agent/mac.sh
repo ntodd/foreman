@@ -226,6 +226,9 @@ install_launcher() {
        launchd starts it again. -->
   <key>KeepAlive</key><true/>
   <key>ThrottleInterval</key><integer>5</integer>
+  <!-- On SIGTERM (logout, shutdown) vfkit asks the box to power off; give
+       it time to stop its containers. -->
+  <key>ExitTimeOut</key><integer>60</integer>
   <!-- Builds run in the box: no background throttling. -->
   <key>ProcessType</key><string>Interactive</string>
   <key>StandardOutPath</key><string>$BOX/vfkit.log</string>

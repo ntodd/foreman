@@ -27,7 +27,7 @@ The control plane's runs sobelow as well.
 | `cd apps/foreman_agent && mix test --only docker` | The agent against real Docker and the devcontainer CLI: two copies side by side, secrets, restart affected, rebuild, pull and rebuild and destroy, plus refusing a tampered compose file and a feature that asks for privileged |
 | `cd apps/foreman && mix test` | Control plane (run with `FOREMAN_DB=postgres` too) |
 | `devcontainer features test ... features` | The feature in a real devcontainer |
-| `e2e/` | Full runs through the UI and on an emulated Linux box; see [e2e/README.md](../e2e/README.md) |
+| `e2e/` | Full runs through the UI, on an emulated Linux box, and on a real Flatcar box made by the Mac or Linux launcher; see [e2e/README.md](../e2e/README.md) |
 
 The README screenshots come from `e2e/demo.exs`, a control plane full of
 made-up data, and `e2e/screenshots.mjs`; see
