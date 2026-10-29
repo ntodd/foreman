@@ -116,20 +116,18 @@ defmodule ForemanAgent.Config do
     bundled_cli = bundled(dir, "bin/devcontainer")
 
     cli =
-      case overrides[:devcontainer] do
+      case override(overrides[:devcontainer]) do
         @legacy_cli when is_binary(bundled_cli) -> bundled_cli
-        path when is_binary(path) and path != "" -> path
-        _ -> bundled_cli || "devcontainer"
+        nil -> bundled_cli || "devcontainer"
+        path -> path
       end
 
-    node =
-      case overrides[:node] do
-        path when is_binary(path) and path != "" -> path
-        _ -> bundled(dir, "node/bin/node") || "node"
-      end
-
+    node = override(overrides[:node]) || bundled(dir, "node/bin/node") || "node"
     %{devcontainer: cli, node: node}
   end
+
+  defp override(path) when is_binary(path) and path != "", do: path
+  defp override(_path), do: nil
 
   defp bundled(nil, _rel), do: nil
 
