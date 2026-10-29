@@ -79,6 +79,37 @@ defmodule Foreman.Tailscale do
     )
   end
 
+  @doc """
+  The tags a box's own node gets (`FOREMAN_TAILSCALE_BOX_TAGS`), by
+  default `tag:foreman-box`. Never the environments' marker tag or the
+  deployment tag: cleanup deletes devices with those.
+  """
+  def box_tags do
+    case Application.get_env(:foreman, :tailscale, %{})[:box_tags] do
+      [_ | _] = tags -> tags
+      _ -> ["tag:foreman-box"]
+    end
+  end
+
+  @doc """
+  A single-use, pre-authorized key for a Flatcar box to join the tailnet
+  with, expiring after `expiry_seconds` (its join token's lifetime: the
+  box has to boot before the token expires anyway).
+  """
+  def create_box_auth_key(box_name, expiry_seconds) do
+    case creds() do
+      nil ->
+        {:error, :not_configured}
+
+      creds ->
+        Client.impl().create_auth_key(creds, %{
+          tags: box_tags(),
+          description: "foreman box #{box_name}",
+          expiry_seconds: expiry_seconds
+        })
+    end
+  end
+
   def create_auth_key(env, repo, user) do
     case creds() do
       nil ->

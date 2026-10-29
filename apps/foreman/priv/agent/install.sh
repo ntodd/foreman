@@ -3,8 +3,8 @@
 #
 #   curl -fsSL __FOREMAN_URL__/agent/install.sh | sudo sh -s -- --token fj_...
 #
-# Re-running it on an enrolled box updates the agent and the devcontainer
-# CLI and keeps the box's identity (no token needed). To enroll again, for
+# Re-running it on an enrolled box updates the agent and keeps the box's
+# identity (no token needed). To enroll again, for
 # example after the box was revoked, pass --reenroll with a new token.
 #
 # It also installs the box's firewall, which keeps environments (and
@@ -13,14 +13,14 @@
 # default bridge out, for a box whose other containers need the tailnet
 # there; builds can then reach it too.
 #
-# Needs: systemd, Docker Engine with Compose v2.24+, git, and Node 20+
-# (for the devcontainer CLI). The agent runs as the `foreman` user, which
+# Needs: systemd, Docker Engine with Compose v2.24+, git and nftables. The
+# agent release carries its own Node and devcontainer CLI. The agent runs
+# as the `foreman` user, which
 # joins the docker group: that is root-equivalent on this box, so only
 # install it on boxes whose owner you trust with every environment on it.
 set -eu
 
 FOREMAN_URL="__FOREMAN_URL__"
-DEVCONTAINER_CLI_VERSION="0.89.0"
 TOKEN=""
 POLICY=""
 REENROLL=""
@@ -54,7 +54,6 @@ fi
 command -v systemctl >/dev/null 2>&1 || fail "systemd is required"
 command -v docker >/dev/null 2>&1 || fail "Docker Engine is required"
 command -v git >/dev/null 2>&1 || fail "git is required"
-command -v npm >/dev/null 2>&1 || fail "Node.js (with npm) is required for the devcontainer CLI"
 nft=$(command -v nft 2>/dev/null || true)
 [ -n "$nft" ] || fail "nftables is required for the box's firewall (apt install nftables)"
 # The firewall rejects environment traffic out of tailscale0, which on a
@@ -99,9 +98,6 @@ d /run/foreman/envs 0700 foreman foreman -
 EOF
 systemd-tmpfiles --create /etc/tmpfiles.d/foreman.conf
 
-echo "foreman: installing the devcontainer CLI $DEVCONTAINER_CLI_VERSION"
-npm install --prefix /opt/foreman-agent/node --no-fund --no-audit --silent "@devcontainers/cli@$DEVCONTAINER_CLI_VERSION"
-
 echo "foreman: downloading the agent for $target"
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
@@ -121,6 +117,11 @@ new="$dest.new.$$"
 rm -rf "$new"
 install -d -o foreman -g foreman "$new"
 tar -xzf "$tmp/agent.tar.gz" -C "$new"
+# The release carries the devcontainer CLI and the Node it runs on; this
+# script no longer installs them. One that doesn't (an agent older than
+# this script, served to a box pinned to it) wouldn't run environments.
+set -- "$new"/lib/foreman_agent-*/priv/tools/bin/devcontainer
+[ -x "$1" ] || { rm -rf "$new"; fail "agent $version doesn't carry the devcontainer CLI; install a newer agent (unpin this box in Foreman, or publish the release that came with this control plane)"; }
 chown -R foreman:foreman "$new"
 rm -rf "$dest.old"
 if [ -d "$dest" ]; then mv "$dest" "$dest.old"; fi
@@ -141,7 +142,6 @@ if [ -n "$enroll" ]; then join_token="$TOKEN"; fi
 cat > /etc/foreman-agent/agent.env <<EOF
 FOREMAN_URL=$FOREMAN_URL
 FOREMAN_JOIN_TOKEN=$join_token
-FOREMAN_DEVCONTAINER_CLI=/opt/foreman-agent/node/node_modules/.bin/devcontainer
 FOREMAN_POLICY=$POLICY
 HOME=/var/lib/foreman-agent
 RELEASE_TMP=/var/lib/foreman-agent/tmp
@@ -168,6 +168,40 @@ if [ -n "$DEFAULT_BRIDGE_FILTER" ]; then
   sed "s/\"docker0\"/\"$default_bridge\"/" "$1" > /etc/foreman-agent/firewall.nft.new
 else
   sed '/# default-bridge$/d' "$1" > /etc/foreman-agent/firewall.nft.new
+fi
+# A box in a VM (a Flatcar box from the Mac or Linux launcher) has the
+# machine it runs on as its gateway, and under QEMU's user-mode network
+# the gateway's address is that machine's loopback, where services expect
+# only local clients. Environments, and image builds unless the default
+# bridge is left out, don't reach it, apart from DNS (vmnet's resolver is
+# there).
+if systemd-detect-virt --vm --quiet 2>/dev/null; then
+  gateway=$(ip -4 route show default 2>/dev/null | awk '$1 == "default" && $2 == "via" { print $3; exit }')
+  case "$gateway" in *[!0-9.]*) gateway="" ;; esac
+  if [ -n "$gateway" ]; then
+    builds=""
+    if [ -n "$DEFAULT_BRIDGE_FILTER" ]; then builds="iifname \"$default_bridge\" jump environment"; fi
+    cat >> /etc/foreman-agent/firewall.nft.new <<EOF
+
+# This box is a VM; $gateway, its gateway, is the machine it runs on.
+table inet foreman_vm
+delete table inet foreman_vm
+
+table inet foreman_vm {
+	chain environment {
+		ip daddr $gateway udp dport 53 accept
+		ip daddr $gateway tcp dport 53 accept
+		ip daddr $gateway reject with icmpx type admin-prohibited
+	}
+
+	chain forward {
+		type filter hook forward priority filter - 10; policy accept;
+		iifname "fm-*" jump environment
+		$builds
+	}
+}
+EOF
+  fi
 fi
 "$nft" -c -f /etc/foreman-agent/firewall.nft.new || fail "nftables rejected the firewall rules"
 chmod 0644 /etc/foreman-agent/firewall.nft.new
@@ -224,7 +258,8 @@ After=foreman-firewall.service
 
 [Service]
 Type=oneshot
-ExecStart=/etc/foreman-agent/firewall-check
+# Through sh: /etc is mounted noexec on Flatcar.
+ExecStart=/bin/sh /etc/foreman-agent/firewall-check
 EOF
 
 cat > /etc/systemd/system/foreman-firewall-check.timer <<'EOF'
@@ -281,9 +316,90 @@ Type=oneshot
 ExecStart=/bin/sh -c 'cd /opt/foreman-agent && if [ -L previous ]; then ln -sfn "$(readlink previous)" current && rm -f previous update-pending && systemctl reset-failed foreman-agent && systemctl start foreman-agent; else echo "no previous release to roll back to"; fi'
 EOF
 
+# Reboots the box when an admin asks for it in Foreman (box.restart). The
+# agent can't: it runs unprivileged. It writes /run/foreman/restart, and
+# this root unit reboots the box a few seconds later, which leaves the
+# agent time to answer. Environments only see their own directories below
+# /run/foreman/envs, so nothing they run can ask.
+cat > /etc/systemd/system/foreman-restart.path <<'EOF'
+[Unit]
+Description=Reboot the box when the Foreman agent asks
+
+[Path]
+PathExists=/run/foreman/restart
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+cat > /etc/systemd/system/foreman-restart.service <<'EOF'
+[Unit]
+Description=Reboot the box for the Foreman agent
+
+[Service]
+Type=oneshot
+ExecStart=/bin/sh -c 'rm -f /run/foreman/restart; sleep 5; exec systemctl reboot'
+EOF
+
+# Flatcar applies OS updates to its other partition by itself, and its
+# reboot manager would then reboot the box whenever it liked. Foreman
+# shows the update as a reboot the box needs instead (the flag the agent
+# reports), and the box reboots when an admin asks.
+os_id=$(sed -n 's/^ID=//p' /etc/os-release /usr/lib/os-release 2>/dev/null | head -n 1 | tr -d '"')
+if [ "$os_id" = flatcar ]; then
+  echo "foreman: Flatcar: OS updates wait for a reboot from Foreman"
+  install -d -m 0755 /etc/flatcar
+  { grep -v '^REBOOT_STRATEGY=' /etc/flatcar/update.conf 2>/dev/null || true; echo REBOOT_STRATEGY=off; } \
+    > /etc/flatcar/update.conf.new
+  mv /etc/flatcar/update.conf.new /etc/flatcar/update.conf
+  systemctl try-restart locksmithd.service 2>/dev/null || true
+
+  cat > /etc/foreman-agent/flatcar-update-check <<'EOF'
+#!/bin/sh
+# Flags an OS update update-engine has applied, which takes effect on the
+# next boot, the way Debian flags one: /run/reboot-required, with what
+# asked for it in /run/reboot-required.pkgs. The agent reports both.
+set -u
+status=$(update_engine_client -status 2>/dev/null) || exit 0
+case "$status" in
+  *UPDATE_STATUS_UPDATED_NEED_REBOOT*) ;;
+  *) exit 0 ;;
+esac
+version=$(printf '%s\n' "$status" | sed -n 's/^NEW_VERSION=//p')
+line="flatcar-${version:-update}"
+grep -qxF "$line" /run/reboot-required.pkgs 2>/dev/null || echo "$line" >> /run/reboot-required.pkgs
+[ -e /run/reboot-required ] || echo "*** System restart required ***" > /run/reboot-required
+EOF
+  chmod 0755 /etc/foreman-agent/flatcar-update-check
+
+  cat > /etc/systemd/system/foreman-flatcar-update.service <<'EOF'
+[Unit]
+Description=Flag a Flatcar update waiting for a reboot
+After=update-engine.service
+
+[Service]
+Type=oneshot
+# Through sh: Flatcar mounts /etc noexec.
+ExecStart=/bin/sh /etc/foreman-agent/flatcar-update-check
+EOF
+
+  cat > /etc/systemd/system/foreman-flatcar-update.timer <<'EOF'
+[Unit]
+Description=Check for a Flatcar update waiting for a reboot
+
+[Timer]
+OnBootSec=1min
+OnUnitActiveSec=1min
+
+[Install]
+WantedBy=timers.target
+EOF
+fi
+
 systemctl daemon-reload
 systemctl enable foreman-firewall foreman-agent
-systemctl enable --now foreman-firewall-check.timer
+systemctl enable --now foreman-firewall-check.timer foreman-restart.path
+if [ "$os_id" = flatcar ]; then systemctl enable --now foreman-flatcar-update.timer; fi
 # Loads the rules again on a re-run, in case they changed.
 systemctl restart foreman-firewall
 # Restart, not start: on a re-run the agent may already be running (or
@@ -291,6 +407,9 @@ systemctl restart foreman-firewall
 systemctl reset-failed foreman-agent 2>/dev/null || true
 systemctl restart foreman-agent
 rm -rf "$dest.old"
+# Install scripts before the release carried the devcontainer CLI put one
+# here with npm.
+rm -rf /opt/foreman-agent/node
 
 if [ -z "$enroll" ]; then
   echo "foreman: updated; this box keeps its enrollment ($IDENTITY)."

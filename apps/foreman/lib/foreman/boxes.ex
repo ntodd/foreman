@@ -10,7 +10,7 @@ defmodule Foreman.Boxes do
   """
   import Ecto.Query
 
-  alias Foreman.Boxes.{Box, JoinToken}
+  alias Foreman.Boxes.{Box, Flatcar, JoinToken}
   alias Foreman.{Audit, Repo, Scope}
 
   @token_ttl 3600
@@ -47,11 +47,14 @@ defmodule Foreman.Boxes do
   """
   def create_join_token(%Scope{} = scope, attrs) do
     changeset =
-      {%{}, %{box_name: :string, owner_user_id: :binary_id}}
-      |> Ecto.Changeset.cast(attrs, [:box_name, :owner_user_id])
+      {%{}, %{box_name: :string, owner_user_id: :binary_id, tailscale_auth_key: :string}}
+      |> Ecto.Changeset.cast(attrs, [:box_name, :owner_user_id, :tailscale_auth_key])
       |> Ecto.Changeset.validate_required([:box_name])
       |> Ecto.Changeset.validate_format(:box_name, ~r/\A[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\z/,
         message: "must be lowercase letters, digits and dashes"
+      )
+      |> Ecto.Changeset.validate_format(:tailscale_auth_key, ~r/\Atskey-[A-Za-z0-9_-]+\z/,
+        message: "must be a Tailscale auth key (tskey-...)"
       )
 
     cond do
@@ -70,6 +73,7 @@ defmodule Foreman.Boxes do
           box_name: data.box_name,
           owner_user_id: data[:owner_user_id] || scope.user.id,
           created_by_id: scope.user.id,
+          tailscale_auth_key: data[:tailscale_auth_key],
           expires_at: DateTime.add(DateTime.utc_now(), @token_ttl)
         })
 
@@ -90,7 +94,11 @@ defmodule Foreman.Boxes do
            true <- is_nil(token.used_at) and DateTime.compare(token.expires_at, now) == :gt,
            {:ok, public_key} <- decode_key(attrs["public_key"]),
            {:ok, box} <- upsert_enrolled_box(token, public_key, attrs) do
-        token |> Ecto.Changeset.change(used_at: now, box_id: box.id) |> Repo.update!()
+        # The box's Tailscale key was for its first boot, which this is.
+        token
+        |> Ecto.Changeset.change(used_at: now, box_id: box.id, tailscale_auth_key: nil)
+        |> Repo.update!()
+
         Audit.log(nil, "box.enroll", box, %{"hostname" => attrs["hostname"]})
         disconnect(box)
         {:ok, box}
@@ -103,6 +111,80 @@ defmodule Foreman.Boxes do
   end
 
   def enroll(_, _), do: {:error, :invalid_token}
+
+  @doc """
+  The first-boot config (Ignition) for a Flatcar box that enrolls with
+  `raw_token`, for `params["arch"]` (amd64 or arm64), with
+  `params["ssh_keys"]` (a list, or one per line) for the core user, and
+  the name the box will have. See `Foreman.Boxes.Flatcar`.
+
+  The box joins the tailnet with a key of its own: the one pasted when
+  the token was made, or one the control plane's Tailscale OAuth client
+  mints for the token the first time it's asked (tagged
+  `Foreman.Tailscale.box_tags/0`), and keeps for later asks. Without
+  either, the box has to reach the control plane some other way.
+  """
+  def flatcar_ignition(raw_token, params) do
+    with true <- params["arch"] in Flatcar.arches() || {:error, :bad_arch},
+         %JoinToken{} = token <- valid_join_token(raw_token) || {:error, :invalid_token},
+         {:ok, key} <- box_tailscale_key(token),
+         {:ok, config} <-
+           Flatcar.ignition(%{
+             url: Foreman.Config.base_url(),
+             join_token: raw_token,
+             name: token.box_name,
+             arch: params["arch"],
+             tailscale_auth_key: key,
+             ssh_keys: ssh_keys(params["ssh_keys"])
+           }) do
+      {:ok, config, token.box_name}
+    end
+  end
+
+  defp valid_join_token(raw) when is_binary(raw) do
+    now = DateTime.utc_now()
+
+    case Repo.get_by(JoinToken, token_hash: hash(raw)) do
+      %JoinToken{used_at: nil} = token ->
+        if DateTime.compare(token.expires_at, now) == :gt, do: token
+
+      _ ->
+        nil
+    end
+  end
+
+  defp valid_join_token(_), do: nil
+
+  defp box_tailscale_key(%JoinToken{tailscale_auth_key: key}) when is_binary(key), do: {:ok, key}
+
+  defp box_tailscale_key(token) do
+    if Foreman.Tailscale.configured?(), do: mint_box_key(token), else: {:ok, nil}
+  end
+
+  # Minted outside a transaction (it's a call to Tailscale), then kept
+  # only if no other request stored one first: the token's key is the
+  # first one stored, and a key minted by a request that lost the race
+  # expires unused.
+  defp mint_box_key(token) do
+    expiry = max(DateTime.diff(token.expires_at, DateTime.utc_now()), 600)
+
+    case Foreman.Tailscale.create_box_auth_key(token.box_name, expiry) do
+      {:ok, %{key: key}} ->
+        from(t in JoinToken, where: t.id == ^token.id and is_nil(t.tailscale_auth_key))
+        |> Repo.update_all(set: [tailscale_auth_key: key])
+
+        {:ok, Repo.reload!(token).tailscale_auth_key}
+
+      {:error, reason} ->
+        {:error, {:tailscale, reason}}
+    end
+  end
+
+  defp ssh_keys(keys) when is_list(keys),
+    do: Enum.reject(keys, &(not is_binary(&1) or String.trim(&1) == ""))
+
+  defp ssh_keys(keys) when is_binary(keys), do: keys |> String.split(~r/\R/) |> ssh_keys()
+  defp ssh_keys(_), do: []
 
   defp upsert_enrolled_box(token, public_key, attrs) do
     box = Repo.get_by(Box, name: token.box_name) || %Box{name: token.box_name}
@@ -194,25 +276,45 @@ defmodule Foreman.Boxes do
   Records whether a box needs a reboot, as its agent reports it after
   every join and when it changes. A box that starts needing one is news
   (`Foreman.Activity.box_reboot_required/1`); the same report again isn't.
+
+  Agents on protocol 5 also say whether they can reboot the box
+  (`box.restart`) and which boot they're on. A box back on another boot
+  than a reboot was sent for has rebooted, whether or not the agent's
+  answer got through first, so that operation is done.
   """
   def record_reboot(box_id, reboot) do
     if box = get_box(box_id) do
       newly? = reboot.required and box.reboot_required != true
+      boot_id = Map.get(reboot, :boot_id)
 
       box =
         box
         |> Ecto.Changeset.change(
           reboot_required: reboot.required,
           reboot_packages: reboot.packages,
-          livepatch: reboot.livepatch
+          livepatch: Map.get(reboot, :livepatch, false),
+          can_restart: Map.get(reboot, :can_restart, false),
+          boot_id: boot_id
         )
         |> Repo.update!()
 
+      if boot_id, do: finish_restarts(box.id, boot_id)
       broadcast(box, :updated)
       if newly?, do: Foreman.Activity.box_reboot_required(box)
     end
 
     :ok
+  end
+
+  defp finish_restarts(box_id, boot_id) do
+    for %{action: "box.restart", args: %{"boot_id" => sent_for}} = op <-
+          Foreman.Operations.active_for_box(box_id),
+        sent_for != boot_id do
+      Foreman.Operations.mark(op, "succeeded",
+        result: %{"rebooted" => true},
+        finished_at: DateTime.utc_now()
+      )
+    end
   end
 
   @doc """

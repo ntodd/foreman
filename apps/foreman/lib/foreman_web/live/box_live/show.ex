@@ -104,10 +104,26 @@ defmodule ForemanWeb.BoxLive.Show do
   end
 
   def handle_event("run", %{"type" => type}, socket)
-      when type in ["box.inventory", "box.stats", "box.gc"] do
-    case Agents.run_box_command(socket.assigns.current_scope, socket.assigns.box, type) do
+      when type in ["box.inventory", "box.stats", "box.gc", "box.restart"] do
+    box = socket.assigns.box
+
+    case Agents.run_box_command(socket.assigns.current_scope, box, type) do
+      {:ok, _op} when type == "box.restart" ->
+        {:noreply,
+         socket
+         |> put_flash(:info, "Rebooting #{box.name}. It'll be back once its agent rejoins.")
+         |> load()}
+
       {:ok, _op} ->
-        {:noreply, socket |> put_flash(:info, "Sent to #{socket.assigns.box.name}.") |> load()}
+        {:noreply, socket |> put_flash(:info, "Sent to #{box.name}.") |> load()}
+
+      {:error, :cannot_restart} ->
+        {:noreply,
+         put_flash(
+           socket,
+           :error,
+           "#{box.name}'s agent can't reboot it; run its install command again."
+         )}
 
       {:error, _} ->
         {:noreply, put_flash(socket, :error, "Only admins can do that.")}
@@ -180,7 +196,7 @@ defmodule ForemanWeb.BoxLive.Show do
 
       <.box_policy_alert box={@box} />
       <.box_firewall_alert box={@box} />
-      <.box_reboot_alert box={@box} />
+      <.box_reboot_alert box={@box} can_reboot={Scope.admin?(@current_scope) and @online} />
 
       <.callout
         :if={@box.failed_agent_version && @box.failed_agent_version == @target_version}
@@ -309,7 +325,7 @@ defmodule ForemanWeb.BoxLive.Show do
             This box has environments Foreman has no record of: {Enum.join(@orphans, ", ")}. They keep running; remove them on the box with docker compose down if they're not wanted.
           </.callout>
 
-          <.panel :if={Scope.admin?(@current_scope)} title="Box operations">
+          <.panel :if={Scope.admin?(@current_scope)} title="Box operations" id="box-operations">
             <:actions>
               <.button
                 size="sm"
@@ -326,6 +342,15 @@ defmodule ForemanWeb.BoxLive.Show do
                 disabled={not @online}
                 data-confirm="Prune dangling images, old build cache and unused anonymous volumes on this box?"
               >Prune</.button>
+              <.button
+                :if={@box.can_restart}
+                size="sm"
+                variant="ghost"
+                phx-click="run"
+                phx-value-type="box.restart"
+                disabled={not @online}
+                data-confirm={"Reboot #{@box.name}? Its environments stop, and come back up once it rejoins."}
+              >Reboot</.button>
             </:actions>
             <ul :if={@ops != []} class="-m-5 divide-y divide-line">
               <li :for={op <- @ops} class="flex items-center justify-between gap-3 px-5 py-2.5">

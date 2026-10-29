@@ -108,4 +108,25 @@ defmodule ForemanAgent.HandlerTest do
     assert message =~ "checked out, not main"
     refute message =~ secret
   end
+
+  @tag :tmp_dir
+  test "box.restart asks the root unit to reboot the box", %{tmp_dir: tmp} do
+    previous = ForemanAgent.Config.get()
+    on_exit(fn -> ForemanAgent.Config.put(previous) end)
+
+    config = %{
+      previous
+      | restart_unit: Path.join(tmp, "foreman-restart.path"),
+        restart_request: Path.join(tmp, "restart"),
+        boot_id: Path.join(tmp, "boot_id")
+    }
+
+    ForemanAgent.Config.put(config)
+    File.write!(config.restart_unit, "[Path]\n")
+    File.write!(config.boot_id, "0b5a1f0e-7d1c-4c5e-9a43-5f1e2d3c4b5a\n")
+
+    {:ok, cmd} = Command.new("box.restart", %{boot_id: "0b5a1f0e-7d1c-4c5e-9a43-5f1e2d3c4b5a"})
+    assert {:ok, %{"requested" => true}} = Handler.handle(cmd, fn _, _ -> :ok end)
+    assert File.exists?(config.restart_request)
+  end
 end

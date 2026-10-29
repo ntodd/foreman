@@ -34,14 +34,17 @@ defmodule ForemanAgent.Env.ComposeScan do
   @doc """
   Scans `compose_files` (absolute paths inside `clone`, as the devcontainer
   lists them) and whatever they include or extend.
+
+  `:node` is the Node to read YAML with (the agent's, from its config).
   """
-  @spec scan(Path.t(), [Path.t()]) :: {:ok, [fact()]} | {:error, String.t()}
-  def scan(clone, [first | _] = compose_files) do
+  @spec scan(Path.t(), [Path.t()], keyword()) :: {:ok, [fact()]} | {:error, String.t()}
+  def scan(clone, [first | _] = compose_files, opts \\ []) do
     clone = Path.expand(clone)
     project_dir = Path.dirname(first)
     queue = Enum.map(compose_files, &{&1, project_dir})
+    node = Keyword.get_lazy(opts, :node, fn -> ForemanAgent.Config.get().node end)
 
-    case walk(queue, %{clone: clone, seen: MapSet.new(), facts: []}) do
+    case walk(queue, %{clone: clone, node: node, seen: MapSet.new(), facts: []}) do
       {:ok, state} -> {:ok, state.facts |> Enum.reverse() |> Enum.uniq()}
       {:error, _} = error -> error
     end
@@ -60,18 +63,18 @@ defmodule ForemanAgent.Env.ComposeScan do
       true ->
         state = %{state | seen: MapSet.put(state.seen, path)}
 
-        with {:ok, doc} <- read(state.clone, path),
+        with {:ok, doc} <- read(state, path),
              {:ok, facts, more} <- document(doc, path, base, state.clone) do
           walk(rest ++ more, %{state | facts: Enum.reverse(facts, state.facts)})
         end
     end
   end
 
-  defp read(clone, path) do
-    rel = Path.relative_to(path, clone)
+  defp read(state, path) do
+    rel = Path.relative_to(path, state.clone)
 
-    with {:ok, content} <- read_file(clone, rel),
-         {:ok, doc} <- parse(content, rel) do
+    with {:ok, content} <- read_file(state.clone, rel),
+         {:ok, doc} <- parse(content, rel, state.node) do
       {:ok, doc || %{}}
     end
   end
@@ -85,14 +88,14 @@ defmodule ForemanAgent.Env.ComposeScan do
     end
   end
 
-  # js-yaml (vendored in priv/yaml, run with the Node the devcontainer CLI
-  # needs anyway): Erlang's yamerl resolves an alias to a list or map as
+  # js-yaml (vendored in priv/yaml, run on the Node the release carries for
+  # the devcontainer CLI): Erlang's yamerl resolves an alias to a list or map as
   # its first scalar, which would hide whatever a merge brings in. The
   # script keeps `<<` merges as keys, reads compose's own tags as plain
   # values, refuses any other tag and duplicate keys, and stops at a node
   # budget (aliases can expand without end).
-  defp parse(content, rel) do
-    with {:ok, node} <- find_node() do
+  defp parse(content, rel, node) do
+    with {:ok, node} <- find_node(node) do
       tmp =
         Path.join(System.tmp_dir!(), "foreman-compose-#{System.unique_integer([:positive])}.yml")
 
@@ -116,11 +119,17 @@ defmodule ForemanAgent.Env.ComposeScan do
     end
   end
 
-  defp find_node do
-    case System.find_executable("node") do
-      nil -> {:error, "Node is needed to check compose files, and isn't installed on this box"}
-      node -> {:ok, node}
+  defp find_node(node) do
+    case System.find_executable(node) do
+      nil -> {:error, "Node is needed to check compose files, and #{missing(node)}"}
+      path -> {:ok, path}
     end
+  end
+
+  defp missing(node) do
+    if Path.type(node) == :absolute,
+      do: "#{node} isn't there",
+      else: "it isn't installed on this box"
   end
 
   defp script, do: Application.app_dir(:foreman_agent, "priv/yaml/compose_yaml.js")

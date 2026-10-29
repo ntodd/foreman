@@ -82,6 +82,8 @@ defmodule Foreman.Fixtures do
         reboot_required: Map.get(attrs, :reboot_required),
         reboot_packages: Map.get(attrs, :reboot_packages, []),
         livepatch: Map.get(attrs, :livepatch),
+        can_restart: Map.get(attrs, :can_restart, false),
+        boot_id: Map.get(attrs, :boot_id),
         agent_version: "0.1.0",
         protocol_version: 1,
         feature_version: Map.get(attrs, :feature_version)

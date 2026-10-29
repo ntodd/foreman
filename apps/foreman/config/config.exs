@@ -95,4 +95,8 @@ config :logger, :default_formatter,
 
 config :phoenix, :json_library, Jason
 
+# Kept out of request logs: join tokens (and the Tailscale keys and
+# first-boot configs that come with them), secrets, passwords.
+config :phoenix, :filter_parameters, ["password", "token", "secret", "auth_key"]
+
 import_config "#{config_env()}.exs"

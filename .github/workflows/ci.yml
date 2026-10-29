@@ -106,8 +106,11 @@ jobs:
             apps/foreman_agent/deps
             apps/foreman_agent/_build
           key: agent-${{ env.ELIXIR_VERSION }}-${{ env.OTP_VERSION }}-${{ hashFiles('apps/foreman_agent/mix.lock') }}
-      - name: Install the devcontainer CLI
-        run: npm install --prefix "$RUNNER_TEMP/devcontainer" --no-fund --no-audit @devcontainers/cli@0.89.0
+      - name: Install the devcontainer CLI the agent release carries
+        run: |
+          mkdir -p "$RUNNER_TEMP/devcontainer"
+          cp rel/tools/devcontainer/package.json rel/tools/devcontainer/package-lock.json "$RUNNER_TEMP/devcontainer/"
+          npm ci --prefix "$RUNNER_TEMP/devcontainer" --omit=dev --ignore-scripts --no-fund --no-audit
       - run: mix deps.get
       - run: mix test --only docker
         env:
@@ -162,6 +165,15 @@ jobs:
       - run: mix credo --strict
       - run: mix sobelow --config --exit
       - run: mix test
+      # What Flatcar's Ignition (the version Flatcar ships) makes of the
+      # first-boot configs the control plane makes for Flatcar boxes.
+      - name: Validate Flatcar first-boot configs
+        if: matrix.db == 'sqlite'
+        run: |
+          for arch in amd64 arm64; do
+            mix run --no-start -e "{:ok, c} = Foreman.Boxes.Flatcar.ignition(%{url: \"https://foreman.example.ts.net\", join_token: \"fj_ci\", name: \"ci\", arch: \"$arch\", tailscale_auth_key: \"tskey-auth-ci\", ssh_keys: [\"ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIA ci\"]}); File.write!(\"$RUNNER_TEMP/$arch.ign\", JSON.encode!(c))"
+            docker run --rm -i quay.io/coreos/ignition-validate:v2.24.0@sha256:b951f790f0ec6ae3a440ba67f2121e4ed19017d3f5024e45dd5c5916602687b2 - < "$RUNNER_TEMP/$arch.ign"
+          done
 
   feature:
     if: github.event_name != 'schedule'
@@ -172,7 +184,7 @@ jobs:
         with:
           node-version: "22"
       - name: ShellCheck
-        run: shellcheck -s sh features/src/foreman/install.sh features/src/foreman/scripts/* apps/foreman/priv/agent/install.sh scripts/publish-agent-release.sh e2e/*.sh e2e/firewall/test.sh e2e/linux/run.sh e2e/linux/bin/gh docker/foreman-update e2e/updater/run.sh
+        run: shellcheck -s sh features/src/foreman/install.sh features/src/foreman/scripts/* apps/foreman/priv/agent/install.sh apps/foreman/priv/agent/mac.sh apps/foreman/priv/agent/vm.sh apps/foreman/priv/flatcar/*.sh apps/foreman_agent/rel/tools/bundle.sh apps/foreman_agent/rel/tools/devcontainer.sh scripts/publish-agent-release.sh e2e/*.sh e2e/firewall/test.sh e2e/linux/run.sh e2e/flatcar/run.sh e2e/linux/bin/gh docker/foreman-update e2e/updater/run.sh
       - name: Test the feature in a real devcontainer
         run: npx --yes @devcontainers/cli@0.89.0 features test --features foreman --base-image mcr.microsoft.com/devcontainers/base:debian --skip-scenarios features
 

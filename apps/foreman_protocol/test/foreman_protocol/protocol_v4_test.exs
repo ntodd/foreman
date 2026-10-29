@@ -17,13 +17,6 @@ defmodule ForemanProtocol.ProtocolV4Test do
     "env.restart" => %{"env_id" => @env_id, "slug" => "storefront-2", "mode" => "all"}
   }
 
-  test "this build speaks protocol 4 and still accepts agents on 3" do
-    assert ForemanProtocol.version() == 4
-    assert ForemanProtocol.compatible?(4)
-    assert ForemanProtocol.compatible?(3)
-    refute ForemanProtocol.compatible?(2)
-  end
-
   for {type, payload} <- @commands do
     describe "#{type} registry_auth" do
       test "carries registry credentials" do

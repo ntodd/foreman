@@ -19,7 +19,10 @@ users, repos, boxes, environments, secrets and the audit log. It runs on
 SQLite for one person or Postgres for a team.
 
 A machine that hosts environments is a box, and it runs the agent
-(`apps/foreman_agent`), an Elixir release. The agent dials out to the
+(`apps/foreman_agent`), an Elixir release. A box can be a Linux machine
+running the install script, or Flatcar Container Linux: in a VM on a Mac
+or a Linux machine, or on bare metal, set up on its first boot from a
+config the control plane makes, and updating its OS itself. The agent dials out to the
 control plane over a WebSocket, so boxes need no open ports, and every
 message is signed with ed25519. When the control plane asks for an
 environment, the agent brings it up with `git`, `docker compose` and the
@@ -121,6 +124,8 @@ regenerate them; see [e2e/README.md](e2e/README.md).
 |---|---|
 | Personal (a Linux desktop, SQLite) | [docs/setup/personal.md](docs/setup/personal.md) |
 | Team (EC2 + Postgres/Neon, a box per developer) | [docs/setup/team.md](docs/setup/team.md) |
+| A Mac as a box (a Flatcar VM, started at login) | [docs/setup/mac.md](docs/setup/mac.md) |
+| Flatcar boxes (a VM on Linux, or bare metal) | [docs/setup/flatcar.md](docs/setup/flatcar.md) |
 | Upgrading, backups and rolling back | [docs/setup/upgrading.md](docs/setup/upgrading.md) |
 | The GitHub App | [docs/setup/github-app.md](docs/setup/github-app.md) |
 | Tailscale | [docs/setup/tailscale.md](docs/setup/tailscale.md) |

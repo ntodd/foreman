@@ -1,5 +1,5 @@
 # The agent release, and a stand-in for a remote Linux box for end-to-end
-# tests: systemd, Docker Engine (docker-in-docker), git and Node.
+# tests: systemd, Docker Engine (docker-in-docker) and git.
 #
 #   docker build -f docker/box.Dockerfile --target agent-tarball -o tmp/agent .
 #   docker build -f docker/box.Dockerfile --target box -t foreman-box .
@@ -15,9 +15,14 @@ FROM ${ELIXIR_IMAGE} AS agent
 ARG FOREMAN_AGENT_VERSION=0.1.0
 ARG FOREMAN_RELEASE_PUBLIC_KEY=
 ENV MIX_ENV=prod FOREMAN_AGENT_VERSION=${FOREMAN_AGENT_VERSION} FOREMAN_RELEASE_PUBLIC_KEY=${FOREMAN_RELEASE_PUBLIC_KEY}
-RUN apt-get update -y && apt-get install -y --no-install-recommends build-essential git ca-certificates \
+RUN apt-get update -y && apt-get install -y --no-install-recommends build-essential git ca-certificates curl xz-utils \
   && rm -rf /var/lib/apt/lists/*
 RUN mix local.hex --force && mix local.rebar --force
+# Node and the devcontainer CLI ship inside the release, so boxes need
+# neither (see rel/tools/bundle.sh).
+COPY apps/foreman_agent/rel/tools /tools-src
+RUN /tools-src/bundle.sh /tools
+ENV FOREMAN_AGENT_TOOLS=/tools
 WORKDIR /src
 COPY apps/foreman_protocol apps/foreman_protocol
 COPY features features
@@ -36,11 +41,12 @@ COPY --from=agent /foreman_agent.tar.gz /
 
 FROM ${RUNTIME_IMAGE} AS box
 # What the install script expects of a box: systemd, Docker Engine with
-# Compose, nftables (for the box firewall), git, and Node for the
-# devcontainer CLI. Nothing of Foreman's: e2e/linux/run.sh installs the
-# agent with the control plane's install script, as on a real box.
+# Compose, nftables (for the box firewall) and git. No Node: the agent
+# release carries its own for the devcontainer CLI. Nothing of Foreman's:
+# e2e/linux/run.sh installs the agent with the control plane's install
+# script, as on a real box.
 RUN apt-get update -y \
-  && apt-get install -y --no-install-recommends systemd systemd-sysv dbus ca-certificates curl gnupg git procps iptables nftables nodejs npm \
+  && apt-get install -y --no-install-recommends systemd systemd-sysv dbus ca-certificates curl gnupg git procps iptables nftables \
   && install -m 0755 -d /etc/apt/keyrings \
   && curl -fsSL https://download.docker.com/linux/debian/gpg -o /etc/apt/keyrings/docker.asc \
   && echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/debian trixie stable" > /etc/apt/sources.list.d/docker.list \

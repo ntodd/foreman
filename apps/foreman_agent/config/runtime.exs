@@ -28,7 +28,9 @@ if config_env() != :test do
     envs_root: System.get_env("FOREMAN_ENVS_ROOT", "/srv/foreman/envs"),
     secrets_root: System.get_env("FOREMAN_SECRETS_ROOT", "/run/foreman/envs"),
     release_root: System.get_env("FOREMAN_RELEASE_ROOT", "/opt/foreman-agent"),
-    devcontainer: System.get_env("FOREMAN_DEVCONTAINER_CLI", "devcontainer"),
+    # The release carries both; these override it (ForemanAgent.Config.tools/2).
+    devcontainer: System.get_env("FOREMAN_DEVCONTAINER_CLI"),
+    node: System.get_env("FOREMAN_NODE"),
     docker_socket: docker_socket,
     allowed_git_hosts: list.("FOREMAN_ALLOWED_GIT_HOSTS", ["github.com"]),
     insecure_git_hosts: list.("FOREMAN_INSECURE_GIT_HOSTS", []),

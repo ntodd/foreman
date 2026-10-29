@@ -9,7 +9,9 @@ defmodule ForemanAgent.RebootTest do
     %{
       config: %Config{
         reboot_required: Path.join(tmp, "run/reboot-required"),
-        livepatch_dir: Path.join(tmp, "sys/kernel/livepatch")
+        livepatch_dir: Path.join(tmp, "sys/kernel/livepatch"),
+        restart_unit: Path.join(tmp, "etc/systemd/system/foreman-restart.path"),
+        boot_id: Path.join(tmp, "proc/sys/kernel/random/boot_id")
       }
     }
   end
@@ -27,7 +29,12 @@ defmodule ForemanAgent.RebootTest do
   end
 
   test "no flag, no reboot", %{config: config} do
-    assert Reboot.report(config) == %{required: false, packages: [], livepatch: false}
+    assert Reboot.report(config) == %{
+             required: false,
+             packages: [],
+             livepatch: false,
+             can_restart: false
+           }
   end
 
   # update-notifier's hooks write the flag, and the packages that asked
@@ -38,7 +45,8 @@ defmodule ForemanAgent.RebootTest do
     assert Reboot.report(config) == %{
              required: true,
              packages: ["libc6", "linux-image-6.8.0-90-generic"],
-             livepatch: false
+             livepatch: false,
+             can_restart: false
            }
   end
 
@@ -62,5 +70,27 @@ defmodule ForemanAgent.RebootTest do
   test "keeps the package list short", %{config: config} do
     flag(config, Enum.map_join(1..80, "\n", &"pkg#{&1}"))
     assert length(Reboot.report(config).packages) == 50
+  end
+
+  # The install script sets up a root unit that reboots the box when the
+  # agent asks (box.restart); an agent installed before it can't.
+  test "can reboot the box once the install script set up the unit", %{config: config} do
+    boot_id = "0b5a1f0e-7d1c-4c5e-9a43-5f1e2d3c4b5a"
+    File.mkdir_p!(Path.dirname(config.boot_id))
+    File.write!(config.boot_id, boot_id <> "\n")
+
+    assert %{can_restart: false, boot_id: ^boot_id} = Reboot.report(config)
+
+    File.mkdir_p!(Path.dirname(config.restart_unit))
+    File.write!(config.restart_unit, "[Path]\n")
+    assert %{can_restart: true, boot_id: ^boot_id} = Reboot.report(config)
+  end
+
+  test "a boot id it can't read is left out", %{config: config} do
+    File.mkdir_p!(Path.dirname(config.boot_id))
+    File.write!(config.boot_id, "garbage\n")
+    refute Map.has_key?(Reboot.report(config), :boot_id)
+
+    assert {:ok, _} = ForemanProtocol.Event.new("box.reboot", Reboot.report(config))
   end
 end
