@@ -194,25 +194,45 @@ defmodule Foreman.Boxes do
   Records whether a box needs a reboot, as its agent reports it after
   every join and when it changes. A box that starts needing one is news
   (`Foreman.Activity.box_reboot_required/1`); the same report again isn't.
+
+  Agents on protocol 5 also say whether they can reboot the box
+  (`box.restart`) and which boot they're on. A box back on another boot
+  than a reboot was sent for has rebooted, whether or not the agent's
+  answer got through first, so that operation is done.
   """
   def record_reboot(box_id, reboot) do
     if box = get_box(box_id) do
       newly? = reboot.required and box.reboot_required != true
+      boot_id = Map.get(reboot, :boot_id)
 
       box =
         box
         |> Ecto.Changeset.change(
           reboot_required: reboot.required,
           reboot_packages: reboot.packages,
-          livepatch: reboot.livepatch
+          livepatch: Map.get(reboot, :livepatch, false),
+          can_restart: Map.get(reboot, :can_restart, false),
+          boot_id: boot_id
         )
         |> Repo.update!()
 
+      if boot_id, do: finish_restarts(box.id, boot_id)
       broadcast(box, :updated)
       if newly?, do: Foreman.Activity.box_reboot_required(box)
     end
 
     :ok
+  end
+
+  defp finish_restarts(box_id, boot_id) do
+    for %{action: "box.restart", args: %{"boot_id" => sent_for}} = op <-
+          Foreman.Operations.active_for_box(box_id),
+        sent_for != boot_id do
+      Foreman.Operations.mark(op, "succeeded",
+        result: %{"rebooted" => true},
+        finished_at: DateTime.utc_now()
+      )
+    end
   end
 
   @doc """

@@ -44,38 +44,57 @@ defmodule Foreman.Agents do
   end
 
   @doc """
-  Runs a box-level command (inventory, stats, gc). Returns the operation,
-  whose result arrives later.
+  Runs a box-level command (inventory, stats, gc, restart). Returns the
+  operation, whose result arrives later.
+
+  A restart reboots the box, and names the boot the agent last reported:
+  `{:error, :cannot_restart}` for a box whose agent can't (one before
+  protocol 5, or installed before the root unit that does it).
   """
+  def run_box_command(%Scope{} = scope, box, "box.restart") do
+    cond do
+      not Scope.admin?(scope) -> {:error, :unauthorized}
+      not box.can_restart or is_nil(box.boot_id) -> {:error, :cannot_restart}
+      true -> send_box_command(scope, box, "box.restart", %{boot_id: box.boot_id})
+    end
+  end
+
   def run_box_command(%Scope{} = scope, box, type)
       when type in ["box.inventory", "box.stats", "box.gc"] do
-    if Scope.admin?(scope) do
-      {:ok, cmd} = Command.new(type, %{})
+    if Scope.admin?(scope),
+      do: send_box_command(scope, box, type, %{}),
+      else: {:error, :unauthorized}
+  end
 
-      op =
-        Operations.create!(%{
-          id: cmd.op_id,
-          box_id: box.id,
-          user_id: Scope.user_id(scope),
-          action: type,
-          command: type,
-          status: "dispatched",
-          dispatched_at: DateTime.utc_now()
-        })
+  defp send_box_command(scope, box, type, payload) do
+    {:ok, cmd} = Command.new(type, payload)
 
-      case dispatch(box.id, cmd) do
-        :ok ->
-          {:ok, op}
+    op =
+      Operations.create!(%{
+        id: cmd.op_id,
+        box_id: box.id,
+        user_id: Scope.user_id(scope),
+        action: type,
+        command: type,
+        args:
+          if(payload == %{},
+            do: nil,
+            else: Map.new(payload, &{to_string(elem(&1, 0)), elem(&1, 1)})
+          ),
+        status: "dispatched",
+        dispatched_at: DateTime.utc_now()
+      })
 
-        {:error, :offline} ->
-          {:ok,
-           Operations.mark(op, "failed",
-             error: "the box is offline",
-             finished_at: DateTime.utc_now()
-           )}
-      end
-    else
-      {:error, :unauthorized}
+    case dispatch(box.id, cmd) do
+      :ok ->
+        {:ok, op}
+
+      {:error, :offline} ->
+        {:ok,
+         Operations.mark(op, "failed",
+           error: "the box is offline",
+           finished_at: DateTime.utc_now()
+         )}
     end
   end
 

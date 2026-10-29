@@ -93,7 +93,7 @@ defmodule ForemanWeb.AgentChannelTest do
                subscribe_and_join(
                  socket,
                  "agent:#{box.id}",
-                 join_payload(%{"protocol_version" => 3})
+                 join_payload(%{"protocol_version" => ForemanProtocol.version() - 1})
                )
 
       assert Repo.reload!(box).firewall == nil

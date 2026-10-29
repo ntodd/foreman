@@ -170,7 +170,8 @@ defmodule ForemanProtocol.EventTest do
       assert ev.payload == %{
                required: true,
                packages: ["linux-image-6.8.0-90-generic"],
-               livepatch: true
+               livepatch: true,
+               can_restart: false
              }
     end
 

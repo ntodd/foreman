@@ -48,11 +48,15 @@ defmodule ForemanProtocol.Event do
     ],
     # Whether the box needs a reboot (its /run/reboot-required), the
     # packages that asked for it, and whether a livepatch is applied to
-    # the running kernel. After every join and when it changes.
+    # the running kernel. After every join and when it changes. Protocol
+    # 5: whether the agent can reboot the box (box.restart), and the boot
+    # it's on (the kernel's boot_id).
     "box.reboot" => [
       required: {:boolean, required: true},
       packages: {{:list, :string}, default: []},
-      livepatch: {:boolean, default: false}
+      livepatch: {:boolean, default: false},
+      can_restart: {:boolean, default: false},
+      boot_id: {:uuid, []}
     ],
     "box.stats" => [
       capacity:

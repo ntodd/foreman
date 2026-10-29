@@ -14,7 +14,10 @@ defmodule ForemanProtocol do
   # policy rule; the join reports the box's firewall (`firewall`,
   # `firewall_default_bridge`), and box.firewall when it changes.
   # 4: env.start and env.restart can carry `registry_auth`.
-  @version 4
+  # 5: box.restart reboots the box; box.reboot says whether the agent can
+  # (`can_restart`) and which boot it's on (`boot_id`), which the command
+  # names.
+  @version 5
 
   @doc "The protocol version this build speaks."
   def version, do: @version

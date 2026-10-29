@@ -29,6 +29,8 @@ defmodule Foreman.Boxes.Box do
     field :reboot_required, :boolean
     field :reboot_packages, {:array, :string}, default: []
     field :livepatch, :boolean
+    field :can_restart, :boolean, default: false
+    field :boot_id, :string
     field :last_seen_at, :utc_datetime_usec
     field :revoked_at, :utc_datetime_usec
     timestamps()

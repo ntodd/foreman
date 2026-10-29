@@ -83,6 +83,10 @@ defmodule ForemanProtocol.Command do
     "box.inventory" => [],
     "box.stats" => [],
     "box.gc" => [],
+    # Protocol 5. Reboots the box, if it's still on the boot the control
+    # plane saw (box.reboot's `boot_id`): a resend after the reboot is
+    # done already. Sent only to agents that report `can_restart`.
+    "box.restart" => [boot_id: {:uuid, required: true}],
     "op.cancel" => [target_op_id: {:uuid, required: true}],
     "agent.update" => [
       version: {:version, required: true},
