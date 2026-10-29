@@ -3,8 +3,8 @@
 #
 #   curl -fsSL __FOREMAN_URL__/agent/install.sh | sudo sh -s -- --token fj_...
 #
-# Re-running it on an enrolled box updates the agent and the devcontainer
-# CLI and keeps the box's identity (no token needed). To enroll again, for
+# Re-running it on an enrolled box updates the agent and keeps the box's
+# identity (no token needed). To enroll again, for
 # example after the box was revoked, pass --reenroll with a new token.
 #
 # It also installs the box's firewall, which keeps environments (and
@@ -13,14 +13,14 @@
 # default bridge out, for a box whose other containers need the tailnet
 # there; builds can then reach it too.
 #
-# Needs: systemd, Docker Engine with Compose v2.24+, git, and Node 20+
-# (for the devcontainer CLI). The agent runs as the `foreman` user, which
+# Needs: systemd, Docker Engine with Compose v2.24+, git and nftables. The
+# agent release carries its own Node and devcontainer CLI. The agent runs
+# as the `foreman` user, which
 # joins the docker group: that is root-equivalent on this box, so only
 # install it on boxes whose owner you trust with every environment on it.
 set -eu
 
 FOREMAN_URL="__FOREMAN_URL__"
-DEVCONTAINER_CLI_VERSION="0.89.0"
 TOKEN=""
 POLICY=""
 REENROLL=""
@@ -54,7 +54,6 @@ fi
 command -v systemctl >/dev/null 2>&1 || fail "systemd is required"
 command -v docker >/dev/null 2>&1 || fail "Docker Engine is required"
 command -v git >/dev/null 2>&1 || fail "git is required"
-command -v npm >/dev/null 2>&1 || fail "Node.js (with npm) is required for the devcontainer CLI"
 nft=$(command -v nft 2>/dev/null || true)
 [ -n "$nft" ] || fail "nftables is required for the box's firewall (apt install nftables)"
 # The firewall rejects environment traffic out of tailscale0, which on a
@@ -99,9 +98,6 @@ d /run/foreman/envs 0700 foreman foreman -
 EOF
 systemd-tmpfiles --create /etc/tmpfiles.d/foreman.conf
 
-echo "foreman: installing the devcontainer CLI $DEVCONTAINER_CLI_VERSION"
-npm install --prefix /opt/foreman-agent/node --no-fund --no-audit --silent "@devcontainers/cli@$DEVCONTAINER_CLI_VERSION"
-
 echo "foreman: downloading the agent for $target"
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
@@ -141,7 +137,6 @@ if [ -n "$enroll" ]; then join_token="$TOKEN"; fi
 cat > /etc/foreman-agent/agent.env <<EOF
 FOREMAN_URL=$FOREMAN_URL
 FOREMAN_JOIN_TOKEN=$join_token
-FOREMAN_DEVCONTAINER_CLI=/opt/foreman-agent/node/node_modules/.bin/devcontainer
 FOREMAN_POLICY=$POLICY
 HOME=/var/lib/foreman-agent
 RELEASE_TMP=/var/lib/foreman-agent/tmp
@@ -291,6 +286,9 @@ systemctl restart foreman-firewall
 systemctl reset-failed foreman-agent 2>/dev/null || true
 systemctl restart foreman-agent
 rm -rf "$dest.old"
+# Install scripts before the release carried the devcontainer CLI put one
+# here with npm.
+rm -rf /opt/foreman-agent/node
 
 if [ -z "$enroll" ]; then
   echo "foreman: updated; this box keeps its enrollment ($IDENTITY)."

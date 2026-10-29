@@ -63,7 +63,7 @@ An Elixir release running under systemd on each box, as a dedicated `foreman` us
 
 - It connects out to the control plane over WSS with Slipstream.
 - It uses the Docker Engine API (unix socket) for inventory, start/stop, logs and stats.
-- It shells out to `@devcontainers/cli` only for `up` and builds.
+- It shells out to `@devcontainers/cli` only for `up` and builds. The release carries the CLI and the Node it runs on (`priv/tools`, pinned in `rel/tools`), so a box needs neither, and the signed release covers both.
 - It runs child processes under MuonTrap. Cancelling an operation, or a command running past its timeout, kills the command's whole process tree (found through `/proc`), and the environment's next operation waits until it's gone. Every command has a timeout: three hours for `devcontainer up`, 30 minutes for the rest.
 - It holds no durable state of its own. The control plane owns desired state, and Docker labels on the box record what exists (`foreman.env_id`, `foreman.repo`, `foreman.owner`).
 
@@ -73,7 +73,6 @@ The local agent on the personal desktop is the same binary, pointed at `localhos
 - Linux
 - Docker Engine with Compose v2.24+ (needed for the `!reset` tag)
 - git
-- Node with a pinned `@devcontainers/cli`
 - Tailscale on the host, because the control plane is tailnet-only
 
 ### Environment
