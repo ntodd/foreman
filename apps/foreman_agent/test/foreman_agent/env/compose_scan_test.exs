@@ -68,9 +68,11 @@ defmodule ForemanAgent.Env.ComposeScanTest do
   end
 
   test "reads with the Node it's given, and a missing one is an error, not a pass", ctx do
-    main = write(ctx.clone, ".devcontainer/docker-compose.yml", "services: {app: {image: alpine}}\n")
+    main =
+      write(ctx.clone, ".devcontainer/docker-compose.yml", "services: {app: {image: alpine}}\n")
 
-    assert {:ok, _facts} = ComposeScan.scan(ctx.clone, [main], node: System.find_executable("node"))
+    assert {:ok, _facts} =
+             ComposeScan.scan(ctx.clone, [main], node: System.find_executable("node"))
 
     assert {:error, message} =
              ComposeScan.scan(ctx.clone, [main], node: Path.join(ctx.outside, "no-node"))
