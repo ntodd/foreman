@@ -248,6 +248,13 @@ for unit in docker tailscaled foreman-agent foreman-firewall foreman-restart.pat
   [ "$(box "systemctl is-active $unit")" = active ] || fail "$unit isn't active"
 done
 box 'sudo nft list table inet foreman' | grep -q 'fm-\*' || fail "the box's firewall isn't loaded"
+# The firewall's reload timer ticks every 15 seconds; let it, then nothing
+# on the box may have failed.
+sleep 20
+[ "$(box 'systemctl show -p Result --value foreman-firewall-check.service')" = success ] ||
+  fail "the firewall's reload check fails"
+failed=$(box 'systemctl list-units --failed --no-legend --plain')
+[ -z "$failed" ] || fail "failed units on the box: $failed"
 box 'grep -qx REBOOT_STRATEGY=off /etc/flatcar/update.conf' || fail "Flatcar's reboot manager is on"
 box 'test ! -e /etc/foreman-box/provision.env && test ! -e /etc/foreman-box/tailscale-authkey' ||
   fail "the join token was left on the box"
@@ -325,12 +332,14 @@ if [ "${E2E_OS_UPDATE:-}" = 1 ]; then
   say "a Flatcar update waits for a reboot from the box's page"
   os1=$(box '. /etc/os-release && echo $VERSION_ID')
   box 'echo GROUP=beta | sudo tee -a /etc/flatcar/update.conf >/dev/null && sudo systemctl restart update-engine && sleep 3 && sudo update_engine_client -check_for_update' >/dev/null 2>&1 || true
+  # update-engine creates the flag itself; the check timer (every minute)
+  # adds what asked for it.
   i=0
-  until [ "$(reboot_field required)" = true ]; do
-    i=$((i + 15)); [ $i -lt 1500 ] || fail "the update was never flagged"; sleep 15
+  until reboot_field packages | grep -q 'flatcar-'; do
+    i=$((i + 15)); [ $i -lt 1500 ] || fail "the update was never flagged ($(reboot_field required), $(reboot_field packages))"; sleep 15
   done
+  [ "$(reboot_field required)" = true ] || fail "the update's package came without the flag"
   packages=$(reboot_field packages)
-  echo "$packages" | grep -q '^flatcar-\|,flatcar-' || fail "flagged without the Flatcar version: $packages"
   echo "ok: flagged as a reboot the box needs ($packages); the box stays up"
   n=$(joins flatbox)
   node e2e/lv-click.mjs "$cp_url" "$cookie" "/boxes/$box_id" run '{"type":"box.restart"}' >/dev/null
