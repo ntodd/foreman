@@ -1,8 +1,10 @@
 defmodule ForemanWeb.AgentController do
   @moduledoc """
   What agents fetch over plain HTTP: enrollment, the install script and
-  release tarballs. Enrollment needs a join token; tarballs are signed,
-  and agents verify the signature themselves.
+  release tarballs, and for Flatcar boxes the launchers (`mac.sh`,
+  `vm.sh`) and their first-boot config. Enrollment and the config need a
+  join token; tarballs are signed, and agents verify the signature
+  themselves.
   """
   use ForemanWeb, :controller
 
@@ -38,17 +40,63 @@ defmodule ForemanWeb.AgentController do
     end
   end
 
+  def install_script(conn, _params), do: send_script(conn, "install.sh")
+  def mac_script(conn, _params), do: send_script(conn, "mac.sh")
+  def vm_script(conn, _params), do: send_script(conn, "vm.sh")
+
   # sobelow_skip ["Traversal.FileModule"]
-  # A fixed path inside the release.
-  def install_script(conn, _params) do
+  # A fixed path inside the release, one of the three above.
+  defp send_script(conn, name) when name in ["install.sh", "mac.sh", "vm.sh"] do
     script =
-      Application.app_dir(:foreman, "priv/agent/install.sh")
+      Application.app_dir(:foreman, Path.join("priv/agent", name))
       |> File.read!()
       |> String.replace("__FOREMAN_URL__", Foreman.Config.base_url())
 
     conn
     |> put_resp_content_type("text/x-shellscript")
     |> send_resp(200, script)
+  end
+
+  @doc """
+  A Flatcar box's first-boot config for a join token (see
+  `Foreman.Boxes.flatcar_ignition/2`). It carries the token, so a bad one
+  counts against the client like a failed enrollment.
+  """
+  def flatcar_ignition(conn, params) do
+    key = "enroll-failed:#{ForemanWeb.ClientIP.from_conn(conn)}"
+
+    with false <- RateLimit.exhausted?(key, @window, @max_failures),
+         {:ok, config, box_name} <- Boxes.flatcar_ignition(params["join_token"], params) do
+      conn
+      |> put_resp_header("cache-control", "no-store")
+      |> put_resp_header("x-foreman-box", box_name)
+      |> json(config)
+    else
+      true ->
+        conn |> put_status(:too_many_requests) |> json(%{error: "too many attempts"})
+
+      {:error, :invalid_token} ->
+        RateLimit.failed(key, @window, @max_failures)
+
+        conn
+        |> put_status(:unauthorized)
+        |> json(%{error: "join token is invalid, expired or used"})
+
+      {:error, :bad_arch} ->
+        conn
+        |> put_status(:bad_request)
+        |> json(%{
+          error: "arch must be one of: #{Enum.join(Foreman.Boxes.Flatcar.arches(), ", ")}"
+        })
+
+      {:error, :bad_ssh_key} ->
+        conn |> put_status(:bad_request) |> json(%{error: "ssh_keys must be SSH public keys"})
+
+      {:error, {:tailscale, reason}} ->
+        conn
+        |> put_status(:bad_gateway)
+        |> json(%{error: "Tailscale wouldn't mint the box a key: #{inspect(reason)}"})
+    end
   end
 
   # sobelow_skip ["Traversal.SendFile"]

@@ -62,6 +62,7 @@ if config_env() != :test do
       client_secret: System.get_env("FOREMAN_TAILSCALE_CLIENT_SECRET"),
       tailnet: System.get_env("FOREMAN_TAILSCALE_TAILNET", "-"),
       tags: list.("FOREMAN_TAILSCALE_TAGS"),
+      box_tags: list.("FOREMAN_TAILSCALE_BOX_TAGS"),
       deployment_tag: deployment_tag
     },
     tailnet_sweep: System.get_env("FOREMAN_TAILNET_SWEEP", "true") != "false",

@@ -1,0 +1,39 @@
+# A control plane (the release image) and a git server for the fixture
+# repo, published on this machine's ports for a Flatcar VM to reach.
+# Driven by e2e/flatcar/run.sh, which names the project and the image and
+# sets the address the VM reaches this machine at (E2E_GUEST_HOST).
+name: foreman-flatcar
+
+services:
+  cp:
+    image: ${E2E_CP_IMAGE:-foreman-flatcar-cp}
+    environment:
+      SECRET_KEY_BASE: ${SECRET_KEY_BASE:-}
+      FOREMAN_ENCRYPTION_KEY: ${FOREMAN_ENCRYPTION_KEY:-}
+      FOREMAN_AGENT_RELEASE_PUBLIC_KEY: ${FOREMAN_RELEASE_PUBLIC_KEY:-}
+      PHX_HOST: ${E2E_GUEST_HOST:-127.0.0.1}
+      PORT: "4000"
+      FOREMAN_LISTEN_IP: 0.0.0.0
+      # Where the box (in its VM) reaches the control plane: this
+      # machine, as the VM's network sees it.
+      FOREMAN_BASE_URL: http://${E2E_GUEST_HOST:-127.0.0.1}:${E2E_CP_PORT:-4180}
+      FOREMAN_FORCE_SSL: "false"
+      FOREMAN_SECURE_COOKIES: "false"
+      FOREMAN_GIT_BASE_URL: http://${E2E_GUEST_HOST:-127.0.0.1}:${E2E_GIT_PORT:-4181}
+      FOREMAN_AGENT_RELEASE_DIR: /var/lib/foreman/releases
+      # e2e/lv-click.mjs connects from this machine.
+      FOREMAN_EXTRA_ORIGINS: http://127.0.0.1:${E2E_CP_PORT:-4180}
+    ports:
+      - "${E2E_BIND:-127.0.0.1}:${E2E_CP_PORT:-4180}:4000"
+    volumes:
+      - cp-data:/var/lib/foreman
+
+  git:
+    # Docker Hub's busybox, from its ECR Public mirror (no anonymous rate limit).
+    image: public.ecr.aws/docker/library/busybox:1.37
+    command: ["httpd", "-f", "-v", "-p", "8080", "-h", "/srv"]
+    ports:
+      - "${E2E_BIND:-127.0.0.1}:${E2E_GIT_PORT:-4181}:8080"
+
+volumes:
+  cp-data:

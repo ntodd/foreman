@@ -22,6 +22,7 @@ defmodule ForemanWeb.BoxLive.Index do
      socket
      |> assign(:page_title, "Boxes")
      |> assign(:join, nil)
+     |> assign(:tailscale?, Foreman.Tailscale.configured?())
      |> assign(
        :form,
        to_form(%{"box_name" => "", "owner_user_id" => socket.assigns.current_scope.user.id},
@@ -65,14 +66,12 @@ defmodule ForemanWeb.BoxLive.Index do
 
   @impl true
   def handle_event("create_token", %{"box" => params}, socket) do
+    params = Map.update(params, "tailscale_auth_key", nil, &blank_to_nil/1)
+
     case Boxes.create_join_token(socket.assigns.current_scope, params) do
       {:ok, token} ->
-        name = params["box_name"]
-
-        command =
-          "curl -fsSL #{Foreman.Config.base_url()}/agent/install.sh | sudo sh -s -- --token #{token}"
-
-        {:noreply, assign(socket, :join, %{name: name, token: token, command: command})}
+        join = %{name: params["box_name"], token: token, kind: "linux", ignition: nil}
+        {:noreply, assign(socket, :join, join)}
 
       {:error, %Ecto.Changeset{} = changeset} ->
         {:noreply, assign(socket, :form, to_form(changeset, as: :box))}
@@ -82,7 +81,62 @@ defmodule ForemanWeb.BoxLive.Index do
     end
   end
 
+  def handle_event("join_kind", %{"kind" => kind}, %{assigns: %{join: %{} = join}} = socket)
+      when kind in ["linux", "mac", "vm", "flatcar"] do
+    join = %{join | kind: kind}
+
+    # The configs carry the box's Tailscale key, minted the first time.
+    join =
+      if kind == "flatcar" and is_nil(join.ignition),
+        do: %{join | ignition: ignition_downloads(join.token)},
+        else: join
+
+    {:noreply, assign(socket, :join, join)}
+  end
+
   def handle_event("done", _params, socket), do: {:noreply, assign(socket, :join, nil)}
+
+  defp ignition_downloads(token) do
+    Enum.reduce_while(Foreman.Boxes.Flatcar.arches(), {:ok, []}, fn arch, {:ok, acc} ->
+      case Boxes.flatcar_ignition(token, %{"arch" => arch}) do
+        {:ok, config, _name} ->
+          url = "data:application/json;base64," <> Base.encode64(JSON.encode!(config))
+          {:cont, {:ok, acc ++ [{arch, url}]}}
+
+        {:error, {:tailscale, reason}} ->
+          {:halt, {:error, "Tailscale wouldn't mint the box a key: #{inspect(reason)}"}}
+
+        {:error, reason} ->
+          {:halt, {:error, "couldn't make the config: #{inspect(reason)}"}}
+      end
+    end)
+  end
+
+  defp blank_to_nil(value) when is_binary(value),
+    do: if(String.trim(value) == "", do: nil, else: String.trim(value))
+
+  defp blank_to_nil(value), do: value
+
+  defp join_command(%{kind: kind, token: token}) do
+    url = Foreman.Config.base_url()
+
+    case kind do
+      "mac" -> "curl -fsSL #{url}/agent/mac.sh | sh -s -- --token #{token}"
+      "vm" -> "curl -fsSL #{url}/agent/vm.sh | sudo sh -s -- --token #{token}"
+      _ -> "curl -fsSL #{url}/agent/install.sh | sudo sh -s -- --token #{token}"
+    end
+  end
+
+  defp join_label(%{kind: "mac", name: name}),
+    do:
+      "Run this on the Mac that hosts #{name}. It runs the box as a Flatcar VM (Apple's hypervisor, through vfkit) that starts at login:"
+
+  defp join_label(%{kind: "vm", name: name}),
+    do:
+      "Run this on the Linux machine that hosts #{name}. It needs KVM, and runs the box as a Flatcar VM under QEMU, apart from the host and updating itself:"
+
+  defp join_label(%{name: name}),
+    do: "Run this on #{name} (Linux with systemd, Docker Engine with Compose, git and nftables):"
 
   @impl true
   def handle_info({:box_metrics, box_id, point}, socket) do
@@ -259,11 +313,76 @@ defmodule ForemanWeb.BoxLive.Index do
         <:subtitle>Creates a single-use join token that expires in an hour.</:subtitle>
         <%= if @join do %>
           <div class="space-y-4">
+            <div id="join-kinds" class="inline-flex rounded-lg border border-line-strong p-0.5">
+              <button
+                :for={
+                  {kind, label} <- [
+                    {"linux", "Linux"},
+                    {"mac", "Mac"},
+                    {"vm", "Linux VM"},
+                    {"flatcar", "Flatcar"}
+                  ]
+                }
+                type="button"
+                phx-click="join_kind"
+                phx-value-kind={kind}
+                aria-pressed={to_string(@join.kind == kind)}
+                class={[
+                  "rounded-md px-3 py-1 text-xs font-medium transition-colors",
+                  if(@join.kind == kind,
+                    do: "bg-subtle text-ink shadow-control",
+                    else: "text-ink-2 hover:text-ink"
+                  )
+                ]}
+              >
+                {label}
+              </button>
+            </div>
             <.command
+              :if={@join.kind != "flatcar"}
               id="install-command"
-              label={"Run this on #{@join.name} (Linux with Docker, git and Node):"}
-              command={@join.command}
+              label={join_label(@join)}
+              command={join_command(@join)}
             />
+            <div
+              :if={@join.kind == "flatcar"}
+              id="flatcar-config"
+              class="space-y-3 text-sm text-ink-2"
+            >
+              <p>
+                For bare metal, or any other hypervisor: boot Flatcar Container Linux with this first-boot config. On bare metal, from Flatcar's live image: <code class="font-mono text-xs">flatcar-install -d /dev/sda -i {@join.name}-amd64.ign</code>. The box sets itself up and enrolls on its first boot.
+              </p>
+              <%= case @join.ignition do %>
+                <% {:ok, downloads} -> %>
+                  <div class="flex flex-wrap gap-2">
+                    <a
+                      :for={{arch, url} <- downloads}
+                      id={"ignition-#{arch}"}
+                      href={url}
+                      download={"#{@join.name}-#{arch}.ign"}
+                      class="inline-flex items-center gap-1.5 rounded-lg border border-line-strong bg-canvas px-3 py-1.5 text-xs font-medium text-ink shadow-control hover:bg-subtle"
+                    >
+                      <.icon name="hero-arrow-down-tray-micro" class="size-3.5" />
+                      {@join.name}-{arch}.ign
+                    </a>
+                  </div>
+                <% {:error, message} -> %>
+                  <.callout kind="danger">{message}</.callout>
+                <% nil -> %>
+              <% end %>
+              <p class="text-xs">
+                The config holds the join token{if @tailscale?,
+                  do:
+                    " and a single-use Tailscale key tagged #{Enum.join(Foreman.Tailscale.box_tags(), ", ")}",
+                  else: ""}; keep it to yourself.
+              </p>
+            </div>
+            <.callout
+              :if={@join.kind in ["mac", "vm", "flatcar"] and not @tailscale?}
+              kind="warning"
+            >
+              Without a Tailscale OAuth client, a Flatcar box only joins the tailnet with a key pasted when the token was made. Without one, it reaches Foreman only if its network can (a Mac's own tailnet, say).
+            </.callout>
             <.callout kind="info">
               The token is shown once. The agent generates its own key and uses the token to enroll; after that, the token is spent.
             </.callout>
@@ -289,6 +408,14 @@ defmodule ForemanWeb.BoxLive.Index do
               options={Enum.map(@users, &{&1.login, &1.id})}
             />
             <.button type="submit" variant="primary">Create join token</.button>
+            <.input
+              :if={not @tailscale?}
+              field={@form[:tailscale_auth_key]}
+              type="password"
+              label="Tailscale auth key, for a Flatcar box (optional)"
+              placeholder="tskey-auth-..."
+              autocomplete="off"
+            />
           </.form>
         <% end %>
       </.panel>

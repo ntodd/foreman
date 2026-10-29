@@ -59,6 +59,9 @@ defmodule ForemanWeb.Router do
 
     post "/api/agents/enroll", AgentController, :enroll
     get "/agent/install.sh", AgentController, :install_script
+    get "/agent/mac.sh", AgentController, :mac_script
+    get "/agent/vm.sh", AgentController, :vm_script
+    post "/agent/flatcar/ignition", AgentController, :flatcar_ignition
     get "/agent/releases/:version/:target", AgentController, :release
   end
 
