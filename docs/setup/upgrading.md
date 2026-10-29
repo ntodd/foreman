@@ -171,7 +171,9 @@ to.
 Some releases change what the install script sets up on a box, which a
 self-update can't do: the box firewall, for one, which keeps
 environments off the tailnet as the box (see
-[tailscale.md](tailscale.md#boxes-on-the-tailnet)). A box whose agent
+[tailscale.md](tailscale.md#boxes-on-the-tailnet)), and the unit that
+reboots a box from its page (a box without it says so in its reboot
+alert, and offers no Reboot). A box whose agent
 reports no firewall, or older rules than the agent ships with, gets an
 alert on its page and its cards. Run the install command on it again;
 an enrolled box needs no token, but pass any `--policy` or

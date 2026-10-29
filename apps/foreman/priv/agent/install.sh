@@ -219,7 +219,8 @@ After=foreman-firewall.service
 
 [Service]
 Type=oneshot
-ExecStart=/etc/foreman-agent/firewall-check
+# Through sh: /etc is mounted noexec on Flatcar.
+ExecStart=/bin/sh /etc/foreman-agent/firewall-check
 EOF
 
 cat > /etc/systemd/system/foreman-firewall-check.timer <<'EOF'
@@ -340,7 +341,8 @@ After=update-engine.service
 
 [Service]
 Type=oneshot
-ExecStart=/etc/foreman-agent/flatcar-update-check
+# Through sh: Flatcar mounts /etc noexec.
+ExecStart=/bin/sh /etc/foreman-agent/flatcar-update-check
 EOF
 
   cat > /etc/systemd/system/foreman-flatcar-update.timer <<'EOF'
