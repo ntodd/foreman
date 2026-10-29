@@ -222,6 +222,27 @@ token=$($compose exec -T cp env -u PHX_SERVER E2E_ADMIN=e2e E2E_BOX=flatbox /app
 [ -n "$token" ] || fail "no join token"
 publish 0.1.0
 
+say "a bad token fails before anything is installed, and leaves nothing behind"
+if [ "$launcher" = mac ]; then
+  bad_home=$root/$work/bad-home
+  curl -fsSL "$cp_url/agent/mac.sh" |
+    FOREMAN_BOX_HOME=$bad_home FOREMAN_BOX_LABEL=$project-bad sh -s -- --url "$cp_url" --token fj_not_a_token \
+    > "$work/bad.log" 2>&1 && fail "the launcher took a bad token"
+  [ ! -e "$bad_home" ] || fail "a failed launcher left $bad_home"
+  [ ! -e "$HOME/Library/LaunchAgents/$project-bad.plist" ] || fail "a failed launcher left its launchd job"
+else
+  # The log is ours, not root's.
+  # shellcheck disable=SC2024
+  curl -fsSL "$cp_url/agent/vm.sh" |
+    sudo FOREMAN_BOX_DIR="$box_dir-bad" FOREMAN_BOX_UNIT="$project-bad" sh -s -- --url "$cp_url" --token fj_not_a_token \
+    > "$work/bad.log" 2>&1 && fail "the launcher took a bad token"
+  [ ! -e "$box_dir-bad" ] || fail "a failed launcher left $box_dir-bad"
+  [ ! -e "/etc/systemd/system/$project-bad.service" ] || fail "a failed launcher left its unit"
+  [ ! -e "/usr/local/sbin/$project-bad" ] || fail "a failed launcher left its command"
+fi
+grep -q "Foreman said 401" "$work/bad.log" || { cat "$work/bad.log" >&2; fail "the launcher didn't say why"; }
+echo "ok: refused with Foreman's answer, nothing left"
+
 say "the launcher makes the box, which enrolls on its first boot"
 start=$(date +%s)
 if [ "$launcher" = mac ]; then
@@ -299,6 +320,34 @@ wait_for_env hello-1 running 600
 box "docker exec -u vscode \$(docker ps -q --filter label=foreman.env_id --filter label=com.docker.compose.service=app) bash -lc 'echo \$SIDECAR_TOKEN'" |
   grep -q flatcar-secret-1 || fail "secrets not back after the reboot"
 echo "ok: rebooted, rejoined on a new boot, environment and secrets back"
+
+say "the VM's process dies, and launchd or systemd brings the box back"
+n=$(joins flatbox)
+if [ "$launcher" = mac ]; then
+  pkill -9 -f "vfkit.*$box_home/box/disk.img" || fail "no vfkit to kill"
+else
+  qemu_pid=$(systemctl show -p MainPID --value "$project")
+  [ "${qemu_pid:-0}" -gt 0 ] || fail "no QEMU to kill"
+  sudo kill -9 "$qemu_pid"
+fi
+wait_for "agent rejoined after the VM died" 300 joined_more flatbox "$n"
+wait_for_env hello-1 running 600
+echo "ok: the box came back on its own"
+
+say "running the launcher again updates it and keeps the box"
+n=$(joins flatbox)
+if [ "$launcher" = mac ]; then
+  curl -fsSL "$cp_url/agent/mac.sh" | FOREMAN_BOX_HOME=$box_home FOREMAN_BOX_LABEL=$project sh -s -- --url "$cp_url" |
+    tee "$work/update.log"
+else
+  curl -fsSL "$cp_url/agent/vm.sh" | sudo FOREMAN_BOX_DIR="$box_dir" FOREMAN_BOX_UNIT="$project" sh -s -- --url "$cp_url" |
+    tee "$work/update.log"
+fi
+grep -q "the box keeps its disk and enrollment" "$work/update.log" || fail "the launcher didn't update in place"
+sleep 10
+[ "$(joins flatbox)" = "$n" ] || fail "updating the launcher restarted the box"
+box true || fail "the box isn't up after the update"
+echo "ok: updated in place, the box untouched"
 
 if [ "$launcher" = mac ]; then
   say "the Mac sleeps: the VM stops for 90 seconds"

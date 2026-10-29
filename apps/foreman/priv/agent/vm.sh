@@ -195,6 +195,51 @@ find_firmware() {
   done
 }
 
+new=""
+[ -f "$DIR/box.conf" ] || new=1
+# A new box, until it starts: a failure leaves nothing of it behind.
+fresh_dir="" fresh_user="" fresh_unit="" fresh_self=""
+work=$(mktemp -d)
+# shellcheck disable=SC2329 # the EXIT trap runs it
+cleanup() {
+  rm -rf "$work"
+  [ -z "$fresh_unit" ] || { rm -f "/etc/systemd/system/$UNIT.service"; systemctl daemon-reload; }
+  [ -z "$fresh_self" ] || rm -f "$SELF"
+  [ -z "$fresh_dir" ] || rm -rf "$DIR"
+  [ -z "$fresh_user" ] || userdel "$USER_NAME" 2>/dev/null || true
+}
+trap cleanup EXIT
+
+if [ -n "$new" ]; then
+  [ -n "$TOKEN" ] || fail "--token is required (create one under Boxes, Add a box, in Foreman)"
+
+  cores=$(nproc)
+  mem_gib=$(($(sed -n 's/^MemTotal: *\([0-9]*\) kB/\1/p' /proc/meminfo) / 1048576))
+  [ -n "$CPUS" ] || CPUS=$((cores / 2 > 2 ? cores / 2 : 2))
+  [ -n "$MEMORY" ] || MEMORY=$((mem_gib / 2 > 16 ? 16 : (mem_gib / 2 < 4 ? 4 : mem_gib / 2)))
+  [ "$CPUS" -le "$cores" ] || fail "--cpus $CPUS is more than this machine's $cores"
+  [ "$MEMORY" -lt "$mem_gib" ] || fail "--memory $MEMORY GiB leaves nothing for this machine's $mem_gib GiB"
+  [ "$DISK" -ge 20 ] || fail "--disk needs at least 20 GiB"
+
+  [ -e "$DIR" ] || fresh_dir=1
+  [ -e "/etc/systemd/system/$UNIT.service" ] || fresh_unit=1
+  [ -e "$SELF" ] || fresh_self=1
+  id "$USER_NAME" >/dev/null 2>&1 || fresh_user=1
+
+  # A key of its own for `foreman-box ssh`, and the box's MAC address.
+  ssh-keygen -q -t ed25519 -N "" -C "foreman-box@$(hostname)" -f "$work/id_ed25519" </dev/null
+  mac=$(od -An -N3 -tx1 /dev/urandom | tr -s ' ' ':' | sed 's/^/52:54:00/; s/:$//')
+
+  # First, so a bad token fails before anything is installed.
+  say "asking $FOREMAN_URL for the box's first-boot config"
+  code=$(curl -sS -D "$work/headers" -o "$work/config.ign" -w '%{http_code}' \
+    -X POST "$FOREMAN_URL/agent/flatcar/ignition" \
+    --data-urlencode "join_token=$TOKEN" --data-urlencode "arch=$arch" \
+    --data-urlencode "ssh_keys[]=$(cat "$work/id_ed25519.pub")" </dev/null) || fail "couldn't reach $FOREMAN_URL"
+  [ "$code" = 200 ] || fail "Foreman said $code: $(cat "$work/config.ign")"
+  name=$(tr -d '\r' < "$work/headers" | sed -n 's/^[Xx]-[Ff]oreman-[Bb]ox: *//p' | tail -1)
+fi
+
 # bzip2 for Flatcar's image, which minimal systems (Ubuntu's cloud
 # images) leave out.
 packages="$packages bzip2"
@@ -283,7 +328,7 @@ WantedBy=multi-user.target
 EOF
 systemctl daemon-reload
 
-if [ -f "$DIR/box.conf" ]; then
+if [ -z "$new" ]; then
   # An update: the box and its disk stay as they are. (To start over with
   # a new token: foreman-box uninstall --yes, then this again.)
   { grep -v -e '^cpus=' -e '^memory=' -e '^qemu=' -e '^firmware=' -e '^aio=' "$DIR/box.conf"
@@ -300,30 +345,6 @@ if [ -f "$DIR/box.conf" ]; then
   say "updated; the box keeps its disk and enrollment"
   exit 0
 fi
-
-[ -n "$TOKEN" ] || fail "--token is required (create one under Boxes, Add a box, in Foreman)"
-
-cores=$(nproc)
-mem_gib=$(($(sed -n 's/^MemTotal: *\([0-9]*\) kB/\1/p' /proc/meminfo) / 1048576))
-[ -n "$CPUS" ] || CPUS=$((cores / 2 > 2 ? cores / 2 : 2))
-[ -n "$MEMORY" ] || MEMORY=$((mem_gib / 2 > 16 ? 16 : (mem_gib / 2 < 4 ? 4 : mem_gib / 2)))
-[ "$CPUS" -le "$cores" ] || fail "--cpus $CPUS is more than this machine's $cores"
-[ "$MEMORY" -lt "$mem_gib" ] || fail "--memory $MEMORY GiB leaves nothing for this machine's $mem_gib GiB"
-[ "$DISK" -ge 20 ] || fail "--disk needs at least 20 GiB"
-
-work=$(mktemp -d)
-trap 'rm -rf "$work"' EXIT
-
-[ -f "$DIR/id_ed25519" ] || ssh-keygen -q -t ed25519 -N "" -C "foreman-box@$(hostname)" -f "$DIR/id_ed25519" </dev/null
-mac=$(od -An -N3 -tx1 /dev/urandom | tr -s ' ' ':' | sed 's/^/52:54:00/; s/:$//')
-
-say "asking $FOREMAN_URL for the box's first-boot config"
-code=$(curl -sS -D "$work/headers" -o "$work/config.ign" -w '%{http_code}' \
-  -X POST "$FOREMAN_URL/agent/flatcar/ignition" \
-  --data-urlencode "join_token=$TOKEN" --data-urlencode "arch=$arch" \
-  --data-urlencode "ssh_keys[]=$(cat "$DIR/id_ed25519.pub")" </dev/null) || fail "couldn't reach $FOREMAN_URL"
-[ "$code" = 200 ] || fail "Foreman said $code: $(cat "$work/config.ign")"
-name=$(tr -d '\r' < "$work/headers" | sed -n 's/^[Xx]-[Ff]oreman-[Bb]ox: *//p' | tail -1)
 
 images="$DIR/images/$FLATCAR_VERSION-$arch"
 mkdir -p "$images"
@@ -345,6 +366,8 @@ mv -f "$DIR/disk.img.part" "$DIR/disk.img"
 rm -rf "$DIR/images"
 cp "$firmware_vars" "$DIR/efi-vars.fd"
 install -m 0600 "$work/config.ign" "$DIR/config.ign"
+install -m 0600 "$work/id_ed25519" "$DIR/id_ed25519"
+install -m 0644 "$work/id_ed25519.pub" "$DIR/id_ed25519.pub"
 
 cat > "$DIR/box.conf" <<EOF
 name=$name
@@ -359,8 +382,9 @@ aio=$aio
 flatcar=$FLATCAR_VERSION
 EOF
 chown -R "$USER_NAME:$USER_NAME" "$DIR"
-chmod 0600 "$DIR/id_ed25519"
 
+# The box exists from here on, and keeps trying whatever happens next.
+fresh_dir="" fresh_user="" fresh_unit="" fresh_self=""
 say "starting the box ($CPUS CPUs, $MEMORY GiB); it sets itself up on its first boot"
 systemctl enable "$UNIT" >/dev/null 2>&1
 systemctl restart "$UNIT"
