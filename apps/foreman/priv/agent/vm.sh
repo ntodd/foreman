@@ -207,7 +207,8 @@ new=""
 # A new box, until it starts: a failure leaves nothing of it behind.
 fresh_dir="" fresh_user="" fresh_unit="" fresh_self=""
 work=$(mktemp -d)
-# shellcheck disable=SC2329 # the EXIT trap runs it
+# The EXIT trap runs it (SC2317 and SC2329 are the same check in older and newer ShellCheck).
+# shellcheck disable=SC2317,SC2329
 cleanup() {
   rm -rf "$work"
   [ -z "$fresh_unit" ] || { rm -f "/etc/systemd/system/$UNIT.service"; systemctl daemon-reload; }

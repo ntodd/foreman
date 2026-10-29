@@ -275,7 +275,8 @@ fi
 fresh=""
 [ -e "$HOME_DIR" ] || fresh=1
 work="$HOME_DIR/install"
-# shellcheck disable=SC2329 # the EXIT trap runs it
+# The EXIT trap runs it (SC2317 and SC2329 are the same check in older and newer ShellCheck).
+# shellcheck disable=SC2317,SC2329
 cleanup() {
   rm -rf "$work"
   if [ -n "$fresh" ]; then

@@ -333,7 +333,7 @@ node e2e/lv-click.mjs "$cp_url" "$cookie" "/boxes/$box_id" run '{"type":"box.res
   fail "the Reboot button didn't send the reboot"
 wait_for "agent rejoined after the reboot" 300 joined_more flatbox "$n"
 boot2=$(reboot_field boot)
-[ -n "$boot2" ] && [ "$boot2" != "$boot1" ] || fail "the box is on the same boot ($boot1)"
+if [ -z "$boot2" ] || [ "$boot2" = "$boot1" ]; then fail "the box is on the same boot ($boot1)"; fi
 wait_for_env hello-1 running 600
 box "docker exec -u vscode \$(docker ps -q --filter label=foreman.env_id --filter label=com.docker.compose.service=app) bash -lc 'echo \$SIDECAR_TOKEN'" |
   grep -q flatcar-secret-1 || fail "secrets not back after the reboot"
