@@ -10,7 +10,7 @@ defmodule Foreman.Boxes do
   """
   import Ecto.Query
 
-  alias Foreman.Boxes.{Box, JoinToken}
+  alias Foreman.Boxes.{Box, Flatcar, JoinToken}
   alias Foreman.{Audit, Repo, Scope}
 
   @token_ttl 3600
@@ -47,11 +47,14 @@ defmodule Foreman.Boxes do
   """
   def create_join_token(%Scope{} = scope, attrs) do
     changeset =
-      {%{}, %{box_name: :string, owner_user_id: :binary_id}}
-      |> Ecto.Changeset.cast(attrs, [:box_name, :owner_user_id])
+      {%{}, %{box_name: :string, owner_user_id: :binary_id, tailscale_auth_key: :string}}
+      |> Ecto.Changeset.cast(attrs, [:box_name, :owner_user_id, :tailscale_auth_key])
       |> Ecto.Changeset.validate_required([:box_name])
       |> Ecto.Changeset.validate_format(:box_name, ~r/\A[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\z/,
         message: "must be lowercase letters, digits and dashes"
+      )
+      |> Ecto.Changeset.validate_format(:tailscale_auth_key, ~r/\Atskey-[A-Za-z0-9_-]+\z/,
+        message: "must be a Tailscale auth key (tskey-...)"
       )
 
     cond do
@@ -70,6 +73,7 @@ defmodule Foreman.Boxes do
           box_name: data.box_name,
           owner_user_id: data[:owner_user_id] || scope.user.id,
           created_by_id: scope.user.id,
+          tailscale_auth_key: data[:tailscale_auth_key],
           expires_at: DateTime.add(DateTime.utc_now(), @token_ttl)
         })
 
@@ -103,6 +107,81 @@ defmodule Foreman.Boxes do
   end
 
   def enroll(_, _), do: {:error, :invalid_token}
+
+  @doc """
+  The first-boot config (Ignition) for a Flatcar box that enrolls with
+  `raw_token`, for `params["arch"]` (amd64 or arm64), with
+  `params["ssh_keys"]` (a list, or one per line) for the core user, and
+  the name the box will have. See `Foreman.Boxes.Flatcar`.
+
+  The box joins the tailnet with a key of its own: the one pasted when
+  the token was made, or one the control plane's Tailscale OAuth client
+  mints for the token the first time it's asked (tagged
+  `Foreman.Tailscale.box_tags/0`), and keeps for later asks. Without
+  either, the box has to reach the control plane some other way.
+  """
+  def flatcar_ignition(raw_token, params) do
+    with true <- params["arch"] in Flatcar.arches() || {:error, :bad_arch},
+         %JoinToken{} = token <- valid_join_token(raw_token) || {:error, :invalid_token},
+         {:ok, key} <- box_tailscale_key(token),
+         {:ok, config} <-
+           Flatcar.ignition(%{
+             url: Foreman.Config.base_url(),
+             join_token: raw_token,
+             name: token.box_name,
+             arch: params["arch"],
+             tailscale_auth_key: key,
+             ssh_keys: ssh_keys(params["ssh_keys"])
+           }) do
+      {:ok, config, token.box_name}
+    end
+  end
+
+  defp valid_join_token(raw) when is_binary(raw) do
+    now = DateTime.utc_now()
+
+    case Repo.get_by(JoinToken, token_hash: hash(raw)) do
+      %JoinToken{used_at: nil} = token ->
+        if DateTime.compare(token.expires_at, now) == :gt, do: token
+
+      _ ->
+        nil
+    end
+  end
+
+  defp valid_join_token(_), do: nil
+
+  defp box_tailscale_key(%JoinToken{tailscale_auth_key: key}) when is_binary(key), do: {:ok, key}
+
+  defp box_tailscale_key(token) do
+    if Foreman.Tailscale.configured?() do
+      Repo.transact(fn ->
+        case Repo.reload!(token) do
+          %JoinToken{tailscale_auth_key: key} when is_binary(key) -> {:ok, key}
+          token -> mint_box_key(token)
+        end
+      end)
+    else
+      {:ok, nil}
+    end
+  end
+
+  defp mint_box_key(token) do
+    case Foreman.Tailscale.create_box_auth_key(token.box_name) do
+      {:ok, %{key: key}} ->
+        token |> Ecto.Changeset.change(tailscale_auth_key: key) |> Repo.update!()
+        {:ok, key}
+
+      {:error, reason} ->
+        {:error, {:tailscale, reason}}
+    end
+  end
+
+  defp ssh_keys(keys) when is_list(keys),
+    do: Enum.reject(keys, &(not is_binary(&1) or String.trim(&1) == ""))
+
+  defp ssh_keys(keys) when is_binary(keys), do: keys |> String.split(~r/\R/) |> ssh_keys()
+  defp ssh_keys(_), do: []
 
   defp upsert_enrolled_box(token, public_key, attrs) do
     box = Repo.get_by(Box, name: token.box_name) || %Box{name: token.box_name}
