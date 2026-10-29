@@ -32,6 +32,11 @@ defmodule ForemanAgent.Config do
             firewall_info: "/etc/foreman-agent/firewall.info",
             reboot_required: "/run/reboot-required",
             livepatch_dir: "/sys/kernel/livepatch",
+            # The root unit the install script sets up to reboot the box
+            # (box.restart), and the file it watches.
+            restart_unit: "/etc/systemd/system/foreman-restart.path",
+            restart_request: "/run/foreman/restart",
+            boot_id: "/proc/sys/kernel/random/boot_id",
             join_token: nil,
             connect: true,
             tailscale_join_wait: :timer.seconds(30)

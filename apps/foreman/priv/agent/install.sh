@@ -276,9 +276,90 @@ Type=oneshot
 ExecStart=/bin/sh -c 'cd /opt/foreman-agent && if [ -L previous ]; then ln -sfn "$(readlink previous)" current && rm -f previous update-pending && systemctl reset-failed foreman-agent && systemctl start foreman-agent; else echo "no previous release to roll back to"; fi'
 EOF
 
+# Reboots the box when an admin asks for it in Foreman (box.restart). The
+# agent can't: it runs unprivileged. It writes /run/foreman/restart, and
+# this root unit reboots the box a few seconds later, which leaves the
+# agent time to answer. Environments only see their own directories below
+# /run/foreman/envs, so nothing they run can ask.
+cat > /etc/systemd/system/foreman-restart.path <<'EOF'
+[Unit]
+Description=Reboot the box when the Foreman agent asks
+
+[Path]
+PathExists=/run/foreman/restart
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+cat > /etc/systemd/system/foreman-restart.service <<'EOF'
+[Unit]
+Description=Reboot the box for the Foreman agent
+
+[Service]
+Type=oneshot
+ExecStart=/bin/sh -c 'rm -f /run/foreman/restart; sleep 5; exec systemctl reboot'
+EOF
+
+# Flatcar applies OS updates to its other partition by itself, and its
+# reboot manager would then reboot the box whenever it liked. Foreman
+# shows the update as a reboot the box needs instead (the flag the agent
+# reports), and the box reboots when an admin asks.
+# shellcheck disable=SC1091
+os_id=$(. /etc/os-release 2>/dev/null && echo "${ID:-}")
+if [ "$os_id" = flatcar ]; then
+  echo "foreman: Flatcar: OS updates wait for a reboot from Foreman"
+  install -d -m 0755 /etc/flatcar
+  { grep -v '^REBOOT_STRATEGY=' /etc/flatcar/update.conf 2>/dev/null || true; echo REBOOT_STRATEGY=off; } \
+    > /etc/flatcar/update.conf.new
+  mv /etc/flatcar/update.conf.new /etc/flatcar/update.conf
+  systemctl try-restart locksmithd.service 2>/dev/null || true
+
+  cat > /etc/foreman-agent/flatcar-update-check <<'EOF'
+#!/bin/sh
+# Flags an OS update update-engine has applied, which takes effect on the
+# next boot, the way Debian flags one: /run/reboot-required, with what
+# asked for it in /run/reboot-required.pkgs. The agent reports both.
+set -u
+status=$(update_engine_client -status 2>/dev/null) || exit 0
+case "$status" in
+  *UPDATE_STATUS_UPDATED_NEED_REBOOT*) ;;
+  *) exit 0 ;;
+esac
+version=$(printf '%s\n' "$status" | sed -n 's/^NEW_VERSION=//p')
+line="flatcar-${version:-update}"
+grep -qxF "$line" /run/reboot-required.pkgs 2>/dev/null || echo "$line" >> /run/reboot-required.pkgs
+[ -e /run/reboot-required ] || echo "*** System restart required ***" > /run/reboot-required
+EOF
+  chmod 0755 /etc/foreman-agent/flatcar-update-check
+
+  cat > /etc/systemd/system/foreman-flatcar-update.service <<'EOF'
+[Unit]
+Description=Flag a Flatcar update waiting for a reboot
+After=update-engine.service
+
+[Service]
+Type=oneshot
+ExecStart=/etc/foreman-agent/flatcar-update-check
+EOF
+
+  cat > /etc/systemd/system/foreman-flatcar-update.timer <<'EOF'
+[Unit]
+Description=Check for a Flatcar update waiting for a reboot
+
+[Timer]
+OnBootSec=1min
+OnUnitActiveSec=1min
+
+[Install]
+WantedBy=timers.target
+EOF
+fi
+
 systemctl daemon-reload
 systemctl enable foreman-firewall foreman-agent
-systemctl enable --now foreman-firewall-check.timer
+systemctl enable --now foreman-firewall-check.timer foreman-restart.path
+if [ "$os_id" = flatcar ]; then systemctl enable --now foreman-flatcar-update.timer; fi
 # Loads the rules again on a re-run, in case they changed.
 systemctl restart foreman-firewall
 # Restart, not start: on a re-run the agent may already be running (or

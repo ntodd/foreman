@@ -9,6 +9,7 @@ defmodule ForemanAgent.Handler do
     Ops,
     Outbox,
     Redactor,
+    Restart,
     Runner,
     Stats,
     Updater
@@ -47,6 +48,9 @@ defmodule ForemanAgent.Handler do
   end
 
   def handle(%Command{type: "box.gc"}, log), do: gc(ctx(log))
+
+  def handle(%Command{type: "box.restart", payload: %{boot_id: boot_id}}, _log),
+    do: Restart.request(Config.get(), boot_id)
 
   def handle(%Command{type: "agent.update", payload: payload} = cmd, log) do
     with {:ok, result} <- Updater.run(payload, Config.get(), log) do

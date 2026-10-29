@@ -182,8 +182,13 @@ defmodule ForemanWeb.ForemanComponents do
     """
   end
 
-  @doc "The box page's alert for a box that needs a reboot, with what asked for it."
+  @doc """
+  The box page's alert for a box that needs a reboot, with what asked for
+  it, and (`can_reboot`: an admin, the box online) a button that reboots
+  it when its agent can.
+  """
   attr :box, :map, required: true
+  attr :can_reboot, :boolean, default: false
 
   def box_reboot_alert(assigns) do
     assigns = assign(assigns, :needed, Foreman.Boxes.reboot_needed(assigns.box))
@@ -200,6 +205,17 @@ defmodule ForemanWeb.ForemanComponents do
       <p :if={@box.reboot_packages != []} class="mt-2 text-xs">
         For: <span class="font-mono break-all">{Enum.join(@box.reboot_packages, ", ")}</span>
       </p>
+      <p :if={@can_reboot and not @box.can_restart} class="mt-2 text-xs">
+        To reboot it from here, run the install command on the box again; it sets up what Foreman reboots it with.
+      </p>
+      <:actions :if={@can_reboot and @box.can_restart}>
+        <.button
+          size="sm"
+          phx-click="run"
+          phx-value-type="box.restart"
+          data-confirm={"Reboot #{@box.name}? Its environments stop, and come back up once it rejoins."}
+        >Reboot now</.button>
+      </:actions>
     </.callout>
     """
   end
@@ -398,6 +414,7 @@ defmodule ForemanWeb.ForemanComponents do
   def action_label("box.inventory"), do: "Refresh inventory"
   def action_label("box.stats"), do: "Refresh stats"
   def action_label("box.gc"), do: "Prune images and caches"
+  def action_label("box.restart"), do: "Reboot"
   def action_label("agent.update"), do: "Update agent"
   def action_label("op.cancel"), do: "Cancel an operation"
   def action_label(other), do: other
