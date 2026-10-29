@@ -75,6 +75,16 @@ The local agent on the personal desktop is the same binary, pointed at `localhos
 - git
 - Tailscale on the host, because the control plane is tailnet-only
 
+Or Flatcar Container Linux, which has all of that from its first boot (see [Flatcar boxes](#flatcar-boxes)).
+
+### Flatcar boxes
+
+A box can run Flatcar Container Linux: in a VM on a Mac (`mac.sh`: vfkit on Apple's hypervisor, under launchd) or on a Linux machine with KVM (`vm.sh`: QEMU as an unprivileged user under systemd, with user-mode networking), or on bare metal. The control plane makes the box's first-boot config (Ignition) for a join token, `Foreman.Boxes.Flatcar`: Compose and Tailscale as system extensions from Flatcar's sysext bakery, pinned by digest and updated by systemd-sysupdate; the box's own Tailscale key, minted by the control plane's OAuth client (`tag:foreman-box`) or pasted with the token; and a oneshot unit that joins the tailnet, waits for the control plane and runs its install script. The launchers fetch the config from `POST /agent/flatcar/ignition` with the token; "Add a box" offers it to download for bare metal.
+
+The config reaches the box the way its platform allows. Under QEMU, Flatcar reads it from `fw_cfg`. Apple's hypervisor has no such channel, the image's OEM partition is btrfs, which macOS can't write, and Flatcar's initrd has no vsock for vfkit's own Ignition server, so `mac.sh` boots the image's kernel once with `systemd.run` to stage the config with `flatcar-reset` from a small ISO, then boots it normally with EFI.
+
+Flatcar updates itself to its other partition. The install script turns off its reboot manager and flags an applied update in `/run/reboot-required`, as it does a new extension, so both show as a reboot the box needs and wait for an admin's Reboot. On Apple's hypervisor the VM's clock stops while the Mac sleeps; a timer sets it from the RTC, which follows the Mac's clock, so the agent's signed connects aren't refused afterwards. See [setup/flatcar.md](setup/flatcar.md) and [setup/mac.md](setup/mac.md).
+
 ### Environment
 
 One devcontainer compose project, plus a Foreman overlay and the Foreman devcontainer feature. An environment belongs to one user, one repo and one box.
