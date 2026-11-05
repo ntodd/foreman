@@ -56,9 +56,14 @@ defmodule ForemanWeb.AdminLive.Users do
 
       <section class="rounded-xl border border-line bg-raised shadow-xs">
         <ul class="divide-y divide-line">
-          <li :for={user <- @users} id={"user-#{user.id}"} class="flex items-center gap-3 px-5 py-3">
+          <li
+            :for={user <- @users}
+            id={"user-#{user.id}"}
+            class="flex flex-wrap items-center gap-x-3 gap-y-2 px-5 py-3"
+          >
             <.avatar user={user} class="size-8 text-xs" />
-            <div class="min-w-0 flex-1">
+            <%!-- The actions drop to their own line when there's no room. --%>
+            <div class="min-w-0 flex-1 basis-32">
               <p class="truncate text-sm font-medium text-ink">{user.login}</p>
               <p class="truncate text-xs text-ink-3">
                 {user.name}<span :if={user.github_login_expired}> · GitHub login expired</span><span :if={
@@ -74,27 +79,29 @@ defmodule ForemanWeb.AdminLive.Users do
                 <span :if={options != %{}} class="break-all">{JSON.encode!(options)}</span>
               </p>
             </div>
-            <.badge :if={user.role == "admin"} color="brand" size="sm">Admin</.badge>
-            <%= if user.id != @current_scope.user.id do %>
-              <.button
-                size="sm"
-                variant="ghost"
-                phx-click="role"
-                phx-value-id={user.id}
-                phx-value-role={if user.role == "admin", do: "member", else: "admin"}
-              >
-                {if user.role == "admin", do: "Make member", else: "Make admin"}
-              </.button>
-              <.button
-                size="sm"
-                variant={if user.disabled_at, do: "secondary", else: "danger_outline"}
-                phx-click="disable"
-                phx-value-id={user.id}
-                phx-value-disabled={to_string(is_nil(user.disabled_at))}
-              >
-                {if user.disabled_at, do: "Enable", else: "Disable"}
-              </.button>
-            <% end %>
+            <div class="ml-auto flex items-center gap-3">
+              <.badge :if={user.role == "admin"} color="brand" size="sm">Admin</.badge>
+              <%= if user.id != @current_scope.user.id do %>
+                <.button
+                  size="sm"
+                  variant="ghost"
+                  phx-click="role"
+                  phx-value-id={user.id}
+                  phx-value-role={if user.role == "admin", do: "member", else: "admin"}
+                >
+                  {if user.role == "admin", do: "Make member", else: "Make admin"}
+                </.button>
+                <.button
+                  size="sm"
+                  variant={if user.disabled_at, do: "secondary", else: "danger_outline"}
+                  phx-click="disable"
+                  phx-value-id={user.id}
+                  phx-value-disabled={to_string(is_nil(user.disabled_at))}
+                >
+                  {if user.disabled_at, do: "Enable", else: "Disable"}
+                </.button>
+              <% end %>
+            </div>
           </li>
         </ul>
       </section>

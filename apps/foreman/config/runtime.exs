@@ -7,6 +7,27 @@ list = fn name ->
   name |> System.get_env("") |> String.split(",", trim: true) |> Enum.map(&String.trim/1)
 end
 
+# A value, or nil when it's unset or empty: `FOREMAN_ALLOWED_ORG=` in an
+# env file means no org, not an org named "".
+present = fn name ->
+  case System.get_env(name) do
+    nil -> nil
+    value -> if String.trim(value) == "", do: nil, else: value
+  end
+end
+
+# On or off. Unset or empty takes the default; anything that isn't a
+# spelling of true or false stops the boot, so a typo can't quietly turn
+# a security setting off.
+flag = fn name, default ->
+  case name |> System.get_env("") |> String.trim() |> String.downcase() do
+    "" -> default
+    value when value in ~w(true 1 yes on) -> true
+    value when value in ~w(false 0 no off) -> false
+    value -> raise "#{name} must be true or false, got #{inspect(value)}"
+  end
+end
+
 if System.get_env("PHX_SERVER") do
   config :foreman, ForemanWeb.Endpoint, server: true
 end
@@ -34,6 +55,19 @@ end
 # Settings every environment reads (dev and prod), with defaults that suit
 # a single-user personal deployment.
 if config_env() != :test do
+  # Peers allowed to say who the client is (X-Forwarded-For), besides
+  # loopback: addresses, CIDR ranges, or `gateway`. See ForemanWeb.ClientIP.
+  trusted_proxies = list.("FOREMAN_TRUSTED_PROXIES")
+
+  try do
+    ForemanWeb.ClientIP.parse_trusted(trusted_proxies)
+  rescue
+    e in ArgumentError ->
+      reraise ArgumentError, "FOREMAN_TRUSTED_PROXIES: #{Exception.message(e)}", __STACKTRACE__
+  end
+
+  config :foreman, trusted_proxies: trusted_proxies
+
   deployment_tag = System.get_env("FOREMAN_TAILSCALE_DEPLOYMENT_TAG", "")
 
   if deployment_tag != "" and not (deployment_tag =~ ~r/\Atag:[A-Za-z0-9][A-Za-z0-9-]{0,62}\z/) do
@@ -44,7 +78,7 @@ if config_env() != :test do
     slug_style: if(System.get_env("FOREMAN_SLUG_STYLE") == "team", do: :team, else: :personal),
     admins: list.("FOREMAN_ADMINS"),
     allowed_users: list.("FOREMAN_ALLOWED_USERS"),
-    allowed_org: System.get_env("FOREMAN_ALLOWED_ORG"),
+    allowed_org: present.("FOREMAN_ALLOWED_ORG"),
     git_base_url: System.get_env("FOREMAN_GIT_BASE_URL", "https://github.com"),
     agent_release_public_key: System.get_env("FOREMAN_AGENT_RELEASE_PUBLIC_KEY"),
     agent_release_dir: System.get_env("FOREMAN_AGENT_RELEASE_DIR"),
@@ -53,9 +87,9 @@ if config_env() != :test do
       client_id: System.get_env("FOREMAN_GITHUB_CLIENT_ID"),
       client_secret: System.get_env("FOREMAN_GITHUB_CLIENT_SECRET"),
       private_key:
-        System.get_env("FOREMAN_GITHUB_PRIVATE_KEY") ||
-          (System.get_env("FOREMAN_GITHUB_PRIVATE_KEY_FILE") &&
-             File.read!(System.get_env("FOREMAN_GITHUB_PRIVATE_KEY_FILE")))
+        present.("FOREMAN_GITHUB_PRIVATE_KEY") ||
+          (present.("FOREMAN_GITHUB_PRIVATE_KEY_FILE") &&
+             File.read!(present.("FOREMAN_GITHUB_PRIVATE_KEY_FILE")))
     },
     tailscale: %{
       client_id: System.get_env("FOREMAN_TAILSCALE_CLIENT_ID"),
@@ -64,8 +98,8 @@ if config_env() != :test do
       tags: list.("FOREMAN_TAILSCALE_TAGS"),
       deployment_tag: deployment_tag
     },
-    tailnet_sweep: System.get_env("FOREMAN_TAILNET_SWEEP", "true") != "false",
-    update_check: System.get_env("FOREMAN_UPDATE_CHECK", "true") != "false",
+    tailnet_sweep: flag.("FOREMAN_TAILNET_SWEEP", true),
+    update_check: flag.("FOREMAN_UPDATE_CHECK", true),
     update_repo: System.get_env("FOREMAN_UPDATE_REPO", "ntodd/foreman"),
     update_dir: System.get_env("FOREMAN_UPDATE_DIR", "/var/lib/foreman-update")
 end
@@ -96,7 +130,7 @@ if config_env() == :prod do
 
     # TLS with certificate checks by default (Neon requires TLS).
     ssl =
-      if System.get_env("DATABASE_SSL", "true") == "true" do
+      if flag.("DATABASE_SSL", true) do
         [
           verify: :verify_peer,
           cacerts: :public_key.cacerts_get(),
@@ -160,7 +194,7 @@ if config_env() == :prod do
     ]
 
   host =
-    System.get_env("PHX_HOST") ||
+    present.("PHX_HOST") ||
       raise "PHX_HOST is missing (the tailnet host name, e.g. foreman.tail1234.ts.net)"
 
   # Listens on loopback by default: put `tailscale serve` in front of it
@@ -172,10 +206,10 @@ if config_env() == :prod do
     |> :inet.parse_address()
 
   config :foreman,
-    force_ssl: System.get_env("FOREMAN_FORCE_SSL", "true") == "true",
-    secure_cookies: System.get_env("FOREMAN_SECURE_COOKIES", "true") == "true",
+    force_ssl: flag.("FOREMAN_FORCE_SSL", true),
+    secure_cookies: flag.("FOREMAN_SECURE_COOKIES", true),
     # Overrides the https://PHX_HOST base URL agents and GitHub are given.
-    base_url: System.get_env("FOREMAN_BASE_URL")
+    base_url: present.("FOREMAN_BASE_URL")
 
   config :foreman, ForemanWeb.Endpoint,
     url: [host: host, port: 443, scheme: "https"],

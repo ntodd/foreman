@@ -177,9 +177,13 @@ defmodule Foreman.Environments.Server do
   # If it can't be rebuilt, it fails rather than sitting there as if it
   # were on the box, holding up the queue; it's failed the way Housekeeping
   # does, so a result from a box that was running it after all still wins.
+  # What the rebuilt command carries (the secrets' hashes, whether it has
+  # a token) replaces what the first send recorded, since that's what the
+  # result will be judged against. The state before it began stays.
   defp resend_op(op, env) do
     case Commands.build(op, env) do
-      {:ok, cmd, _extra} ->
+      {:ok, cmd, extra} ->
+        Foreman.Operations.refresh_args(op, Map.delete(extra, "prior_state"))
         Foreman.Operations.Redactions.put(op.id, cmd, env)
         Agents.dispatch(env.box_id, cmd)
 

@@ -172,4 +172,41 @@ defmodule Foreman.EnvironmentsCommandsTest do
       refute "features" in Map.keys(Command.to_wire(cmd)["payload"])
     end
   end
+
+  test "a secret whose name is now reserved stays out of compose_env, not the command", %{
+    user: user,
+    env: env
+  } do
+    # Stored before the name was reserved.
+    Repo.insert!(%Foreman.Secrets.Secret{
+      scope: "user",
+      scope_key: "user:" <> user.id,
+      user_id: user.id,
+      name: "GIT_CONFIG_KEY_0",
+      value: "core.fsmonitor"
+    })
+
+    Repo.insert!(%Foreman.Secrets.Secret{
+      scope: "user",
+      scope_key: "user:" <> user.id,
+      user_id: user.id,
+      name: "API_KEY",
+      value: "k"
+    })
+
+    op =
+      Foreman.Operations.create!(%{
+        id: Ecto.UUID.generate(),
+        environment_id: env.id,
+        box_id: env.box_id,
+        action: "start",
+        command: "start",
+        status: "queued"
+      })
+
+    assert {:ok, %Command{type: "env.start", payload: payload}, _extra} =
+             Foreman.Environments.Commands.build(op, env)
+
+    assert payload.compose_env == %{"API_KEY" => "k"}
+  end
 end

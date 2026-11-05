@@ -41,10 +41,24 @@ defmodule ForemanAgent.Env.ComposeScan do
     project_dir = Path.dirname(first)
     queue = Enum.map(compose_files, &{&1, project_dir})
 
-    case walk(queue, %{clone: clone, seen: MapSet.new(), facts: []}) do
-      {:ok, state} -> {:ok, state.facts |> Enum.reverse() |> Enum.uniq()}
-      {:error, _} = error -> error
+    case walk(queue, %{clone: clone, seen: MapSet.new(), bases: MapSet.new(), facts: []}) do
+      {:ok, state} ->
+        {:ok, (Enum.reverse(state.facts) ++ dotenv_facts(state.bases, clone)) |> Enum.uniq()}
+
+      {:error, _} = error ->
+        error
     end
+  end
+
+  # Compose reads a project directory's .env for interpolation, the main
+  # project's and each include's, and follows a symlink there like any
+  # other. (An extended file's directory is counted too; compose doesn't
+  # read a .env there, but a link out of the workspace is still one.)
+  defp dotenv_facts(bases, clone) do
+    for base <- Enum.sort(bases),
+        path = Path.join(base, ".env"),
+        match?({:ok, _}, File.lstat(path)),
+        do: {:file, "compose reads #{Path.relative_to(path, clone)}", path}
   end
 
   defp walk([], state), do: {:ok, state}
@@ -58,7 +72,11 @@ defmodule ForemanAgent.Env.ComposeScan do
         {:error, "the compose files include too many others (more than #{@max_files})"}
 
       true ->
-        state = %{state | seen: MapSet.put(state.seen, path)}
+        state = %{
+          state
+          | seen: MapSet.put(state.seen, path),
+            bases: MapSet.put(state.bases, base)
+        }
 
         with {:ok, doc} <- read(state.clone, path),
              {:ok, facts, more} <- document(doc, path, base, state.clone) do
@@ -148,7 +166,8 @@ defmodule ForemanAgent.Env.ComposeScan do
 
     services =
       for top <- tops,
-          {name, svc} <- map(top["services"]),
+          services <- candidates(map(top["services"])),
+          {name, svc} <- services,
           fact <- service(name, svc, ctx),
           do: fact
 
@@ -193,10 +212,12 @@ defmodule ForemanAgent.Env.ComposeScan do
     if Policy.known_service_key?(key), do: [], else: [{:key, "service '#{service}'", key}]
   end
 
-  # env_file: a path, a list of paths, or a list of {path, required}.
+  # env_file: a path, a list of paths, or a list of {path, required},
+  # which can come from a merge like anything else.
   defp file_paths(value) do
     for entry <- List.wrap(value),
-        path = if(is_map(entry), do: entry["path"], else: entry),
+        candidate <- if(is_map(entry), do: candidates(entry), else: [entry]),
+        path = if(is_map(candidate), do: candidate["path"], else: candidate),
         is_binary(path),
         do: path
   end
@@ -269,7 +290,8 @@ defmodule ForemanAgent.Env.ComposeScan do
 
   defp extends(tops, ctx) do
     for top <- tops,
-        {name, svc} <- map(top["services"]),
+        services <- candidates(map(top["services"])),
+        {name, svc} <- services,
         m <- candidates(svc),
         %{} = ext <- [m["extends"]],
         reduce: {[], []} do

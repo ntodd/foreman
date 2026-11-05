@@ -44,7 +44,11 @@ gaps" section is the place to start.
   takes a renamed user's old login doesn't get their account.
   Sign-in attempts are rate limited per client. Behind a loopback proxy
   (`tailscale serve`) the client is the last `X-Forwarded-For` entry;
-  that header is ignored from any other peer.
+  that header is ignored from any other peer, except those in
+  `FOREMAN_TRUSTED_PROXIES`. The image trusts its default gateway, which
+  is where connections to the port Docker publishes on the host's
+  loopback come from; without that, every client behind the proxy
+  shared one limit.
 - Sessions: a random 32-byte token in an encrypted, signed, `HttpOnly`,
   `SameSite=Lax` cookie (`Secure` in production); only its SHA-256 is
   stored, so a database leak doesn't leak sessions. Sessions last 30
@@ -85,7 +89,10 @@ gaps" section is the place to start.
   as their use: slugs are DNS labels, env ids UUIDs, branch names can't
   start with `-`, clone URLs can't carry credentials, secret file names
   come from an allowlist, compose variables can't override `PATH`,
-  `DOCKER_HOST`, `LD_PRELOAD` and the like.
+  `DOCKER_HOST` and the like, or set anything that loads code into the
+  agent's own tools: any `LD_` variable, `GCONV_PATH`, `NODE_PATH`, git
+  config through the environment (`GIT_CONFIG_*`) and git's helper
+  commands and trace files.
 - An agent may only report on its own box's operations and
   environments; anything else is refused and logged.
 - Agent self-update: the release signature (ed25519 over version, target

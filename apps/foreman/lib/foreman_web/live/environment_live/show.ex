@@ -119,6 +119,7 @@ defmodule ForemanWeb.EnvironmentLive.Show do
         "restart_affected" -> Environments.restart(scope, env, :affected)
         "restart_all" -> Environments.restart(scope, env, :all)
         "logs" -> Environments.logs(scope, env)
+        _ -> {:error, "That isn't something an environment can do."}
       end
 
     case result do
@@ -219,11 +220,12 @@ defmodule ForemanWeb.EnvironmentLive.Show do
   def handle_event("cancel_destroy", _params, socket),
     do: {:noreply, assign(socket, :destroy_check, nil)}
 
-  def handle_event("confirm_input", %{"confirm" => value}, socket) do
-    {:noreply, update(socket, :destroy_check, &%{&1 | confirm: value})}
-  end
+  def handle_event("confirm_input", %{"confirm" => value}, socket),
+    do: {:noreply, put_confirm(socket, value)}
 
-  def handle_event("destroy", _params, socket) do
+  # The Destroy button, or Enter in the confirmation field.
+  def handle_event("destroy", params, socket) do
+    socket = put_confirm(socket, params["confirm"])
     %{env: env, destroy_check: check} = socket.assigns
 
     if destroy_allowed?(check, env) do
@@ -239,6 +241,12 @@ defmodule ForemanWeb.EnvironmentLive.Show do
       {:noreply, socket}
     end
   end
+
+  defp put_confirm(%{assigns: %{destroy_check: %{} = check}} = socket, value)
+       when is_binary(value),
+       do: assign(socket, :destroy_check, %{check | confirm: value})
+
+  defp put_confirm(socket, _value), do: socket
 
   # A clean tree destroys with one click; anything that would be lost
   # (or a status we couldn't get) needs the slug typed out.
@@ -773,6 +781,7 @@ defmodule ForemanWeb.EnvironmentLive.Show do
             }
             id="confirm-destroy"
             phx-change="confirm_input"
+            phx-submit="destroy"
             class="mt-4"
           >
             <.input

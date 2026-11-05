@@ -26,11 +26,17 @@ defmodule ForemanWeb.SecretsComponent do
      |> assign(:secrets, secrets)
      |> assign_new(:repos, fn -> [] end)
      |> assign_new(:description, fn -> nil end)
-     |> assign_new(:form, fn ->
-       to_form(%{"name" => "", "value" => "", "repo_ids" => []}, as: :secret)
-     end)
+     |> assign_new(:form, fn -> blank_form(socket) end)
      |> assign_new(:editing, fn -> nil end)}
   end
+
+  # A page can hold several of these (one per owner on Deployment): the
+  # component's id keeps their inputs' ids apart.
+  defp secret_form(socket, data),
+    do: to_form(data, as: :secret, id: "#{socket.assigns.id}-secret")
+
+  defp blank_form(socket),
+    do: secret_form(socket, %{"name" => "", "value" => "", "repo_ids" => []})
 
   @impl true
   def render(assigns) do
@@ -104,12 +110,12 @@ defmodule ForemanWeb.SecretsComponent do
             />
           </div>
           <.input
-            :if={@scope_name == "user" and @repos != []}
+            :if={@scope_name == "user" and repo_options(@repos, @form) != []}
             field={@form[:repo_ids]}
             type="select"
             multiple
             label="Only for these repos (leave empty for all)"
-            options={Enum.map(@repos, &{&1.full_name, &1.id})}
+            options={repo_options(@repos, @form)}
           />
           <div class="flex items-center gap-2">
             <.button type="submit" variant="primary" size="sm">{if @editing,
@@ -128,6 +134,27 @@ defmodule ForemanWeb.SecretsComponent do
       </.panel>
     </div>
     """
+  end
+
+  # The repos a secret can be limited to, plus any it's limited to that
+  # aren't listed any more (no devcontainer now, or gone). Without an
+  # option those can't stay selected, and a Replace that sends no repos
+  # widens the secret to every repo.
+  defp repo_options(repos, form) do
+    listed = Enum.map(repos, &{&1.full_name, &1.id})
+    known = MapSet.new(repos, & &1.id)
+
+    unlisted =
+      case List.wrap(form[:repo_ids].value) |> Enum.reject(&(&1 in ["", nil] or &1 in known)) do
+        [] ->
+          []
+
+        ids ->
+          names = Foreman.Repos.full_names(ids)
+          Enum.map(ids, &{"#{names[&1] || "A removed repo"} (not listed)", &1})
+      end
+
+    listed ++ unlisted
   end
 
   defp repo_names(ids, repos) do
@@ -153,11 +180,11 @@ defmodule ForemanWeb.SecretsComponent do
         {:noreply,
          socket
          |> assign(:editing, nil)
-         |> assign(:form, to_form(%{"name" => "", "value" => "", "repo_ids" => []}, as: :secret))
+         |> assign(:form, blank_form(socket))
          |> assign(:secrets, list_secrets(socket))}
 
       {:error, %Ecto.Changeset{} = changeset} ->
-        {:noreply, assign(socket, :form, to_form(%{changeset | action: :insert}, as: :secret))}
+        {:noreply, assign(socket, :form, secret_form(socket, %{changeset | action: :insert}))}
 
       {:error, :unauthorized} ->
         {:noreply, socket}
@@ -178,7 +205,7 @@ defmodule ForemanWeb.SecretsComponent do
      |> assign(:editing, name)
      |> assign(
        :form,
-       to_form(%{"name" => name, "value" => "", "repo_ids" => repo_ids}, as: :secret)
+       secret_form(socket, %{"name" => name, "value" => "", "repo_ids" => repo_ids})
      )}
   end
 
@@ -186,7 +213,7 @@ defmodule ForemanWeb.SecretsComponent do
     {:noreply,
      socket
      |> assign(:editing, nil)
-     |> assign(:form, to_form(%{"name" => "", "value" => "", "repo_ids" => []}, as: :secret))}
+     |> assign(:form, blank_form(socket))}
   end
 
   def handle_event("delete", %{"name" => name}, socket) do

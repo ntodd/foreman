@@ -388,9 +388,13 @@ defmodule Foreman.Environments do
     end
   end
 
+  # The id comes from the browser; Postgres refuses a non-UUID outright.
   defp fetch_operation(env, op_id) do
-    case Operations.get(op_id) do
-      %Foreman.Operations.Operation{environment_id: id} = op when id == env.id -> {:ok, op}
+    with {:ok, op_id} <- Ecto.UUID.cast(op_id),
+         %Foreman.Operations.Operation{environment_id: id} = op when id == env.id <-
+           Operations.get(op_id) do
+      {:ok, op}
+    else
       _ -> {:error, "That operation isn't this environment's."}
     end
   end
@@ -747,14 +751,28 @@ defmodule Foreman.Environments do
     |> then(&if(action in @fresh_build, do: Map.put(&1, :ts_authkey, nil), else: &1))
   end
 
+  # Nothing's running with the old secrets any more; a start picks up
+  # whatever is current.
   defp result_attrs(%{status: "succeeded", action: "stop"}, _env),
-    do: %{observed_state: "stopped", status_message: nil}
+    do: %{
+      observed_state: "stopped",
+      status_message: nil,
+      pending_restart: false,
+      pending_changes: []
+    }
 
   defp result_attrs(%{status: "succeeded", action: "destroy"}, _env),
     do: %{observed_state: "destroyed", destroyed_at: DateTime.utc_now(), status_message: nil}
 
-  defp result_attrs(%{status: "succeeded", action: "secrets_write"} = op, _env),
-    do: put_token_pushed(%{}, op.args || %{})
+  # A write that works clears the message an earlier failed one left.
+  defp result_attrs(%{status: "succeeded", action: "secrets_write"} = op, env) do
+    attrs = put_token_pushed(%{}, op.args || %{})
+
+    if is_binary(env.status_message) and
+         String.starts_with?(env.status_message, "secrets_write failed"),
+       do: Map.put(attrs, :status_message, nil),
+       else: attrs
+  end
 
   # Cancelled before it was sent: nothing happened on the box. Only a
   # first create that never ran leaves anything to show (a Retry).
@@ -779,6 +797,9 @@ defmodule Foreman.Environments do
     op
     |> revert_desired(env)
     |> Map.merge(%{observed_state: "error", status_message: error || status})
+    # It never came up, so its next build is a first boot and gets a
+    # fresh Tailscale key; this one may have expired by then.
+    |> then(&if(env.created_once, do: &1, else: Map.put(&1, :ts_authkey, nil)))
   end
 
   # The environment is back where it was before the stop or destroy began.
@@ -892,8 +913,10 @@ defmodule Foreman.Environments do
       current = env |> Secrets.resolve() |> Secrets.hashes()
       changed = Secrets.changed_names(env.applied_secret_hashes, current)
 
+      # A stopped environment has nothing running to restart; its next
+      # start gets the new secrets.
       env =
-        if changed == [],
+        if changed == [] or env.desired_state != "running",
           do: update_env!(env, %{pending_restart: false, pending_changes: []}),
           else: update_env!(env, %{pending_restart: true, pending_changes: changed})
 

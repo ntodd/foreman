@@ -6,6 +6,7 @@ defmodule ForemanAgent.Application do
   def start(_type, _args) do
     config = ForemanAgent.Config.load()
     ForemanAgent.Config.put(config)
+    ForemanAgent.Env.sweep_docker_configs(config)
 
     # Ops holds the running operations and Outbox their unsent results, so
     # they sit apart from the link to the control plane: a socket or

@@ -173,6 +173,53 @@ defmodule ForemanAgent.Env.ComposeScanTest do
              ) =~ "protected"
     end
 
+    test "an env_file entry that's a merge", ctx do
+      assert refused(
+               check(ctx, """
+               x-e: &e {path: #{ctx.other_secrets}}
+               services:
+                 app: {image: alpine, env_file: [{<<: *e}]}
+               """)
+             ) =~ "protected"
+    end
+
+    test "a service merged into services itself", ctx do
+      assert refused(
+               check(ctx, """
+               x-s: &s
+                 evil: {image: alpine, env_file: #{ctx.other_secrets}}
+               services:
+                 <<: [*s]
+                 app: {image: alpine}
+               """)
+             ) =~ "protected"
+    end
+
+    # Compose reads the project directory's .env for interpolation.
+    test "a project .env that links out of the workspace", ctx do
+      File.ln_s!(ctx.other_secrets, Path.join(ctx.clone, ".devcontainer/.env"))
+
+      assert refused(
+               check(ctx, """
+               services:
+                 app: {image: alpine, environment: {X: "${DATABASE_URL}"}}
+               """)
+             ) =~ "protected"
+    end
+
+    test "an included project's .env that links out", ctx do
+      write(ctx.clone, "shared/compose.yml", "services:\n  db: {image: postgres}\n")
+      File.ln_s!(ctx.other_secrets, Path.join(ctx.clone, "shared/.env"))
+
+      assert refused(check(ctx, "include: [../shared/compose.yml]\nservices: {}\n")) =~
+               "protected"
+    end
+
+    test "the repo's own .env is fine", ctx do
+      write(ctx.clone, ".devcontainer/.env", "A=1\n")
+      assert {:ok, []} = check(ctx, "services:\n  app: {image: alpine}\n")
+    end
+
     test "an include chain is followed", ctx do
       write(ctx.clone, ".devcontainer/a/one.yml", "include: [../b/two.yml]\n")
 

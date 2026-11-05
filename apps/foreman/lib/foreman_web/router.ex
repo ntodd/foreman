@@ -97,7 +97,12 @@ defmodule ForemanWeb.Router do
   scope "/admin" do
     pipe_through [:browser, :admin]
 
-    oban_dashboard("/oban", resolver: ForemanWeb.ObanResolver)
+    # Oban Web checks the user its session was rendered with, so a page
+    # left open would reconnect with an admin who isn't one any more.
+    oban_dashboard("/oban",
+      resolver: ForemanWeb.ObanResolver,
+      on_mount: [{ForemanWeb.UserAuth, :require_user}, {ForemanWeb.UserAuth, :require_admin}]
+    )
   end
 
   if Application.compile_env(:foreman, :dev_routes) do

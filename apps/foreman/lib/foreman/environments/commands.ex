@@ -35,7 +35,7 @@ defmodule Foreman.Environments.Commands do
         with_secrets(env, fn s ->
           payload =
             base(env)
-            |> Map.put(:compose_env, s.values)
+            |> Map.put(:compose_env, compose_env(s.values))
             |> put_present(:registry_auth, up_registry_auth(env))
 
           command(op, "env.start", payload)
@@ -84,7 +84,7 @@ defmodule Foreman.Environments.Commands do
 
   defp restart(env, mode, changed, s) do
     base(env)
-    |> Map.merge(%{mode: mode, changed: changed, compose_env: s.values})
+    |> Map.merge(%{mode: mode, changed: changed, compose_env: compose_env(s.values)})
     |> put_present(:registry_auth, up_registry_auth(env))
   end
 
@@ -123,7 +123,7 @@ defmodule Foreman.Environments.Commands do
           branch: env.branch,
           config_path: env.repo.devcontainer_path || ".devcontainer/devcontainer.json",
           files: files,
-          compose_env: secrets.values,
+          compose_env: compose_env(secrets.values),
           limits: limits(env),
           tailscale: %{
             enabled: Tailscale.configured?(),
@@ -178,6 +178,12 @@ defmodule Foreman.Environments.Commands do
       {:error, errors} -> {:error, "couldn't build #{type}: #{inspect(errors)}"}
     end
   end
+
+  # Compose interpolates with these, so the agent's own tools run with
+  # them too. A secret stored before its name was reserved still reaches
+  # the environment's shells through secrets.env, but not the box.
+  defp compose_env(values),
+    do: Map.reject(values, fn {name, _} -> ForemanProtocol.Schema.reserved_env?(name) end)
 
   defp secrets(env) do
     values = Secrets.resolve(env)
@@ -245,8 +251,12 @@ defmodule Foreman.Environments.Commands do
   end
 
   # A new node needs an auth key on its first boot only; the node's state
-  # volume keeps its identity after that.
-  defp tailscale_key(env, "create") do
+  # volume keeps its identity after that. Until the environment has come
+  # up once, a rebuild is a first boot too. A failed first build drops its
+  # key (keys expire after a day), so the next attempt gets a fresh one.
+  defp tailscale_key(env, action)
+       when action == "create" or
+              (action in ["rebuild", "pull_rebuild"] and not env.created_once) do
     cond do
       not Tailscale.configured?() ->
         {:ok, nil, env}

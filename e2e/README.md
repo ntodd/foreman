@@ -111,3 +111,14 @@ cd ../.. && node e2e/screenshots.mjs
 
 `DEMO=personal` seeds one person on one box instead, in `tmp/demo-personal`,
 for the simpler views a personal instance gets.
+
+## Layout checks
+
+`layout.mjs` opens every page of the demo control plane at 390, 768, 1024
+and 1440px and fails if a page scrolls sideways or leaves no room for text
+it shows, like a table whose fixed columns squeeze the name column to
+nothing on a phone. Run it after a UI change, against a running demo:
+
+```sh
+node e2e/layout.mjs
+```

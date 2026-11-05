@@ -124,7 +124,9 @@ defmodule Foreman.SecretsTest do
     test "rejects reserved and invalid names", %{user: user} do
       u = Scope.for_user(user)
 
-      for name <- ["PATH", "LD_PRELOAD", "FOREMAN_X", "1ABC", "A-B", "a b", "DOCKER_HOST"] do
+      for name <-
+            ["PATH", "LD_PRELOAD", "LD_AUDIT", "GIT_CONFIG_KEY_0", "FOREMAN_X", "1ABC"] ++
+              ["A-B", "a b", "DOCKER_HOST"] do
         assert {:error, changeset} =
                  Secrets.put_secret(u, "user", user, %{"name" => name, "value" => "x"})
 

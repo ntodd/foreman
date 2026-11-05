@@ -54,8 +54,22 @@ defmodule ForemanWeb.BoxLive.Show do
       else: socket
   end
 
+  # Runs on every box event and every 30 seconds of stats, so it checks
+  # access again (a box can be unshared under an open page) and leaves the
+  # settings form alone unless the saved settings changed.
   defp load(socket) do
     box = Boxes.get_box!(socket.assigns.box.id)
+    scope = socket.assigns.current_scope
+
+    if Scope.admin?(scope) or Foreman.Boxes.Box.usable_by?(box, scope.user),
+      do: load(socket, box),
+      else:
+        socket
+        |> put_flash(:error, "You don't have access to #{box.name} any more.")
+        |> push_navigate(to: ~p"/boxes")
+  end
+
+  defp load(socket, box) do
     envs = Environments.live_for_box(box.id)
 
     socket
@@ -68,9 +82,17 @@ defmodule ForemanWeb.BoxLive.Show do
       Operations.list_for_box(box.id, 10) |> Enum.filter(&is_nil(&1.environment_id))
     )
     |> assign(:orphans, Environments.orphans(box.id))
-    |> assign(:form, to_form(form_params(box), as: :box))
+    |> sync_form(box)
     |> assign(:target_version, Releases.target_version(box))
     |> assign(:fleet_version, box.arch && Releases.fleet_version(box.arch))
+  end
+
+  defp sync_form(socket, box) do
+    saved = form_params(box)
+
+    if saved == socket.assigns[:form_saved],
+      do: socket,
+      else: assign(socket, form: to_form(saved, as: :box), form_saved: saved)
   end
 
   defp form_params(box) do
@@ -93,7 +115,7 @@ defmodule ForemanWeb.BoxLive.Show do
            Map.put(params, "name", socket.assigns.box.name)
          ) do
       {:ok, _box} ->
-        {:noreply, socket |> put_flash(:info, "Saved.") |> load()}
+        {:noreply, socket |> put_flash(:info, "Saved.") |> assign(:form_saved, nil) |> load()}
 
       {:error, %Ecto.Changeset{} = cs} ->
         {:noreply, assign(socket, :form, to_form(%{cs | action: :update}, as: :box))}
