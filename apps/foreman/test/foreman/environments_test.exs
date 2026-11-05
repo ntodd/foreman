@@ -512,6 +512,69 @@ defmodule Foreman.EnvironmentsTest do
       refute_receive {:dispatch, %Command{type: "env.secrets.write"}}
     end
 
+    # The agent restarted with the start in flight, and a secret changed
+    # meanwhile: the start is sent again with the new secrets.
+    test "a start sent again records the secrets it was sent with", %{
+      scope: scope,
+      env: env,
+      box: box
+    } do
+      {:ok, _} = Environments.stop(scope, Repo.reload!(env))
+      assert_receive {:dispatch, %Command{type: "env.stop"} = stop}
+      succeed(box, stop)
+
+      {:ok, _} = Environments.start(scope, Repo.reload!(env))
+      assert_receive {:dispatch, %Command{type: "env.secrets.write"} = write}
+      succeed(box, write)
+      assert_receive {:dispatch, %Command{type: "env.start"} = start}
+
+      {:ok, _} = Secrets.put_secret(scope, "user", scope.user, %{"name" => "X", "value" => "1"})
+      Foreman.Environments.Server.resend(env.id, start.op_id)
+
+      assert_receive {:dispatch, %Command{type: "env.start", op_id: op_id} = resent}
+      assert op_id == start.op_id
+      assert resent.payload.compose_env["X"] == "1"
+
+      succeed(box, resent, @up_result)
+      refute Repo.reload!(env).pending_restart
+    end
+
+    test "a secrets write that works clears the last one's failure", %{env: env, box: box} do
+      :ok = Environments.push_secrets()
+      assert_receive {:dispatch, %Command{type: "env.secrets.write"} = first}
+      fail(box, first, "disk full")
+      assert Repo.reload!(env).status_message =~ "secrets_write failed"
+
+      :ok = Environments.push_secrets()
+      assert_receive {:dispatch, %Command{type: "env.secrets.write"} = second}
+      succeed(box, second)
+      assert Repo.reload!(env).status_message == nil
+    end
+
+    test "a stopped environment has no restart pending", %{scope: scope, env: env, box: box} do
+      {:ok, _} = Environments.stop(scope, Repo.reload!(env))
+      assert_receive {:dispatch, %Command{type: "env.stop"} = stop}
+      succeed(box, stop)
+
+      {:ok, _} = Secrets.put_secret(scope, "user", scope.user, %{"name" => "X", "value" => "1"})
+      refute Repo.reload!(env).pending_restart
+    end
+
+    test "stopping clears a restart that was pending", %{scope: scope, env: env, box: box} do
+      {:ok, _} = Secrets.put_secret(scope, "user", scope.user, %{"name" => "X", "value" => "1"})
+      assert Repo.reload!(env).pending_restart
+      assert_receive {:dispatch, %Command{type: "env.secrets.write"} = write}
+      succeed(box, write)
+
+      {:ok, _} = Environments.stop(scope, Repo.reload!(env))
+      assert_receive {:dispatch, %Command{type: "env.stop"} = stop}
+      succeed(box, stop)
+
+      env = Repo.reload!(env)
+      refute env.pending_restart
+      assert env.pending_changes == []
+    end
+
     test "setting a secret back to what's applied clears pending restart", %{
       scope: scope,
       env: env
@@ -703,6 +766,62 @@ defmodule Foreman.EnvironmentsTest do
 
       succeed(box, cmd, @up_result)
       assert Repo.reload!(env).ts_authkey == nil
+    end
+
+    # Auth keys expire after a day, and a failed first create can sit for
+    # longer than that before someone retries it.
+    test "a retry after a failed first create gets a fresh key", %{
+      scope: scope,
+      repo: repo,
+      box: box
+    } do
+      connect_agent(box)
+
+      expect(Foreman.Tailscale.ClientMock, :create_auth_key, fn _, _ ->
+        {:ok, %{key: "k1", id: "1"}}
+      end)
+
+      {:ok, env} =
+        Environments.create_environment(scope, %{"repo_id" => repo.id, "box_id" => box.id})
+
+      assert_receive {:dispatch, first}
+      fail(box, first, "the build exited with code 1")
+
+      expect(Foreman.Tailscale.ClientMock, :create_auth_key, fn _, _ ->
+        {:ok, %{key: "k2", id: "2"}}
+      end)
+
+      {:ok, _} = Environments.retry(scope, Repo.reload!(env))
+
+      assert_receive {:dispatch, %Command{type: "env.create"} = retry}
+      assert retry.payload.files["ts-authkey"] == "k2"
+    end
+
+    test "a rebuild of one that never came up gets a fresh key too", %{
+      scope: scope,
+      repo: repo,
+      box: box
+    } do
+      connect_agent(box)
+
+      expect(Foreman.Tailscale.ClientMock, :create_auth_key, fn _, _ ->
+        {:ok, %{key: "k1", id: "1"}}
+      end)
+
+      {:ok, env} =
+        Environments.create_environment(scope, %{"repo_id" => repo.id, "box_id" => box.id})
+
+      assert_receive {:dispatch, first}
+      fail(box, first, "the build exited with code 1")
+
+      expect(Foreman.Tailscale.ClientMock, :create_auth_key, fn _, _ ->
+        {:ok, %{key: "k2", id: "2"}}
+      end)
+
+      {:ok, _} = Environments.rebuild(scope, Repo.reload!(env))
+
+      assert_receive {:dispatch, %Command{type: "env.rebuild"} = rebuild}
+      assert rebuild.payload.files["ts-authkey"] == "k2"
     end
 
     test "records the node the environment joined as", %{scope: scope, repo: repo, box: box} do
