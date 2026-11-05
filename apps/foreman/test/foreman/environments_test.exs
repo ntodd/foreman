@@ -382,6 +382,37 @@ defmodule Foreman.EnvironmentsTest do
     end
   end
 
+  # Results carry what the agent and the repo say, at whatever length.
+  # Postgres refuses a varchar(255) overflow outright, which used to crash
+  # the agent's channel every time the agent resent the result.
+  describe "a long up result" do
+    test "is recorded", %{scope: scope, repo: repo, box: box} do
+      connect_agent(box)
+
+      {:ok, env} =
+        Environments.create_environment(scope, %{"repo_id" => repo.id, "box_id" => box.id})
+
+      assert_receive {:dispatch, cmd}
+      long = String.duplicate("x", 300)
+
+      succeed(
+        box,
+        cmd,
+        Map.merge(@up_result, %{
+          "warnings" => ["Docker's default runtime on this box is the nvidia runtime " <> long],
+          "remote_workspace_folder" => "/workspaces/" <> long,
+          "remote_user" => long,
+          "services" => [long],
+          "devcontainer_service" => long
+        })
+      )
+
+      env = Repo.reload!(env)
+      assert env.observed_state == "running"
+      assert env.workspace_folder == "/workspaces/" <> long
+    end
+  end
+
   describe "secrets changes" do
     setup %{scope: scope, repo: repo, box: box} do
       connect_agent(box)
