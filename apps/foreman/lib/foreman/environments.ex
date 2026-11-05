@@ -388,9 +388,13 @@ defmodule Foreman.Environments do
     end
   end
 
+  # The id comes from the browser; Postgres refuses a non-UUID outright.
   defp fetch_operation(env, op_id) do
-    case Operations.get(op_id) do
-      %Foreman.Operations.Operation{environment_id: id} = op when id == env.id -> {:ok, op}
+    with {:ok, op_id} <- Ecto.UUID.cast(op_id),
+         %Foreman.Operations.Operation{environment_id: id} = op when id == env.id <-
+           Operations.get(op_id) do
+      {:ok, op}
+    else
       _ -> {:error, "That operation isn't this environment's."}
     end
   end
