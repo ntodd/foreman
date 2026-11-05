@@ -1279,11 +1279,38 @@ defmodule ForemanAgent.Env do
     :ok = SafeFS.write_atomic(Path.join(dir, "config.json"), JSON.encode!(config), 0o600)
     link_cli_plugins(dir)
 
+    # Cancelling kills this process, so `after` doesn't run then; this
+    # cleans up when it dies. The token is only meant to be on disk for
+    # the build.
+    owner = self()
+
+    janitor =
+      spawn(fn ->
+        ref = Process.monitor(owner)
+
+        receive do
+          {:DOWN, ^ref, :process, _, _} -> File.rm_rf(dir)
+        end
+      end)
+
     try do
       fun.(dir)
     after
       File.rm_rf(dir)
+      Process.exit(janitor, :kill)
     end
+  end
+
+  @doc """
+  Removes registry credentials an agent that died mid-build left in any
+  environment's directory (see `with_docker_config/3`). Runs at start,
+  before any operation can be using one.
+  """
+  def sweep_docker_configs(config) do
+    config.envs_root
+    |> Path.join("*/meta/docker-*")
+    |> Path.wildcard(match_dot: false)
+    |> Enum.each(&File.rm_rf/1)
   end
 
   defp link_cli_plugins(dir) do
