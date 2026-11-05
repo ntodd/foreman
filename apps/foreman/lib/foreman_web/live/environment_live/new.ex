@@ -11,13 +11,14 @@ defmodule ForemanWeb.EnvironmentLive.New do
     repos = Repos.list_repos(with_devcontainer: true)
     boxes = Boxes.usable_boxes(socket.assigns.current_scope)
 
-    repo_id = params["repo_id"] || (List.first(repos) && List.first(repos).id)
+    # A link can name a repo that's since lost its devcontainer or left
+    # the installation; the select can't show that one.
+    repo_id =
+      if Enum.any?(repos, &(&1.id == params["repo_id"])),
+        do: params["repo_id"],
+        else: List.first(repos) && List.first(repos).id
 
-    box_id =
-      boxes
-      |> Enum.find(&Boxes.online?(&1.id))
-      |> Kernel.||(List.first(boxes))
-      |> then(&(&1 && &1.id))
+    box_id = default_box(boxes, socket.assigns.current_scope.user)
 
     form = %{
       "repo_id" => repo_id,
@@ -37,6 +38,20 @@ defmodule ForemanWeb.EnvironmentLive.New do
      |> assign(:branches, [])
      |> assign_form(form)
      |> load_branches()}
+  end
+
+  # An online box first, and of those your own, then one shared with you.
+  # An admin can use every box, and the first by name is usually someone
+  # else's.
+  defp default_box([], _user), do: nil
+
+  defp default_box(boxes, user) do
+    boxes
+    |> Enum.min_by(fn box ->
+      {not Boxes.online?(box.id), box.owner_user_id != user.id,
+       user.id not in box.shared_user_ids}
+    end)
+    |> Map.fetch!(:id)
   end
 
   defp assign_form(socket, params) do
