@@ -85,7 +85,10 @@ gaps" section is the place to start.
   as their use: slugs are DNS labels, env ids UUIDs, branch names can't
   start with `-`, clone URLs can't carry credentials, secret file names
   come from an allowlist, compose variables can't override `PATH`,
-  `DOCKER_HOST`, `LD_PRELOAD` and the like.
+  `DOCKER_HOST` and the like, or set anything that loads code into the
+  agent's own tools: any `LD_` variable, `GCONV_PATH`, `NODE_PATH`, git
+  config through the environment (`GIT_CONFIG_*`) and git's helper
+  commands and trace files.
 - An agent may only report on its own box's operations and
   environments; anything else is refused and logged.
 - Agent self-update: the release signature (ed25519 over version, target

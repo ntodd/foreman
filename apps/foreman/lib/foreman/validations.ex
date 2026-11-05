@@ -87,7 +87,12 @@ defmodule Foreman.Validations do
       message:
         "must start with a letter or underscore and contain only letters, digits and underscores"
     )
-    |> validate_exclusion(field, ForemanProtocol.Schema.reserved_env(), message: "is reserved")
+    |> validate_change(field, fn ^field, name ->
+      # FOREMAN_ gets its own message below.
+      if ForemanProtocol.Schema.reserved_env?(name) and not String.starts_with?(name, "FOREMAN_"),
+        do: [{field, "is reserved"}],
+        else: []
+    end)
     |> validate_change(field, fn ^field, name ->
       if String.starts_with?(name, "FOREMAN_"),
         do: [{field, "uses the FOREMAN_ prefix, which Foreman reserves"}],
