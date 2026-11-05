@@ -26,11 +26,17 @@ defmodule ForemanWeb.SecretsComponent do
      |> assign(:secrets, secrets)
      |> assign_new(:repos, fn -> [] end)
      |> assign_new(:description, fn -> nil end)
-     |> assign_new(:form, fn ->
-       to_form(%{"name" => "", "value" => "", "repo_ids" => []}, as: :secret)
-     end)
+     |> assign_new(:form, fn -> blank_form(socket) end)
      |> assign_new(:editing, fn -> nil end)}
   end
+
+  # A page can hold several of these (one per owner on Deployment): the
+  # component's id keeps their inputs' ids apart.
+  defp secret_form(socket, data),
+    do: to_form(data, as: :secret, id: "#{socket.assigns.id}-secret")
+
+  defp blank_form(socket),
+    do: secret_form(socket, %{"name" => "", "value" => "", "repo_ids" => []})
 
   @impl true
   def render(assigns) do
@@ -153,11 +159,11 @@ defmodule ForemanWeb.SecretsComponent do
         {:noreply,
          socket
          |> assign(:editing, nil)
-         |> assign(:form, to_form(%{"name" => "", "value" => "", "repo_ids" => []}, as: :secret))
+         |> assign(:form, blank_form(socket))
          |> assign(:secrets, list_secrets(socket))}
 
       {:error, %Ecto.Changeset{} = changeset} ->
-        {:noreply, assign(socket, :form, to_form(%{changeset | action: :insert}, as: :secret))}
+        {:noreply, assign(socket, :form, secret_form(socket, %{changeset | action: :insert}))}
 
       {:error, :unauthorized} ->
         {:noreply, socket}
@@ -178,7 +184,7 @@ defmodule ForemanWeb.SecretsComponent do
      |> assign(:editing, name)
      |> assign(
        :form,
-       to_form(%{"name" => name, "value" => "", "repo_ids" => repo_ids}, as: :secret)
+       secret_form(socket, %{"name" => name, "value" => "", "repo_ids" => repo_ids})
      )}
   end
 
@@ -186,7 +192,7 @@ defmodule ForemanWeb.SecretsComponent do
     {:noreply,
      socket
      |> assign(:editing, nil)
-     |> assign(:form, to_form(%{"name" => "", "value" => "", "repo_ids" => []}, as: :secret))}
+     |> assign(:form, blank_form(socket))}
   end
 
   def handle_event("delete", %{"name" => name}, socket) do
