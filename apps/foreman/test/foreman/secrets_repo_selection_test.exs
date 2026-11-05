@@ -64,4 +64,31 @@ defmodule Foreman.SecretsRepoSelectionTest do
 
     assert repo_ids(user) == [prod.id]
   end
+
+  # The page lists repos with a devcontainer. One that's lost its
+  # devcontainer since had no option to keep selected, so Replace sent no
+  # repos at all, which means every repo.
+  describe "Replace when the secret's repo isn't listed any more" do
+    defp lose_devcontainer(repo),
+      do: repo |> Ecto.Changeset.change(devcontainer_path: nil) |> Repo.update!()
+
+    defp replace(user) do
+      {:ok, view, _} = live(log_in(build_conn(), user), ~p"/secrets")
+      view |> element("button[phx-click=edit][phx-value-name=PROD_DEPLOY_KEY]") |> render_click()
+      view |> form("#user-secrets-form", secret: %{value: "v2"}) |> render_submit()
+    end
+
+    test "keeps it", %{user: user, prod: prod} do
+      lose_devcontainer(prod)
+      replace(user)
+      assert repo_ids(user) == [prod.id]
+    end
+
+    test "keeps it when no repo is listed at all", %{user: user, prod: prod, other: other} do
+      lose_devcontainer(prod)
+      lose_devcontainer(other)
+      replace(user)
+      assert repo_ids(user) == [prod.id]
+    end
+  end
 end

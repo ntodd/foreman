@@ -31,6 +31,10 @@ defmodule Foreman.Repos do
 
   def get_repo!(id), do: GitRepo |> Repo.get!(id) |> Repo.preload(:owner)
 
+  @doc "`%{id => full_name}` for the repos with these ids, listed or not."
+  def full_names(ids),
+    do: Map.new(Repo.all(from r in GitRepo, where: r.id in ^ids, select: {r.id, r.full_name}))
+
   def get_repo_by_full_name(full_name),
     do: GitRepo |> Repo.get_by(full_name: full_name) |> Repo.preload(:owner)
 

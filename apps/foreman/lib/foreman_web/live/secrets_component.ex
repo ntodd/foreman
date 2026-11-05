@@ -110,12 +110,12 @@ defmodule ForemanWeb.SecretsComponent do
             />
           </div>
           <.input
-            :if={@scope_name == "user" and @repos != []}
+            :if={@scope_name == "user" and repo_options(@repos, @form) != []}
             field={@form[:repo_ids]}
             type="select"
             multiple
             label="Only for these repos (leave empty for all)"
-            options={Enum.map(@repos, &{&1.full_name, &1.id})}
+            options={repo_options(@repos, @form)}
           />
           <div class="flex items-center gap-2">
             <.button type="submit" variant="primary" size="sm">{if @editing,
@@ -134,6 +134,27 @@ defmodule ForemanWeb.SecretsComponent do
       </.panel>
     </div>
     """
+  end
+
+  # The repos a secret can be limited to, plus any it's limited to that
+  # aren't listed any more (no devcontainer now, or gone). Without an
+  # option those can't stay selected, and a Replace that sends no repos
+  # widens the secret to every repo.
+  defp repo_options(repos, form) do
+    listed = Enum.map(repos, &{&1.full_name, &1.id})
+    known = MapSet.new(repos, & &1.id)
+
+    unlisted =
+      case List.wrap(form[:repo_ids].value) |> Enum.reject(&(&1 in ["", nil] or &1 in known)) do
+        [] ->
+          []
+
+        ids ->
+          names = Foreman.Repos.full_names(ids)
+          Enum.map(ids, &{"#{names[&1] || "A removed repo"} (not listed)", &1})
+      end
+
+    listed ++ unlisted
   end
 
   defp repo_names(ids, repos) do
