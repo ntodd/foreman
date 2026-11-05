@@ -447,6 +447,37 @@ defmodule ForemanAgent.Env.PolicyHardeningTest do
     end
   end
 
+  describe "top-level volumes" do
+    test "another project's volume, even with driver_opts", %{ctx: ctx} do
+      config =
+        compose(%{}, %{
+          "volumes" => %{
+            "vol" => %{
+              "name" => "s-2_foreman-tailscale",
+              "driver_opts" => %{"type" => "tmpfs", "device" => "tmpfs"}
+            }
+          }
+        })
+
+      assert {:error, [message]} = Policy.check(config, %{}, Map.put(ctx, :project, "s-1"))
+      assert message =~ "s-2_foreman-tailscale"
+    end
+
+    test "this project's tmpfs volume is fine", %{ctx: ctx} do
+      config =
+        compose(%{}, %{
+          "volumes" => %{
+            "vol" => %{
+              "name" => "s-1_vol",
+              "driver_opts" => %{"type" => "tmpfs", "device" => "tmpfs"}
+            }
+          }
+        })
+
+      assert {:ok, []} = Policy.check(config, %{}, ctx)
+    end
+  end
+
   describe "devcontainer.json volume mounts" do
     test "an external volume that isn't this environment's", %{ctx: ctx} do
       config = %{

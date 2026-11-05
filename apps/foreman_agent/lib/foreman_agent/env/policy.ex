@@ -594,28 +594,31 @@ defmodule ForemanAgent.Env.Policy do
     end
   end
 
+  # Both checks, always: driver_opts on another project's volume don't
+  # stop compose attaching to it.
   defp named_volume_finding(key, spec, project, ctx) do
     opts = spec["driver_opts"]
 
-    cond do
-      spec["driver"] in [nil, "local"] and is_map(opts) and is_binary(opts["device"]) ->
-        driver_opts_finding(key, opts, ctx)
+    device =
+      if spec["driver"] in [nil, "local"] and is_map(opts) and is_binary(opts["device"]),
+        do: driver_opts_finding(key, opts, ctx),
+        else: []
 
-      # Another project's volume: another environment's database or
-      # Tailscale identity, say.
-      is_binary(project) and is_binary(spec["name"]) and
-          not String.starts_with?(spec["name"], project <> "_") ->
-        [
-          rule(
-            ctx,
-            :host_bind,
-            "volume '#{key}' is the Docker volume #{spec["name"]}, which belongs outside this environment"
-          )
-        ]
+    # Another project's volume: another environment's database or
+    # Tailscale identity, say.
+    other =
+      if is_binary(project) and is_binary(spec["name"]) and
+           not String.starts_with?(spec["name"], project <> "_"),
+         do: [
+           rule(
+             ctx,
+             :host_bind,
+             "volume '#{key}' is the Docker volume #{spec["name"]}, which belongs outside this environment"
+           )
+         ],
+         else: []
 
-      true ->
-        []
-    end
+    device ++ other
   end
 
   defp driver_opts_finding(key, opts, ctx) do
