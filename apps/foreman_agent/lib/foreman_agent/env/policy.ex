@@ -160,7 +160,7 @@ defmodule ForemanAgent.Env.Policy do
 
     verdict(
       Enum.flat_map(features, &feature_findings(&1, ctx)) ++
-        mount_findings(merged, ctx) ++
+        mount_findings(merged, ctx, :resolved) ++
         unattributed_privileged(resolved, features, ctx) ++
         unattributed_caps(resolved, features, ctx) ++
         unattributed_security_opts(resolved, features, ctx)
@@ -970,27 +970,56 @@ defmodule ForemanAgent.Env.Policy do
       end
 
     features ++
-      mount_findings(config, ctx) ++
+      mount_findings(config, ctx, :raw) ++
       privileged ++
       caps ++ security_opt_findings("devcontainer.json", config["securityOpt"], ctx)
   end
 
-  defp mount_findings(config, ctx) do
+  # Read the way the devcontainer CLI hands mounts to compose: it writes
+  # `source:target` into its override file whatever the type or readonly
+  # say, so a source that isn't a volume name is a read-write bind of
+  # that host path, and compose splits the pair at its colons.
+  #
+  # devcontainer.json's own variables (${localWorkspaceFolderBasename}…)
+  # are only filled in by read-configuration, so a source with one waits
+  # for the resolved config, which check_resolved/2 sees before every up.
+  # A $ still there then is one the CLI didn't know: it writes it out
+  # unescaped and compose fills it in from the box's environment.
+  defp mount_findings(config, ctx, stage) do
     for mount <- List.wrap(config["mounts"]),
-        {source, target, type, ro, external} = parse_mount(mount),
+        {source, target, type, external} = parse_mount(mount),
         is_binary(source),
-        finding <- mount_finding(type, source, target, ro, external, ctx) do
+        finding <- mount_source_finding(stage, source, target, type, external, ctx) do
       finding
     end
   end
 
-  defp mount_finding("bind", source, target, ro, _external, ctx),
-    do: bind_finding("devcontainer.json", source, target, ro, ctx)
+  defp mount_source_finding(stage, source, target, type, external, ctx) do
+    cond do
+      not String.contains?(source, "$") ->
+        mount_finding(compose_source(source, target), target, type, external, ctx)
+
+      stage == :raw ->
+        []
+
+      true ->
+        [
+          {:refuse,
+           "devcontainer.json mounts #{source}, which compose would fill in from the box's environment"}
+        ]
+    end
+  end
+
+  defp mount_finding(source, target, type, external, ctx) do
+    if volume_name?(source),
+      do: volume_mount_finding(source, type == "volume" and external, ctx),
+      else: bind_finding("devcontainer.json", source, target, false, ctx)
+  end
 
   # The CLI declares an external mount's volume by its own name, not the
   # project's, so it can be any volume on the box: another environment's
   # database or Tailscale identity. Without `external` it's this project's.
-  defp mount_finding("volume", source, _target, _ro, true, ctx) do
+  defp volume_mount_finding(source, true = _external, ctx) do
     project = ctx[:project]
 
     if is_binary(project) and String.starts_with?(source, project <> "_"),
@@ -1004,7 +1033,15 @@ defmodule ForemanAgent.Env.Policy do
       ]
   end
 
-  defp mount_finding(_type, _source, _target, _ro, _external, _ctx), do: []
+  defp volume_mount_finding(_source, _external, _ctx), do: []
+
+  # Compose reads anything but a volume name (/, ., ~, a drive letter) as
+  # a host path.
+  defp volume_name?(source), do: source =~ ~r/\A[A-Za-z0-9][A-Za-z0-9_.-]*\z/
+
+  # The source compose takes from the CLI's `source:target`.
+  defp compose_source(source, target),
+    do: "#{source}:#{target}" |> String.split(":") |> hd()
 
   defp privileged_feature(owner),
     do: "#{owner} runs the devcontainer privileged, which is root on the box"
@@ -1017,28 +1054,32 @@ defmodule ForemanAgent.Env.Policy do
 
   defp cap_name(cap), do: cap |> String.upcase() |> String.replace_prefix("CAP_", "")
 
+  # {source, target, type, external}. An object goes to compose as it is.
   defp parse_mount(%{} = m),
-    do:
-      {m["source"], m["target"], m["type"], m["readonly"] == true,
-       m["external"] in [true, "true"]}
+    do: {m["source"], m["target"], m["type"], m["external"] in [true, "true"]}
 
+  # The CLI splits on "," and then "=", keeps the first two parts, lets a
+  # later key win, and takes src, dst and destination as aliases. A key
+  # with no "=" has no value, so a bare `external` isn't external.
   defp parse_mount(m) when is_binary(m) do
     pairs =
       m
       |> String.split(",")
-      |> Map.new(fn part ->
-        case String.split(part, "=", parts: 2) do
-          [k, v] -> {String.trim(k), String.trim(v)}
-          [k] -> {String.trim(k), "true"}
+      |> Enum.reduce(%{}, fn part, acc ->
+        case String.split(part, "=") do
+          [k, v | _] -> Map.put(acc, mount_key(k), v)
+          [k] -> Map.put(acc, mount_key(k), nil)
         end
       end)
 
-    {pairs["source"] || pairs["src"], pairs["target"] || pairs["dst"] || pairs["destination"],
-     pairs["type"], Map.has_key?(pairs, "readonly") or Map.has_key?(pairs, "ro"),
-     pairs["external"] == "true"}
+    {pairs["source"], pairs["target"], pairs["type"], pairs["external"] == "true"}
   end
 
-  defp parse_mount(_), do: {nil, nil, nil, false, false}
+  defp parse_mount(_), do: {nil, nil, nil, false}
+
+  defp mount_key("src"), do: "source"
+  defp mount_key(key) when key in ["dst", "destination"], do: "target"
+  defp mount_key(key), do: key
 
   # -- paths -----------------------------------------------------------------
 

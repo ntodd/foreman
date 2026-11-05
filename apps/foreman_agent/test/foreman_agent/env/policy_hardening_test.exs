@@ -477,4 +477,107 @@ defmodule ForemanAgent.Env.PolicyHardeningTest do
                Policy.check_resolved(resolved(merged), Map.put(ctx, :project, "s-1"))
     end
   end
+
+  # The devcontainer CLI (0.89) reads a mount string by splitting on ","
+  # and then "=", keeping the first two parts and letting a later key win
+  # (src, dst and destination are aliases), then writes `source:target`
+  # into its compose override. Type and readonly never reach compose, so
+  # any source that isn't a volume name is a bind of that host path.
+  describe "devcontainer.json mounts as the CLI hands them to compose" do
+    test "a mount with no type binds its host path", %{ctx: ctx} do
+      config = %{"mounts" => ["source=/var/run/docker.sock,target=/var/run/docker.sock"]}
+
+      assert {:error, [message]} = Policy.check(compose(%{}), config, ctx)
+      assert message =~ "Docker socket"
+    end
+
+    test "so does any type other than bind", %{ctx: ctx, outside: outside} do
+      for mount <- [
+            "type=tmpfs,source=#{outside},target=/host",
+            "type=Bind,source=#{outside},target=/host",
+            "type=volume,source=#{outside},target=/host",
+            %{"type" => "tmpfs", "source" => outside, "target" => "/host"}
+          ] do
+        assert {:error, [message]} = Policy.check(compose(%{}), %{"mounts" => [mount]}, ctx),
+               inspect(mount)
+
+        assert message =~ outside
+      end
+    end
+
+    test "the last of source and src wins", %{ctx: ctx, clone: clone} do
+      mount = "type=bind,source=#{clone},src=/var/run/docker.sock,target=/x"
+
+      assert {:error, [message]} = Policy.check(compose(%{}), %{"mounts" => [mount]}, ctx)
+      assert message =~ "Docker socket"
+    end
+
+    test "a value stops at the next =", %{ctx: ctx} do
+      mount = "type=bind,source=/var/run/docker.sock=ignored,target=/x"
+
+      assert {:error, [message]} = Policy.check(compose(%{}), %{"mounts" => [mount]}, ctx)
+      assert message =~ "Docker socket"
+    end
+
+    test "a colon in the source is where compose splits it", %{ctx: ctx} do
+      # Compose reads "/var/run/docker.sock:/sock:ro" for this one.
+      mount = "type=bind,source=/var/run/docker.sock:/sock,target=ro"
+      loose = loosen(ctx, %{host_bind: :allow})
+
+      assert {:error, [message]} = Policy.check(compose(%{}), %{"mounts" => [mount]}, loose)
+      assert message =~ "Docker socket"
+    end
+
+    test "readonly doesn't make the secrets mount read-only", %{ctx: ctx} do
+      mount = "type=bind,source=#{ctx.secrets_dir},target=/run/foreman,readonly"
+
+      assert {:error, [message]} = Policy.check(compose(%{}), %{"mounts" => [mount]}, ctx)
+      assert message =~ "secrets"
+    end
+
+    test "a feature's mount with no type", %{ctx: ctx} do
+      merged = %{"mounts" => [%{"source" => "/var/run/docker.sock", "target" => "/d.sock"}]}
+
+      assert {:error, [message]} = Policy.check_resolved(resolved(merged), ctx)
+      assert message =~ "Docker socket"
+    end
+
+    test "volume names and workspace paths are still fine", %{ctx: ctx, clone: clone} do
+      for mount <- [
+            "source=node_modules,target=/w/node_modules,type=volume",
+            "source=cache,target=/c",
+            "source=#{clone},target=/w,type=bind",
+            "target=/anonymous,type=volume"
+          ] do
+        assert {:ok, []} = Policy.check(compose(%{}), %{"mounts" => [mount]}, ctx), mount
+      end
+    end
+
+    test "a variable in devcontainer.json waits for the resolved config", %{ctx: ctx} do
+      # The usual per-environment volume; read-configuration fills it in.
+      mount = "source=${localWorkspaceFolderBasename}-node_modules,target=/w/nm,type=volume"
+      assert {:ok, []} = Policy.check(compose(%{}), %{"mounts" => [mount]}, ctx)
+
+      merged = %{"mounts" => ["source=repo-node_modules,target=/w/nm,type=volume"]}
+      assert {:ok, []} = Policy.check_resolved(resolved(merged), ctx)
+    end
+
+    test "a $ left after resolving is compose's to fill in from the box", %{ctx: ctx} do
+      # The CLI leaves variables it doesn't know, and doesn't escape $ in
+      # what it writes, so compose takes ${EVIL} from its own environment.
+      for mount <- [
+            "source=${EVIL},target=/x",
+            "source=$EVIL,target=/x,type=volume",
+            %{"source" => "/tmp/${EVIL}", "target" => "/x", "type" => "bind"}
+          ] do
+        merged = %{"mounts" => [mount]}
+        loose = loosen(ctx, %{host_bind: :allow})
+
+        assert {:error, [message]} = Policy.check_resolved(resolved(merged), loose),
+               inspect(mount)
+
+        assert message =~ "environment"
+      end
+    end
+  end
 end
