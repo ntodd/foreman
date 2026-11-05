@@ -44,7 +44,11 @@ gaps" section is the place to start.
   takes a renamed user's old login doesn't get their account.
   Sign-in attempts are rate limited per client. Behind a loopback proxy
   (`tailscale serve`) the client is the last `X-Forwarded-For` entry;
-  that header is ignored from any other peer.
+  that header is ignored from any other peer, except those in
+  `FOREMAN_TRUSTED_PROXIES`. The image trusts its default gateway, which
+  is where connections to the port Docker publishes on the host's
+  loopback come from; without that, every client behind the proxy
+  shared one limit.
 - Sessions: a random 32-byte token in an encrypted, signed, `HttpOnly`,
   `SameSite=Lax` cookie (`Secure` in production); only its SHA-256 is
   stored, so a database leak doesn't leak sessions. Sessions last 30

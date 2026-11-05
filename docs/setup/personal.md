@@ -234,6 +234,7 @@ sudo docker run --rm --entrypoint cat "$img" /app/updater/foreman-update |
 | `PHX_HOST` | required | The tailnet host name |
 | `FOREMAN_LISTEN_IP` | `127.0.0.1` | `0.0.0.0` inside a container |
 | `PORT` | `4000` | |
+| `FOREMAN_TRUSTED_PROXIES` | (none); `gateway` in the image | Peers besides loopback whose `X-Forwarded-For` is believed, for per-client rate limits: addresses, CIDR ranges, or `gateway` (the container's default gateway, where Docker's published ports connect from) |
 | `DATABASE_PATH` | `/var/lib/foreman/foreman.db` | SQLite file |
 | `FOREMAN_ADMINS` | | Comma-separated GitHub logins that are admins |
 | `FOREMAN_ALLOWED_USERS` | | Other logins that may sign in |

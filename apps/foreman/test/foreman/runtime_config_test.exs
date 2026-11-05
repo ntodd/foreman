@@ -18,7 +18,8 @@ defmodule Foreman.RuntimeConfigTest do
   setup do
     keys =
       Map.keys(@env) ++
-        ["FOREMAN_DB", "FOREMAN_TAILSCALE_DEPLOYMENT_TAG", "FOREMAN_ENCRYPTION_KEYS_RETIRED"]
+        ["FOREMAN_DB", "FOREMAN_TAILSCALE_DEPLOYMENT_TAG", "FOREMAN_ENCRYPTION_KEYS_RETIRED"] ++
+        ["FOREMAN_TRUSTED_PROXIES"]
 
     saved_env = Map.new(keys, &{&1, System.get_env(&1)})
     saved_database = Application.get_env(:foreman, :database)
@@ -37,6 +38,15 @@ defmodule Foreman.RuntimeConfigTest do
   defp read_config, do: Config.Reader.read!(@runtime, env: :prod, target: :host)[:foreman]
 
   defp read_repo_config, do: read_config()[Foreman.Repo]
+
+  test "FOREMAN_TRUSTED_PROXIES is read, and an entry that isn't one stops the boot" do
+    Application.put_env(:foreman, :database, "postgres")
+    System.put_env("FOREMAN_TRUSTED_PROXIES", "gateway, 172.16.0.0/12")
+    assert read_config()[:trusted_proxies] == ["gateway", "172.16.0.0/12"]
+
+    System.put_env("FOREMAN_TRUSTED_PROXIES", "172.16.0.0/40")
+    assert_raise ArgumentError, ~r/FOREMAN_TRUSTED_PROXIES/, fn -> read_config() end
+  end
 
   test "a release built for Postgres uses DATABASE_URL without FOREMAN_DB set at runtime" do
     Application.put_env(:foreman, :database, "postgres")

@@ -34,6 +34,19 @@ end
 # Settings every environment reads (dev and prod), with defaults that suit
 # a single-user personal deployment.
 if config_env() != :test do
+  # Peers allowed to say who the client is (X-Forwarded-For), besides
+  # loopback: addresses, CIDR ranges, or `gateway`. See ForemanWeb.ClientIP.
+  trusted_proxies = list.("FOREMAN_TRUSTED_PROXIES")
+
+  try do
+    ForemanWeb.ClientIP.parse_trusted(trusted_proxies)
+  rescue
+    e in ArgumentError ->
+      reraise ArgumentError, "FOREMAN_TRUSTED_PROXIES: #{Exception.message(e)}", __STACKTRACE__
+  end
+
+  config :foreman, trusted_proxies: trusted_proxies
+
   deployment_tag = System.get_env("FOREMAN_TAILSCALE_DEPLOYMENT_TAG", "")
 
   if deployment_tag != "" and not (deployment_tag =~ ~r/\Atag:[A-Za-z0-9][A-Za-z0-9-]{0,62}\z/) do
