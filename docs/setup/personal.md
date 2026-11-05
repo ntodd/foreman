@@ -226,6 +226,10 @@ sudo docker run --rm --entrypoint cat "$img" /app/updater/foreman-update |
 
 ## Settings
 
+An empty value counts as unset. On/off settings take `true` or `false`
+(or `1`/`0`, `yes`/`no`, `on`/`off`); anything else stops the control
+plane from starting, so a typo can't quietly turn one off.
+
 | Variable | Default | |
 |---|---|---|
 | `SECRET_KEY_BASE` | required | Signs sessions |
