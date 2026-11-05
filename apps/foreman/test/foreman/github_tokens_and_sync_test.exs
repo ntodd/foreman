@@ -214,6 +214,75 @@ defmodule Foreman.GitHubTokensAndSyncTest do
       refute Map.has_key?(Foreman.Secrets.resolve(env), "DB_PASSWORD")
     end
 
+    test "a devcontainer.json in a shape it shouldn't be doesn't stop the sync" do
+      configs = %{
+        "acme/null-features" => ~s({"dockerComposeFile": "c.yml", "features": null}),
+        "acme/numeric-image" => ~s({"dockerComposeFile": "c.yml", "image": 1}),
+        "acme/list" => ~s([1, 2]),
+        "acme/fine" => ~s({"dockerComposeFile": "c.yml", "hostRequirements": "lots"})
+      }
+
+      installation(
+        [
+          gh_repo(1, "null-features"),
+          gh_repo(2, "numeric-image"),
+          gh_repo(3, "list"),
+          gh_repo(4, "fine")
+        ],
+        get_file: fn _, full_name, ".devcontainer/devcontainer.json", _ ->
+          {:ok, configs[full_name]}
+        end
+      )
+
+      assert {:ok, 4} = GitHub.sync_repos()
+
+      assert %{private_registry_refs: []} =
+               Foreman.Repos.get_repo_by_full_name("acme/null-features")
+
+      assert %{private_registry_refs: []} =
+               Foreman.Repos.get_repo_by_full_name("acme/numeric-image")
+
+      assert %{devcontainer_error: error} = Foreman.Repos.get_repo_by_full_name("acme/list")
+      assert error =~ "object"
+
+      assert %{devcontainer_path: ".devcontainer/devcontainer.json", host_requirements: nil} =
+               Foreman.Repos.get_repo_by_full_name("acme/fine")
+    end
+
+    test "a repo archived after it was synced leaves the list" do
+      synced_repo(1, "storefront")
+      installation([%{gh_repo(1, "storefront") | "archived" => true}])
+
+      {:ok, _} = GitHub.sync_repos()
+      refute Enum.any?(Foreman.Repos.list_repos(), &(&1.github_id == 1))
+
+      installation([gh_repo(1, "storefront")])
+      {:ok, _} = GitHub.sync_repos()
+      assert Enum.any?(Foreman.Repos.list_repos(), &(&1.github_id == 1))
+    end
+
+    # Org 1 renames away from "acme", org 2 takes the name and installs
+    # the app: org 2 gets a row of its own, not org 1's secrets.
+    test "an account that takes over a login doesn't take over the row" do
+      {:ok, old} = Foreman.Repos.upsert_owner(%{github_id: 1, login: "acme", installation_id: 10})
+      admin = Foreman.Scope.for_user(user_fixture(role: "admin"))
+
+      {:ok, _} =
+        Foreman.Secrets.put_secret(admin, "owner", old, %{"name" => "DEPLOY_KEY", "value" => "v"})
+
+      {:ok, new} = Foreman.Repos.upsert_owner(%{github_id: 2, login: "acme", installation_id: 20})
+
+      refute new.id == old.id
+      assert {:ok, []} = Foreman.Secrets.list_secrets(admin, "owner", new)
+      assert Repo.reload!(old).github_id == 1
+
+      # Org 1 shows up again under its new name and keeps its row.
+      {:ok, back} =
+        Foreman.Repos.upsert_owner(%{github_id: 1, login: "acme-old", installation_id: 10})
+
+      assert back.id == old.id
+    end
+
     test "a renamed repo keeps its row and settings" do
       repo = synced_repo(1, "storefront")
       installation([gh_repo(1, "shopfront")])

@@ -42,15 +42,44 @@ defmodule Foreman.Repos do
   Creates or updates an owner from GitHub's account data, matched by
   GitHub id first so a renamed org keeps its row.
   """
+  # Logins move between accounts: an org renames, and another account can
+  # take the old name. A row holding the login under another GitHub id is
+  # that other account's, with its secrets and registry credential, so
+  # it's moved out of the way instead of taken over; if that account still
+  # exists, the next sync finds it by id and gives it its new login.
   def upsert_owner(attrs) do
     github_id = attrs[:github_id] || attrs["github_id"]
     login = attrs[:login] || attrs["login"]
+    by_id = github_id && Repo.get_by(Owner, github_id: github_id)
+    by_login = login && Repo.get_by(Owner, login: login)
 
-    owner =
-      (github_id && Repo.get_by(Owner, github_id: github_id)) ||
-        Repo.get_by(Owner, login: login) || %Owner{}
+    by_id
+    |> owner_row(by_login, github_id)
+    |> Owner.changeset(attrs)
+    |> Repo.insert_or_update()
+  end
 
-    owner |> Owner.changeset(attrs) |> Repo.insert_or_update()
+  defp owner_row(nil, nil, _github_id), do: %Owner{}
+
+  defp owner_row(nil, by_login, github_id) do
+    if other_owner?(by_login, github_id), do: free_login(by_login, %Owner{}), else: by_login
+  end
+
+  defp owner_row(by_id, by_login, _github_id) do
+    if by_login && by_login.id != by_id.id, do: free_login(by_login, by_id), else: by_id
+  end
+
+  defp other_owner?(%Owner{github_id: nil}, _github_id), do: false
+  defp other_owner?(%Owner{}, nil), do: false
+  defp other_owner?(%Owner{github_id: id}, github_id), do: id != github_id
+
+  defp free_login(%Owner{} = taken, owner) do
+    suffix = taken.github_id || taken.id
+
+    from(o in Owner, where: o.id == ^taken.id)
+    |> Repo.update_all(set: [login: "#{taken.login}#github-#{suffix}"])
+
+    owner
   end
 
   @doc """
@@ -105,6 +134,14 @@ defmodule Foreman.Repos do
   defp by_github_id(id) do
     from(r in GitRepo, where: r.github_id == ^id, order_by: r.inserted_at, limit: 1)
     |> Repo.one()
+  end
+
+  @doc "Marks the owner's synced repos with these GitHub ids archived, which takes them off the list."
+  def mark_archived(_owner, []), do: {0, nil}
+
+  def mark_archived(%Owner{id: owner_id}, github_ids) do
+    from(r in GitRepo, where: r.owner_id == ^owner_id and r.github_id in ^github_ids)
+    |> Repo.update_all(set: [archived: true])
   end
 
   @doc """
