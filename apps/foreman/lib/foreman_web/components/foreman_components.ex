@@ -302,13 +302,14 @@ defmodule ForemanWeb.ForemanComponents do
     <section id={@id} class={["rounded-xl border border-line bg-raised shadow-xs", @class]}>
       <header
         :if={@title}
-        class="flex items-start justify-between gap-4 border-b border-line px-5 py-3.5"
+        class="flex flex-wrap items-start justify-between gap-x-4 gap-y-2 border-b border-line px-5 py-3.5"
       >
-        <div class="min-w-0">
+        <%!-- Actions drop below the title when there's no room for both. --%>
+        <div class="min-w-0 flex-1 basis-48">
           <h2 class="text-sm font-semibold text-ink">{@title}</h2>
           <p :if={@subtitle != []} class="mt-0.5 text-xs text-ink-2">{render_slot(@subtitle)}</p>
         </div>
-        <div :if={@actions != []} class="flex shrink-0 items-center gap-2">
+        <div :if={@actions != []} class="flex shrink-0 flex-wrap items-center gap-2">
           {render_slot(@actions)}
         </div>
       </header>
