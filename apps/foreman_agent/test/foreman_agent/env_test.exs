@@ -88,6 +88,14 @@ defmodule ForemanAgent.EnvTest do
   end
 
   # A runner that behaves like git, docker compose and the devcontainer CLI.
+  defp eventually(fun, tries \\ 50) do
+    cond do
+      fun.() -> true
+      tries == 0 -> false
+      true -> Process.sleep(20) && eventually(fun, tries - 1)
+    end
+  end
+
   defp stub_tools(opts \\ []) do
     test_pid = self()
     compose = Keyword.get(opts, :compose, %{"services" => %{"app" => %{}, "db" => %{}}})
@@ -126,6 +134,7 @@ defmodule ForemanAgent.EnvTest do
           {:ok, %{status: 0, output: log <> JSON.encode!(resolved) <> "\n"}}
 
         {"devcontainer", args} ->
+          Keyword.get(opts, :before_up, fn _ -> :ok end).(run_opts)
           container = fake_up(containers, args)
 
           run_opts[:on_output].(
@@ -938,6 +947,51 @@ defmodule ForemanAgent.EnvTest do
 
       assert {:ok, _} = Env.run("env.create", payload(), ctx)
       refute Enum.any?(runs(), &match?({"git", _, _}, &1))
+    end
+
+    # Cancelling an operation kills its process, so cleanup in the
+    # process itself never runs.
+    test "registry credentials don't outlive a build that's killed", %{ctx: ctx} do
+      test_pid = self()
+
+      stub_tools(
+        before_up: fn run_opts ->
+          send(test_pid, {:up, run_opts[:env]["DOCKER_CONFIG"]})
+          Process.sleep(:infinity)
+        end
+      )
+
+      auth = [%{"host" => "ghcr.io", "username" => "machine", "token" => "ghp_registry"}]
+
+      pid =
+        spawn(fn ->
+          receive do
+            :go -> Env.run("env.create", payload(%{"registry_auth" => auth}), ctx)
+          end
+        end)
+
+      allow(RunnerMock, test_pid, pid)
+      allow(DockerMock, test_pid, pid)
+      send(pid, :go)
+
+      assert_receive {:up, docker_config}, 5_000
+      assert File.exists?(Path.join(docker_config, "config.json"))
+
+      Process.exit(pid, :kill)
+      assert eventually(fn -> not File.exists?(docker_config) end)
+    end
+
+    test "registry credentials left by an agent that died are swept at start", %{config: config} do
+      leftover = Path.join([Env.paths(config, @env_id).meta, "docker-abc", "config.json"])
+      File.mkdir_p!(Path.dirname(leftover))
+      File.write!(leftover, ~s({"auths":{}}))
+      spec = Path.join(Env.paths(config, @env_id).meta, "spec.term")
+      File.write!(spec, "keep")
+
+      :ok = Env.sweep_docker_configs(config)
+
+      refute File.exists?(Path.dirname(leftover))
+      assert File.exists?(spec)
     end
 
     test "writes registry credentials to a throwaway docker config, never argv", %{ctx: ctx} do

@@ -158,6 +158,18 @@ defmodule ForemanWeb.EnvironmentLive.Index do
 
   defp state_order, do: @state_order
 
+  attr :env, :map, required: true
+  attr :class, :any, default: nil
+
+  defp env_state(assigns) do
+    ~H"""
+    <div class={["flex flex-wrap items-center gap-1.5", @class]}>
+      <.state_badge state={@env.observed_state} size="sm" />
+      <.badge :if={@env.pending_restart} color="amber" size="sm">Restart pending</.badge>
+    </div>
+    """
+  end
+
   attr :id, :string, required: true
   attr :title, :string, default: nil
   attr :envs, :list, required: true
@@ -175,7 +187,7 @@ defmodule ForemanWeb.EnvironmentLive.Index do
         </th>
         <td class="hidden md:table-cell"></td>
         <td :if={@show_box} class="hidden lg:table-cell"></td>
-        <td></td>
+        <td class="hidden sm:table-cell"></td>
         <td class="hidden 2xl:table-cell"></td>
         <td></td>
       </tr>
@@ -196,6 +208,8 @@ defmodule ForemanWeb.EnvironmentLive.Index do
             {env.repo.full_name} <span class="text-ink-3">·</span>
             <span class="font-mono">{env.branch}</span>
           </p>
+          <%!-- A phone has no room for the State column. --%>
+          <.env_state env={env} class={["mt-1.5 sm:hidden", @owners && "pl-[34px]"]} />
         </td>
         <td class="hidden truncate py-3 pr-3 text-ink-2 md:table-cell">
           {env.repo.full_name} <span class="text-ink-3">·</span>
@@ -204,11 +218,8 @@ defmodule ForemanWeb.EnvironmentLive.Index do
         <td :if={@show_box} class="hidden truncate py-3 pr-3 text-ink-2 lg:table-cell">
           {env.box.name}
         </td>
-        <td class="py-3 pr-3">
-          <div class="flex flex-wrap items-center gap-1.5">
-            <.state_badge state={env.observed_state} size="sm" />
-            <.badge :if={env.pending_restart} color="amber" size="sm">Restart pending</.badge>
-          </div>
+        <td class="hidden py-3 pr-3 sm:table-cell">
+          <.env_state env={env} />
         </td>
         <td class="hidden truncate py-3 pr-3 2xl:table-cell">
           <code
@@ -368,7 +379,7 @@ defmodule ForemanWeb.EnvironmentLive.Index do
           <table class="w-full table-fixed text-sm">
             <thead class="border-b border-line text-left text-xs font-medium text-ink-3">
               <tr>
-                <th class="w-[30%] py-2.5 pl-5 pr-3 font-medium md:w-[24%]">Name</th>
+                <th class="py-2.5 pl-5 pr-3 font-medium sm:w-[30%] md:w-[24%]">Name</th>
                 <th class="hidden py-2.5 pr-3 font-medium md:table-cell">Repo</th>
                 <th
                   :if={length(@list_boxes) > 1}
@@ -376,9 +387,9 @@ defmodule ForemanWeb.EnvironmentLive.Index do
                 >
                   Box
                 </th>
-                <th class="w-36 py-2.5 pr-3 font-medium xl:w-56">State</th>
+                <th class="hidden w-36 py-2.5 pr-3 font-medium sm:table-cell xl:w-56">State</th>
                 <th class="hidden w-64 py-2.5 pr-3 font-medium 2xl:table-cell">SSH</th>
-                <th class="w-40 py-2.5 pr-5"><span class="sr-only">Actions</span></th>
+                <th class="w-36 py-2.5 pr-5 sm:w-40"><span class="sr-only">Actions</span></th>
               </tr>
             </thead>
             <.env_rows

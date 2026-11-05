@@ -18,7 +18,10 @@ defmodule Foreman.RuntimeConfigTest do
   setup do
     keys =
       Map.keys(@env) ++
-        ["FOREMAN_DB", "FOREMAN_TAILSCALE_DEPLOYMENT_TAG", "FOREMAN_ENCRYPTION_KEYS_RETIRED"]
+        ["FOREMAN_DB", "FOREMAN_TAILSCALE_DEPLOYMENT_TAG", "FOREMAN_ENCRYPTION_KEYS_RETIRED"] ++
+        ["FOREMAN_TRUSTED_PROXIES", "DATABASE_SSL", "FOREMAN_FORCE_SSL", "FOREMAN_SECURE_COOKIES"] ++
+        ["FOREMAN_ALLOWED_ORG", "FOREMAN_BASE_URL", "FOREMAN_GITHUB_PRIVATE_KEY"] ++
+        ["FOREMAN_GITHUB_PRIVATE_KEY_FILE", "FOREMAN_UPDATE_CHECK"]
 
     saved_env = Map.new(keys, &{&1, System.get_env(&1)})
     saved_database = Application.get_env(:foreman, :database)
@@ -37,6 +40,74 @@ defmodule Foreman.RuntimeConfigTest do
   defp read_config, do: Config.Reader.read!(@runtime, env: :prod, target: :host)[:foreman]
 
   defp read_repo_config, do: read_config()[Foreman.Repo]
+
+  test "FOREMAN_TRUSTED_PROXIES is read, and an entry that isn't one stops the boot" do
+    Application.put_env(:foreman, :database, "postgres")
+    System.put_env("FOREMAN_TRUSTED_PROXIES", "gateway, 172.16.0.0/12")
+    assert read_config()[:trusted_proxies] == ["gateway", "172.16.0.0/12"]
+
+    System.put_env("FOREMAN_TRUSTED_PROXIES", "172.16.0.0/40")
+    assert_raise ArgumentError, ~r/FOREMAN_TRUSTED_PROXIES/, fn -> read_config() end
+  end
+
+  describe "on and off settings" do
+    setup do
+      Application.put_env(:foreman, :database, "postgres")
+      :ok
+    end
+
+    # Each of these defaults to on; anything but an exact "true" used to
+    # turn it off.
+    test "take the usual spellings of true" do
+      for value <- ["TRUE", "True", "1", "yes", "on"] do
+        System.put_env("DATABASE_SSL", value)
+        System.put_env("FOREMAN_FORCE_SSL", value)
+        System.put_env("FOREMAN_SECURE_COOKIES", value)
+
+        config = read_config()
+        assert is_list(config[Foreman.Repo][:ssl]), "DATABASE_SSL=#{value}"
+        assert config[:force_ssl], "FOREMAN_FORCE_SSL=#{value}"
+        assert config[:secure_cookies], "FOREMAN_SECURE_COOKIES=#{value}"
+      end
+    end
+
+    test "still turn off with false" do
+      System.put_env("DATABASE_SSL", "false")
+      System.put_env("FOREMAN_UPDATE_CHECK", "0")
+
+      config = read_config()
+      assert config[Foreman.Repo][:ssl] == false
+      refute config[:update_check]
+    end
+
+    test "a value that's neither stops the boot" do
+      System.put_env("FOREMAN_FORCE_SSL", "ture")
+      assert_raise RuntimeError, ~r/FOREMAN_FORCE_SSL/, fn -> read_config() end
+    end
+  end
+
+  describe "an empty setting counts as unset" do
+    setup do
+      Application.put_env(:foreman, :database, "postgres")
+      :ok
+    end
+
+    test "for the org, the base URL and the GitHub key" do
+      key_file = Path.join(System.tmp_dir!(), "foreman-key-#{System.unique_integer([:positive])}")
+      File.write!(key_file, "-----BEGIN KEY-----")
+      on_exit(fn -> File.rm(key_file) end)
+
+      System.put_env("FOREMAN_ALLOWED_ORG", "")
+      System.put_env("FOREMAN_BASE_URL", " ")
+      System.put_env("FOREMAN_GITHUB_PRIVATE_KEY", "")
+      System.put_env("FOREMAN_GITHUB_PRIVATE_KEY_FILE", key_file)
+
+      config = read_config()
+      assert config[:allowed_org] == nil
+      assert config[:base_url] == nil
+      assert config[:github_app].private_key == "-----BEGIN KEY-----"
+    end
+  end
 
   test "a release built for Postgres uses DATABASE_URL without FOREMAN_DB set at runtime" do
     Application.put_env(:foreman, :database, "postgres")

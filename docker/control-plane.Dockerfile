@@ -57,6 +57,10 @@ COPY docker/foreman-update /app/updater/foreman-update
 COPY --from=build --chown=foreman:foreman /src/apps/foreman/_build/prod/rel/foreman ./
 USER foreman
 ENV DATABASE_PATH=/var/lib/foreman/foreman.db
+# tailscale serve reaches the port published on the host's loopback, and
+# Docker hands the connection over from the bridge network's gateway: let
+# that peer say who the client is. See ForemanWeb.ClientIP.
+ENV FOREMAN_TRUSTED_PROXIES=gateway
 # 200 once the app is up and its database answers. 127.0.0.1 is exempt
 # from the FOREMAN_FORCE_SSL redirect.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=60s \

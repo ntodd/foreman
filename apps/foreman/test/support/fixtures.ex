@@ -67,6 +67,7 @@ defmodule Foreman.Fixtures do
       %Foreman.Boxes.Box{
         name: Map.get(attrs, :name, "box#{unique()}"),
         owner_user_id: Map.get(attrs, :owner_user_id),
+        shared_user_ids: Map.get(attrs, :shared_user_ids, []),
         public_key: public,
         capacity:
           Map.get(attrs, :capacity, %{
