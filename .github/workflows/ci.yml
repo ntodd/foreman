@@ -21,14 +21,16 @@ env:
   ELIXIR_VERSION: "1.20.4"
   OTP_VERSION: "29.1.1"
 
-# Every job runs on the self-hosted runners, which share one host and one
-# Docker daemon: nothing may publish a fixed port or use a fixed container
-# or image name. Postgres is reached at its container's own address.
+# Every job runs on Crew, in a VM of its own, at the default size on either
+# arch: nothing here needs x86, and the caches are keyed by arch. The jobs
+# still publish no fixed port and use no fixed container or image name,
+# so they also run on a shared Docker daemon. Postgres is reached at its
+# container's own address.
 
 jobs:
   protocol:
     if: github.event_name != 'schedule'
-    runs-on: [self-hosted, Linux, X64]
+    runs-on: crew
     defaults:
       run:
         working-directory: apps/foreman_protocol
@@ -45,7 +47,7 @@ jobs:
           path: |
             apps/foreman_protocol/deps
             apps/foreman_protocol/_build
-          key: protocol-${{ env.ELIXIR_VERSION }}-${{ env.OTP_VERSION }}-${{ hashFiles('apps/foreman_protocol/mix.lock') }}
+          key: protocol-${{ runner.arch }}-${{ env.ELIXIR_VERSION }}-${{ env.OTP_VERSION }}-${{ hashFiles('apps/foreman_protocol/mix.lock') }}
       - run: mix deps.get
       - run: mix format --check-formatted
       - run: mix compile --warnings-as-errors
@@ -54,7 +56,7 @@ jobs:
 
   agent:
     if: github.event_name != 'schedule'
-    runs-on: [self-hosted, Linux, X64]
+    runs-on: crew
     defaults:
       run:
         working-directory: apps/foreman_agent
@@ -71,7 +73,7 @@ jobs:
           path: |
             apps/foreman_agent/deps
             apps/foreman_agent/_build
-          key: agent-${{ env.ELIXIR_VERSION }}-${{ env.OTP_VERSION }}-${{ hashFiles('apps/foreman_agent/mix.lock') }}
+          key: agent-${{ runner.arch }}-${{ env.ELIXIR_VERSION }}-${{ env.OTP_VERSION }}-${{ hashFiles('apps/foreman_agent/mix.lock') }}
       # The agent reads compose files with Node (ComposeScan).
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
@@ -85,7 +87,7 @@ jobs:
   # The agent against a real Docker daemon and the real devcontainer CLI.
   agent-docker:
     if: github.event_name != 'schedule'
-    runs-on: [self-hosted, Linux, X64]
+    runs-on: crew
     defaults:
       run:
         working-directory: apps/foreman_agent
@@ -105,7 +107,7 @@ jobs:
           path: |
             apps/foreman_agent/deps
             apps/foreman_agent/_build
-          key: agent-${{ env.ELIXIR_VERSION }}-${{ env.OTP_VERSION }}-${{ hashFiles('apps/foreman_agent/mix.lock') }}
+          key: agent-${{ runner.arch }}-${{ env.ELIXIR_VERSION }}-${{ env.OTP_VERSION }}-${{ hashFiles('apps/foreman_agent/mix.lock') }}
       - name: Install the devcontainer CLI
         run: npm install --prefix "$RUNNER_TEMP/devcontainer" --no-fund --no-audit @devcontainers/cli@0.89.0
       - run: mix deps.get
@@ -115,7 +117,7 @@ jobs:
 
   control-plane:
     if: github.event_name != 'schedule'
-    runs-on: [self-hosted, Linux, X64]
+    runs-on: crew
     strategy:
       fail-fast: false
       matrix:
@@ -149,7 +151,7 @@ jobs:
           path: |
             apps/foreman/deps
             apps/foreman/_build
-          key: cp-${{ matrix.db }}-${{ env.ELIXIR_VERSION }}-${{ env.OTP_VERSION }}-${{ hashFiles('apps/foreman/mix.lock') }}
+          key: cp-${{ matrix.db }}-${{ runner.arch }}-${{ env.ELIXIR_VERSION }}-${{ env.OTP_VERSION }}-${{ hashFiles('apps/foreman/mix.lock') }}
       - name: Point the tests at Postgres
         if: matrix.db == 'postgres'
         run: >-
@@ -165,7 +167,7 @@ jobs:
 
   feature:
     if: github.event_name != 'schedule'
-    runs-on: [self-hosted, Linux, X64]
+    runs-on: crew
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
@@ -182,7 +184,7 @@ jobs:
   # of its own, with its own network namespace, nftables and Docker.
   firewall:
     if: github.event_name != 'schedule'
-    runs-on: [self-hosted, Linux, X64]
+    runs-on: crew
     env:
       RUN: foreman-ci-firewall-${{ github.run_id }}-${{ github.run_attempt }}
     steps:
@@ -199,7 +201,7 @@ jobs:
 
   images:
     if: github.event_name != 'schedule'
-    runs-on: [self-hosted, Linux, X64]
+    runs-on: crew
     env:
       RUN: foreman-ci-${{ github.run_id }}-${{ github.run_attempt }}
     services:
@@ -276,7 +278,7 @@ jobs:
   # and OpenSSL; it has to start on the oldest systems boxes run.
   agent-smoke:
     if: github.event_name != 'schedule'
-    runs-on: [self-hosted, Linux, X64]
+    runs-on: crew
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Build the agent release
@@ -289,7 +291,7 @@ jobs:
   # secrets, a reboot, a self-update, --reenroll and a rollback.
   e2e-linux:
     if: github.event_name != 'schedule'
-    runs-on: [self-hosted, Linux, X64]
+    runs-on: crew
     timeout-minutes: 40
     env:
       E2E_PROJECT: foreman-e2e-${{ github.run_id }}-${{ github.run_attempt }}
@@ -306,7 +308,7 @@ jobs:
           path: |
             apps/foreman_agent/deps
             apps/foreman_agent/_build
-          key: agent-dev-${{ env.ELIXIR_VERSION }}-${{ env.OTP_VERSION }}-${{ hashFiles('apps/foreman_agent/mix.lock') }}
+          key: agent-dev-${{ runner.arch }}-${{ env.ELIXIR_VERSION }}-${{ env.OTP_VERSION }}-${{ hashFiles('apps/foreman_agent/mix.lock') }}
       - name: Compile the agent
         working-directory: apps/foreman_agent
         run: mix deps.get && mix compile
@@ -325,7 +327,7 @@ jobs:
   # update, and a rollback that restores the data volume.
   e2e-updater:
     if: github.event_name != 'schedule'
-    runs-on: [self-hosted, Linux, X64]
+    runs-on: crew
     timeout-minutes: 40
     env:
       E2E_PROJECT: foreman-update-e2e-${{ github.run_id }}-${{ github.run_attempt }}
@@ -342,7 +344,7 @@ jobs:
           docker image rm -f "$E2E_PROJECT-cp:0.9.1" "$E2E_PROJECT-cp:0.9.2" "$E2E_PROJECT-cp:0.9.3" "$E2E_PROJECT-box" 2>/dev/null || true
 
   security:
-    runs-on: [self-hosted, Linux, X64]
+    runs-on: crew
     # gitleaks lists a pull request's commits through the API.
     permissions:
       contents: read
@@ -366,8 +368,8 @@ jobs:
         working-directory: apps/foreman
         run: MIX_ENV=test mix deps.audit
       # gitleaks-action downloads to a fixed $TMPDIR/gitleaks.tmp and fails
-      # if it already exists. TMPDIR on the self-hosted runners is shared,
-      # so give the scan a directory of its own.
+      # if it already exists, as it can where TMPDIR is shared, so give the
+      # scan a directory of its own.
       - name: Make a temp directory for gitleaks
         if: ${{ !cancelled() }}
         run: |
@@ -382,8 +384,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           # .gitleaks.toml uses [[allowlists]], which needs 8.25 or newer.
           GITLEAKS_VERSION: 8.30.1
-          # The upload wants the workspace under $HOME, which it isn't on
-          # the self-hosted runners; findings are in the log anyway.
+          # Findings are in the log; the upload isn't needed.
           GITLEAKS_ENABLE_UPLOAD_ARTIFACT: "false"
       - name: Remove the gitleaks temp directory
         if: ${{ always() }}

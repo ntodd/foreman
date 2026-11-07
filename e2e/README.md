@@ -67,8 +67,8 @@ It needs `openssl`, and Elixir for `mix foreman_agent.sign` (through
 images, so runs can share a Docker daemon.
 
 `agent-smoke.sh` starts an agent release on Ubuntu 22.04 and 24.04 and
-Debian 12 and 13, in this machine's architecture. CI runs it for amd64,
-and the release workflow for both architectures before signing:
+Debian 12 and 13, in this machine's architecture. CI runs it on whichever
+arch its Crew VM has, and the release workflow on both before signing:
 
 ```sh
 docker build -f docker/box.Dockerfile --target agent-tarball -o tmp/agent .
