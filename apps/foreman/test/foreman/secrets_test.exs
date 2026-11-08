@@ -147,6 +147,123 @@ defmodule Foreman.SecretsTest do
     end
   end
 
+  describe "list_inherited_secrets/3" do
+    test "an environment sees the owner, repo and user secrets it gets, by level", %{
+      admin: admin,
+      user: user,
+      repo: repo,
+      env: env,
+      owner: owner
+    } do
+      a = Scope.for_user(admin)
+      u = Scope.for_user(user)
+
+      {:ok, _} = Secrets.put_secret(a, "owner", owner, %{"name" => "ORG_KEY", "value" => "x"})
+      {:ok, _} = Secrets.put_secret(a, "repo", repo, %{"name" => "SHARED", "value" => "x"})
+      {:ok, _} = Secrets.put_secret(a, "repo", repo, %{"name" => "DB_URL", "value" => "x"})
+      {:ok, _} = Secrets.put_secret(u, "user", user, %{"name" => "SHARED", "value" => "x"})
+      {:ok, _} = Secrets.put_secret(u, "environment", env, %{"name" => "OWN", "value" => "x"})
+
+      assert {:ok, inherited} = Secrets.list_inherited_secrets(u, "environment", env)
+
+      assert Enum.map(inherited, &{&1.scope, &1.name}) == [
+               {"owner", "ORG_KEY"},
+               {"repo", "DB_URL"},
+               {"repo", "SHARED"},
+               {"user", "SHARED"}
+             ]
+
+      assert Enum.all?(inherited, &is_nil(&1.value))
+    end
+
+    test "an environment leaves out user secrets limited to other repos and other users' secrets",
+         %{user: user, env: env} do
+      other_repo = repo_fixture()
+      other = user_fixture()
+      u = Scope.for_user(user)
+
+      {:ok, _} =
+        Secrets.put_secret(u, "user", user, %{
+          "name" => "ONLY_OTHER",
+          "value" => "x",
+          "repo_ids" => [other_repo.id]
+        })
+
+      {:ok, _} =
+        Secrets.put_secret(u, "user", user, %{
+          "name" => "MINE",
+          "value" => "y",
+          "repo_ids" => [env.repo_id]
+        })
+
+      {:ok, _} =
+        Secrets.put_secret(Scope.for_user(other), "user", other, %{
+          "name" => "THEIRS",
+          "value" => "z"
+        })
+
+      assert {:ok, [%{scope: "user", name: "MINE"}]} =
+               Secrets.list_inherited_secrets(u, "environment", env)
+    end
+
+    test "an environment leaves out another owner's and another repo's secrets", %{
+      admin: admin,
+      user: user,
+      env: env
+    } do
+      a = Scope.for_user(admin)
+      other_repo = repo_fixture()
+
+      {:ok, _} =
+        Secrets.put_secret(a, "owner", other_repo.owner, %{"name" => "O", "value" => "x"})
+
+      {:ok, _} = Secrets.put_secret(a, "repo", other_repo, %{"name" => "R", "value" => "x"})
+
+      assert {:ok, []} = Secrets.list_inherited_secrets(Scope.for_user(user), "environment", env)
+    end
+
+    test "an admin on someone else's environment doesn't see that user's own secret names", %{
+      admin: admin,
+      user: user,
+      repo: repo,
+      env: env
+    } do
+      a = Scope.for_user(admin)
+      {:ok, _} = Secrets.put_secret(a, "repo", repo, %{"name" => "DB_URL", "value" => "x"})
+
+      {:ok, _} =
+        Secrets.put_secret(Scope.for_user(user), "user", user, %{"name" => "MINE", "value" => "y"})
+
+      assert {:ok, [%{scope: "repo", name: "DB_URL"}]} =
+               Secrets.list_inherited_secrets(a, "environment", env)
+    end
+
+    test "a repo sees its owner's secrets", %{admin: admin, repo: repo, owner: owner} do
+      a = Scope.for_user(admin)
+      {:ok, _} = Secrets.put_secret(a, "owner", owner, %{"name" => "ORG_KEY", "value" => "x"})
+      {:ok, _} = Secrets.put_secret(a, "repo", repo, %{"name" => "OWN", "value" => "x"})
+
+      assert {:ok, [%{scope: "owner", name: "ORG_KEY", value: nil}]} =
+               Secrets.list_inherited_secrets(a, "repo", repo)
+    end
+
+    test "an owner has nothing above it", %{admin: admin, owner: owner} do
+      a = Scope.for_user(admin)
+      {:ok, _} = Secrets.put_secret(a, "owner", owner, %{"name" => "ORG_KEY", "value" => "x"})
+
+      assert {:ok, []} = Secrets.list_inherited_secrets(a, "owner", owner)
+    end
+
+    test "follows the level's own authorization", %{user: user, repo: repo, env: env} do
+      other = Scope.for_user(user_fixture())
+
+      assert {:error, :unauthorized} = Secrets.list_inherited_secrets(other, "environment", env)
+
+      assert {:error, :unauthorized} =
+               Secrets.list_inherited_secrets(Scope.for_user(user), "repo", repo)
+    end
+  end
+
   describe "rendering" do
     test "secrets.env quotes values so the shell takes them literally" do
       rendered = Secrets.render_env_file(%{"A" => "it's $HOME `id` \\n", "B" => "line1\nline2"})

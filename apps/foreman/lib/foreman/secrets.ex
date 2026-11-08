@@ -66,6 +66,36 @@ defmodule Foreman.Secrets do
     end
   end
 
+  @doc """
+  The secrets a scope picks up from the scopes above it, without values:
+  an environment's from its owner, repo and user, a repo's from its owner.
+  Ordered by scope, then name. A name set at two scopes is listed at both.
+  A user's own secrets are listed only to that user, as on their own page,
+  so an admin on someone else's environment sees the owner's and repo's.
+  """
+  def list_inherited_secrets(%Scope{} = scope, scope_name, subject) do
+    with :ok <- authorize(scope, scope_name, subject) do
+      secrets =
+        case {scope_name, subject} do
+          {"environment", %Environment{} = env} ->
+            [owner, repo, user, _env] = env_secrets(env)
+            if Scope.user_id(scope) == env.user_id, do: [owner, repo, user], else: [owner, repo]
+
+          {"repo", %Repo{owner_id: owner_id}} ->
+            [secrets_at("owner:" <> owner_id)]
+
+          _ ->
+            []
+        end
+
+      {:ok, secrets |> Enum.concat() |> Enum.map(&%{&1 | value: nil})}
+    end
+  end
+
+  defp secrets_at(key) do
+    Foreman.Repo.all(from s in Secret, where: s.scope_key == ^key, order_by: s.name)
+  end
+
   def change_secret(attrs \\ %{}), do: Secret.changeset(%Secret{}, attrs)
 
   # -- writing -----------------------------------------------------------------------
@@ -156,6 +186,15 @@ defmodule Foreman.Secrets do
 
   @doc "The secrets an environment gets, name => value, with later scopes winning."
   def resolve(%Environment{} = env) do
+    env
+    |> env_secrets()
+    |> Enum.concat()
+    |> Enum.reduce(%{}, fn s, acc -> Map.put(acc, s.name, s.value) end)
+  end
+
+  # The secrets that reach an environment, one list per scope from owner
+  # to environment. A user secret limited to other repos doesn't.
+  defp env_secrets(%Environment{} = env) do
     env = Foreman.Repo.preload(env, :repo)
 
     keys = [
@@ -165,13 +204,15 @@ defmodule Foreman.Secrets do
       "environment:" <> env.id
     ]
 
-    rank = keys |> Enum.with_index() |> Map.new()
+    by_key =
+      from(s in Secret, where: s.scope_key in ^keys, order_by: s.name)
+      |> Foreman.Repo.all()
+      |> Enum.filter(fn s ->
+        s.scope != "user" or s.repo_ids == [] or env.repo_id in s.repo_ids
+      end)
+      |> Enum.group_by(& &1.scope_key)
 
-    from(s in Secret, where: s.scope_key in ^keys)
-    |> Foreman.Repo.all()
-    |> Enum.filter(fn s -> s.scope != "user" or s.repo_ids == [] or env.repo_id in s.repo_ids end)
-    |> Enum.sort_by(&rank[&1.scope_key])
-    |> Enum.reduce(%{}, fn s, acc -> Map.put(acc, s.name, s.value) end)
+    Enum.map(keys, &Map.get(by_key, &1, []))
   end
 
   @doc """

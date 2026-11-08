@@ -2,7 +2,8 @@ defmodule ForemanWeb.SecretsComponent do
   @moduledoc """
   Manages the secrets at one scope (owner, repo, user or environment).
   Values are write-only: the list shows names and who changed them last,
-  and a value can be replaced or deleted but never shown.
+  and a value can be replaced or deleted but never shown. Below that, the
+  names the scope picks up from the scopes above it, read-only.
   """
   use ForemanWeb, :live_component
 
@@ -21,9 +22,17 @@ defmodule ForemanWeb.SecretsComponent do
         socket.assigns.subject
       )
 
+    {:ok, inherited} =
+      Secrets.list_inherited_secrets(
+        socket.assigns.current_scope,
+        socket.assigns.scope_name,
+        socket.assigns.subject
+      )
+
     {:ok,
      socket
      |> assign(:secrets, secrets)
+     |> assign(:inherited, inherited)
      |> assign_new(:repos, fn -> [] end)
      |> assign_new(:description, fn -> nil end)
      |> assign_new(:form, fn -> blank_form(socket) end)
@@ -131,6 +140,29 @@ defmodule ForemanWeb.SecretsComponent do
             >Cancel</.button>
           </div>
         </.form>
+
+        <%!-- Two hyphens: a secret's name can't have one, so its row's id
+             can't collide with this. --%>
+        <div
+          :if={@inherited != []}
+          id={"#{@id}--inherited"}
+          class="-mx-5 -mb-5 mt-5 border-t border-line"
+        >
+          <p class="px-5 pt-3 text-xs font-medium text-ink-2">
+            Inherited from higher levels
+          </p>
+          <ul class="divide-y divide-line">
+            <li
+              :for={secret <- @inherited}
+              id={"#{@id}--inherited-#{secret.scope}-#{secret.name}"}
+              class="flex items-center gap-3 px-5 py-2"
+            >
+              <.icon name="hero-key-mini" class="size-4 shrink-0 text-ink-3" />
+              <p class="min-w-0 flex-1 break-all font-mono text-[13px] text-ink-2">{secret.name}</p>
+              <.badge size="sm">{level_label(secret.scope)}</.badge>
+            </li>
+          </ul>
+        </div>
       </.panel>
     </div>
     """
@@ -156,6 +188,10 @@ defmodule ForemanWeb.SecretsComponent do
 
     listed ++ unlisted
   end
+
+  defp level_label("owner"), do: "Owner"
+  defp level_label("repo"), do: "Repo"
+  defp level_label("user"), do: "User"
 
   defp repo_names(ids, repos) do
     repos

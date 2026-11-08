@@ -236,6 +236,48 @@ defmodule ForemanWeb.PagesTest do
     refute html =~ "sk-very-secret"
   end
 
+  test "an environment lists the owner, repo and user secrets it gets", %{
+    conn: conn,
+    user: user,
+    repo: repo,
+    box: box
+  } do
+    env = environment_fixture(user: user, repo: repo, box: box)
+    scope = Scope.for_user(user)
+    owner = Repo.preload(repo, :owner).owner
+
+    {:ok, _} = Foreman.Secrets.put_secret(scope, "owner", owner, %{name: "ORG_KEY", value: "o"})
+    {:ok, _} = Foreman.Secrets.put_secret(scope, "repo", repo, %{name: "DB_URL", value: "r"})
+    {:ok, _} = Foreman.Secrets.put_secret(scope, "user", user, %{name: "MY_TOKEN", value: "u"})
+    {:ok, _} = Foreman.Secrets.put_secret(scope, "environment", env, %{name: "OWN", value: "e"})
+
+    {:ok, view, _html} = live(conn, ~p"/environments/#{env.id}")
+
+    assert has_element?(view, "#env-secrets--inherited-owner-ORG_KEY", "Owner")
+    assert has_element?(view, "#env-secrets--inherited-repo-DB_URL", "Repo")
+    assert has_element?(view, "#env-secrets--inherited-user-MY_TOKEN", "User")
+    refute has_element?(view, "#env-secrets--inherited [id$=OWN]")
+    assert has_element?(view, "#env-secrets-OWN")
+  end
+
+  test "a repo lists its owner's secrets", %{conn: conn, user: user, repo: repo} do
+    owner = Repo.preload(repo, :owner).owner
+
+    {:ok, _} =
+      Foreman.Secrets.put_secret(Scope.for_user(user), "owner", owner, %{
+        name: "ORG_KEY",
+        value: "o"
+      })
+
+    {:ok, view, _html} = live(conn, ~p"/repos/#{repo.id}")
+    assert has_element?(view, "#repo-secrets--inherited-owner-ORG_KEY", "Owner")
+  end
+
+  test "a level with nothing above it lists no inherited secrets", %{conn: conn, repo: repo} do
+    {:ok, view, _html} = live(conn, ~p"/repos/#{repo.id}")
+    refute has_element?(view, "#repo-secrets--inherited")
+  end
+
   test "a box that opens up its policy gets a red alert everywhere it's shown", %{
     conn: conn,
     user: user
