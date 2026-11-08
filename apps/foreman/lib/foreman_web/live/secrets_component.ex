@@ -8,7 +8,7 @@ defmodule ForemanWeb.SecretsComponent do
 
   import ForemanWeb.ForemanComponents
 
-  alias Foreman.Secrets
+  alias Foreman.{Scope, Secrets}
 
   @impl true
   def update(assigns, socket) do
@@ -53,36 +53,64 @@ defmodule ForemanWeb.SecretsComponent do
           <li
             :for={secret <- @secrets}
             id={"#{@id}-#{secret.name}"}
-            class="flex items-center gap-3 px-5 py-2.5"
+            class="flex flex-wrap items-center gap-x-3 gap-y-1.5 px-5 py-2.5"
           >
-            <.icon name="hero-key-mini" class="size-4 shrink-0 text-ink-3" />
-            <div class="min-w-0 flex-1">
-              <p class="break-all font-mono text-[13px] font-medium text-ink">{secret.name}</p>
-              <p class="text-xs text-ink-3">
-                <span :if={secret.repo_ids != []}>{repo_names(secret.repo_ids, @repos)} · </span>
-                Updated {Calendar.strftime(secret.updated_at, "%b %-d, %Y")}<span :if={
-                  secret.updated_by
-                }> by {secret.updated_by.login}</span>
-              </p>
+            <%!-- On a phone the buttons wrap under the name rather than squeezing it. --%>
+            <div class="flex min-w-40 flex-1 items-center gap-3">
+              <.icon name="hero-key-mini" class="size-4 shrink-0 text-ink-3" />
+              <div class="min-w-0 flex-1">
+                <p class="break-all font-mono text-[13px] font-medium text-ink">{secret.name}</p>
+                <p class="text-xs text-ink-3">
+                  <span :if={secret.repo_ids != []}>{repo_names(secret.repo_ids, @repos)} · </span>
+                  Updated {Calendar.strftime(secret.updated_at, "%b %-d, %Y")}<span :if={
+                    secret.updated_by
+                  }> by {secret.updated_by.login}</span>
+                </p>
+              </div>
             </div>
-            <.button
-              size="sm"
-              variant="ghost"
-              phx-click="edit"
-              phx-value-name={secret.name}
-              phx-target={@myself}
-            >
-              Replace
-            </.button>
-            <.icon_button
-              icon="hero-trash"
-              label={"Delete #{secret.name}"}
-              size="sm"
-              phx-click="delete"
-              phx-value-name={secret.name}
-              phx-target={@myself}
-              data-confirm={"Delete #{secret.name}? Running environments get the change right away."}
-            />
+            <%!-- Small screens place the menu against these buttons, so it stays on screen. --%>
+            <div class="relative ml-auto flex items-center gap-3">
+              <.dropdown
+                :if={promote_targets(@scope_name, @subject, @current_scope) != []}
+                id={"#{@id}-#{secret.name}-promote"}
+                label="Move up"
+                class="max-sm:static"
+              >
+                <.dropdown_item
+                  :for={
+                    {to, title, description} <- promote_targets(@scope_name, @subject, @current_scope)
+                  }
+                  id={"#{@id}-#{secret.name}-promote-#{to}"}
+                  title={title}
+                  icon="hero-arrow-up-mini"
+                  phx-click={
+                    JS.push("promote", value: %{name: secret.name, to: to}, target: @myself)
+                    |> hide_dropdown("#{@id}-#{secret.name}-promote")
+                  }
+                  data-confirm={"Move #{secret.name} to #{target_name(to, @subject)}? It leaves this environment, and the value moves without being shown."}
+                >
+                  {description}
+                </.dropdown_item>
+              </.dropdown>
+              <.button
+                size="sm"
+                variant="ghost"
+                phx-click="edit"
+                phx-value-name={secret.name}
+                phx-target={@myself}
+              >
+                Replace
+              </.button>
+              <.icon_button
+                icon="hero-trash"
+                label={"Delete #{secret.name}"}
+                size="sm"
+                phx-click="delete"
+                phx-value-name={secret.name}
+                phx-target={@myself}
+                data-confirm={"Delete #{secret.name}? Running environments get the change right away."}
+              />
+            </div>
           </li>
         </ul>
 
@@ -135,6 +163,22 @@ defmodule ForemanWeb.SecretsComponent do
     </div>
     """
   end
+
+  # Where an environment's secret can move to, for its owner: their own
+  # secrets, and the repo's if they're an admin.
+  defp promote_targets("environment", %{user_id: owner_id} = env, scope) do
+    [
+      Scope.user_id(scope) == owner_id &&
+        {"user", "Your secrets",
+         "For your environments of #{env.repo.full_name}. Your other repos don't get it."},
+      (Scope.user_id(scope) == owner_id and Scope.admin?(scope)) &&
+        {"repo", "#{env.repo.full_name}'s secrets",
+         "For every environment of #{env.repo.full_name}, everyone's. Their own secrets still override it."}
+    ]
+    |> Enum.filter(& &1)
+  end
+
+  defp promote_targets(_scope_name, _subject, _scope), do: []
 
   # The repos a secret can be limited to, plus any it's limited to that
   # aren't listed any more (no devcontainer now, or gone). Without an
@@ -216,12 +260,46 @@ defmodule ForemanWeb.SecretsComponent do
      |> assign(:form, blank_form(socket))}
   end
 
+  def handle_event("promote", %{"name" => name, "to" => to}, socket) do
+    %{current_scope: scope, subject: env} = socket.assigns
+
+    # A component's flash only reaches the page on a redirect, so the page
+    # shows it.
+    message =
+      case Secrets.promote_secret(scope, env, name, to) do
+        {:ok, _secret} ->
+          {:info, "Moved #{name} to #{target_name(to, env)}."}
+
+        {:error, :exists} ->
+          {:error, "#{already_has(to, env)} a secret named #{name}. Delete one of them first."}
+
+        {:error, :overridden} ->
+          {:error,
+           "#{env.user.login}'s own #{name} would override it here, so #{name} stays on this environment."}
+
+        {:error, :not_found} ->
+          {:error, "#{name} changed or went while you were moving it. Have another look."}
+
+        {:error, _} ->
+          {:error, "Couldn't move #{name}."}
+      end
+
+    send(self(), {:secret_promoted, message})
+    {:noreply, assign(socket, :secrets, list_secrets(socket))}
+  end
+
   def handle_event("delete", %{"name" => name}, socket) do
     %{current_scope: scope, scope_name: scope_name, subject: subject} = socket.assigns
     Secrets.delete_secret(scope, scope_name, subject, name)
     send(self(), {:secret_deleted, name})
     {:noreply, assign(socket, :secrets, list_secrets(socket))}
   end
+
+  defp target_name("user", _env), do: "your secrets"
+  defp target_name("repo", env), do: "#{env.repo.full_name}'s secrets"
+
+  defp already_has("user", _env), do: "You already have"
+  defp already_has("repo", env), do: "#{env.repo.full_name} already has"
 
   defp list_secrets(socket) do
     {:ok, secrets} =
