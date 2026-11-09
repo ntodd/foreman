@@ -30,9 +30,19 @@ defmodule Foreman.DataCase do
   def setup_sandbox(tags) do
     pid = Ecto.Adapters.SQL.Sandbox.start_owner!(Foreman.Repo, shared: not tags[:async])
     ExUnit.Callbacks.on_exit(fn -> Ecto.Adapters.SQL.Sandbox.stop_owner(pid) end)
+    if Foreman.Repo.database() == "sqlite", do: take_write_lock()
     # Runs first (on_exit is last in, first out): stop the environment
     # servers a test started while the sandbox is still there.
     ExUnit.Callbacks.on_exit(&stop_environment_servers/0)
+  end
+
+  # The sandbox's transaction begins deferred, whatever config.exs asks
+  # for, and the previous test's is rolled back asynchronously once its
+  # owner stops, so a test can begin while that one still holds the write
+  # lock. Reading and then writing would fail at once ("database busy");
+  # writing first waits for the lock instead.
+  defp take_write_lock do
+    Foreman.Repo.query!("DELETE FROM schema_migrations WHERE false")
   end
 
   def stop_environment_servers do
