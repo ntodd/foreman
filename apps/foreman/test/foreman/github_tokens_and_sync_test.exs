@@ -3,6 +3,7 @@ defmodule Foreman.GitHubTokensAndSyncTest do
   # misbehaves. Each of these used to cost someone their git push, their
   # login or their repo settings.
   use Foreman.DataCase
+  use Oban.Testing, repo: Foreman.Repo
 
   import Mox
 
@@ -99,6 +100,9 @@ defmodule Foreman.GitHubTokensAndSyncTest do
       Process.exit(caller, :kill)
 
       assert eventually(fn -> Repo.reload!(user).refresh_token == "ghr_new" end)
+      # The refresh goes on to queue the push; let it finish before the
+      # sandbox goes, or it writes into whichever test runs next.
+      assert_enqueued([worker: Foreman.Jobs.PushTokens, args: %{user_id: user.id}], 1000)
     end
 
     test "a rejected refresh doesn't wipe tokens from a sign-in that happened meanwhile" do
