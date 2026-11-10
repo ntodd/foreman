@@ -3,7 +3,6 @@ defmodule Foreman.GitHubTokensAndSyncTest do
   # misbehaves. Each of these used to cost someone their git push, their
   # login or their repo settings.
   use Foreman.DataCase
-  use Oban.Testing, repo: Foreman.Repo
 
   import Mox
 
@@ -88,21 +87,33 @@ defmodule Foreman.GitHubTokensAndSyncTest do
 
       test_pid = self()
 
+      # Hold the refresh until the caller is dead, so it can't finish first.
       stub(ClientMock, :refresh_user_token, fn _, "ghr_old" ->
-        send(test_pid, :spent)
-        Process.sleep(100)
-        new_tokens("ghu_new", "ghr_new")
+        send(test_pid, {:spent, self()})
+
+        receive do
+          :go -> new_tokens("ghu_new", "ghr_new")
+        end
       end)
 
-      caller = spawn(fn -> GitHub.user_token(user) end)
-      Mox.allow(ClientMock, test_pid, caller)
-      assert_receive :spent, 1000
-      Process.exit(caller, :kill)
+      caller =
+        spawn(fn ->
+          Process.put(:"$callers", [test_pid])
+          GitHub.user_token(user)
+        end)
 
-      assert eventually(fn -> Repo.reload!(user).refresh_token == "ghr_new" end)
-      # The refresh goes on to queue the push; let it finish before the
-      # sandbox goes, or it writes into whichever test runs next.
-      assert_enqueued([worker: Foreman.Jobs.PushTokens, args: %{user_id: user.id}], 1000)
+      caller_ref = Process.monitor(caller)
+      assert_receive {:spent, refresher}, 1000
+      ref = Process.monitor(refresher)
+      Process.exit(caller, :kill)
+      assert_receive {:DOWN, ^caller_ref, :process, _, :killed}
+      send(refresher, :go)
+
+      # Wait for the refresh to finish everything it does, including
+      # queueing the token push, so it can't write after the sandbox goes.
+      assert_receive {:DOWN, ^ref, :process, _, reason}, 5000
+      assert reason == :normal
+      assert Repo.reload!(user).refresh_token == "ghr_new"
     end
 
     test "a rejected refresh doesn't wipe tokens from a sign-in that happened meanwhile" do
@@ -364,14 +375,6 @@ defmodule Foreman.GitHubTokensAndSyncTest do
         end)
 
       assert log =~ "FOREMAN_ALLOWED_ORG"
-    end
-  end
-
-  defp eventually(fun, tries \\ 50) do
-    cond do
-      fun.() -> true
-      tries == 0 -> false
-      true -> Process.sleep(20) && eventually(fun, tries - 1)
     end
   end
 end
