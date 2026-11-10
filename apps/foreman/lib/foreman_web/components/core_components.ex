@@ -1080,13 +1080,14 @@ defmodule ForemanWeb.CoreComponents do
   attr :label, :string, required: true
   attr :icon, :string, default: nil
   attr :size, :string, default: "sm", values: ~w(sm md)
+  attr :class, :any, default: nil, doc: "Added to the wrapper the menu sits against."
   slot :inner_block, required: true
 
   def dropdown(assigns) do
     ~H"""
     <div
       id={@id}
-      class="relative"
+      class={["relative", @class]}
       phx-click-away={hide_dropdown(@id)}
       phx-window-keydown={hide_dropdown(@id)}
       phx-key="Escape"

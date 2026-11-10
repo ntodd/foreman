@@ -298,6 +298,9 @@ defmodule ForemanWeb.EnvironmentLive.Show do
   def handle_info({:box, _event, box_id}, %{assigns: %{env: %{box_id: box_id}}} = socket),
     do: {:noreply, load(socket)}
 
+  def handle_info({:secret_promoted, {kind, message}}, socket),
+    do: {:noreply, put_flash(socket, kind, message)}
+
   def handle_info(_message, socket), do: {:noreply, socket}
 
   # The destroy check and the page's own check can be the same operation:

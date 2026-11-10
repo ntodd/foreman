@@ -95,6 +95,142 @@ defmodule Foreman.SecretsTest do
     end
   end
 
+  describe "promote_secret/4" do
+    test "moves an environment secret to its owner's secrets, for the environment's repo", %{
+      user: user,
+      repo: repo,
+      env: env
+    } do
+      u = Scope.for_user(user)
+      sibling = environment_fixture(user: user, repo: repo)
+      elsewhere = environment_fixture(user: user)
+      {:ok, _} = Secrets.put_secret(u, "environment", env, %{"name" => "K", "value" => "v"})
+
+      assert {:ok, promoted} = Secrets.promote_secret(u, env, "K", "user")
+      assert promoted.scope == "user"
+      assert promoted.repo_ids == [repo.id]
+      assert promoted.value == nil
+
+      assert {:ok, []} = Secrets.list_secrets(u, "environment", env)
+      assert Secrets.resolve(env) == %{"K" => "v"}
+      assert Secrets.resolve(sibling) == %{"K" => "v"}
+      assert Secrets.resolve(elsewhere) == %{}
+    end
+
+    test "moves an environment secret to the repo when its owner is an admin", %{
+      admin: admin,
+      repo: repo
+    } do
+      a = Scope.for_user(admin)
+      env = environment_fixture(user: admin, repo: repo)
+      {:ok, _} = Secrets.put_secret(a, "environment", env, %{"name" => "K", "value" => "v"})
+
+      # As if the environment restarted with K since it was set.
+      Repo.update!(
+        Ecto.Changeset.change(env,
+          applied_secret_hashes: Secrets.hashes(Secrets.resolve(env)),
+          pending_restart: false,
+          pending_changes: []
+        )
+      )
+
+      teammate_env = environment_fixture(repo: repo)
+
+      assert {:ok, %{scope: "repo"}} = Secrets.promote_secret(a, env, "K", "repo")
+      assert Secrets.resolve(env) == %{"K" => "v"}
+      assert Secrets.resolve(teammate_env) == %{"K" => "v"}
+      assert Repo.reload!(teammate_env).pending_changes == ["K"]
+      refute Repo.reload!(env).pending_restart
+
+      [event] = Foreman.Audit.recent() |> Enum.filter(&(&1.action == "secret.promote"))
+
+      assert event.metadata == %{
+               "name" => "K",
+               "from" => "environment:" <> env.id,
+               "scope" => "repo:" <> repo.id
+             }
+
+      refute inspect(event) =~ ~s("v")
+    end
+
+    test "only by the environment's owner, and only to a level they can write", %{
+      admin: admin,
+      user: user,
+      repo: repo,
+      env: env
+    } do
+      {:ok, _} =
+        Secrets.put_secret(Scope.for_user(user), "environment", env, %{
+          "name" => "K",
+          "value" => "v"
+        })
+
+      assert {:error, :unauthorized} =
+               Secrets.promote_secret(Scope.for_user(user), env, "K", "repo")
+
+      # An admin can replace or delete someone's environment secret, but
+      # moving it somewhere their own environments get it would show them
+      # the value.
+      assert {:error, :unauthorized} =
+               Secrets.promote_secret(Scope.for_user(admin), env, "K", "repo")
+
+      assert {:error, :unauthorized} =
+               Secrets.promote_secret(Scope.for_user(admin), env, "K", "user")
+
+      assert {:error, :unauthorized} =
+               Secrets.promote_secret(Scope.for_user(user_fixture()), env, "K", "user")
+
+      assert {:error, :unauthorized} =
+               Secrets.promote_secret(Scope.for_user(user), env, "K", "owner")
+
+      assert {:error, :unauthorized} =
+               Secrets.promote_secret(Scope.for_user(admin), repo, "K", "repo")
+
+      assert Secrets.resolve(env) == %{"K" => "v"}
+      assert Repo.aggregate(Secret, :count) == 1
+    end
+
+    test "refuses when the level above already has a secret with that name", %{
+      user: user,
+      env: env
+    } do
+      u = Scope.for_user(user)
+      other_repo = repo_fixture()
+
+      {:ok, _} =
+        Secrets.put_secret(u, "user", user, %{
+          "name" => "K",
+          "value" => "theirs",
+          "repo_ids" => [other_repo.id]
+        })
+
+      {:ok, _} = Secrets.put_secret(u, "environment", env, %{"name" => "K", "value" => "v"})
+
+      assert {:error, :exists} = Secrets.promote_secret(u, env, "K", "user")
+      assert Secrets.resolve(env) == %{"K" => "v"}
+      assert Repo.aggregate(Secret, :count) == 2
+    end
+
+    test "refuses when a level in between would override it in this environment", %{
+      admin: admin,
+      repo: repo
+    } do
+      a = Scope.for_user(admin)
+      env = environment_fixture(user: admin, repo: repo)
+      {:ok, _} = Secrets.put_secret(a, "user", admin, %{"name" => "K", "value" => "mine"})
+      {:ok, _} = Secrets.put_secret(a, "environment", env, %{"name" => "K", "value" => "v"})
+
+      assert {:error, :overridden} = Secrets.promote_secret(a, env, "K", "repo")
+      assert Secrets.resolve(env) == %{"K" => "v"}
+      assert Repo.aggregate(Secret, :count) == 2
+    end
+
+    test "a missing secret is not found", %{user: user, env: env} do
+      assert {:error, :not_found} =
+               Secrets.promote_secret(Scope.for_user(user), env, "NOPE", "user")
+    end
+  end
+
   describe "storage" do
     test "values are encrypted at rest and never returned", %{user: user} do
       {:ok, secret} =

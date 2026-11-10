@@ -49,7 +49,9 @@ Secrets come at four levels: owner, repo, user and environment. They're
 encrypted at rest and can't be read back in the UI. On the box they land
 on a tmpfs, and login shells load them from there. When one changes, new
 shells see it right away and Foreman asks whether to restart the affected
-services, restart everything, or leave it for later.
+services, restart everything, or leave it for later. A secret you tried
+out on one environment can move up to your own secrets for that repo, or,
+for an admin, to the repo's, without anyone seeing the value.
 
 Each environment gets its own GitHub token, scoped to its repo, and
 Foreman refreshes it every few hours. A repo can opt to use the person's
