@@ -22,17 +22,10 @@ defmodule ForemanWeb.SecretsComponent do
         socket.assigns.subject
       )
 
-    {:ok, inherited} =
-      Secrets.list_inherited_secrets(
-        socket.assigns.current_scope,
-        socket.assigns.scope_name,
-        socket.assigns.subject
-      )
-
     {:ok,
      socket
      |> assign(:secrets, secrets)
-     |> assign(:inherited, inherited)
+     |> assign(:inherited, list_inherited_secrets(socket))
      |> assign_new(:repos, fn -> [] end)
      |> assign_new(:description, fn -> nil end)
      |> assign_new(:form, fn -> blank_form(socket) end)
@@ -321,7 +314,12 @@ defmodule ForemanWeb.SecretsComponent do
       end
 
     send(self(), {:secret_promoted, message})
-    {:noreply, assign(socket, :secrets, list_secrets(socket))}
+
+    # A moved secret is now one this environment inherits.
+    {:noreply,
+     socket
+     |> assign(:secrets, list_secrets(socket))
+     |> assign(:inherited, list_inherited_secrets(socket))}
   end
 
   def handle_event("delete", %{"name" => name}, socket) do
@@ -346,5 +344,16 @@ defmodule ForemanWeb.SecretsComponent do
       )
 
     secrets
+  end
+
+  defp list_inherited_secrets(socket) do
+    {:ok, inherited} =
+      Secrets.list_inherited_secrets(
+        socket.assigns.current_scope,
+        socket.assigns.scope_name,
+        socket.assigns.subject
+      )
+
+    inherited
   end
 end

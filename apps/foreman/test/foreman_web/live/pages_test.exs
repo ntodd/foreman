@@ -303,6 +303,9 @@ defmodule ForemanWeb.PagesTest do
     assert render(view) =~ "Moved B to your secrets"
     refute has_element?(view, "#env-secrets-B")
 
+    assert has_element?(view, "#env-secrets--inherited-repo-A")
+    assert has_element?(view, "#env-secrets--inherited-user-B")
+
     {:ok, [%{name: "A"}]} = Foreman.Secrets.list_secrets(scope, "repo", repo)
     {:ok, [%{name: "B", repo_ids: [repo_id]}]} = Foreman.Secrets.list_secrets(scope, "user", user)
     assert repo_id == repo.id
