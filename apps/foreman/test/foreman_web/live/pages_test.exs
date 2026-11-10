@@ -278,6 +278,88 @@ defmodule ForemanWeb.PagesTest do
     refute has_element?(view, "#repo-secrets--inherited")
   end
 
+  test "an environment secret can be moved up to the repo or to your own secrets", %{
+    conn: conn,
+    user: user,
+    repo: repo,
+    box: box
+  } do
+    env = environment_fixture(user: user, repo: repo, box: box)
+    scope = Scope.for_user(user)
+
+    {:ok, _} =
+      Foreman.Secrets.put_secret(scope, "environment", env, %{"name" => "A", "value" => "1"})
+
+    {:ok, _} =
+      Foreman.Secrets.put_secret(scope, "environment", env, %{"name" => "B", "value" => "2"})
+
+    {:ok, view, _html} = live(conn, ~p"/environments/#{env.id}")
+
+    view |> element("#env-secrets-A-promote-repo") |> render_click()
+    assert render(view) =~ "Moved A to #{repo.full_name}&#39;s secrets"
+    refute has_element?(view, "#env-secrets-A")
+
+    view |> element("#env-secrets-B-promote-user") |> render_click()
+    assert render(view) =~ "Moved B to your secrets"
+    refute has_element?(view, "#env-secrets-B")
+
+    {:ok, [%{name: "A"}]} = Foreman.Secrets.list_secrets(scope, "repo", repo)
+    {:ok, [%{name: "B", repo_ids: [repo_id]}]} = Foreman.Secrets.list_secrets(scope, "user", user)
+    assert repo_id == repo.id
+  end
+
+  test "moving a secret up says why when it can't", %{
+    conn: conn,
+    user: user,
+    repo: repo,
+    box: box
+  } do
+    env = environment_fixture(user: user, repo: repo, box: box)
+    scope = Scope.for_user(user)
+    {:ok, _} = Foreman.Secrets.put_secret(scope, "repo", repo, %{"name" => "A", "value" => "old"})
+
+    {:ok, _} =
+      Foreman.Secrets.put_secret(scope, "environment", env, %{"name" => "A", "value" => "1"})
+
+    {:ok, view, _html} = live(conn, ~p"/environments/#{env.id}")
+    view |> element("#env-secrets-A-promote-repo") |> render_click()
+
+    assert render(view) =~ "#{repo.full_name} already has a secret named A"
+    assert has_element?(view, "#env-secrets-A")
+  end
+
+  test "a member can move an environment secret to their own secrets, not the repo's", %{
+    repo: repo
+  } do
+    member = user_fixture()
+    env = environment_fixture(user: member, repo: repo)
+
+    {:ok, _} =
+      Foreman.Secrets.put_secret(Scope.for_user(member), "environment", env, %{
+        "name" => "A",
+        "value" => "1"
+      })
+
+    {:ok, view, _html} = live(log_in(build_conn(), member), ~p"/environments/#{env.id}")
+    assert has_element?(view, "#env-secrets-A-promote-user")
+    refute has_element?(view, "#env-secrets-A-promote-repo")
+  end
+
+  test "an admin can't move someone else's environment secret", %{conn: conn, repo: repo} do
+    member = user_fixture()
+    env = environment_fixture(user: member, repo: repo)
+
+    {:ok, _} =
+      Foreman.Secrets.put_secret(Scope.for_user(member), "environment", env, %{
+        "name" => "A",
+        "value" => "1"
+      })
+
+    {:ok, view, _html} = live(conn, ~p"/environments/#{env.id}")
+    assert has_element?(view, "#env-secrets-A")
+    refute has_element?(view, "#env-secrets-A-promote")
+  end
+
   test "a box that opens up its policy gets a red alert everywhere it's shown", %{
     conn: conn,
     user: user
