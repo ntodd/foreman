@@ -134,6 +134,11 @@ defmodule ForemanWeb.SettingsLive do
               label="Install command"
               placeholder="Defaults to install.sh, bootstrap.sh or setup.sh"
             />
+            <.input
+              field={@form[:dotfiles_target_path]}
+              label="Clone to"
+              placeholder="~/dotfiles"
+            />
           </div>
         </.panel>
 

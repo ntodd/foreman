@@ -19,6 +19,7 @@ defmodule Foreman.Accounts.User do
     field :git_email, :string
     field :dotfiles_repository, :string
     field :dotfiles_install_command, :string
+    field :dotfiles_target_path, :string
     field :devcontainer_features, :map, default: %{}
     field :disabled_at, :utc_datetime_usec
     timestamps()
@@ -68,7 +69,13 @@ defmodule Foreman.Accounts.User do
 
   def preferences_changeset(user, attrs) do
     user
-    |> cast(attrs, [:git_name, :git_email, :dotfiles_repository, :dotfiles_install_command])
+    |> cast(attrs, [
+      :git_name,
+      :git_email,
+      :dotfiles_repository,
+      :dotfiles_install_command,
+      :dotfiles_target_path
+    ])
     |> Foreman.Validations.validate_git_identity()
     |> Foreman.Validations.validate_dotfiles()
   end
