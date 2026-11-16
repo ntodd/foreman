@@ -83,7 +83,7 @@ defmodule Foreman.MixProject do
       {:eqrcode, "~> 0.2.1"},
       {:boundary, "~> 0.12.0", runtime: false},
       {:credo, "~> 1.7", only: [:dev, :test], runtime: false},
-      {:sobelow, "~> 0.18.1", only: [:dev, :test], runtime: false},
+      {:sobelow, "~> 0.19.0", only: [:dev, :test], runtime: false},
       {:mix_audit, "~> 2.1", only: [:dev, :test], runtime: false},
       {:mox, "~> 1.3", only: :test}
     ]
