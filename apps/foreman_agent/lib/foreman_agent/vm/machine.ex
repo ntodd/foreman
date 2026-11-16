@@ -34,6 +34,12 @@ defmodule ForemanAgent.VM.Machine do
   @doc "Starts the VM from its snapshot (the VM's `snapshot` directory), running."
   @callback restore(env_id :: String.t(), spec(), Config.t()) :: :ok | {:error, String.t()}
 
+  @doc """
+  Lets a running VM go on if something paused it and never let it go (a
+  suspend cut short). `:ok` for one that wasn't paused.
+  """
+  @callback unpause(env_id :: String.t(), Config.t()) :: :ok | {:error, String.t()}
+
   @doc "Shuts the guest down, and stops the VM if it doesn't go within `timeout`."
   @callback power_off(env_id :: String.t(), timeout(), Config.t()) :: :ok | {:error, String.t()}
 

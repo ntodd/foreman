@@ -18,8 +18,9 @@ defmodule ForemanAgent.VM.Machine.Cloud do
   @impl true
   def boot(env_id, spec, config) do
     paths = VM.paths(config, env_id)
-    # What an earlier run left: Cloud Hypervisor won't bind over them.
-    Enum.each([paths.api, paths.vsock], &File.rm/1)
+    # What an earlier run left: Cloud Hypervisor won't bind over them. Not
+    # a running VM's, which the helper leaves running.
+    unless running?(env_id, config), do: Enum.each([paths.api, paths.vsock], &File.rm/1)
 
     case Helper.start(config, env_id, spec) do
       {:ok, _} -> :ok
@@ -39,6 +40,9 @@ defmodule ForemanAgent.VM.Machine.Cloud do
 
   @impl true
   def snapshot(env_id, dir, config) do
+    # Paused already by a suspend that was cut short: pausing again fails.
+    _ = unpause(env_id, config)
+
     with :ok <- api_ok(api(config, env_id, :put, "vm.pause"), "pause"),
          :ok <- snapshot_to(config, env_id, dir) do
       # Stopping the VMM ends the unit; the snapshot is what's left.
@@ -66,9 +70,29 @@ defmodule ForemanAgent.VM.Machine.Cloud do
   defp api_ok({:error, reason}, what), do: {:error, "couldn't #{what} the VM: #{inspect(reason)}"}
 
   @impl true
+  def unpause(env_id, config) do
+    case vm_state(config, env_id) do
+      "Paused" -> api_ok(api(config, env_id, :put, "vm.resume"), "resume")
+      _ -> :ok
+    end
+  end
+
+  defp vm_state(config, env_id) do
+    case Req.get(
+           url: "http://localhost/api/v1/vm.info",
+           unix_socket: VM.paths(config, env_id).api,
+           retry: false,
+           receive_timeout: 5_000
+         ) do
+      {:ok, %Req.Response{status: 200, body: %{"state" => state}}} -> state
+      _ -> nil
+    end
+  end
+
+  @impl true
   def restore(env_id, spec, config) do
     paths = VM.paths(config, env_id)
-    Enum.each([paths.api, paths.vsock], &File.rm/1)
+    unless running?(env_id, config), do: Enum.each([paths.api, paths.vsock], &File.rm/1)
 
     case Helper.restore(config, env_id, spec) do
       {:ok, _} -> :ok

@@ -35,18 +35,23 @@ defmodule ForemanAgent.VM.Env do
     with :ok <- Env.check_clone_url(p.clone_url, ctx.config),
          {:ok, _} <- cache_secrets(ctx, p.env_id, p.files),
          {:ok, spec} <- prepare(p, ctx, log),
-         :ok <- ensure_running(p.env_id, spec, ctx, log),
+         {:ok, _how} <- ensure_running(p.env_id, spec, ctx, log),
          :ok <- push_secrets(p.env_id, log, ctx) do
       relay(cmd, log, ctx)
     end
   end
 
+  # A start that resumed the VM says so: the environment's processes kept
+  # the secrets they had when it was suspended.
   def run(%Command{type: "env.start", payload: p} = cmd, log, ctx) do
     with {:ok, meta} <- existing(ctx.config, p.env_id),
          {:ok, spec} <- prepare(Map.put(p, :limits, limits(meta)), ctx, log),
-         :ok <- ensure_running(p.env_id, spec, ctx, log),
+         {:ok, how} <- ensure_running(p.env_id, spec, ctx, log),
          :ok <- push_secrets(p.env_id, log, ctx) do
-      relay(cmd, log, ctx)
+      case relay(cmd, log, ctx) do
+        {:ok, result} when how == :resumed -> {:ok, Map.put(result, "resumed", true)}
+        other -> other
+      end
     end
   end
 
@@ -65,6 +70,9 @@ defmodule ForemanAgent.VM.Env do
         case machine.snapshot(p.env_id, tmp, ctx.config) do
           :ok ->
             Links.stop(p.env_id)
+            # On disk before it counts: a power cut after this mustn't
+            # leave a torn snapshot that looks whole.
+            sync_dir(tmp)
             File.rm_rf!(paths.snapshot)
             File.rename!(tmp, paths.snapshot)
             {:ok, %{"suspended" => true}}
@@ -155,8 +163,42 @@ defmodule ForemanAgent.VM.Env do
     with {:ok, meta} <- existing(ctx.config, p.env_id),
          {:ok, spec} <-
            prepare(Map.merge(p, %{slug: meta["slug"], limits: limits(meta)}), ctx, log) do
-      ensure_running(p.env_id, spec, ctx, log)
+      with {:ok, _how} <- ensure_running(p.env_id, spec, ctx, log), do: :ok
     end
+  end
+
+  @doc """
+  Run as the agent starts, before any operation: what a suspend that was
+  cut short left. A half-written snapshot goes, a VM left paused carries
+  on, and a snapshot beside a VM that's running (it was resumed, and the
+  agent stopped before deleting it) goes too: restoring it later would
+  put old memory over a disk that has changed since.
+  """
+  @spec recover(ForemanAgent.Config.t()) :: :ok
+  def recover(config) do
+    machine = Machine.impl(config)
+
+    for env_id <- VM.list(config) do
+      paths = VM.paths(config, env_id)
+      File.rm_rf(paths.snapshot <> ".tmp")
+
+      if machine.running?(env_id, config) do
+        File.rm_rf(paths.snapshot)
+        _ = machine.unpause(env_id, config)
+      end
+    end
+
+    :ok
+  end
+
+  defp sync_dir(dir) do
+    for name <- File.ls!(dir), path = Path.join(dir, name), File.regular?(path) do
+      {:ok, fd} = :file.open(path, [:read, :raw])
+      :ok = :file.sync(fd)
+      :file.close(fd)
+    end
+
+    :ok
   end
 
   defp relay(cmd, log, ctx, opts \\ []),
@@ -191,6 +233,7 @@ defmodule ForemanAgent.VM.Env do
          :ok <- File.mkdir_p(paths.dir),
          :ok <- File.chmod(paths.dir, 0o700),
          :ok <- ensure_data_disk(paths, config),
+         p = keep_snapshot_compatible(p, guest, agent, ctx, log),
          {:ok, meta} <- ensure_root_disk(p, paths, guest, ctx, log) do
       size = VM.size(Map.get(p, :limits, %{}), config, VM.box_size(config.proc))
 
@@ -214,6 +257,35 @@ defmodule ForemanAgent.VM.Env do
       {:error, reason} when is_binary(reason) -> {:error, reason}
       {:error, reason} -> {:error, "couldn't prepare the environment's VM: #{inspect(reason)}"}
     end
+  end
+
+  # A suspended VM resumes with what it booted with: Cloud Hypervisor
+  # restores a snapshot only with the binary, guest image and agent disk it
+  # was taken with, and memory the size it was. The box updated since, the
+  # snapshot goes and the environment boots afresh.
+  defp keep_snapshot_compatible(p, guest, agent, ctx, log) do
+    config = ctx.config
+
+    with true <- VM.suspended?(config, p.env_id),
+         false <- Machine.impl(config).running?(p.env_id, config),
+         {:ok, %{"booted" => booted}} <- VM.read_meta(config, p.env_id) do
+      if booted["agent"] == agent.version and booted["guest"] == guest.digest do
+        Map.put(p, :limits, %{cpus: booted["cpus"], memory_mb: booted["memory_mb"]})
+      else
+        drop_snapshot(p, config, log)
+      end
+    else
+      true -> p
+      false -> p
+      {:ok, _meta} -> drop_snapshot(p, config, log)
+      {:error, _} -> p
+    end
+  end
+
+  defp drop_snapshot(p, config, log) do
+    log.("info", "The box was updated since the environment was suspended; starting it afresh\n")
+    File.rm_rf(VM.paths(config, p.env_id).snapshot)
+    p
   end
 
   defp ensure_data_disk(paths, config) do
@@ -271,55 +343,73 @@ defmodule ForemanAgent.VM.Env do
     end
   end
 
+  # {:ok, :running | :booted | :resumed}
   defp ensure_running(env_id, spec, ctx, log) do
     machine = Machine.impl(ctx.config)
+    snapshot = VM.paths(ctx.config, env_id).snapshot
 
     cond do
       machine.running?(env_id, ctx.config) ->
-        :ok
+        # Never restored: the VM has run since it was taken.
+        File.rm_rf(snapshot)
+        with :ok <- machine.unpause(env_id, ctx.config), do: {:ok, :running}
 
       VM.suspended?(ctx.config, env_id) ->
         case restore(env_id, spec, ctx, log) do
           :ok ->
-            :ok
+            {:ok, :resumed}
 
           {:error, message} ->
             # The disk is as the VM left it, mid-flight; booting it is like
             # after a power cut, which beats not starting at all.
             log.("info", "Couldn't resume the environment (#{message}); booting it instead\n")
-            File.rm_rf(VM.paths(ctx.config, env_id).snapshot)
-            boot(env_id, spec, ctx, log)
+            File.rm_rf(snapshot)
+            with :ok <- boot(env_id, spec, ctx, log), do: {:ok, :booted}
         end
 
       true ->
-        boot(env_id, spec, ctx, log)
+        with :ok <- boot(env_id, spec, ctx, log), do: {:ok, :booted}
     end
   end
 
+  # What the VM booted with, which a resume needs to match.
   defp boot(env_id, spec, ctx, log) do
     log.("info", "Booting the environment's VM\n")
 
     with :ok <- Machine.impl(ctx.config).boot(env_id, spec, ctx.config),
          :ok <- await(env_id, ctx, "didn't come up") do
       log.("info", "VM running (agent #{spec.agent_version})\n")
+
+      with {:ok, meta} <- VM.read_meta(ctx.config, env_id) do
+        booted = %{
+          "agent" => spec.agent_version,
+          "guest" => spec.guest,
+          "cpus" => spec.cpus,
+          "memory_mb" => spec.memory_mb
+        }
+
+        VM.write_meta(ctx.config, env_id, Map.put(meta, "booted", booted))
+      end
+
       :ok
     end
   end
 
   # The guest's clock is stepped to the box's when the link says hello;
   # the secrets go again after (they may have changed while it was
-  # suspended).
+  # suspended). The snapshot goes as soon as the VM is running from it:
+  # copy-on-write keeps the pages the VM maps, and a snapshot left behind
+  # would be restored over a disk the VM has changed since.
   defp restore(env_id, spec, ctx, log) do
     log.("info", "Resuming the environment's VM\n")
-    snapshot = VM.paths(ctx.config, env_id).snapshot
 
-    with :ok <- Machine.impl(ctx.config).restore(env_id, spec, ctx.config),
-         :ok <- await(env_id, ctx, "didn't come back from its snapshot") do
-      # Copy-on-write: the VM still reads the file it maps, which stays
-      # until the VM stops; nothing else can.
-      File.rm_rf(snapshot)
-      log.("info", "VM resumed\n")
-      :ok
+    with :ok <- Machine.impl(ctx.config).restore(env_id, spec, ctx.config) do
+      File.rm_rf(VM.paths(ctx.config, env_id).snapshot)
+
+      with :ok <- await(env_id, ctx, "didn't come back from its snapshot") do
+        log.("info", "VM resumed\n")
+        :ok
+      end
     end
   end
 

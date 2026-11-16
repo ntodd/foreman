@@ -8,7 +8,7 @@ defmodule Foreman.Environments.Environment do
   """
   use Foreman.Schema
 
-  @desired ~w(running stopped destroyed)
+  @desired ~w(running stopped suspended destroyed)
   @observed ~w(pending creating starting stopping suspending running stopped suspended partial missing error destroying destroyed)
 
   schema "environments" do

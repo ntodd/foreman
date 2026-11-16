@@ -462,10 +462,13 @@ defmodule Foreman.Environments do
   defp queue_action(scope, env, action, args) do
     desired =
       case action do
-        # Suspended is stopped as far as reconciling goes: nothing starts it
-        # but a start.
-        a when a in [:stop, :suspend] ->
+        :stop ->
           "stopped"
+
+        # Nothing starts it but a start, and a box that still says it's
+        # running is told to suspend it, not stop it.
+        :suspend ->
+          "suspended"
 
         :destroy ->
           "destroyed"
@@ -751,6 +754,13 @@ defmodule Foreman.Environments do
   defp result_attrs(%{status: "succeeded", action: action} = op, env) when action in @up do
     result = if is_map(op.result), do: op.result, else: %{}
     args = op.args || %{}
+    # A resumed VM's processes carry on with the secrets they had when it
+    # was suspended, whatever its files say now.
+    args =
+      if result["resumed"] == true,
+        do: Map.put(args, "secret_hashes", env.applied_secret_hashes),
+        else: args
+
     changed = changed_since(args["secret_hashes"], env)
 
     %{
@@ -865,7 +875,9 @@ defmodule Foreman.Environments do
 
   # A cancelled stop means "keep it running": put back the desired state
   # the action replaced, unless something since has changed it again.
-  defp revert_desired(%{status: "cancelled", action: action, args: args}, env) do
+  # A failed suspend leaves it running, so running is the wish again.
+  defp revert_desired(%{status: status, action: action, args: args}, env)
+       when status == "cancelled" or (status == "failed" and action == "suspend") do
     case args do
       %{"prior_desired" => prior} when is_binary(prior) ->
         if env.desired_state == desired_for(action), do: %{desired_state: prior}, else: %{}
@@ -878,7 +890,7 @@ defmodule Foreman.Environments do
   defp revert_desired(_op, _env), do: %{}
 
   defp desired_for("stop"), do: "stopped"
-  defp desired_for("suspend"), do: "stopped"
+  defp desired_for("suspend"), do: "suspended"
   defp desired_for("destroy"), do: "destroyed"
   defp desired_for(action) when action in @up, do: "running"
   defp desired_for(_), do: nil
@@ -948,13 +960,17 @@ defmodule Foreman.Environments do
       changed = Secrets.changed_names(env.applied_secret_hashes, current)
 
       # A stopped environment has nothing running to restart; its next
-      # start gets the new secrets.
+      # start gets the new secrets. A suspended one's processes come back
+      # with the secrets they had, so they need the restart too, and the
+      # box keeps the new files for the resume.
+      live? = env.desired_state in ["running", "suspended"]
+
       env =
-        if changed == [] or env.desired_state != "running",
+        if changed == [] or not live?,
           do: update_env!(env, %{pending_restart: false, pending_changes: []}),
           else: update_env!(env, %{pending_restart: true, pending_changes: changed})
 
-      if env.desired_state == "running", do: enqueue(env, "secrets_write", %{}, nil)
+      if live?, do: enqueue(env, "secrets_write", %{}, nil)
     end
 
     :ok
@@ -1043,6 +1059,11 @@ defmodule Foreman.Environments do
   defp reconcile(%Environment{desired_state: "stopped"} = env, observed)
        when observed in ["running", "partial"] do
     enqueue(env, "stop", %{}, nil)
+  end
+
+  defp reconcile(%Environment{desired_state: "suspended"} = env, observed)
+       when observed in ["running", "partial"] do
+    enqueue(env, "suspend", %{}, nil)
   end
 
   defp reconcile(%Environment{desired_state: "destroyed"} = env, _observed),

@@ -414,6 +414,84 @@ defmodule ForemanAgent.VMEnvTest do
       assert {:ok, %{"suspended" => true}} = run(command("env.suspend"), ctx)
     end
 
+    test "a start after a resume says so", ctx do
+      {:ok, _} = run(command("env.suspend"), ctx)
+      assert {:ok, %{"resumed" => true}} = run(command("env.start"), ctx)
+      assert {:ok, result} = run(command("env.start"), ctx)
+      refute Map.has_key?(result, "resumed")
+    end
+
+    # Cloud Hypervisor restores a snapshot only with the binary, guest
+    # image and agent disk it was taken with.
+    test "a box updated since the suspend starts the environment afresh", ctx do
+      {:ok, _} = run(command("env.suspend"), ctx)
+      {:ok, meta} = VM.read_meta(ctx.config, @env)
+      VM.write_meta(ctx.config, @env, put_in(meta, ["booted", "agent"], "0.0.1"))
+      flush()
+
+      assert {:ok, result} = run(command("env.start"), ctx)
+      refute Map.has_key?(result, "resumed")
+      refute_received {:machine, {:restore, _}, @env}
+      assert_received {:machine, {:boot, _}, @env}
+      refute VM.suspended?(ctx.config, @env)
+    end
+
+    test "a resume is the size it was suspended at, whatever the command asks", ctx do
+      {:ok, _} = run(command("env.suspend"), ctx)
+      {:ok, %{"booted" => %{"memory_mb" => memory}}} = VM.read_meta(ctx.config, @env)
+      flush()
+
+      assert {:ok, _} =
+               run(
+                 command("env.rebuild", %{
+                   repo: "acme/hello",
+                   clone_url: "https://github.com/acme/hello.git",
+                   branch: "main",
+                   limits: %{memory_mb: 1024}
+                 }),
+                 ctx
+               )
+
+      assert_received {:machine, {:restore, %{memory_mb: ^memory}}, @env}
+    end
+
+    # Copy-on-write: once the VM is back the snapshot can go, and a stale
+    # one beside a VM that has run since would restore old memory over a
+    # changed disk.
+    test "a snapshot beside a running VM is never restored", ctx do
+      snapshot = VM.paths(ctx.config, @env).snapshot
+      File.mkdir_p!(snapshot)
+      File.write!(Path.join(snapshot, "config.json"), "{}")
+
+      assert {:ok, _} = run(command("env.stop"), ctx)
+      refute File.exists?(snapshot)
+      flush()
+      assert {:ok, _} = run(command("env.start"), ctx)
+      refute_received {:machine, {:restore, _}, @env}
+    end
+
+    test "a VM left paused is let go before anything is sent to it", ctx do
+      assert {:ok, _} = run(command("env.start"), ctx)
+      assert_received {:machine, :unpause, @env}
+    end
+
+    test "at the agent's start, what a suspend cut short is cleaned up", ctx do
+      paths = VM.paths(ctx.config, @env)
+      File.mkdir_p!(paths.snapshot <> ".tmp")
+      File.mkdir_p!(paths.snapshot)
+      File.write!(Path.join(paths.snapshot, "config.json"), "{}")
+
+      :ok = VM.Env.recover(ctx.config)
+      refute File.exists?(paths.snapshot <> ".tmp")
+      refute File.exists?(paths.snapshot)
+      assert_received {:machine, :unpause, @env}
+
+      # A suspended VM keeps its snapshot.
+      {:ok, _} = run(command("env.suspend"), ctx)
+      :ok = VM.Env.recover(ctx.config)
+      assert VM.suspended?(ctx.config, @env)
+    end
+
     test "destroy takes the snapshot with the rest", ctx do
       {:ok, _} = run(command("env.suspend"), ctx)
       assert {:ok, %{}} = run(command("env.destroy"), ctx)
@@ -509,6 +587,14 @@ defmodule ForemanAgent.VMEnvTest do
       assert cpus == System.schedulers_online()
       assert usage.memory_mb == 512
     end
+  end
+
+  test "a guest can't say its environment is suspended; only the box can" do
+    entry = %{"env_id" => @env, "slug" => "x", "state" => "suspended", "containers" => []}
+    assert VM.cast_inventory_entry([entry], @env, "hello-1") == :error
+
+    assert {:ok, %{state: "running"}} =
+             VM.cast_inventory_entry([%{entry | "state" => "running"}], @env, "hello-1")
   end
 
   test "a VM's size never passes the box's" do

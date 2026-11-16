@@ -138,6 +138,12 @@ defmodule ForemanAgent.Test.FakeMachine do
   end
 
   @impl true
+  def unpause(env_id, _config) do
+    report(:unpause, env_id)
+    :ok
+  end
+
+  @impl true
   def power_off(env_id, _timeout, config) do
     report(:power_off, env_id)
     kill(env_id, config)

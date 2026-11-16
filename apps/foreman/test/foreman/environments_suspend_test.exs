@@ -35,8 +35,8 @@ defmodule Foreman.EnvironmentsSuspendTest do
 
     env = Repo.reload!(ctx.env)
     assert env.observed_state == "suspending"
-    # Nothing starts it again but a start.
-    assert env.desired_state == "stopped"
+    # Nothing starts it again but a start, and nothing stops it.
+    assert env.desired_state == "suspended"
 
     report(ctx.box, cmd, %{status: "ok"})
     assert Repo.reload!(ctx.env).observed_state == "suspended"
@@ -49,7 +49,51 @@ defmodule Foreman.EnvironmentsSuspendTest do
 
     env = Repo.reload!(ctx.env)
     assert env.observed_state == "running"
+    assert env.desired_state == "running"
     assert env.status_message == "suspend failed: no room for the snapshot"
+  end
+
+  # An inventory taken while the VM was still pausing can arrive after the
+  # suspend's result.
+  test "a box that still says it's running is told to suspend it, not stop it", ctx do
+    {:ok, _} = Environments.suspend(ctx.scope, ctx.env)
+    assert_receive {:dispatch, %Command{type: "env.suspend"} = cmd}
+    report(ctx.box, cmd, %{status: "ok"})
+
+    inventory = [%{env_id: ctx.env.id, slug: ctx.env.slug, state: "running", containers: []}]
+    Environments.reconcile_inventory(ctx.box.id, inventory)
+    assert_receive {:dispatch, %Command{type: "env.suspend"}}
+    refute_receive {:dispatch, %Command{type: "env.stop"}}, 200
+  end
+
+  # A resumed environment's processes kept the secrets they had.
+  test "secrets that changed while it was suspended are still pending after the resume", ctx do
+    {:ok, _} = Environments.suspend(ctx.scope, ctx.env)
+    assert_receive {:dispatch, %Command{type: "env.suspend"} = cmd}
+    report(ctx.box, cmd, %{status: "ok"})
+
+    secret_fixture("environment", ctx.env, "API_KEY", "new")
+    :ok = Environments.secrets_changed([ctx.env.id])
+    assert %{pending_restart: true, pending_changes: ["API_KEY"]} = Repo.reload!(ctx.env)
+
+    {:ok, _} = Environments.start(ctx.scope, Repo.reload!(ctx.env))
+    secrets_writes(ctx.box)
+    assert_receive {:dispatch, %Command{type: "env.start"} = start}
+    report(ctx.box, start, %{status: "ok", result: %{"resumed" => true}})
+
+    assert %{observed_state: "running", pending_restart: true, pending_changes: ["API_KEY"]} =
+             Repo.reload!(ctx.env)
+  end
+
+  # Every secrets write the box is sent, answered.
+  defp secrets_writes(box) do
+    receive do
+      {:dispatch, %Command{type: "env.secrets.write"} = cmd} ->
+        report(box, cmd, %{status: "ok"})
+        secrets_writes(box)
+    after
+      300 -> :ok
+    end
   end
 
   test "a start resumes it", ctx do

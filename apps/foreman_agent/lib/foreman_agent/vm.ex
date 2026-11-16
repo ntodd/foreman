@@ -115,10 +115,13 @@ defmodule ForemanAgent.VM do
     %{cpus: cpus, memory_mb: memory_mb}
   end
 
+  # Suspended is the box's to say: a guest that's answering is running.
+  @guest_states ForemanProtocol.Event.env_states() -- ["suspended"]
+
   @inventory_entry {:object,
                     env_id: {:uuid, required: true},
                     slug: {:slug, required: true},
-                    state: {{:enum, ForemanProtocol.Event.env_states()}, required: true},
+                    state: {{:enum, @guest_states}, required: true},
                     containers:
                       {{:list,
                         {:object,
