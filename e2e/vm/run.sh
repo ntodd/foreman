@@ -396,7 +396,6 @@ sleep 20
 echo "ok: same VM process, environment still running"
 
 say "an environment from a prebuild"
-cookie=$(cp_eval 'E2E.session_cookie()' | sed -n 's/^COOKIE=//p')
 box_id=$(cp_eval 'E2E.box_id()' | sed -n 's/^BOX_ID=//p')
 repo_id=$(cp_eval 'E2E.repo_id()' | sed -n 's/^REPO_ID=//p')
 lv_click "/repos/$repo_id" build_prebuild "{\"box\":\"$box_id\"}" | grep -q "Building a prebuild" ||
