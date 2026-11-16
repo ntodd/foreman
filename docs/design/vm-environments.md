@@ -2,7 +2,7 @@
 
 Status: design spec, 2026-11-16, with the open questions settled for the first implementation in [Implementation decisions](#implementation-decisions). The direction is decided, and the mechanisms were validated in two spikes and a validation run on the same day. Where an implementation decision differs from a requirement below, the decision wins.
 
-This spec replaces the shared-Docker model in [architecture.md](../architecture.md) and [security.md](../security.md): each environment gets its own virtual machine, with its own kernel and its own Docker daemon, under Cloud Hypervisor.
+This spec replaces the shared-Docker model in [architecture.md](../architecture.md) and [security.md](../security.md): each environment gets its own virtual machine, with its own kernel and its own Docker daemon, under Cloud Hypervisor. The first implementation (protocol 6) is built, and those two documents now describe it; this one keeps the reasoning and the measurements.
 
 ## How to read this
 
@@ -686,4 +686,4 @@ Until step 6 the clone sends from the source's address, which the firewall's gue
 | `memory_restore_mode=ondemand` | Needs userfaultfd: missing on Flatcar, privileged on Ubuntu |
 | Environment VMs nested in a Flatcar VM on a Mac | Nested virtualization on Apple's hypervisor is poor; [#180](https://github.com/ntodd/foreman/issues/180) uses the hypervisor directly |
 | Keeping shared Docker as a fallback | Two isolation models to maintain, and the weaker one is the one being removed |
-| Sysbox, Podman, Kata, rootless Docker | See "No docker-in-docker" in [architecture.md](../architecture.md) |
+| Sysbox, Podman, Kata, rootless Docker | See "Docker inside an environment" in [architecture.md](../architecture.md#docker-inside-an-environment) |

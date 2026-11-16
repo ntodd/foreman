@@ -19,144 +19,59 @@ You don't add any of this to the repo; the agent layers it on:
 - `COMPOSE_PROJECT_NAME` set to the environment's name, so every named
   volume is per copy
 
-`initializeCommand` is ignored: the devcontainer CLI runs it on the box
-itself, not in a container.
+`initializeCommand` runs where the devcontainer CLI runs it, outside the
+containers, which is the environment's own VM.
 
-## What a box refuses
+## What an environment can do
 
-Environments run unprivileged. Every time the agent starts one, it
-checks the merged compose config, `devcontainer.json`, and what the
-devcontainer CLI resolves from features, before anything runs. It does
-this on every start because anything running inside an environment can
-edit the files in its workspace. By default a box refuses:
+Each environment runs in a VM of its own, with its own kernel and its
+own Docker, and nothing checks what the repo's config asks for. A repo
+can use whatever Docker allows: privileged containers, the docker-in-docker feature,
+capabilities, host namespaces, devices, `seccomp=unconfined` (the
+official Go and Rust features ask for it, for debuggers), the Docker
+socket, and bind mounts of any path. The "host" in all of these is the
+environment's VM, which holds that environment and nothing else, so none
+of it reaches the box or other environments.
 
-- privileged containers: `privileged: true` in a compose file or
-  `devcontainer.json`, the docker-in-docker feature, any feature whose
-  own metadata asks for privileged, and capabilities that amount to
-  root on the box (`SYS_ADMIN`, `SYS_MODULE`, `SYS_RAWIO`,
-  `DAC_READ_SEARCH`, `BPF`, `PERFMON`, `MAC_ADMIN`, `ALL`)
-- the host's network, PID or IPC namespace
-- the Docker socket
-- bind mounts of host paths outside the environment's workspace
-  (`../..` from `.devcontainer`, the usual `/workspaces` mount, is fine)
-- `env_file`, `secrets`, `configs` or build contexts outside the
-  workspace
-- host devices, including `/dev/net/tun` (Foreman's Tailscale doesn't
-  need it, so remove a repo's own Tailscale setup), `device_cgroup_rules`,
-  and device reservations that aren't NVIDIA GPUs
-- NVIDIA GPU reservations, under a rule of their own so a box can allow
-  them without allowing host devices; see [GPUs](#gpus)
-- turning seccomp off (`seccomp=unconfined`). The official Go and Rust
-  features ask for it, for debuggers; remove it from the repo's config,
-  or let a box allow it with `FOREMAN_POLICY=seccomp=allow`. That only
-  loosens seccomp, not privileged containers.
-- other `security_opt` settings, joining another container's namespaces
-  or volumes, and named volumes that are really host paths
-- env files, label files, and included or extended compose files outside
-  the workspace, or with paths built from variables (`${...}`), and
-  remote includes. Use plain paths inside the repo.
-- networks from outside the project (an `external` network, or one with
-  a fixed `name:`), and `devcontainer.json` mounts of `external` volumes
-  that aren't the environment's own
-- builds with `privileged`, `network: host` or `entitlements`
-- compose keys Foreman hasn't reviewed, such as `runtime`,
-  `cgroup_parent`, `external_links`, `models` or
-  `use_api_socket`. A box can allow unreviewed keys with
-  `FOREMAN_POLICY=compose_keys=allow`. `x-` extension keys are always
-  fine.
-- `provider` services, whatever the box allows: compose runs a
-  provider's `type` as a program on the box.
+What still applies:
 
-The check reads compose files with Node. The agent release carries its
-own, so a box doesn't need Node installed.
+- Published ports are stripped. Reach the environment over the tailnet
+  instead; nothing outside the box could reach a VM's ports anyway.
+- The VM has a size: the environment's CPU and memory limits, else the
+  repo's, else the box's default of 4 CPUs and 8 GB, and a 64 GB data
+  disk by default.
+- The network: the internet, and the box's LAN unless the box blocks it.
+  Not the box itself, not other environments, and not the tailnet except
+  through the environment's own node.
+- Bind mounts of host paths outside the workspace bind the VM's paths,
+  which hold none of your files.
 
-Ordinary capabilities such as `NET_ADMIN` or `SYS_PTRACE` (debuggers)
-are fine. Binds that expose the agent's own state, other environments
-or secrets are refused whatever the box allows.
-
-A box can open a rule up with `FOREMAN_POLICY` in its agent's
-environment (for example `privileged=allow`, or `host_bind=warn` to
-allow with a warning on the environment's page). That's the exception:
-the box then shows a red alert in the control plane until it's
-removed.
+Boxes before environment VMs refused most of the list above, with a
+compose policy a box could loosen with `FOREMAN_POLICY`. That's gone.
 
 ## Docker inside an environment
 
-The docker-in-docker feature runs the devcontainer privileged, which is
-root on the box, so it's refused. Usually it isn't needed:
+The docker-in-docker feature works, and so does a `docker:dind`
+sidecar with `privileged: true`. Either runs a daemon of its own inside
+the environment's VM, with its images on the environment's data disk.
 
-| What dind was for | Do this instead |
+Often a daemon isn't needed, and leaving it out saves the second
+daemon's memory and disk:
+
+| What dind was for | Without it |
 |---|---|
-| Databases, caches, search, Selenium and other services | Add them to the compose file as sidecars. They run unprivileged, get their own volumes per copy, and pick up secrets through `${NAME}`. |
-| Building and deploying images | Use a remote builder or CI. `fly deploy` builds remotely by default; with plain Docker, point `docker buildx` at a remote builder or build in a workflow. |
+| Databases, caches, search, Selenium and other services | Add them to the compose file as sidecars. They get their own volumes per copy, and pick up secrets through `${NAME}`. |
+| Building and deploying images | A remote builder or CI. `fly deploy` builds remotely by default; with plain Docker, point `docker buildx` at a remote builder or build in a workflow. |
 | Pulling, retagging or pushing images | `crane` or `skopeo`, which need no daemon. |
-| Testcontainers or tests that start containers | Point the tests at sidecars in development, and run the container-starting suite in CI. |
-
-If a repo really needs a Docker daemon in its environments, run them on
-a box that allows it (`FOREMAN_POLICY=privileged=allow`) and treat that
-box as belonging to whatever runs in it. Its own VM is a good fit.
 
 ## GPUs
 
-A box with NVIDIA GPUs can let environments use them with
-`FOREMAN_POLICY=gpu=allow` (or `gpu=warn`). That doesn't let them map
-other host devices; those stay under the `devices` rule. Reserve the GPU
-in the compose file, with the driver and the driver capabilities the
-service uses:
-
-```yaml
-deploy:
-  resources:
-    reservations:
-      devices:
-        - driver: nvidia
-          count: all              # or a number, or device_ids: ["0"]
-          capabilities: [gpu, compute, video, utility]
-```
-
-`compute` is CUDA, `video` is NVENC and NVDEC, `utility` is
-`nvidia-smi` and NVML, and `compat32` is the 32-bit libraries. Listing
-`video` and `utility` without `compute` replaces NVIDIA's default set,
-so CUDA (Whisper, say) needs `compute` listed too. The `gpus:` key works
-the same way, as a list with `driver: nvidia` and `capabilities`.
-
-These stay under the `devices` rule, so `gpu=allow` doesn't cover them:
-
-- `graphics` and `display`, which bring in OpenGL and Vulkan and the
-  display's modeset device
-- a reservation that names no driver capabilities, `gpus: all` among
-  them. Docker then leaves the capabilities to the image, which can ask
-  for all of them.
-- another driver (`cdi` can name any device), `options`, and device IDs
-  that aren't a GPU index or a `GPU-`/`MIG-` UUID
-- `runtime: nvidia`, which hands GPUs to whatever the image's
-  environment asks for
-
-`hostRequirements.gpu` in `devcontainer.json` is ignored: the agent runs
-the devcontainer CLI with `--gpu-availability none`, so only the
-reservations in the compose file reach a container. Agents before this
-let the CLI add a GPU for `hostRequirements.gpu`, and a container made
-that way keeps it across starts and restarts, so rebuild environments
-on a GPU box after upgrading its agent.
-
-Environments on a box share its GPUs. Foreman doesn't limit their GPU
-memory or keep one environment's work off another's GPU, so one that
-fills the memory starves the rest. Give a GPU box to environments that
-can share it.
-
-The box needs the NVIDIA driver and the
-[NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html).
-Configure Docker with `nvidia-ctk runtime configure --runtime=docker`,
-without `--set-as-default`: with nvidia as Docker's default runtime, any
-image that sets `NVIDIA_VISIBLE_DEVICES` (CUDA images do) gets the GPUs
-without a reservation, so the agent refuses to start environments on
-that box unless it allows `devices`. If nvidia is already the default,
-running `nvidia-ctk` again doesn't change that: remove `default-runtime`
-from `/etc/docker/daemon.json` (or set it to `runc`) and restart Docker.
-The agent goes by the runtime's binary, not its name, and refuses a
-default runtime whose binary Docker doesn't report. If the toolkit is
-missing, starting an environment that reserves a GPU fails with an error
-that says so.
+Environments can't use a box's GPUs. A VM gets none of the box's
+devices, Foreman doesn't pass GPUs through, and the devcontainer CLI
+runs with `--gpu-availability none`. A compose service that reserves a
+GPU fails to start. Before environment VMs, a box could let
+environments share its NVIDIA GPUs (`FOREMAN_POLICY=gpu=allow`); that
+went with shared Docker.
 
 ## Postgres 18 and its data volume
 
@@ -178,20 +93,23 @@ Or pin the image to `postgres:17` until you're ready to move.
 
 ## Builds and caching
 
-Every environment on a box builds through the box's Docker daemon, so a
-second copy of a repo reuses the first one's image layers, and a
-different branch rebuilds from the first layer whose files changed. The
-cache is per box and grows until it's pruned: **Prune** on the box's
-page drops build cache that hasn't been used for a week, along with
-dangling images and unused anonymous volumes. Nothing runs it on a
-schedule. Rebuild reuses the cache too: it recreates the
-containers, it doesn't refetch a base image tag that has moved, so pin
-base images rather than relying on `:latest`.
+Every environment builds with the Docker in its own VM, so nothing is
+shared between environments: a second copy of a repo pulls its images
+and builds from scratch, as the first did. Within an environment, a
+rebuild reuses that environment's cache and rebuilds from the first
+layer whose files changed. It recreates the containers but doesn't
+refetch a base image tag that has moved, so pin base images rather than
+relying on `:latest`.
+
+The cache lives on the environment's data disk and grows until it's
+pruned. **Prune** on the box's page prunes Docker in every running
+environment's VM (build cache unused for a week, dangling images and
+unused anonymous volumes) and removes guest images and agent disks no VM uses any
+more. Stopped environments aren't pruned. Nothing runs it on a
+schedule.
 
 ## What to remove
 
-- **The docker-in-docker feature:** see
-  [Docker inside an environment](#docker-inside-an-environment).
 - **Repo-level Tailscale:** install scripts, `tailscale-up.sh`, `TS_*`
   settings, the auth key mount, and `cap_add` or `devices` added only for
   Tailscale. The feature does all of it.
@@ -203,20 +121,19 @@ base images rather than relying on `:latest`.
   (overridable per repo).
 - **The `sshd` feature and any published SSH port:** Tailscale SSH
   replaces them.
-- **Bind mounts to host paths** outside the repo: they break on other
-  boxes and collide between copies (and the box refuses them).
+- **Bind mounts to host paths** outside the repo: the host is the
+  environment's VM, which has none of your files.
 - **`ports:`** can stay; the overlay strips them.
 
 ## What trips a port up
 
-Each of these broke a real repo moving onto Foreman. None of them is an
-error you'd see from the box's checks.
+Each of these broke a real repo moving onto Foreman. None of them shows
+up as an error from Foreman.
 
 - **The remote user doesn't run as the uid you set.** The devcontainer CLI
   changes the remote user's uid and gid to the host user's that runs it,
-  which is the agent's own user (`foreman`, a system account `install.sh`
-  creates, so its uid is below 1000 and varies by box; `id foreman` shows
-  it). A Dockerfile's `useradd -u 1000` or common-utils'
+  which is the guest agent's own user in the VM (`foreman`, a system
+  account in the guest image, so its uid is below 1000). A Dockerfile's `useradd -u 1000` or common-utils'
   `userUid` doesn't survive that. HOME is fine (the CLI re-owns it), but
   anything else the image chowns to the user, `/usr/local/bundle` or a
   browser cache like `/ms-playwright`, isn't writable at runtime. Make
