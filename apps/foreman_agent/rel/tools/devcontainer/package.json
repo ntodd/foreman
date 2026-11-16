@@ -3,6 +3,6 @@
   "private": true,
   "description": "The devcontainer CLI the agent release carries (rel/tools/bundle.sh)",
   "dependencies": {
-    "@devcontainers/cli": "0.89.0"
+    "@devcontainers/cli": "0.90.0"
   }
 }
