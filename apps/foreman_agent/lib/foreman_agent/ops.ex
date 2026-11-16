@@ -41,10 +41,19 @@ defmodule ForemanAgent.Ops do
   @spec in_flight(GenServer.server()) :: [String.t()]
   def in_flight(server \\ __MODULE__), do: GenServer.call(server, :in_flight)
 
+  @doc """
+  A random id this server picks when it starts. What it knows of the
+  operations it ran goes when it stops, so a new id means a resend may
+  run an operation again (see `ForemanAgent.VM.Link`).
+  """
+  @spec instance(GenServer.server()) :: String.t()
+  def instance(server \\ __MODULE__), do: GenServer.call(server, :instance)
+
   @impl true
   def init(opts) do
     {:ok,
      %{
+       instance: ForemanProtocol.uuid(),
        handler: Keyword.get(opts, :handler, &ForemanAgent.Handler.handle/2),
        sink: Keyword.get(opts, :sink, &ForemanAgent.Outbox.push/1),
        running: %{},
@@ -86,6 +95,7 @@ defmodule ForemanAgent.Ops do
   end
 
   def handle_call(:in_flight, _from, state), do: {:reply, MapSet.to_list(state.known), state}
+  def handle_call(:instance, _from, state), do: {:reply, state.instance, state}
 
   @impl true
   def handle_info({:op_done, op_id, result}, state) do

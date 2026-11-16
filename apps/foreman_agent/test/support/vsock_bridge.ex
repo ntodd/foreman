@@ -4,18 +4,20 @@ defmodule ForemanAgent.Test.VsockBridge do
   unix socket, takes `CONNECT <port>\\n`, connects to `target` (the guest
   agent's socket), answers `OK <port>\\n` and copies bytes both ways.
 
-  `drop/1` closes every connection (a lost link); `stop/1` closes the
-  listener too (the VM gone).
+  `drop/1` closes every connection (a lost link). Stopping it closes the
+  listener too (the VM gone): use `stop_supervised/1`, as a supervisor
+  starts it again otherwise.
   """
   use GenServer
 
   def start_link(opts), do: GenServer.start_link(__MODULE__, opts)
 
   def drop(bridge), do: GenServer.call(bridge, :drop)
-  def stop(bridge), do: GenServer.stop(bridge)
 
   @impl true
   def init(opts) do
+    # So a supervisor stopping it runs terminate/2, which closes the pipes.
+    Process.flag(:trap_exit, true)
     path = Keyword.fetch!(opts, :path)
     _ = File.rm(path)
     {:ok, listen} = :gen_tcp.listen(0, [:binary, {:ifaddr, {:local, path}}, active: false])
@@ -32,6 +34,7 @@ defmodule ForemanAgent.Test.VsockBridge do
 
   @impl true
   def handle_info({:pipe, pid}, state), do: {:noreply, %{state | pipes: [pid | state.pipes]}}
+  def handle_info({:EXIT, _pid, _reason}, state), do: {:noreply, state}
 
   @impl true
   def terminate(_reason, state) do

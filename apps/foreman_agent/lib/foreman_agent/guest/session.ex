@@ -7,7 +7,14 @@ defmodule ForemanAgent.Guest.Session do
   the result the guest already has, or waits for the one still running.
   Their events come back through `ForemanAgent.Outbox`, which this session
   attaches to once the host says hello: results the host hasn't
-  acknowledged are delivered again on every connection.
+  acknowledged are delivered again on every connection. The session's
+  hello carries the Ops server's instance id, so the host can tell when a
+  restart has made it forget what it ran.
+
+  The host drops the connection on a frame past
+  `ForemanAgent.Channel.max_frame(:to_host)`, and a result is delivered
+  again on every connection until it's acknowledged, so a result too
+  large to send goes as an error instead.
 
   Options (all have defaults that use the application's processes):
 
@@ -46,7 +53,7 @@ defmodule ForemanAgent.Guest.Session do
 
   @impl true
   def handle_info(:go, state) do
-    :ok = :inet.setopts(state.socket, Channel.frame_opts() ++ [active: :once])
+    :ok = :inet.setopts(state.socket, Channel.frame_opts(:guest) ++ [active: :once])
     {:noreply, state}
   end
 
@@ -69,7 +76,11 @@ defmodule ForemanAgent.Guest.Session do
   end
 
   def handle_info({:outbox_deliver, %Event{} = event, seq}, state) do
-    send_frame(state, %{"t" => "event", "seq" => seq, "event" => Event.to_wire(event)})
+    with {:error, :too_large} <- send_event(state, event, seq) do
+      Logger.warning("an #{event.type} event is too large to send to the host")
+      with {:ok, smaller} <- too_large(event), do: send_event(state, smaller, seq)
+    end
+
     {:noreply, state}
   end
 
@@ -92,7 +103,13 @@ defmodule ForemanAgent.Guest.Session do
   defp handle_frame(%{"t" => "hello"} = frame, state) do
     sync_clock(frame, state)
     if is_map(frame["config"]), do: state.configure.(frame["config"])
-    send_frame(state, %{"t" => "hello", "agent_version" => ForemanAgent.Identity.version()})
+
+    send_frame(state, %{
+      "t" => "hello",
+      "agent_version" => ForemanAgent.Identity.version(),
+      "instance" => Ops.instance(state.ops)
+    })
+
     Outbox.attach(state.outbox, self())
   end
 
@@ -154,10 +171,31 @@ defmodule ForemanAgent.Guest.Session do
 
   defp reject(_wire, _errors, _state), do: :ok
 
+  defp send_event(state, event, seq),
+    do: send_frame(state, %{"t" => "event", "seq" => seq, "event" => Event.to_wire(event)})
+
+  # Ops only sends op events; a log chunk too large is dropped.
+  defp too_large(%Event{type: "op.result", payload: %{op_id: op_id}}) do
+    Event.new("op.result", %{
+      op_id: op_id,
+      status: "error",
+      error: "the result was too large to send to the box"
+    })
+  end
+
+  defp too_large(_event), do: :drop
+
   defp send_frame(state, frame) do
-    case Channel.send_frame(state.socket, frame) do
-      :ok -> :ok
-      {:error, reason} -> Logger.warning("couldn't send to the host: #{inspect(reason)}")
+    case Channel.send_frame(state.socket, frame, Channel.max_frame(:to_host)) do
+      :ok ->
+        :ok
+
+      {:error, :too_large} = error ->
+        error
+
+      {:error, reason} = error ->
+        Logger.warning("couldn't send to the host: #{inspect(reason)}")
+        error
     end
   end
 end

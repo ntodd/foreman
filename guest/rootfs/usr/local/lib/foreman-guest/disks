@@ -22,10 +22,22 @@ udevadm settle --timeout=10 || true
 data=$(disk fm-data /dev/vdb)
 agent=$(disk fm-agent /dev/vdc)
 
-if ! blkid "$data" >/dev/null 2>&1; then
-  echo "foreman-guest: formatting $data"
-  mkfs.ext4 -q -L fm-data -E nodiscard,lazy_itable_init=1,lazy_journal_init=1 "$data"
-fi
+# blkid -p probes the disk itself: 0 is a filesystem, 2 is nothing on it
+# (a new disk). Anything else (a disk it can't read, signatures that
+# disagree) stops here rather than format over the environment's data.
+probe=0
+blkid -p "$data" >/dev/null || probe=$?
+case $probe in
+  0) ;;
+  2)
+    echo "foreman-guest: formatting $data"
+    mkfs.ext4 -q -L fm-data -E nodiscard,lazy_itable_init=1,lazy_journal_init=1 "$data"
+    ;;
+  *)
+    echo "foreman-guest: can't tell what's on $data (blkid -p exited $probe); not formatting it" >&2
+    exit 1
+    ;;
+esac
 
 base=/var/lib/foreman-data
 mkdir -p "$base"
