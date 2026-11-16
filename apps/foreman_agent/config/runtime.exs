@@ -21,7 +21,22 @@ if config_env() != :test do
       _ -> System.get_env("FOREMAN_DOCKER_SOCKET", "/var/run/docker.sock")
     end
 
+  # In an environment's VM the agent takes its commands from the box's
+  # agent, not the control plane (ForemanAgent.Guest).
+  mode =
+    case System.get_env("FOREMAN_AGENT_MODE", "host") do
+      "host" ->
+        :host
+
+      "guest" ->
+        :guest
+
+      other ->
+        raise ArgumentError, "FOREMAN_AGENT_MODE must be host or guest, not #{inspect(other)}"
+    end
+
   config :foreman_agent,
+    mode: mode,
     url: System.get_env("FOREMAN_URL"),
     join_token: System.get_env("FOREMAN_JOIN_TOKEN"),
     data_dir: System.get_env("FOREMAN_AGENT_DATA_DIR", "/var/lib/foreman-agent"),
@@ -35,5 +50,5 @@ if config_env() != :test do
     allowed_git_hosts: list.("FOREMAN_ALLOWED_GIT_HOSTS", ["github.com"]),
     insecure_git_hosts: list.("FOREMAN_INSECURE_GIT_HOSTS", []),
     policy_rules: policy,
-    connect: System.get_env("FOREMAN_URL") not in [nil, ""]
+    connect: mode == :host and System.get_env("FOREMAN_URL") not in [nil, ""]
 end

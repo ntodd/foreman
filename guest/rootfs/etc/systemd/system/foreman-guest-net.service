@@ -1,0 +1,18 @@
+[Unit]
+Description=Foreman guest network
+DefaultDependencies=no
+After=systemd-udevd.service systemd-modules-load.service
+Wants=systemd-udevd.service
+Before=network.target docker.service
+Conflicts=shutdown.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+# On the serial console too, where the box keeps the VM's log.
+StandardOutput=journal+console
+StandardError=journal+console
+ExecStart=/usr/local/lib/foreman-guest/net
+
+[Install]
+WantedBy=multi-user.target

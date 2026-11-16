@@ -1,0 +1,45 @@
+#!/bin/sh
+# Mounts the environment's disks. The data disk (formatted on its first
+# boot) holds everything the environment keeps: Docker's images,
+# containers and volumes, the clone, and the guest agent's state. The
+# agent disk is the box's agent release, read-only.
+set -eu
+
+disk() { # serial, the device it is when there's no by-id link
+  i=0
+  while [ $i -lt 100 ]; do
+    if [ -e "/dev/disk/by-id/virtio-$1" ]; then
+      readlink -f "/dev/disk/by-id/virtio-$1"
+      return
+    fi
+    i=$((i + 1))
+    sleep 0.05
+  done
+  echo "$2"
+}
+
+udevadm settle --timeout=10 || true
+data=$(disk fm-data /dev/vdb)
+agent=$(disk fm-agent /dev/vdc)
+
+if ! blkid "$data" >/dev/null 2>&1; then
+  echo "foreman-guest: formatting $data"
+  mkfs.ext4 -q -L fm-data -E nodiscard,lazy_itable_init=1,lazy_journal_init=1 "$data"
+fi
+
+base=/var/lib/foreman-data
+mkdir -p "$base"
+mountpoint -q "$base" || mount -o noatime "$data" "$base"
+for dir in docker containerd srv agent; do mkdir -p "$base/$dir"; done
+
+bind() {
+  mkdir -p "$2"
+  mountpoint -q "$2" || mount --bind "$1" "$2"
+}
+bind "$base/docker" /var/lib/docker
+bind "$base/containerd" /var/lib/containerd
+bind "$base/srv" /srv/foreman
+bind "$base/agent" /var/lib/foreman-agent
+
+mkdir -p /opt/foreman-agent
+mountpoint -q /opt/foreman-agent || mount -o ro "$agent" /opt/foreman-agent

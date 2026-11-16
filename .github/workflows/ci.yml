@@ -186,9 +186,32 @@ jobs:
         with:
           node-version: "22"
       - name: ShellCheck
-        run: shellcheck -s sh features/src/foreman/install.sh features/src/foreman/scripts/* apps/foreman/priv/agent/install.sh apps/foreman/priv/agent/mac.sh apps/foreman/priv/agent/vm.sh apps/foreman/priv/flatcar/*.sh apps/foreman_agent/rel/tools/bundle.sh apps/foreman_agent/rel/tools/devcontainer.sh scripts/publish-agent-release.sh e2e/*.sh e2e/firewall/test.sh e2e/linux/run.sh e2e/flatcar/run.sh e2e/linux/bin/gh docker/foreman-update e2e/updater/run.sh
+        run: shellcheck -s sh guest/build.sh guest/rootfs/usr/local/lib/foreman-guest/* e2e/guest/run.sh features/src/foreman/install.sh features/src/foreman/scripts/* apps/foreman/priv/agent/install.sh apps/foreman/priv/agent/mac.sh apps/foreman/priv/agent/vm.sh apps/foreman/priv/flatcar/*.sh apps/foreman_agent/rel/tools/bundle.sh apps/foreman_agent/rel/tools/devcontainer.sh scripts/publish-agent-release.sh e2e/*.sh e2e/firewall/test.sh e2e/linux/run.sh e2e/flatcar/run.sh e2e/linux/bin/gh docker/foreman-update e2e/updater/run.sh
       - name: Test the feature in a real devcontainer
         run: npx --yes @devcontainers/cli@0.89.0 features test --features foreman --base-image mcr.microsoft.com/devcontainers/base:debian --skip-scenarios features
+
+  # The guest system image, booted under Cloud Hypervisor with the agent
+  # release on its agent disk, and the agent on the box driving the one in
+  # the VM over hybrid vsock (e2e/guest/run.sh). Crew's VMs have no KVM,
+  # so this runs on a GitHub-hosted runner (amd64), which does.
+  guest:
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Build the guest image
+        run: guest/build.sh "$RUNNER_TEMP/guest"
+      - name: Build the agent release
+        run: docker build -f docker/box.Dockerfile --target agent-tarball -o "$RUNNER_TEMP/agent" .
+      - name: Give the runner's user KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+          ls -l /dev/kvm
+      - name: Boot it
+        run: e2e/guest/run.sh "$RUNNER_TEMP/guest/foreman-guest-linux-amd64.tar" "$RUNNER_TEMP/agent/foreman_agent.tar.gz"
 
   # The box firewall against a fake tailnet: a peer behind an interface
   # named tailscale0, as a box on the tailnet has. The test changes its

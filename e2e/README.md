@@ -75,6 +75,23 @@ docker build -f docker/box.Dockerfile --target agent-tarball -o tmp/agent .
 e2e/agent-smoke.sh tmp/agent/foreman_agent.tar.gz
 ```
 
+## The guest image
+
+`e2e/guest/run.sh` boots the guest system image (`guest/build.sh`) under the
+Cloud Hypervisor the agent release carries, with the release on the VM's
+agent disk and no network, and has the agent on this machine drive the
+agent in the VM over hybrid vsock: hello, the inventory and ports
+queries, `box.gc` run in the guest, and `box.restart` refused there. It
+then boots the VM again on the same data disk, which mustn't be
+formatted twice. CI runs it on a GitHub-hosted runner, since Crew's VMs
+have no KVM. It needs `/dev/kvm`, `zstd` and `mkfs.ext4`, and no root.
+
+```sh
+guest/build.sh tmp/guest
+docker build -f docker/box.Dockerfile --target agent-tarball -o tmp/agent .
+e2e/guest/run.sh tmp/guest/foreman-guest-linux-amd64.tar tmp/agent/foreman_agent.tar.gz
+```
+
 ## A Flatcar box, for real
 
 `flatcar/run.sh` makes a box the way a person would, with the launcher

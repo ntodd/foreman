@@ -30,7 +30,18 @@ defmodule ForemanAgent.Application do
     }
 
     children =
-      [ForemanAgent.Outbox, ForemanAgent.Ops] ++ if(config.connect, do: [link], else: [])
+      case config.mode do
+        # In an environment's VM: commands come from the box's agent.
+        :guest ->
+          [
+            ForemanAgent.Outbox,
+            {ForemanAgent.Ops, handler: &ForemanAgent.Guest.handle/2},
+            {ForemanAgent.Guest.Server, path: config.guest_socket}
+          ]
+
+        :host ->
+          [ForemanAgent.Outbox, ForemanAgent.Ops] ++ if(config.connect, do: [link], else: [])
+      end
 
     Supervisor.start_link(children,
       strategy: :one_for_one,

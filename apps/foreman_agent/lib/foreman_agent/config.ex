@@ -39,6 +39,11 @@ defmodule ForemanAgent.Config do
             boot_id: "/proc/sys/kernel/random/boot_id",
             join_token: nil,
             connect: true,
+            # :host on a box; :guest in an environment's VM, where the
+            # agent serves the box's agent on guest_socket (see
+            # ForemanAgent.Guest).
+            mode: :host,
+            guest_socket: "/run/foreman-guest/agent.sock",
             tailscale_join_wait: :timer.seconds(30)
 
   @type t :: %__MODULE__{}
