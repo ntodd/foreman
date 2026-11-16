@@ -234,11 +234,11 @@ and restart, so environments with private features can start without a
 rebuild) came in with 0.4.10. A 0.4.10 control plane refuses agents on
 protocol 2 (older than 0.4.0), and a refused box can't update from it, so
 update those boxes to 0.4.0 or later before upgrading past 0.4.9.
-Protocol 5 (rebooting a box from its page) comes in with the release
-after 0.4.13. Its control plane refuses agents on protocol 3 (older than
-0.4.10) the same way, so update those boxes to 0.4.10 or later first. A
-box that was refused anyway comes back when you run the install command
-on it again.
+Protocol 5 (rebooting a box from its page) came in with 0.5.0. A 0.5.0
+control plane refuses agents on protocol 3 (older than 0.4.10) the same
+way, so update those boxes to 0.4.10 or later before upgrading past
+0.4.13. A box that was refused anyway comes back when you run the
+install command on it again.
 
 Following starts with 0.3.0, and 0.3.0 is the first release with
 images, so rolling back from it means building the older version
