@@ -351,8 +351,9 @@ sleep 5
 read -r boot_after clock_after <<EOF
 $(beat)
 EOF
-[ -n "$boot_after" ] && [ "$boot_after" = "$boot_before" ] ||
+if [ -z "$boot_after" ] || [ "$boot_after" != "$boot_before" ]; then
   fail "the VM booted again ($boot_before, then $boot_after) instead of resuming"
+fi
 skew=$(( $(date +%s) - clock_after ))
 [ "$skew" -lt 20 ] || fail "the guest's clock is ${skew}s behind after the resume"
 sudo test -e "/srv/foreman/vms/$first/snapshot" && fail "the snapshot outlived the resume"
