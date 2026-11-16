@@ -24,8 +24,16 @@ defmodule ForemanWeb.AddBoxLiveTest do
     view
   end
 
+  # Read the token from the install command, not the whole page: the page's
+  # LiveView session tokens are random base64 too, and can contain "fj_".
   defp token(view) do
-    [token] = Regex.run(~r/fj_[A-Za-z0-9_-]+/, render(view))
+    command = view |> element("#install-command") |> render()
+
+    [token] =
+      Regex.run(~r/--token (fj_[A-Za-z0-9_-]{43})(?![A-Za-z0-9_-])/, command,
+        capture: :all_but_first
+      )
+
     token
   end
 
@@ -54,13 +62,10 @@ defmodule ForemanWeb.AddBoxLiveTest do
 
   test "a Mac runs the box as a VM with the Mac launcher, no sudo", %{conn: conn} do
     view = add_box(conn)
+    raw = token(view)
     view |> element("#join-kinds button", "Mac") |> render_click()
 
-    assert has_element?(
-             view,
-             "#install-command",
-             "/agent/mac.sh | sh -s -- --token #{token(view)}"
-           )
+    assert has_element?(view, "#install-command", "/agent/mac.sh | sh -s -- --token #{raw}")
 
     refute render(element(view, "#install-command")) =~ "sudo"
   end
