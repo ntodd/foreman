@@ -187,7 +187,7 @@ As a result, environments don't come back after a reboot until the control plane
 ### Create flow
 
 1. The control plane picks the box, then resolves the slug, secrets, GitHub token and Tailscale auth key. It won't place an environment on a box that can't run VMs.
-2. The box's agent keeps the secrets on its tmpfs, makes the VM's disks (downloading the guest image the first time), asks the root helper to start the VM, waits for the guest agent's hello, and writes the secrets into the VM. It then relays `env.create` to the guest agent, which does the rest inside the VM.
+2. The box's agent keeps the secrets on its tmpfs, makes the VM's disks (downloading the guest image the first time; the data disk is a copy of the box's prebuild of the repo's branch when it has one, see [Prebuilds](#prebuilds)), asks the root helper to start the VM, waits for the guest agent's hello, and writes the secrets into the VM. It then relays `env.create` to the guest agent, which does the rest inside the VM.
 3. The guest agent writes the secrets directory and clones the repo. It uses a credential helper that reads the token file, so the token never appears in the URL or `.git/config`.
 4. It reads `.devcontainer/devcontainer.json` (JSONC) and writes two files to its own directory:
    - an override config that appends the overlay to `dockerComposeFile`, using absolute paths
@@ -207,6 +207,26 @@ As a result, environments don't come back after a reboot until the control plane
 
    Build output streams back to the UI, through the box's agent.
 6. The agents report the result. The control plane records the Tailscale device ID once the node shows up.
+
+### Prebuilds
+
+An admin has a box build a prebuild of a repo's default branch
+(`box.prebuild`). The box runs an `env.create` in a VM of its own under
+the prebuild's id, with an installation token that reads the repo and no
+one's secrets, tells the guest it's a prebuild (it also pulls its
+Dockerfiles' base images by tag, so later builds don't ask the registry
+about them), powers it off and keeps the data disk as
+`/srv/foreman/prebuilds/<id>/data.raw`. The VM it was built in is never
+reported as an environment.
+
+A create on that box and branch carries the prebuild's id. The box
+copies the disk (a reflink on XFS) instead of making an empty one, and
+the guest agent takes over the prebuild's clone and its Docker data: it
+renames them to the environment's, removes the prebuild's own containers
+and volumes, and runs `devcontainer up` as usual, which makes the
+environment's containers from the cache. Building another replaces the
+ready one; `box.prebuild.delete` frees a box's copy. Builds that never
+report back fail after five hours.
 
 ### Generated overlay
 
@@ -766,7 +786,7 @@ the plan above, the build wins.
   can ask for. See [security.md](security.md#the-control-plane-and-its-host)
   and `e2e/updater/run.sh`.
 - **Not built yet:** idle auto-stop, per-service limits for sidecars,
-  webhooks (repos are polled). From the VM design: prebuilds, resizing a
-  VM, environment VMs on arm64, Flatcar on metal
+  webhooks (repos are polled). From the VM design: prebuilds that refresh
+  themselves, new environments from a memory snapshot, resizing a VM, environment VMs on arm64, Flatcar on metal
   tested ([#179](https://github.com/ntodd/foreman/issues/179)), and Mac
   boxes on Apple's hypervisor ([#180](https://github.com/ntodd/foreman/issues/180)).

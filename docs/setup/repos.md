@@ -108,6 +108,39 @@ unused anonymous volumes) and removes guest images and agent disks no VM uses an
 more. Stopped environments aren't pruned. Nothing runs it on a
 schedule.
 
+## Prebuilds
+
+A prebuild saves the cold start. An admin builds one from the repo's
+page, per box: the box makes an environment of the repo's default branch
+in a VM of its own, keeps its disk (the clone, the pulled images, the
+build cache), and throws the VM away. A new environment of that branch
+on that box then starts from a copy of the disk (a reflink on XFS, so
+instant) and its `devcontainer up` builds from the cache instead of
+pulling and building from nothing. Environments of other branches, and
+on other boxes, build as before.
+
+What runs where:
+
+- The prebuild runs `initializeCommand`, `onCreateCommand`,
+  `updateContentCommand` and `postCreateCommand`, so whatever they
+  install or download is on the disk. The environment made from it gets
+  containers of its own, and the CLI runs those hooks again in them,
+  then `postStartCommand`; hooks that skip work already done are fast.
+- Named volumes aren't kept: the environment's are its own, under its
+  own name. A database a hook seeded is seeded again.
+- The prebuild clones with a GitHub token that reads the repo (and its
+  extra repos) and nothing else, and has no one's secrets: no user,
+  repo or environment secrets, no Tailscale key. A hook that needs a
+  secret fails in the prebuild, so keep those in `postStartCommand` or
+  make them skip without it.
+- Everyone who can make an environment of the repo gets what's on the
+  disk. Don't have a hook write anything there you wouldn't commit.
+
+Build again after the devcontainer or its base images change: a
+prebuild isn't refreshed on its own, and an environment from a stale one
+still works, rebuilding the layers that changed. A new build replaces
+the old one once it's ready; **Delete** frees its disk.
+
 ## What to remove
 
 - **Repo-level Tailscale:** install scripts, `tailscale-up.sh`, `TS_*`
