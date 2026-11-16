@@ -106,11 +106,11 @@ box = fn name, owner_user, hostname, arch, cpus, memory_gb, disk_gb, free_gb ->
     shared_user_ids: [],
     public_key: :crypto.strong_rand_bytes(32),
     agent_version: "0.1.0",
-    protocol_version: 1,
+    protocol_version: ForemanProtocol.version(),
     hostname: hostname,
     os: "linux",
     arch: arch,
-    policy: ForemanProtocol.Policy.defaults(),
+    vm: %{"ready" => true, "nested" => false, "reflink" => true},
     capacity: %{
       "cpus" => cpus,
       "memory_mb" => memory_gb * 1024,
