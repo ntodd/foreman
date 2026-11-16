@@ -189,9 +189,11 @@ say "a box without KVM says so, and gets no environments"
 vm_status() { cp_eval 'E2E.vm_status()' | grep "^VM"; }
 vm_reported() { vm_status | grep -q '^VM ready=false'; }
 wait_for "the box's VM report" 60 vm_reported
-vm_status | grep -q 'no /dev/kvm' || fail "the box didn't say why it can't run VMs: $(vm_status)"
-cp_eval 'E2E.try_create()' | grep -q "can't run environments: this box has no /dev/kvm" ||
-  fail "an environment was placed on a box without KVM"
+# No /dev/kvm here, or (on an arm64 runner) an architecture without VMs yet.
+reason=$(vm_status | sed -n 's/.* reason="\(.*\)"$/\1/p')
+[ -n "$reason" ] || fail "the box didn't say why it can't run VMs: $(vm_status)"
+cp_eval 'E2E.try_create()' | grep -qF "can't run environments: $reason" ||
+  fail "an environment was placed on a box that can't run VMs"
 echo "ok: $(vm_status)"
 box test -S /run/foreman-vmctl.sock || fail "the VM helper's socket isn't there"
 [ "$(box stat -c '%U %a' /etc/foreman-agent/vmctl)" = "root 755" ] || fail "the VM helper isn't root's"
