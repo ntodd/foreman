@@ -82,6 +82,26 @@ defmodule ForemanProtocol.ProtocolV6Test do
     refute Map.has_key?(create.payload, :prebuild)
   end
 
+  test "box.gc can name the prebuilds to keep, and box.prebuild the repo's limits" do
+    prebuild = ForemanProtocol.uuid()
+    assert {:ok, gc} = ForemanProtocol.Command.new("box.gc", %{prebuilds: [prebuild]})
+    assert gc.payload.prebuilds == [prebuild]
+    assert {:ok, plain} = ForemanProtocol.Command.new("box.gc", %{})
+    refute Map.has_key?(plain.payload, :prebuilds)
+    assert {:error, _} = ForemanProtocol.Command.new("box.gc", %{prebuilds: ["../x"]})
+
+    assert {:ok, cmd} =
+             ForemanProtocol.Command.new("box.prebuild", %{
+               prebuild_id: prebuild,
+               repo: "acme/hello",
+               clone_url: "https://github.com/acme/hello.git",
+               branch: "main",
+               limits: %{cpus: 2, memory_mb: 16_384}
+             })
+
+    assert cmd.payload.limits == %{cpus: 2, memory_mb: 16_384}
+  end
+
   test "a join without it is still valid" do
     assert {:ok, join} = ForemanProtocol.cast_join(@join)
     refute Map.has_key?(join, :vm)

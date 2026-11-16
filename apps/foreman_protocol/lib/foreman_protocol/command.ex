@@ -60,6 +60,8 @@ defmodule ForemanProtocol.Command do
     tailscale:
       {{:object, enabled: {:boolean, default: false}, tags: {{:list, :ts_tag}, default: []}},
        default: %{}},
+    # The repo's limits, so it builds in a VM the size its environments get.
+    limits: {{:object, cpus: {:positive_number, []}, memory_mb: {:integer, []}}, default: %{}},
     registry_auth: @registry_auth
   ]
 
@@ -104,7 +106,9 @@ defmodule ForemanProtocol.Command do
       @env ++ [hook: {:connect_name, required: true}, action: {:connect_name, required: true}],
     "box.inventory" => [],
     "box.stats" => [],
-    "box.gc" => [],
+    # `prebuilds` (protocol 6): the prebuilds the control plane knows on
+    # this box; the box deletes any others. Absent, it leaves them alone.
+    "box.gc" => [prebuilds: {{:list, :uuid}, []}],
     # Protocol 6. Builds a prebuild: an environment's disk with the repo
     # cloned and its devcontainer built, that new environments start from.
     "box.prebuild" => @prebuild_spec,
