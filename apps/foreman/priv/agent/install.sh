@@ -143,7 +143,7 @@ if systemctl is-active --quiet foreman-agent 2>/dev/null; then
   systemctl stop foreman-agent
   agent_stopped=1
 fi
-# shellcheck disable=SC2329 # run by the EXIT trap
+# shellcheck disable=SC2317,SC2329 # run by the EXIT trap
 restart_agent() {
   if [ -n "$agent_stopped" ]; then systemctl start foreman-agent 2>/dev/null || true; fi
 }
