@@ -32,7 +32,6 @@ set -eu
 
 FOREMAN_URL="__FOREMAN_URL__"
 TOKEN=""
-POLICY=""
 REENROLL=""
 DEFAULT_BRIDGE_FILTER=1
 BLOCK_LAN=""
@@ -45,7 +44,8 @@ SETTINGS=/etc/foreman-agent/install.conf
 while [ $# -gt 0 ]; do
   case "$1" in
     --token) TOKEN="$2"; shift 2 ;;
-    --policy) POLICY="$2"; shift 2 ;;
+    # Gone with shared Docker: each environment's VM is its boundary.
+    --policy) echo "foreman: ignoring --policy; environments run in VMs of their own now" >&2; shift 2 ;;
     --url) FOREMAN_URL="$2"; shift 2 ;;
     --reenroll) REENROLL=1; shift ;;
     --default-bridge-reaches-tailnet) DEFAULT_BRIDGE_FILTER=""; shift ;;
@@ -236,7 +236,6 @@ cat > /etc/foreman-agent/agent.env <<EOF
 FOREMAN_URL=$FOREMAN_URL
 FOREMAN_JOIN_TOKEN=$join_token
 $legacy_cli_env
-FOREMAN_POLICY=$POLICY
 HOME=/var/lib/foreman-agent
 RELEASE_TMP=/var/lib/foreman-agent/tmp
 EOF
