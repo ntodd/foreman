@@ -246,7 +246,7 @@ defmodule ForemanAgent.VMEnvTest do
   end
 
   test "env.start with no VM says how to get one", ctx do
-    assert {:error, "this environment has no VM on this box; rebuild it to make one"} =
+    assert {:error, "this environment has no VM on this box" <> _} =
              run(command("env.start"), ctx)
   end
 

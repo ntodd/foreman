@@ -99,7 +99,8 @@ defmodule ForemanAgent.VM.Env do
         {:ok, meta}
 
       {:error, :none} ->
-        {:error, "this environment has no VM on this box; rebuild it to make one"}
+        {:error,
+         "this environment has no VM on this box (it was made before environment VMs, or its disks are gone); destroy it and create a new one"}
     end
   end
 
