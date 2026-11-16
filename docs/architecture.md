@@ -253,8 +253,9 @@ The feature goes into the image, and the CLI builds the image only when it creat
 
 ### Stop, restart, rebuild, destroy
 
-- **Stop:** `docker compose stop` in the VM, then the VM powers off (its ACPI power button, and a forced stop after a minute). Sidecars get a graceful shutdown; for example, a Neon Local sidecar deletes its branch on stop. Suspending a VM instead isn't built yet.
-- **Start:** boots the VM if it's off, writes the secrets into it, then `devcontainer up`.
+- **Stop:** `docker compose stop` in the VM, then the VM powers off (its ACPI power button, and a forced stop after a minute). Sidecars get a graceful shutdown; for example, a Neon Local sidecar deletes its branch on stop.
+- **Suspend:** pauses the VM, writes its memory and device state to `/srv/foreman/vms/<env_id>/snapshot/` and stops it. Nothing in the environment notices: processes, open shells and containers carry on where they were when it comes back. A snapshot is the VM's whole memory (8 GB for an 8 GB VM), so it costs disk where a stop doesn't.
+- **Start:** resumes a suspended VM from its snapshot (in well under a second), or boots the VM if it's off. Either way the box then puts the guest's clock right, writes the secrets into it, and runs `devcontainer up`. The snapshot is deleted once the VM is back; one that won't resume is thrown away and the VM boots instead. A stop or destroy of a suspended environment resumes it first, so its own stop runs.
 - **Restart:** a stop followed by a normal start, as one operation, inside the VM; the VM keeps running. Nothing is rebuilt.
 - **Rebuild:** `devcontainer up --remove-existing-container`. Named volumes, the clone and the Tailscale identity survive.
 - **Pull and rebuild:** a rebuild that first fast-forwards the clone to `origin/<branch>`. git runs inside the devcontainer (started first if it's stopped), as the remote user with the environment's own credential helper, never as the agent. It refuses, before anything is torn down, if the tree has uncommitted changes, the clone has commits the branch doesn't, another branch is checked out, or the fast-forward fails; the environment stays running and the page shows why.
@@ -765,7 +766,7 @@ the plan above, the build wins.
   can ask for. See [security.md](security.md#the-control-plane-and-its-host)
   and `e2e/updater/run.sh`.
 - **Not built yet:** idle auto-stop, per-service limits for sidecars,
-  webhooks (repos are polled). From the VM design: prebuilds, suspend and
-  resume, resizing a VM, environment VMs on arm64, Flatcar on metal
+  webhooks (repos are polled). From the VM design: prebuilds, resizing a
+  VM, environment VMs on arm64, Flatcar on metal
   tested ([#179](https://github.com/ntodd/foreman/issues/179)), and Mac
   boxes on Apple's hypervisor ([#180](https://github.com/ntodd/foreman/issues/180)).

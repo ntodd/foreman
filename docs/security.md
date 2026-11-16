@@ -448,11 +448,15 @@ These are accepted for now, or need someone to try them:
 15. **Removed members keep access for up to six hours.** Membership is
     re-checked periodically, not instantly. Disable someone in Foreman to
     cut their access at once.
-16. **Snapshots will hold secrets.** Suspending an environment isn't
-    built yet. When it is, it writes the VM's whole memory, secrets
-    included, to the box's disk, where today secrets only ever touch
-    tmpfs. The plan is snapshot files that are 0600 and the agent's,
-    deleted on resume and on destroy, and never copied off the box.
+16. **Snapshots hold secrets.** Suspending an environment writes the
+    VM's whole memory, secrets included, to the box's disk, where
+    otherwise secrets only ever touch tmpfs. The snapshot is in the VM's
+    own directory (0700, the agent's user), is deleted once the VM is
+    back and on destroy, and is never copied off the box. Until then it
+    is readable by root on the box, and once deleted its blocks stay on
+    the disk until they're reused: a box whose disk isn't encrypted
+    keeps them at rest. Stop rather than suspend an environment whose
+    secrets matter more than its running processes.
 17. **A hostile guest against Cloud Hypervisor.** A guest that finds a
     bug in Cloud Hypervisor's device emulation (block, network, vsock,
     balloon, serial) or in KVM gets code running on the box as the
