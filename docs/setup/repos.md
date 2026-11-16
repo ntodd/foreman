@@ -67,8 +67,8 @@ edit the files in its workspace. By default a box refuses:
 - `provider` services, whatever the box allows: compose runs a
   provider's `type` as a program on the box.
 
-The check reads compose files with Node (which the devcontainer CLI needs
-anyway), so a box needs Node on its `PATH`.
+The check reads compose files with Node. The agent release carries its
+own, so a box doesn't need Node installed.
 
 Ordinary capabilities such as `NET_ADMIN` or `SYS_PTRACE` (debuggers)
 are fine. Binds that expose the agent's own state, other environments
