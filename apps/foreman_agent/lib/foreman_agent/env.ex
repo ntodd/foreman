@@ -697,7 +697,7 @@ defmodule ForemanAgent.Env do
   # them in where the path no longer shows, and quotes any it can't parse
   # in its error. See ForemanAgent.Env.ComposeScan.
   defp scan_compose(paths, compose_files, spec, config) do
-    with {:ok, facts} <- ComposeScan.scan(paths.clone, compose_files) do
+    with {:ok, facts} <- ComposeScan.scan(paths.clone, compose_files, node: config.node) do
       case Policy.check_sources(facts, policy_ctx(paths, spec, config)) do
         {:ok, warnings} -> {:ok, warnings}
         {:error, refused} -> {:error, refusal(refused)}

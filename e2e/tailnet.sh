@@ -81,7 +81,9 @@ if "$ts" status | grep -qw "$slug"; then fail "a tailnet device named $slug alre
 devcontainer_cli=$root/.tools/node_modules/.bin/devcontainer
 if [ ! -x "$devcontainer_cli" ]; then
   say "installing the devcontainer CLI into .tools"
-  npm install --prefix .tools --no-fund --no-audit --silent @devcontainers/cli@0.89.0
+  mkdir -p .tools
+  cp apps/foreman_agent/rel/tools/devcontainer/package.json apps/foreman_agent/rel/tools/devcontainer/package-lock.json .tools/
+  npm ci --prefix .tools --omit=dev --ignore-scripts --no-fund --no-audit --silent
 fi
 
 if command -v mise >/dev/null 2>&1; then

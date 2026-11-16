@@ -23,6 +23,14 @@ updates:
       agent-minor:
         update-types: [minor, patch]
 
+  # The devcontainer CLI the agent release carries (rel/tools/bundle.sh).
+  # Node itself is pinned in rel/tools/node.sha256, by hand.
+  - package-ecosystem: npm
+    directory: /apps/foreman_agent/rel/tools/devcontainer
+    schedule:
+      interval: weekly
+      day: monday
+
   - package-ecosystem: mix
     directory: /apps/foreman_protocol
     schedule:

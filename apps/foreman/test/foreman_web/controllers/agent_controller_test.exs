@@ -60,6 +60,103 @@ defmodule ForemanWeb.AgentControllerTest do
     refute body =~ "__FOREMAN_URL__"
   end
 
+  for script <- ["mac.sh", "vm.sh"] do
+    test "serves the #{script} launcher with the control plane's URL", %{conn: conn} do
+      conn = get(conn, "/agent/#{unquote(script)}")
+      body = response(conn, 200)
+      assert body =~ ~s(FOREMAN_URL="http://localhost)
+      refute body =~ "__FOREMAN_URL__"
+      assert get_resp_header(conn, "content-type") |> hd() =~ "text/x-shellscript"
+    end
+  end
+
+  describe "a Flatcar box's first-boot config" do
+    test "comes back for a join token, for the box's architecture", %{conn: conn, token: token} do
+      conn = post(conn, ~p"/agent/flatcar/ignition", %{"join_token" => token, "arch" => "arm64"})
+      config = json_response(conn, 200)
+      assert config["ignition"]["version"] == "3.4.0"
+      assert get_resp_header(conn, "cache-control") == ["no-store"]
+      assert get_resp_header(conn, "x-foreman-box") == ["desktop"]
+
+      paths = Enum.map(config["storage"]["files"], & &1["path"])
+      assert Enum.any?(paths, &String.ends_with?(&1, "-arm64.raw"))
+    end
+
+    test "takes SSH keys for core", %{conn: conn, token: token} do
+      key = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIKeyForCore box@mac"
+
+      config =
+        conn
+        |> post(~p"/agent/flatcar/ignition", %{
+          "join_token" => token,
+          "arch" => "amd64",
+          "ssh_keys" => [key]
+        })
+        |> json_response(200)
+
+      assert [%{"name" => "core", "sshAuthorizedKeys" => [^key]}] = config["passwd"]["users"]
+    end
+
+    test "refuses a bad token, architecture or key", %{conn: conn, token: token} do
+      assert post(conn, ~p"/agent/flatcar/ignition", %{
+               "join_token" => "fj_nope",
+               "arch" => "amd64"
+             })
+             |> json_response(401)
+
+      assert post(again(conn), ~p"/agent/flatcar/ignition", %{
+               "join_token" => token,
+               "arch" => "mips"
+             })
+             |> json_response(400)
+
+      assert post(again(conn), ~p"/agent/flatcar/ignition", %{
+               "join_token" => token,
+               "arch" => "amd64",
+               "ssh_keys" => ["not a key"]
+             })
+             |> json_response(400)
+    end
+
+    test "says so when Tailscale won't mint the box a key", %{conn: conn, token: token} do
+      Application.put_env(:foreman, :tailscale, %{
+        client_id: "c",
+        client_secret: "s",
+        tailnet: "-",
+        tags: []
+      })
+
+      on_exit(fn -> Application.delete_env(:foreman, :tailscale) end)
+
+      Mox.stub(Foreman.Tailscale.ClientMock, :create_auth_key, fn _, _ ->
+        {:error, {:http, 403, "nope"}}
+      end)
+
+      body =
+        conn
+        |> post(~p"/agent/flatcar/ignition", %{"join_token" => token, "arch" => "amd64"})
+        |> json_response(502)
+
+      assert body["error"] =~ "Tailscale"
+    end
+
+    # The same budget as enrollment: a token is a token.
+    test "bad tokens count against the client's enroll attempts", %{conn: conn, public: public} do
+      for _ <- 1..10 do
+        post(again(conn), ~p"/agent/flatcar/ignition", %{
+          "join_token" => "fj_nope",
+          "arch" => "amd64"
+        })
+      end
+
+      assert post(again(conn), ~p"/api/agents/enroll", %{
+               "join_token" => "fj_x",
+               "public_key" => public
+             })
+             |> json_response(429)
+    end
+  end
+
   @tag :tmp_dir
   test "serves the highest version as latest", %{conn: conn, tmp_dir: tmp} do
     {public, private} = ForemanProtocol.Auth.generate_keypair()

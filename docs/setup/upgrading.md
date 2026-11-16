@@ -146,7 +146,8 @@ delete `/usr/local/sbin/foreman-update`, the two
    is up. Upgrading to 0.3.0 from an older release clears every pin, so
    for that one, stop the agent on the box first (`sudo systemctl stop
    foreman-agent`), pin it once the new control plane is up, then start
-   the agent again.
+   the agent again. Running the install command on a pinned box installs
+   the newest agent first, and the box then moves back to its pin.
 4. Point `FOREMAN_IMAGE` at the new version (in the `.env` beside
    `compose.yml`), then pull and recreate:
 
@@ -171,7 +172,9 @@ to.
 Some releases change what the install script sets up on a box, which a
 self-update can't do: the box firewall, for one, which keeps
 environments off the tailnet as the box (see
-[tailscale.md](tailscale.md#boxes-on-the-tailnet)). A box whose agent
+[tailscale.md](tailscale.md#boxes-on-the-tailnet)), and the unit that
+reboots a box from its page (a box without it says so in its reboot
+alert, and offers no Reboot). A box whose agent
 reports no firewall, or older rules than the agent ships with, gets an
 alert on its page and its cards. Run the install command on it again;
 an enrolled box needs no token, but pass any `--policy` or
@@ -231,6 +234,11 @@ and restart, so environments with private features can start without a
 rebuild) came in with 0.4.10. A 0.4.10 control plane refuses agents on
 protocol 2 (older than 0.4.0), and a refused box can't update from it, so
 update those boxes to 0.4.0 or later before upgrading past 0.4.9.
+Protocol 5 (rebooting a box from its page) came in with 0.5.0. A 0.5.0
+control plane refuses agents on protocol 3 (older than 0.4.10) the same
+way, so update those boxes to 0.4.10 or later before upgrading past
+0.4.13. A box that was refused anyway comes back when you run the
+install command on it again.
 
 Following starts with 0.3.0, and 0.3.0 is the first release with
 images, so rolling back from it means building the older version

@@ -75,6 +75,39 @@ defmodule E2E do
     IO.puts("revoked #{box.name}")
   end
 
+  # A signed session cookie for the e2e admin, for e2e/lv-click.mjs.
+  def session_cookie do
+    token = Accounts.create_session(admin(), "e2e")
+    opts = Plug.Session.init(ForemanWeb.Endpoint.session_options())
+
+    conn =
+      Plug.Test.conn(:get, "/")
+      |> Map.put(:secret_key_base, ForemanWeb.Endpoint.config(:secret_key_base))
+      |> Plug.Session.call(opts)
+      |> Plug.Conn.fetch_session()
+      |> Plug.Conn.put_session(:session_token, token)
+      |> Plug.Conn.send_resp(200, "")
+
+    [cookie | _] = Plug.Conn.get_resp_header(conn, "set-cookie")
+    IO.puts("COOKIE=" <> (cookie |> String.split(";") |> hd()))
+  end
+
+  # The box's reboot report, as the agent last sent it.
+  def reboot_status do
+    admin()
+    box = box()
+
+    IO.puts(
+      "REBOOT required=#{box.reboot_required} can_restart=#{box.can_restart} " <>
+        "boot=#{box.boot_id} packages=#{Enum.join(box.reboot_packages, ",")}"
+    )
+  end
+
+  def box_id do
+    admin()
+    IO.puts("BOX_ID=#{box().id}")
+  end
+
   def desire_version(version) do
     admin()
     box = box()
