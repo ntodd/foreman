@@ -22,7 +22,7 @@ defmodule ForemanAgent.VM.Env do
   """
 
   alias ForemanAgent.{Env, VM}
-  alias ForemanAgent.VM.{Image, Link, Links, Machine}
+  alias ForemanAgent.VM.{Image, Link, Links, Machine, Prebuild}
   alias ForemanProtocol.{Command, Schema}
 
   # How long a guest gets to shut down before the VM is stopped.
@@ -299,7 +299,7 @@ defmodule ForemanAgent.VM.Env do
          {:ok, agent} <- Image.ensure_agent_disk(config, ctx.runner, log),
          :ok <- File.mkdir_p(paths.dir),
          :ok <- File.chmod(paths.dir, 0o700),
-         :ok <- ensure_data_disk(paths, config),
+         :ok <- ensure_data_disk(paths, p, ctx, log),
          p = keep_snapshot_compatible(p, guest, agent, ctx, log),
          {:ok, meta} <- ensure_root_disk(p, paths, guest, ctx, log) do
       size = VM.size(Map.get(p, :limits, %{}), config, VM.box_size(config.proc))
@@ -355,17 +355,29 @@ defmodule ForemanAgent.VM.Env do
     p
   end
 
-  defp ensure_data_disk(paths, config) do
-    if File.exists?(paths.data) do
-      :ok
-    else
-      # Sparse: the guest formats it on first boot, and it takes space as
-      # the environment fills it.
-      with {:ok, fd} <- :file.open(paths.data, [:write, :raw]),
-           {:ok, _} <- :file.position(fd, config.vm_disk_gb * 1024 * 1024 * 1024),
-           :ok <- :file.truncate(fd) do
-        :file.close(fd)
-      end
+  # A new environment's disk: a copy of its prebuild's when the box has
+  # it, otherwise empty and sparse (the guest formats it on first boot,
+  # and it takes space as the environment fills it).
+  defp ensure_data_disk(paths, p, ctx, log) do
+    prebuild = Map.get(p, :prebuild_id)
+
+    cond do
+      File.exists?(paths.data) ->
+        :ok
+
+      is_binary(prebuild) and Prebuild.exists?(ctx.config, prebuild) ->
+        log.("info", "Starting from a prebuild\n")
+        copy_disk(Prebuild.disk(ctx.config, prebuild), paths.data, ctx)
+
+      true ->
+        if is_binary(prebuild),
+          do: log.("info", "This box no longer has the prebuild; starting from scratch\n")
+
+        with {:ok, fd} <- :file.open(paths.data, [:write, :raw]),
+             {:ok, _} <- :file.position(fd, ctx.config.vm_disk_gb * 1024 * 1024 * 1024),
+             :ok <- :file.truncate(fd) do
+          :file.close(fd)
+        end
     end
   end
 
@@ -391,22 +403,27 @@ defmodule ForemanAgent.VM.Env do
 
   defp copy_root_disk(p, paths, guest, meta, ctx, log) do
     if meta["guest"], do: log.("info", "Moving the environment to a new guest image\n")
-    tmp = paths.root <> ".tmp"
-    _ = File.rm(tmp)
-    source = Path.join(guest.dir, "root.raw")
 
-    # A reflink where the filesystem has them (XFS, btrfs), a sparse copy
-    # otherwise.
+    with :ok <- copy_disk(Path.join(guest.dir, "root.raw"), paths.root, ctx) do
+      {:ok, Map.merge(meta, %{"slug" => p.slug, "guest" => guest.digest})}
+    end
+  end
+
+  # A reflink where the filesystem has them (XFS, btrfs), a sparse copy
+  # otherwise, put in place once it's whole.
+  defp copy_disk(source, dest, ctx) do
+    tmp = dest <> ".tmp"
+    _ = File.rm(tmp)
+
     case ctx.runner.run("cp", ["--reflink=auto", "--sparse=always", source, tmp],
            timeout: 600_000
          ) do
       {:ok, %{status: 0}} ->
-        File.rename!(tmp, paths.root)
-        {:ok, Map.merge(meta, %{"slug" => p.slug, "guest" => guest.digest})}
+        File.rename(tmp, dest)
 
       other ->
         _ = File.rm(tmp)
-        {:error, "couldn't copy the guest image: #{inspect(other)}"}
+        {:error, "couldn't copy #{Path.basename(source)}: #{inspect(other)}"}
     end
   end
 

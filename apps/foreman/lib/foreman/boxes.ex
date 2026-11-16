@@ -291,6 +291,21 @@ defmodule Foreman.Boxes do
 
   def vm_problem(%Box{}), do: nil
 
+  @doc "`:ok` when the box can run environment VMs, or what to tell someone when it can't."
+  def check_vm(%Box{} = box) do
+    case vm_problem(box) do
+      nil ->
+        :ok
+
+      {:agent, _} ->
+        {:error,
+         "#{box.name}'s agent predates environment VMs; run the install script on it again"}
+
+      {:vm, reason} ->
+        {:error, "#{box.name} can't run environments: #{reason}"}
+    end
+  end
+
   @doc "Records the box firewall an agent reports between joins."
   def record_firewall(box_id, firewall) do
     if box = get_box(box_id) do

@@ -154,6 +154,9 @@ defmodule ForemanAgent.EnvTest do
 
           up_result(outcome, run_opts, container)
 
+        {"docker", ["pull" | _]} ->
+          {:ok, %{status: 0, output: ""}}
+
         {"docker", ["exec", "-u", "0", _container, "tailscale" | _]} ->
           {status, output} = tailscale.()
           {:ok, %{status: status, output: output}}
@@ -826,12 +829,16 @@ defmodule ForemanAgent.EnvTest do
       leftover = Path.join([Env.paths(config, @env_id).meta, "docker-abc", "config.json"])
       File.mkdir_p!(Path.dirname(leftover))
       File.write!(leftover, ~s({"auths":{}}))
+      on_tmpfs = Path.join([config.secrets_root, ".docker-def", "config.json"])
+      File.mkdir_p!(Path.dirname(on_tmpfs))
+      File.write!(on_tmpfs, ~s({"auths":{}}))
       spec = Path.join(Env.paths(config, @env_id).meta, "spec.term")
       File.write!(spec, "keep")
 
       :ok = Env.sweep_docker_configs(config)
 
       refute File.exists?(Path.dirname(leftover))
+      refute File.exists?(Path.dirname(on_tmpfs))
       assert File.exists?(spec)
     end
 
@@ -847,6 +854,129 @@ defmodule ForemanAgent.EnvTest do
       docker_config = opts[:env]["DOCKER_CONFIG"]
       assert is_binary(docker_config)
       refute File.exists?(docker_config)
+    end
+
+    # The environment's disk can become a prebuild that other people's
+    # environments start from, and a deleted file's blocks stay on it.
+    test "registry credentials never touch the environment's disk", %{ctx: ctx, config: config} do
+      stub_tools()
+      auth = [%{"host" => "ghcr.io", "username" => "machine", "token" => "ghp_registry"}]
+
+      assert {:ok, _} = Env.run("env.create", payload(%{"registry_auth" => auth}), ctx)
+
+      [{"devcontainer", _, opts}] = Enum.filter(runs(), &match?({"devcontainer", _, _}, &1))
+      assert String.starts_with?(opts[:env]["DOCKER_CONFIG"], config.secrets_root <> "/")
+      refute String.starts_with?(opts[:env]["DOCKER_CONFIG"], config.envs_root)
+    end
+  end
+
+  describe "prebuilds" do
+    @prebuild_id "0b0e5c55-7d0b-4c8e-9e6f-3a2b1c0d9e8f"
+
+    # What building a prebuild leaves on the disk: the clone, its git
+    # config naming the prebuild's credential helper, and the saved spec.
+    defp prebuilt_disk(config) do
+      from = Env.paths(config, @prebuild_id, "acme/storefront")
+      File.mkdir_p!(Path.join(from.clone, ".git"))
+      File.mkdir_p!(Path.join(from.clone, ".devcontainer"))
+      File.write!(Path.join(from.clone, ".devcontainer/devcontainer.json"), @devcontainer)
+      File.write!(Path.join(from.clone, ".devcontainer/docker-compose.yml"), "services: {}\n")
+
+      File.write!(Path.join(from.clone, ".git/config"), """
+      [credential]
+      \thelper =
+      \thelper = #{from.meta}/git-credential
+      """)
+
+      File.mkdir_p!(from.meta)
+
+      File.write!(
+        Path.join(from.meta, "spec.term"),
+        :erlang.term_to_binary(%{slug: "prebuild-0b0e5c55"})
+      )
+
+      from
+    end
+
+    test "an environment made from one takes over its clone", %{ctx: ctx, config: config} do
+      stub_tools()
+      from = prebuilt_disk(config)
+
+      assert {:ok, _} = Env.run("env.create", payload(%{"prebuild_id" => @prebuild_id}), ctx)
+
+      runs = runs()
+      refute Enum.any?(runs, &match?({"git", _, _}, &1))
+      refute File.exists?(from.env_dir)
+
+      to = Env.paths(config, @env_id, "acme/storefront")
+      git_config = File.read!(Path.join(to.clone, ".git/config"))
+      assert git_config =~ "helper = #{to.meta}/git-credential"
+      refute git_config =~ @prebuild_id
+
+      assert File.read!(Path.join(to.meta, "git-credential")) =~
+               Path.join(to.secrets, "github-token")
+
+      # The prebuild's own containers and volumes go.
+      assert Enum.any?(runs, fn
+               {"docker", ["compose", "-p", "prebuild-0b0e5c55", "down" | rest], _} ->
+                 "--volumes" in rest
+
+               _ ->
+                 false
+             end)
+
+      assert_received {:log, "info", "Starting from the prebuild\n"}
+    end
+
+    test "without the prebuild's files, it clones as usual", %{ctx: ctx} do
+      stub_tools()
+      assert {:ok, _} = Env.run("env.create", payload(%{"prebuild_id" => @prebuild_id}), ctx)
+      assert Enum.any?(runs(), &match?({"git", _, _}, &1))
+    end
+
+    test "building one keeps its Dockerfiles' base images by tag", %{ctx: ctx, config: config} do
+      clone = Env.paths(config, @env_id, "acme/storefront").clone
+      context = Path.join(clone, ".devcontainer")
+
+      compose = %{
+        "services" => %{
+          "app" => %{"build" => %{"context" => context, "dockerfile" => "Dockerfile"}},
+          "db" => %{"image" => "postgres:17"},
+          "worker" => %{
+            "build" => %{"context" => context, "dockerfile_inline" => "FROM alpine:3.22\n"}
+          }
+        }
+      }
+
+      stub_tools(
+        compose: compose,
+        before_up: fn _ ->
+          File.write!(Path.join(context, "Dockerfile"), """
+          ARG VARIANT=3
+          FROM --platform=linux/amd64 mcr.microsoft.com/devcontainers/base:debian AS base
+          FROM base AS dev
+          from node:${VARIANT}
+          FROM scratch
+          FROM python:3.12-slim@sha256:#{String.duplicate("a", 64)}
+          """)
+        end
+      )
+
+      assert {:ok, _} = Env.run("env.create", payload(%{"prebuild" => true}), ctx)
+
+      pulled = for {"docker", ["pull" | args], _} <- runs(), do: List.last(args)
+
+      assert Enum.sort(pulled) == [
+               "alpine:3.22",
+               "mcr.microsoft.com/devcontainers/base:debian",
+               "python:3.12-slim@sha256:#{String.duplicate("a", 64)}"
+             ]
+    end
+
+    test "an environment's own create pulls nothing more", %{ctx: ctx} do
+      stub_tools()
+      assert {:ok, _} = Env.run("env.create", payload(), ctx)
+      refute Enum.any?(runs(), &match?({"docker", ["pull" | _], _}, &1))
     end
   end
 

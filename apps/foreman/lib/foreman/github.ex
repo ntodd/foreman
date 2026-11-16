@@ -275,6 +275,30 @@ defmodule Foreman.GitHub do
     end
   end
 
+  @doc """
+  A token for a prebuild of `repo` to clone with: the app's installation
+  token, reading the repo (and its extra repos) and nothing else. A
+  prebuild belongs to no user, so it can't have a user's token.
+  """
+  def prebuild_token(%Repos.Repo{} = repo) do
+    repo = Foreman.Repo.preload(repo, :owner)
+
+    cond do
+      not configured?() ->
+        {:error, :not_configured}
+
+      is_nil(repo.owner.installation_id) ->
+        {:error, :not_installed}
+
+      true ->
+        client().repo_read_token(
+          app(),
+          repo.owner.installation_id,
+          Enum.uniq([repo.name | repo.extra_repos])
+        )
+    end
+  end
+
   def list_branches(%User{} = user, %Repos.Repo{} = repo) do
     with {:ok, token} <- user_token(user) do
       client().list_branches(token, repo.full_name)

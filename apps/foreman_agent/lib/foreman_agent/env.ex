@@ -22,6 +22,7 @@ defmodule ForemanAgent.Env do
   alias ForemanAgent.Config
   alias ForemanAgent.Env.{Affected, Overlay}
   alias ForemanAgent.SafeFS
+  alias ForemanAgent.VM.Prebuild
   alias ForemanProtocol.{Connect, Feature, Jsonc}
 
   require Logger
@@ -95,8 +96,9 @@ defmodule ForemanAgent.Env do
   # -- create / rebuild / start --------------------------------------------
 
   defp up(p, ctx, opts) do
+    adopt_prebuild(p, ctx)
     paths = paths(ctx.config, p.env_id, p.repo)
-    spec = Map.drop(p, [:files, :compose_env, :registry_auth, :pull])
+    spec = Map.drop(p, [:files, :compose_env, :registry_auth, :pull, :prebuild_id, :prebuild])
     # A clone this rebuild makes is already up to date.
     pull? = Map.get(p, :pull) == true and File.exists?(spec_path(paths))
 
@@ -108,6 +110,7 @@ defmodule ForemanAgent.Env do
          {:ok, prepared} <- prepare(paths, spec, p.compose_env, ctx),
          {:ok, result} <- devcontainer_up(paths, spec, prepared, p, ctx, opts) do
       save_spec(paths, spec, prepared, result)
+      if Map.get(p, :prebuild) == true, do: keep_base_images(paths, prepared, p, ctx)
       {:ok, result |> put_node_id(spec, ctx) |> put_connect_hooks(ctx)}
     end
   end
@@ -125,6 +128,110 @@ defmodule ForemanAgent.Env do
         {:ok, put_connect_hooks(result, ctx)}
       end
     end
+  end
+
+  # A disk made from a prebuild (ForemanAgent.VM.Prebuild) has the
+  # prebuild's clone, built images and saved spec under the prebuild's id.
+  # The environment takes them over: the clone is kept like any that has
+  # come up, and the CLI makes the environment's own containers from the
+  # images already there. The prebuild's containers and volumes go; the
+  # environment's are its own, under its own name.
+  defp adopt_prebuild(%{prebuild_id: id, env_id: env_id}, ctx) when is_binary(id) do
+    from = paths(ctx.config, id)
+    to = paths(ctx.config, env_id)
+
+    if File.dir?(from.env_dir) and not File.exists?(to.env_dir) do
+      ctx.log.("info", "Starting from the prebuild\n")
+      :ok = File.rename(from.env_dir, to.env_dir)
+      # The clone's git config names the credential helper by its path.
+      for git_config <- Path.wildcard(Path.join(to.workspace, "*/.git/config"), match_dot: true) do
+        content = File.read!(git_config)
+        File.write!(git_config, String.replace(content, from.env_dir <> "/", to.env_dir <> "/"))
+      end
+
+      write_credential_helper(to)
+
+      case compose(ctx, Prebuild.slug(id), ["down", "--volumes", "--remove-orphans"]) do
+        {:ok, _} ->
+          :ok
+
+        {:error, message} ->
+          ctx.log.("info", "Couldn't remove the prebuild's containers: #{message}\n")
+      end
+    end
+
+    :ok
+  end
+
+  defp adopt_prebuild(_p, _ctx), do: :ok
+
+  # BuildKit keeps a build's base images in its cache without tagging
+  # them, so an environment's own build from a prebuild would ask the
+  # registry about each again. Pulled by tag, they're in the image store
+  # and the build takes them as they are. Best effort: a prebuild without
+  # them still works.
+  defp keep_base_images(paths, prepared, p, ctx) do
+    case base_images(prepared.builds) do
+      [] ->
+        :ok
+
+      refs ->
+        ctx.log.("info", "Keeping the base images: #{Enum.join(refs, ", ")}\n")
+
+        with_docker_config(paths, Map.get(p, :registry_auth), fn docker_config ->
+          env = if docker_config, do: %{"DOCKER_CONFIG" => docker_config}, else: %{}
+          Enum.each(refs, &pull_image(&1, env, ctx))
+        end)
+    end
+  end
+
+  defp pull_image(ref, env, ctx) do
+    case cmd(ctx, ctx.config.docker, ["pull", "--quiet", ref], env: env, label: "docker pull") do
+      {:ok, _} -> :ok
+      {:error, output} -> ctx.log.("info", "Couldn't pull #{ref}: #{last_lines(output)}\n")
+    end
+  end
+
+  # What compose builds from: a Dockerfile, or one inline.
+  defp builds(compose) do
+    for {_service, %{"build" => %{} = build}} <- Map.get(compose, "services", %{}),
+        source = build_source(build),
+        uniq: true,
+        do: source
+  end
+
+  defp build_source(%{"dockerfile_inline" => inline}) when is_binary(inline),
+    do: {:inline, inline}
+
+  defp build_source(%{"context" => context} = build) when is_binary(context),
+    do: {:file, Path.expand(Map.get(build, "dockerfile", "Dockerfile"), context)}
+
+  defp build_source(_build), do: nil
+
+  defp read_content({:ok, content}), do: [content]
+  defp read_content(_), do: []
+
+  @from ~r/^\s*FROM\s+(?:--\S+\s+)*(\S+)(?:\s+AS\s+(\S+))?/im
+
+  # The images a Dockerfile's stages start from, less earlier stages,
+  # scratch, and any named by a build argument.
+  defp base_images(builds) do
+    builds
+    |> Enum.flat_map(fn
+      {:inline, content} -> [content]
+      {:file, path} -> read_content(File.read(path))
+    end)
+    |> Enum.flat_map(fn content ->
+      froms = Regex.scan(@from, content)
+      stages = for [_, _, stage] <- froms, do: String.downcase(stage)
+
+      for [_, ref | _] <- froms,
+          ref != "scratch",
+          not String.contains?(ref, "$"),
+          String.downcase(ref) not in stages,
+          do: ref
+    end)
+    |> Enum.uniq()
   end
 
   # The control plane deletes exactly this device when the environment is
@@ -487,6 +594,7 @@ defmodule ForemanAgent.Env do
        %{
          config: config,
          compose_files: compose_files,
+         builds: builds(base),
          overlay_path: overlay_path,
          override_path: override_path,
          services: services,
@@ -953,14 +1061,18 @@ defmodule ForemanAgent.Env do
   defp with_docker_config(_paths, nil, fun), do: fun.(nil)
   defp with_docker_config(_paths, [], fun), do: fun.(nil)
 
+  # On the secrets' tmpfs, never the environment's disk: that can become a
+  # prebuild other people's environments start from, and a deleted file's
+  # blocks stay on it.
   defp with_docker_config(paths, auths, fun) do
     dir =
       Path.join(
-        paths.meta,
-        "docker-" <> (9 |> :crypto.strong_rand_bytes() |> Base.url_encode64(padding: false))
+        Path.dirname(paths.secrets),
+        ".docker-" <> (9 |> :crypto.strong_rand_bytes() |> Base.url_encode64(padding: false))
       )
 
-    File.mkdir_p!(dir)
+    File.mkdir_p!(Path.dirname(dir))
+    File.mkdir!(dir)
     File.chmod!(dir, 0o700)
 
     config = %{
@@ -1001,9 +1113,15 @@ defmodule ForemanAgent.Env do
   before any operation can be using one.
   """
   def sweep_docker_configs(config) do
+    # Where earlier agents kept them, on the environment's disk.
     config.envs_root
     |> Path.join("*/meta/docker-*")
     |> Path.wildcard(match_dot: false)
+    |> Enum.each(&File.rm_rf/1)
+
+    config.secrets_root
+    |> Path.join(".docker-*")
+    |> Path.wildcard(match_dot: true)
     |> Enum.each(&File.rm_rf/1)
   end
 

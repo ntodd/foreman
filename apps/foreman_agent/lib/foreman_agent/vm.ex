@@ -11,6 +11,7 @@ defmodule ForemanAgent.VM do
       <vm_root>/<env_id>/api.sock     Cloud Hypervisor's API
       <vm_root>/<env_id>/vsock.sock   the hybrid vsock the agent talks to the guest on
       <vm_root>/<env_id>/serial.log   the guest's console
+      <prebuilds_root>/<id>/data.raw  a prebuild's data disk, which new environments start from
       <guest_root>/<sha256>/          the guest system image (vmlinuz, root.raw)
       <agent_disks>/<version>.img     this agent's release, the guest's agent disk
 
@@ -54,14 +55,25 @@ defmodule ForemanAgent.VM do
       not File.exists?(Path.join(snapshot, "consumed"))
   end
 
-  @doc "The environments with a VM on this box."
-  @spec list(Config.t()) :: [String.t()]
-  def list(config) do
-    case File.ls(config.vm_root) do
-      {:ok, names} -> Enum.filter(names, &(&1 =~ @uuid and File.regular?(paths(config, &1).meta)))
-      {:error, _} -> []
-    end
+  @doc """
+  The environments with a VM on this box, or with `:all`, the prebuilds
+  being built too (`ForemanAgent.VM.Prebuild`).
+  """
+  @spec list(Config.t(), :environments | :all) :: [String.t()]
+  def list(config, which \\ :environments) do
+    all =
+      case File.ls(config.vm_root) do
+        {:ok, names} ->
+          Enum.filter(names, &(&1 =~ @uuid and File.regular?(paths(config, &1).meta)))
+
+        {:error, _} ->
+          []
+      end
+
+    if which == :all, do: all, else: Enum.reject(all, &prebuild?(config, &1))
   end
+
+  defp prebuild?(config, id), do: match?({:ok, %{"kind" => "prebuild"}}, read_meta(config, id))
 
   @doc "What the agent recorded about an environment's VM."
   @spec read_meta(Config.t(), String.t()) :: {:ok, map()} | {:error, :none}

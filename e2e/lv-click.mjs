@@ -69,7 +69,7 @@ await send(topic, "phx_join", {
 const reply = await send(topic, "event", { type: "click", event, value: JSON.parse(valueJson) })
 
 // The flash, if the event set one, wherever the diff carries it.
-const flash = JSON.stringify(reply).match(/(Sent to [^"<]*|Rebooting [^"<]*|[^">]*can't[^"<]*|Only admins[^"<]*)/)
+const flash = JSON.stringify(reply).match(/(Sent to [^"<]*|Rebooting [^"<]*|Building a prebuild[^"<]*|A prebuild is already[^"<]*|The box is offline[^"<]*|[^">]*can't[^"<]*|Only admins[^"<]*)/)
 console.log(flash ? flash[1] : "ok")
 if (process.env.LV_CLICK_DEBUG) console.error(JSON.stringify(reply).slice(0, 2000))
 ws.close()

@@ -2,13 +2,14 @@ defmodule ForemanWeb.RepoLive.Show do
   @moduledoc """
   One repo: its environments, your git identity and dotfiles overrides
   for it, which of your own devcontainer features go on it, and (admins)
-  its token scope, Tailscale tags, default limits and repo-level secrets.
+  its token scope, Tailscale tags, default limits, repo-level secrets and
+  prebuilds.
   """
   use ForemanWeb, :live_view
 
   import ForemanWeb.ForemanComponents
 
-  alias Foreman.{Accounts, Environments, Repos, Scope}
+  alias Foreman.{Accounts, Boxes, Environments, Prebuilds, Repos, Scope}
   alias Foreman.Repos.TokenPermissions
   alias ForemanProtocol.Feature
 
@@ -17,6 +18,8 @@ defmodule ForemanWeb.RepoLive.Show do
     repo = Repos.get_repo!(id)
     user = socket.assigns.current_scope.user
     setting = Accounts.get_repo_setting(user, repo)
+    admin? = Scope.admin?(socket.assigns.current_scope)
+    if admin? and connected?(socket), do: Prebuilds.subscribe(repo.id)
 
     {:ok,
      socket
@@ -33,7 +36,17 @@ defmodule ForemanWeb.RepoLive.Show do
        :environments,
        Environments.list_environments(socket.assigns.current_scope)
        |> Enum.filter(&(&1.repo_id == repo.id))
-     )}
+     )
+     |> assign_prebuilds(admin?)}
+  end
+
+  defp assign_prebuilds(socket, admin? \\ true)
+  defp assign_prebuilds(socket, false), do: assign(socket, prebuild_boxes: [], prebuilds: %{})
+
+  defp assign_prebuilds(socket, true) do
+    socket
+    |> assign(:prebuild_boxes, Boxes.list_boxes(socket.assigns.current_scope))
+    |> assign(:prebuilds, Prebuilds.latest_by_box(socket.assigns.repo))
   end
 
   defp settings_params(repo) do
@@ -140,7 +153,31 @@ defmodule ForemanWeb.RepoLive.Show do
     end
   end
 
+  def handle_event("build_prebuild", %{"box" => box_id}, socket) do
+    with %{} = box <- Boxes.get_box(box_id),
+         {:ok, _} <- Prebuilds.build(socket.assigns.current_scope, socket.assigns.repo, box) do
+      {:noreply,
+       socket
+       |> assign_prebuilds()
+       |> put_flash(:info, "Building a prebuild on #{box.name}.")}
+    else
+      {:error, message} when is_binary(message) -> {:noreply, put_flash(socket, :error, message)}
+      _ -> {:noreply, socket}
+    end
+  end
+
+  def handle_event("delete_prebuild", %{"id" => id}, socket) do
+    with %{} = prebuild <- Prebuilds.get(socket.assigns.repo, id),
+         :ok <- Prebuilds.delete(socket.assigns.current_scope, prebuild) do
+      {:noreply, assign_prebuilds(socket)}
+    else
+      {:error, message} when is_binary(message) -> {:noreply, put_flash(socket, :error, message)}
+      _ -> {:noreply, socket}
+    end
+  end
+
   @impl true
+  def handle_info({:prebuild, _id}, socket), do: {:noreply, assign_prebuilds(socket)}
   def handle_info(_message, socket), do: {:noreply, socket}
 
   @impl true
@@ -306,6 +343,46 @@ defmodule ForemanWeb.RepoLive.Show do
         </.form>
       </.panel>
 
+      <.panel
+        :if={Scope.admin?(@current_scope)}
+        id="prebuilds"
+        title="Prebuilds"
+        padded={false}
+      >
+        <:subtitle>
+          A new environment of {@repo.default_branch} on a box with a ready prebuild starts from it, with the clone and the devcontainer's images already there. Build again after the devcontainer changes.
+        </:subtitle>
+        <ul class="divide-y divide-line">
+          <li
+            :for={box <- @prebuild_boxes}
+            id={"prebuild-#{box.id}"}
+            class="flex flex-wrap items-center justify-between gap-3 px-5 py-3"
+          >
+            <.prebuild_status box={box} prebuild={@prebuilds[box.id]} />
+            <div :if={Boxes.check_vm(box) == :ok} class="flex shrink-0 gap-2">
+              <.button
+                size="sm"
+                phx-click="build_prebuild"
+                phx-value-box={box.id}
+                disabled={match?(%{status: "building"}, @prebuilds[box.id])}
+              >
+                {if @prebuilds[box.id], do: "Rebuild", else: "Build"}
+              </.button>
+              <.button
+                :if={@prebuilds[box.id] && @prebuilds[box.id].status != "building"}
+                size="sm"
+                phx-click="delete_prebuild"
+                phx-value-id={@prebuilds[box.id].id}
+                data-confirm="Delete this prebuild? New environments on this box will build from scratch."
+              >
+                Delete
+              </.button>
+            </div>
+          </li>
+        </ul>
+        <p :if={@prebuild_boxes == []} class="px-5 py-4 text-sm text-ink-3">No boxes yet.</p>
+      </.panel>
+
       <.live_component
         :if={Scope.admin?(@current_scope)}
         module={ForemanWeb.SecretsComponent}
@@ -319,6 +396,47 @@ defmodule ForemanWeb.RepoLive.Show do
     </Layouts.app>
     """
   end
+
+  attr :box, :map, required: true
+  attr :prebuild, :map, default: nil
+
+  defp prebuild_status(assigns) do
+    assigns = assign(assigns, :vm, Boxes.check_vm(assigns.box))
+
+    ~H"""
+    <div class="min-w-0 flex-1">
+      <div class="text-sm font-medium text-ink">{@box.name}</div>
+      <div class="mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-ink-3">
+        <%= cond do %>
+          <% match?({:error, _}, @vm) -> %>
+            <span>{elem(@vm, 1)}</span>
+          <% is_nil(@prebuild) -> %>
+            <span>None</span>
+          <% @prebuild.status == "building" -> %>
+            <.badge color="amber" size="sm" dot pulse>Building</.badge>
+          <% @prebuild.status == "ready" -> %>
+            <.badge color="emerald" size="sm" dot>Ready</.badge>
+            <span>{@prebuild.branch}</span>
+            <span :if={@prebuild.size_mb}>{size(@prebuild.size_mb)}</span>
+            <span :if={@prebuild.built_at}>
+              built
+              <.local_time
+                id={"prebuild-#{@prebuild.id}-at"}
+                at={@prebuild.built_at}
+                format="relative"
+              />
+            </span>
+          <% true -> %>
+            <.badge color="rose" size="sm" dot>Failed</.badge>
+            <span class="break-all">{@prebuild.error}</span>
+        <% end %>
+      </div>
+    </div>
+    """
+  end
+
+  defp size(mb) when mb >= 1024, do: :erlang.float_to_binary(mb / 1024, decimals: 1) <> " GB"
+  defp size(mb), do: "#{mb} MB"
 
   attr :choices, :map, required: true
   attr :granted, :map, default: nil

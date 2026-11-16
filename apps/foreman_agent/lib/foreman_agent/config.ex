@@ -49,6 +49,7 @@ defmodule ForemanAgent.Config do
             vm_root: "/srv/foreman/vms",
             guest_root: "/srv/foreman/guest",
             agent_disks: "/srv/foreman/agent-disks",
+            prebuilds_root: "/srv/foreman/prebuilds",
             vmctl_socket: "/run/foreman-vmctl.sock",
             # The guest system image: release builds carry its URL and
             # SHA-256 (FOREMAN_GUEST_URL, FOREMAN_GUEST_SHA256 at build

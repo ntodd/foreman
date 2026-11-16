@@ -47,8 +47,27 @@ defmodule ForemanProtocol.Command do
                registry_auth: @registry_auth
              ]
 
+  # What a prebuild is made from: the repo at a branch, with the Foreman
+  # feature (and Tailscale, which joins nothing without a key), and a
+  # GitHub token to clone with in `files`. No secrets of anyone's.
+  @prebuild_spec [
+    prebuild_id: {:uuid, required: true},
+    repo: {:repo, required: true},
+    clone_url: {:git_url, required: true},
+    branch: {:git_ref, required: true},
+    config_path: {:relative_path, default: ".devcontainer/devcontainer.json"},
+    files: {:files, default: %{}},
+    tailscale:
+      {{:object, enabled: {:boolean, default: false}, tags: {{:list, :ts_tag}, default: []}},
+       default: %{}},
+    registry_auth: @registry_auth
+  ]
+
   @specs %{
-    "env.create" => @up_spec,
+    # Protocol 6: `prebuild_id`, a prebuild on this box to start from;
+    # `prebuild`, set by a box for the agent in a VM it's building a
+    # prebuild in.
+    "env.create" => @up_spec ++ [prebuild_id: {:uuid, []}, prebuild: {:boolean, []}],
     # `pull`: fast-forward the clone to its branch first. Protocol 3, and
     # absent unless set.
     "env.rebuild" => @up_spec ++ [pull: {:boolean, []}],
@@ -86,6 +105,10 @@ defmodule ForemanProtocol.Command do
     "box.inventory" => [],
     "box.stats" => [],
     "box.gc" => [],
+    # Protocol 6. Builds a prebuild: an environment's disk with the repo
+    # cloned and its devcontainer built, that new environments start from.
+    "box.prebuild" => @prebuild_spec,
+    "box.prebuild.delete" => [prebuild_id: {:uuid, required: true}],
     # Protocol 5. Reboots the box, if it's still on the boot the control
     # plane saw (box.reboot's `boot_id`): a resend after the reboot is
     # done already. Sent only to agents that report `can_restart`.

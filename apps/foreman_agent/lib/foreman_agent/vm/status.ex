@@ -10,8 +10,8 @@ defmodule ForemanAgent.VM.Status do
   the guest can't touch.
   """
 
-  alias ForemanAgent.{Identity, Stats, Updater, VM}
-  alias ForemanAgent.VM.{Helper, Link, Links, Machine}
+  alias ForemanAgent.{Identity, Ops, Stats, Updater, VM}
+  alias ForemanAgent.VM.{Helper, Link, Links, Machine, Prebuild}
   alias ForemanProtocol.{Command, Event}
 
   @query_timeout 3_000
@@ -138,8 +138,9 @@ defmodule ForemanAgent.VM.Status do
   end
 
   @doc """
-  Prunes Docker in every running VM, and drops guest images and agent
-  disks no VM uses any more.
+  Prunes Docker in every running VM, drops guest images and agent disks
+  no VM uses any more, and the VMs of prebuilds nothing is building (an
+  agent that stopped mid-build leaves one).
   """
   @spec gc(map()) :: {:ok, map()} | {:error, String.t()}
   def gc(ctx) do
@@ -171,7 +172,19 @@ defmodule ForemanAgent.VM.Status do
         {:exit, reason} -> [{"a VM", inspect(reason)}]
       end)
 
-    metas = for env_id <- envs, {:ok, meta} <- [VM.read_meta(config, env_id)], do: meta
+    in_flight = in_flight()
+
+    for id <- VM.list(config, :all) -- envs,
+        {:ok, meta} <- [VM.read_meta(config, id)],
+        meta["op_id"] not in in_flight do
+      ctx.log.("info", "Removing the VM of a prebuild nothing is building (#{id})\n")
+      Prebuild.discard(config, id)
+    end
+
+    metas =
+      for env_id <- VM.list(config, :all),
+          {:ok, meta} <- [VM.read_meta(config, env_id)],
+          do: meta
 
     prune(
       config.guest_root,
@@ -189,6 +202,12 @@ defmodule ForemanAgent.VM.Status do
       [] -> {:ok, %{}}
       _ -> {:error, Enum.map_join(failures, "; ", fn {id, m} -> "#{id}: #{m}" end)}
     end
+  end
+
+  defp in_flight do
+    Ops.in_flight()
+  catch
+    :exit, _ -> []
   end
 
   # Work in progress is a dot-name (a download being unpacked, an agent

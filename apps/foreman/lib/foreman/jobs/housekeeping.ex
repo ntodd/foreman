@@ -27,6 +27,9 @@ defmodule Foreman.Jobs.Housekeeping do
   # prunes, each allowed half an hour on the box.
   @box_command_minutes 10
   @gc_minutes 120
+  # A prebuild clones and builds a devcontainer from nothing, which the
+  # agent gives up to four hours.
+  @prebuild_minutes 300
   @log_days 30
 
   @impl true
@@ -97,16 +100,23 @@ defmodule Foreman.Jobs.Housekeeping do
     now = DateTime.utc_now()
     cutoff = DateTime.add(now, -@box_command_minutes * 60)
     gc_cutoff = DateTime.add(now, -@gc_minutes * 60)
+    prebuild_cutoff = DateTime.add(now, -@prebuild_minutes * 60)
+    long = ["box.gc", "box.prebuild"]
 
     Repo.all(
       from o in Operation,
         where:
           o.status in ["dispatched", "running"] and is_nil(o.environment_id) and
             o.action != "agent.update" and
-            ((o.action != "box.gc" and o.dispatched_at < ^cutoff) or
-               (o.action == "box.gc" and o.dispatched_at < ^gc_cutoff))
+            ((o.action not in ^long and o.dispatched_at < ^cutoff) or
+               (o.action == "box.gc" and o.dispatched_at < ^gc_cutoff) or
+               (o.action == "box.prebuild" and o.dispatched_at < ^prebuild_cutoff))
     )
-    |> Enum.each(&Operations.timed_out(&1, "no result from the agent"))
+    |> Enum.each(
+      &Operations.timed_out(&1, "no result from the agent", fn op ->
+        Foreman.Prebuilds.record_result(op)
+      end)
+    )
   end
 
   defp settle_updates do

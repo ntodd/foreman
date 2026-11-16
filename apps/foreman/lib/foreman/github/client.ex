@@ -42,6 +42,9 @@ defmodule Foreman.GitHub.Client do
   @callback list_installations(app) :: {:ok, [map()]} | {:error, term()}
   @callback installation_token(app, installation_id :: integer()) ::
               {:ok, String.t()} | {:error, term()}
+  @doc "An installation token that reads `repos`' contents and nothing else."
+  @callback repo_read_token(app, installation_id :: integer(), repos :: [String.t()]) ::
+              {:ok, String.t()} | {:error, term()}
   @callback list_installation_repos(token :: String.t()) :: {:ok, [map()]} | {:error, term()}
   @callback get_repo(token :: String.t(), full_name :: String.t()) ::
               {:ok, map()} | {:error, term()}

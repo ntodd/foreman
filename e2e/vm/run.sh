@@ -161,7 +161,7 @@ for unit in $(systemctl list-units --plain --no-legend 'foreman-vm-*' | awk '{ p
 done
 # The agent disk is made once per version (a release doesn't change), and
 # every run here builds 0.1.0 afresh.
-sudo rm -rf /srv/foreman/vms /srv/foreman/agent-disks /var/lib/foreman-vmctl/nets
+sudo rm -rf /srv/foreman/vms /srv/foreman/agent-disks /srv/foreman/prebuilds /var/lib/foreman-vmctl/nets
 for tap in $(ip -br link | awk '/^fm-vm/ { print $1 }'); do sudo ip link del "$tap"; done
 
 # -- the box's LAN, with the fixture repo on it -------------------------------
@@ -395,12 +395,55 @@ sleep 20
 [ "$(env_observed hello-1)" = running ] || fail "hello-1 isn't running after the agent restart"
 echo "ok: same VM process, environment still running"
 
+say "an environment from a prebuild"
+cookie=$(cp_eval 'E2E.session_cookie()' | sed -n 's/^COOKIE=//p')
+box_id=$(cp_eval 'E2E.box_id()' | sed -n 's/^BOX_ID=//p')
+repo_id=$(cp_eval 'E2E.repo_id()' | sed -n 's/^REPO_ID=//p')
+lv_click "/repos/$repo_id" build_prebuild "{\"box\":\"$box_id\"}" | grep -q "Building a prebuild" ||
+  fail "the prebuild didn't start"
+prebuild=$(cp_eval 'E2E.latest_prebuild()' | sed -n 's/^PREBUILD=//p')
+prebuild_ready() { cp_eval "E2E.prebuild_status(\"$prebuild\")" | grep -q '^PREBUILD ready'; }
+i=0
+until prebuild_ready; do
+  cp_eval "E2E.prebuild_status(\"$prebuild\")" | grep -q '^PREBUILD failed' && {
+    cp_eval "E2E.prebuild_status(\"$prebuild\")" | tail -60 >&2
+    fail "the prebuild failed"
+  }
+  i=$((i + 5))
+  [ $i -lt 900 ] || fail "timed out waiting for the prebuild"
+  sleep 5
+done
+cp_eval "E2E.prebuild_status(\"$prebuild\")" | grep '^PREBUILD'
+sudo test -f "/srv/foreman/prebuilds/$prebuild/data.raw" || fail "no prebuild disk on the box"
+sudo test -e "/srv/foreman/vms/$prebuild" && fail "the prebuild's VM outlived the build"
+ip -br link | grep -c '^fm-vm' | grep -qx 2 || fail "the prebuild's tap outlived the build"
+echo "ok: built, its VM gone, its disk kept"
+
+cp_eval 'E2E.create()' >/dev/null
+wait_for_env hello-3 running 600
+cp_eval 'E2E.log("hello-3", "create")' > "$work/create3.log"
+grep -q "Starting from a prebuild" "$work/create3.log" || fail "the box didn't start hello-3's disk from the prebuild"
+grep -q "Starting from the prebuild" "$work/create3.log" || fail "the guest didn't take over the prebuild's clone"
+grep -q "Cloning acme/hello" "$work/create3.log" && fail "hello-3 cloned again"
+probe secrets-owner self create3
+probe first-guest 124 create3
+cold=$(cp_eval 'E2E.took("hello-2", "create")' | sed -n 's/^TOOK //p')
+warm=$(cp_eval 'E2E.took("hello-3", "create")' | sed -n 's/^TOOK //p')
+echo "create took ${cold}s from scratch, ${warm}s from the prebuild"
+[ "$warm" -lt "$cold" ] || fail "the create from the prebuild wasn't faster"
+echo "ok: hello-3 started from the prebuild, without cloning"
+
 say "destroy"
 cp_eval 'E2E.act("hello-1", "destroy")' >/dev/null
 cp_eval 'E2E.act("hello-2", "destroy")' >/dev/null
+cp_eval 'E2E.act("hello-3", "destroy")' >/dev/null
+lv_click "/repos/$repo_id" delete_prebuild "{\"id\":\"$prebuild\"}" >/dev/null ||
+  fail "couldn't delete the prebuild"
 wait_for_env hello-1 destroyed 180
 wait_for_env hello-2 destroyed 180
+wait_for_env hello-3 destroyed 180
 [ -z "$(ls -A /srv/foreman/vms 2>/dev/null)" ] || fail "VM disks left behind: $(ls /srv/foreman/vms)"
+wait_for "the prebuild's disk is deleted" 30 sh -c "[ -z \"\$(sudo ls -A /srv/foreman/prebuilds)\" ]"
 ip -br link | grep -q '^fm-vm' && fail "taps left behind"
 echo "ok: nothing left on the box"
 

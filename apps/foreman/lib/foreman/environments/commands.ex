@@ -93,13 +93,21 @@ defmodule Foreman.Environments.Commands do
     end
   end
 
-  # Pull and rebuild is a rebuild that fast-forwards the clone first.
-  defp up_command("create"), do: {"env.create", %{}}
-  defp up_command("rebuild"), do: {"env.rebuild", %{}}
-  defp up_command("pull_rebuild"), do: {"env.rebuild", %{pull: true}}
+  # Pull and rebuild is a rebuild that fast-forwards the clone first. A
+  # create starts from the box's prebuild of the repo's branch, if it has
+  # one.
+  defp up_command("create", env) do
+    case Foreman.Prebuilds.ready_id(env.repo, env.box_id, env.branch) do
+      nil -> {"env.create", %{}}
+      prebuild_id -> {"env.create", %{prebuild_id: prebuild_id}}
+    end
+  end
+
+  defp up_command("rebuild", _env), do: {"env.rebuild", %{}}
+  defp up_command("pull_rebuild", _env), do: {"env.rebuild", %{pull: true}}
 
   defp up(op, env) do
-    {type, extra} = up_command(op.action)
+    {type, extra} = up_command(op.action, env)
     secrets = secrets(env)
     identity = Accounts.effective_identity(env.user, env.repo)
     features = features(env)

@@ -162,7 +162,7 @@ plain_dir /var/lib/foreman-agent 0700 foreman
 # Root's, so nothing but this script makes entries in it; the agent's
 # directories are below.
 plain_dir /srv/foreman 0755 root
-for dir in vms guest agent-disks; do plain_dir "/srv/foreman/$dir" 0700 foreman; done
+for dir in vms guest agent-disks prebuilds; do plain_dir "/srv/foreman/$dir" 0700 foreman; done
 plain_dir /var/lib/foreman-vmctl 0700 root
 plain_dir /opt/foreman-agent 0755 foreman
 plain_dir /opt/foreman-agent/releases 0755 foreman

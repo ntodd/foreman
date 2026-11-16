@@ -13,6 +13,7 @@ defmodule ForemanAgent.VMEnvTest do
 
   @env "6f1c1d1e-9a3b-4c1f-8f5e-2d7a9b0c1e2f"
   @other "0b8e3a6c-5d2f-4e1a-9c7b-3f2e1d0c9b8a"
+  @prebuild "3c2b1a09-8f7e-4d6c-9b5a-1e2d3c4b5a69"
 
   setup :set_mox_global
 
@@ -22,7 +23,7 @@ defmodule ForemanAgent.VMEnvTest do
     saved = Config.get()
 
     on_exit(fn ->
-      for env <- [@env, @other], do: Links.stop(env) && FakeMachine.kill(env, nil)
+      for env <- [@env, @other, @prebuild], do: Links.stop(env) && FakeMachine.kill(env, nil)
       Config.put(saved)
       File.rm_rf(dir)
     end)
@@ -35,6 +36,7 @@ defmodule ForemanAgent.VMEnvTest do
         vm_root: Path.join(dir, "vms"),
         guest_root: Path.join(dir, "guest"),
         agent_disks: Path.join(dir, "agent"),
+        prebuilds_root: Path.join(dir, "prebuilds"),
         secrets_root: Path.join(dir, "run"),
         machine: FakeMachine,
         guest_url: "file://" <> tar,
@@ -651,6 +653,134 @@ defmodule ForemanAgent.VMEnvTest do
 
     assert {:ok, %{state: "running"}} =
              VM.cast_inventory_entry([%{entry | "state" => "running"}], @env, "hello-1")
+  end
+
+  describe "prebuilds" do
+    # The handler's runner is the box's own; these go through the handler.
+    setup do
+      Application.put_env(:foreman_agent, :runner, ForemanAgent.RunnerMock)
+      on_exit(fn -> Application.delete_env(:foreman_agent, :runner) end)
+    end
+
+    defp prebuild_command do
+      {:ok, cmd} =
+        Command.new("box.prebuild", %{
+          prebuild_id: @prebuild,
+          repo: "acme/hello",
+          clone_url: "https://github.com/acme/hello.git",
+          branch: "main",
+          files: %{"github-token" => "ghs_clonetoken"}
+        })
+
+      cmd
+    end
+
+    defp handle(cmd) do
+      test = self()
+      Handler.handle(cmd, fn stream, data -> send(test, {:handler_log, stream, data}) end)
+    end
+
+    defp prebuilt(config, content) do
+      File.mkdir_p!(VM.Prebuild.dir(config, @prebuild))
+      File.write!(VM.Prebuild.disk(config, @prebuild), content)
+    end
+
+    test "one is built in a VM of its own, and only its data disk is kept", ctx do
+      assert {:ok, %{"prebuild_id" => @prebuild, "size_mb" => size}} = handle(prebuild_command())
+      assert is_integer(size)
+
+      assert_received {:machine, {:boot, _}, @prebuild}
+
+      assert_receive {:guest, "env.secrets.write",
+                      %{files: %{"github-token" => "ghs_clonetoken"}}}
+
+      assert_receive {:guest, "env.create",
+                      %{env_id: @prebuild, slug: "prebuild-3c2b1a09", prebuild: true} = create}
+
+      refute Map.has_key?(create, :prebuild_id)
+      assert_receive {:guest, "env.stop", %{env_id: @prebuild}}
+
+      assert VM.Prebuild.exists?(ctx.config, @prebuild)
+
+      assert {:ok, %{"repo" => "acme/hello", "branch" => "main"}} =
+               ctx.config
+               |> VM.Prebuild.dir(@prebuild)
+               |> Path.join("prebuild.json")
+               |> File.read!()
+               |> JSON.decode()
+
+      # The VM, its root disk and the token the box kept for it go.
+      refute FakeMachine.running?(@prebuild, ctx.config)
+      assert_received {:machine, :release, @prebuild}
+      refute File.exists?(VM.paths(ctx.config, @prebuild).dir)
+      refute File.exists?(Path.join(ctx.config.secrets_root, @prebuild))
+    end
+
+    test "a build that fails keeps nothing, and says why without the token", ctx do
+      test = self()
+
+      FakeMachine.configure(
+        test: test,
+        handler: fn
+          %{type: "env.create"}, _log -> {:error, "git clone failed: bad token ghs_clonetoken"}
+          _cmd, _log -> {:ok, %{}}
+        end
+      )
+
+      assert {:error, message} = handle(prebuild_command())
+      assert message =~ "git clone failed"
+      refute message =~ "ghs_clonetoken"
+      refute VM.Prebuild.exists?(ctx.config, @prebuild)
+      refute File.exists?(VM.paths(ctx.config, @prebuild).dir)
+      refute File.exists?(Path.join(ctx.config.secrets_root, @prebuild))
+    end
+
+    test "an environment starts from a copy of the box's prebuild", ctx do
+      prebuilt(ctx.config, "prebuilt disk")
+
+      assert {:ok, _} = run(create(%{prebuild_id: @prebuild}), ctx)
+
+      assert File.read!(VM.paths(ctx.config, @env).data) == "prebuilt disk"
+      # Kept for the next environment.
+      assert File.read!(VM.Prebuild.disk(ctx.config, @prebuild)) == "prebuilt disk"
+      assert_received {:log, "info", "Starting from a prebuild\n"}
+      assert_receive {:guest, "env.create", %{prebuild_id: @prebuild}}
+    end
+
+    test "one the box doesn't have starts from an empty disk", ctx do
+      assert {:ok, _} = run(create(%{prebuild_id: @prebuild}), ctx)
+
+      assert File.stat!(VM.paths(ctx.config, @env).data).size ==
+               ctx.config.vm_disk_gb * 1024 * 1024 * 1024
+    end
+
+    test "the VM one is built in isn't an environment, and box.gc removes one nothing is building",
+         ctx do
+      {:ok, _} = run(create(), ctx)
+      paths = VM.paths(ctx.config, @prebuild)
+      File.mkdir_p!(paths.dir)
+
+      VM.write_meta(ctx.config, @prebuild, %{
+        "slug" => "prebuild-3c2b1a09",
+        "kind" => "prebuild",
+        "op_id" => ForemanProtocol.uuid()
+      })
+
+      assert VM.list(ctx.config) == [@env]
+      assert Enum.sort(VM.list(ctx.config, :all)) == Enum.sort([@env, @prebuild])
+      assert {:ok, [%{env_id: @env}]} = Status.inventory(ctx.config)
+
+      assert {:ok, _} = Status.gc(ctx.ctx)
+      refute File.exists?(paths.dir)
+      assert File.exists?(VM.paths(ctx.config, @env).dir)
+    end
+
+    test "box.prebuild.delete removes it", ctx do
+      prebuilt(ctx.config, "prebuilt disk")
+      {:ok, cmd} = Command.new("box.prebuild.delete", %{prebuild_id: @prebuild})
+      assert {:ok, %{}} = handle(cmd)
+      refute File.exists?(VM.Prebuild.dir(ctx.config, @prebuild))
+    end
   end
 
   test "a VM's size never passes the box's" do

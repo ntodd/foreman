@@ -137,19 +137,7 @@ defmodule Foreman.Environments do
 
   # Every environment runs in a VM of its own; a box that can't run them
   # gets none.
-  defp check_vm(box) do
-    case Foreman.Boxes.vm_problem(box) do
-      nil ->
-        :ok
-
-      {:agent, _} ->
-        {:error,
-         "#{box.name}'s agent predates environment VMs; run the install script on it again"}
-
-      {:vm, reason} ->
-        {:error, "#{box.name} can't run environments: #{reason}"}
-    end
-  end
+  defp check_vm(box), do: Foreman.Boxes.check_vm(box)
 
   defp check_placement(box, repo, limits, confirmed?) do
     case Capacity.check_placement(box, live_for_box(box.id), repo, limits) do
@@ -679,6 +667,7 @@ defmodule Foreman.Environments do
     if op.action == "agent.update" and op.status == "failed",
       do: Agents.Releases.update_failed(op)
 
+    Foreman.Prebuilds.record_result(op)
     nil
   end
 

@@ -19,7 +19,8 @@ defmodule ForemanProtocol do
   # names.
   # 6: every environment runs in a VM of its own; the join reports whether
   # the box can run them (`vm`), and no longer a compose policy (`policy`);
-  # env.suspend, and environments reported suspended.
+  # env.suspend, and environments reported suspended; box.prebuild and
+  # box.prebuild.delete, and env.create's `prebuild_id`.
   @version 6
 
   # Usually the protocol before this one is accepted too. Protocol 5

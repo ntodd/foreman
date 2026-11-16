@@ -407,6 +407,8 @@ defmodule ForemanWeb.ForemanComponents do
   def action_label("box.stats"), do: "Refresh stats"
   def action_label("box.gc"), do: "Prune images and caches"
   def action_label("box.restart"), do: "Reboot"
+  def action_label("box.prebuild"), do: "Build a prebuild"
+  def action_label("box.prebuild.delete"), do: "Delete a prebuild"
   def action_label("agent.update"), do: "Update agent"
   def action_label("op.cancel"), do: "Cancel an operation"
   def action_label(other), do: other

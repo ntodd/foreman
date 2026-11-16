@@ -36,6 +36,23 @@ defmodule ForemanAgent.Handler do
     end
   end
 
+  # A prebuild's command carries a token to clone with: redacted like an
+  # environment command's secrets.
+  def handle(%Command{type: "box.prebuild"} = cmd, log) do
+    redactor = Redactor.new(cmd)
+    ctx = ctx(Redactor.wrap_log(redactor, log))
+
+    case host_only(ctx, fn -> VM.Prebuild.build(cmd, ctx.log, ctx) end, redactor) do
+      {:error, message} -> {:error, Redactor.redact(redactor, message)}
+      ok -> ok
+    end
+  end
+
+  def handle(%Command{type: "box.prebuild.delete", payload: p} = cmd, log) do
+    ctx = ctx(log)
+    host_only(ctx, fn -> VM.Prebuild.delete(p.prebuild_id, ctx) end, Redactor.new(cmd))
+  end
+
   def handle(%Command{type: "box.inventory"}, _log) do
     with {:ok, envs} <- inventory() do
       {:ok, %{"environments" => Enum.map(envs, &stringify/1)}}
@@ -118,6 +135,16 @@ defmodule ForemanAgent.Handler do
     kind, reason ->
       Logger.error(Redactor.redact(redactor, Exception.format(kind, reason, __STACKTRACE__)))
       {:error, "operation crashed (#{kind})"}
+  end
+
+  defp host_only(ctx, fun, redactor) do
+    if ctx.config.mode == :host,
+      do: fun.(),
+      else: {:error, "prebuilds are made on the box, not in an environment's VM"}
+  rescue
+    e ->
+      Logger.error(Redactor.redact(redactor, Exception.format(:error, e, __STACKTRACE__)))
+      {:error, "operation crashed: #{Exception.message(e)}"}
   end
 
   def inventory do

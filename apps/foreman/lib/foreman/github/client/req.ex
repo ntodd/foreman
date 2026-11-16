@@ -135,6 +135,17 @@ defmodule Foreman.GitHub.Client.Req do
   end
 
   @impl true
+  def repo_read_token(app, installation_id, repos) do
+    case Req.post(api(bearer(app_jwt(app))),
+           url: "/app/installations/#{installation_id}/access_tokens",
+           json: %{repositories: repos, permissions: %{contents: "read"}}
+         ) do
+      {:ok, %{status: 201, body: %{"token" => token}}} -> {:ok, token}
+      other -> unexpected(other)
+    end
+  end
+
+  @impl true
   def list_installation_repos(token) do
     paginate(api(bearer(token)), "/installation/repositories", & &1["repositories"])
   end

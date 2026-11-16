@@ -126,6 +126,41 @@ defmodule E2E do
     env.id |> Operations.list_for_environment(20) |> Enum.find(&(&1.action == "logs"))
   end
 
+  def repo_id do
+    admin()
+    IO.puts("REPO_ID=#{Foreman.Repos.get_repo_by_full_name(System.get_env("E2E_REPO", "acme/hello")).id}")
+  end
+
+  # The prebuild a click on the repo's page started (the box's connection
+  # is in the running control plane, which an eval can't reach).
+  def latest_prebuild do
+    admin()
+
+    case Repo.one(from p in Foreman.Prebuilds.Prebuild, order_by: [desc: p.inserted_at], limit: 1) do
+      nil -> IO.puts("no prebuild")
+      prebuild -> IO.puts("PREBUILD=#{prebuild.id}")
+    end
+  end
+
+  def prebuild_status(id) do
+    admin()
+    prebuild = Repo.get!(Foreman.Prebuilds.Prebuild, id)
+    IO.puts("PREBUILD #{prebuild.status} size_mb=#{prebuild.size_mb}")
+
+    if prebuild.status == "failed" do
+      IO.puts(prebuild.error)
+      IO.puts(Operations.log(Operations.get(prebuild.op_id)))
+    end
+  end
+
+  # How long an environment's operation of one kind took, queued to done.
+  def took(slug, action) do
+    admin()
+    env = Repo.get_by!(Foreman.Environments.Environment, slug: slug)
+    op = env.id |> Operations.list_for_environment(20) |> Enum.find(&(&1.action == action))
+    IO.puts("TOOK #{DateTime.diff(op.finished_at, op.inserted_at)}")
+  end
+
   def secret(slug, name, value) do
     scope = Scope.for_user(admin())
     env = live_env(slug)

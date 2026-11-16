@@ -52,6 +52,36 @@ defmodule ForemanProtocol.ProtocolV6Test do
              ForemanProtocol.Event.new("env.state", %{env_id: env_id, state: "suspended"})
   end
 
+  test "box.prebuild names the repo, branch and config, and env.create can start from one" do
+    prebuild = ForemanProtocol.uuid()
+
+    assert {:ok, cmd} =
+             ForemanProtocol.Command.new("box.prebuild", %{
+               prebuild_id: prebuild,
+               repo: "acme/hello",
+               clone_url: "https://github.com/acme/hello.git",
+               branch: "main",
+               files: %{"github-token" => "ghs_x"}
+             })
+
+    assert cmd.payload.config_path == ".devcontainer/devcontainer.json"
+    assert {:error, _} = ForemanProtocol.Command.new("box.prebuild", %{prebuild_id: prebuild})
+    assert {:ok, _} = ForemanProtocol.Command.new("box.prebuild.delete", %{prebuild_id: prebuild})
+
+    assert {:ok, create} =
+             ForemanProtocol.Command.new("env.create", %{
+               env_id: ForemanProtocol.uuid(),
+               slug: "hello-1",
+               repo: "acme/hello",
+               clone_url: "https://github.com/acme/hello.git",
+               branch: "main",
+               prebuild_id: prebuild
+             })
+
+    assert create.payload.prebuild_id == prebuild
+    refute Map.has_key?(create.payload, :prebuild)
+  end
+
   test "a join without it is still valid" do
     assert {:ok, join} = ForemanProtocol.cast_join(@join)
     refute Map.has_key?(join, :vm)
