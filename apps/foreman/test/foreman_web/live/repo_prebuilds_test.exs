@@ -56,6 +56,87 @@ defmodule ForemanWeb.RepoPrebuildsTest do
       assert has_element?(view, "#prebuild-#{ctx.box.id}", "None")
     end
 
+    defp prebuild(ctx, attrs) do
+      %Prebuild{
+        repo_id: ctx.repo.id,
+        box_id: ctx.box.id,
+        branch: "main",
+        config_path: ctx.repo.devcontainer_path,
+        status: "ready",
+        built_at: DateTime.utc_now()
+      }
+      |> struct!(attrs)
+      |> Repo.insert!()
+    end
+
+    defp ago(minutes), do: DateTime.add(DateTime.utc_now(), -minutes * 60)
+
+    test "after a failed rebuild, sees the prebuild still in use, and can delete either", ctx do
+      in_use = prebuild(ctx, %{size_mb: 300, inserted_at: ago(60)})
+
+      failed =
+        prebuild(ctx, %{
+          status: "failed",
+          error: "devcontainer up failed",
+          built_at: nil,
+          inserted_at: ago(5)
+        })
+
+      {:ok, view, _html} = live(ctx.conn, ~p"/repos/#{ctx.repo.id}")
+
+      assert has_element?(view, "#prebuild-row-#{in_use.id}", "Ready")
+      assert has_element?(view, "#prebuild-row-#{in_use.id}", "300 MB")
+      assert has_element?(view, "#prebuild-row-#{failed.id}", "Failed")
+      assert has_element?(view, "#prebuild-row-#{failed.id}", "devcontainer up failed")
+
+      view |> element("#prebuild-row-#{failed.id} button", "Delete") |> render_click()
+      assert_receive {:dispatch, %Command{type: "box.prebuild.delete", payload: p}}
+      assert p.prebuild_id == failed.id
+      refute has_element?(view, "#prebuild-row-#{failed.id}")
+      assert has_element?(view, "#prebuild-row-#{in_use.id}", "Ready")
+
+      view |> element("#prebuild-row-#{in_use.id} button", "Delete") |> render_click()
+      assert_receive {:dispatch, %Command{type: "box.prebuild.delete", payload: p}}
+      assert p.prebuild_id == in_use.id
+      assert has_element?(view, "#prebuild-#{ctx.box.id}", "None")
+    end
+
+    test "sees the one in use while a rebuild is building, and can't delete the build", ctx do
+      in_use = prebuild(ctx, %{inserted_at: ago(60)})
+      building = prebuild(ctx, %{status: "building", built_at: nil, inserted_at: ago(1)})
+
+      {:ok, view, _html} = live(ctx.conn, ~p"/repos/#{ctx.repo.id}")
+
+      assert has_element?(view, "#prebuild-row-#{in_use.id}", "Ready")
+      assert has_element?(view, "#prebuild-row-#{in_use.id} button", "Delete")
+      assert has_element?(view, "#prebuild-row-#{building.id}", "Building")
+      refute has_element?(view, "#prebuild-row-#{building.id} button")
+      assert has_element?(view, "#prebuild-#{ctx.box.id} button[disabled]", "Rebuild")
+    end
+
+    test "is told a prebuild of the old default branch won't be used", ctx do
+      old = prebuild(ctx, %{branch: "master"})
+      {:ok, view, _html} = live(ctx.conn, ~p"/repos/#{ctx.repo.id}")
+
+      refute has_element?(view, "#prebuild-row-#{old.id}", "Ready")
+      assert has_element?(view, "#prebuild-row-#{old.id}", "Not used")
+      assert has_element?(view, "#prebuild-row-#{old.id}", "master, the old default branch")
+      assert has_element?(view, "#prebuild-row-#{old.id} button", "Delete")
+    end
+
+    test "is told a prebuild of an old devcontainer config won't be used", ctx do
+      old = prebuild(ctx, %{config_path: ".devcontainer/old/devcontainer.json"})
+      {:ok, view, _html} = live(ctx.conn, ~p"/repos/#{ctx.repo.id}")
+
+      assert has_element?(view, "#prebuild-row-#{old.id}", "Not used")
+
+      assert has_element?(
+               view,
+               "#prebuild-row-#{old.id}",
+               ".devcontainer/old/devcontainer.json, the old devcontainer config"
+             )
+    end
+
     test "a box that can't run environments has no button", ctx do
       box = box_fixture(name: "no-kvm", vm: %{"ready" => false, "reason" => "no /dev/kvm"})
       {:ok, view, _html} = live(ctx.conn, ~p"/repos/#{ctx.repo.id}")

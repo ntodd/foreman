@@ -219,14 +219,19 @@ about them), powers it off and keeps the data disk as
 `/srv/foreman/prebuilds/<id>/data.raw`. The VM it was built in is never
 reported as an environment.
 
-A create on that box and branch carries the prebuild's id. The box
+A create on that box and branch carries the prebuild's id, once the
+user's own GitHub token has shown it reads the repo and its extra repos
+(with no GitHub App configured, there's no one to ask). The box
 copies the disk (a reflink on XFS) instead of making an empty one, and
 the guest agent takes over the prebuild's clone and its Docker data: it
 renames them to the environment's, removes the prebuild's own containers
 and volumes, and runs `devcontainer up` as usual, which makes the
 environment's containers from the cache. Building another replaces the
-ready one; `box.prebuild.delete` frees a box's copy. Builds that never
-report back fail after five hours.
+ready one; `box.prebuild.delete` frees a box's copy, and `box.gc` names
+every prebuild the control plane knows on the box so it deletes the
+rest. A build fails when the box's agent rejoins without it, and one that
+never reports back fails after five hours; a result that arrives later
+still counts.
 
 ### Generated overlay
 

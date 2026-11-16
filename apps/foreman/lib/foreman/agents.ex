@@ -9,7 +9,7 @@ defmodule Foreman.Agents do
   """
   import Ecto.Query
 
-  alias Foreman.{Boxes, Environments, Metrics, Operations, Repo, Scope}
+  alias Foreman.{Boxes, Environments, Metrics, Operations, Prebuilds, Repo, Scope}
   alias Foreman.Capacity.Tracker
   alias Foreman.Environments.Environment
   alias Foreman.Operations.Operation
@@ -62,8 +62,17 @@ defmodule Foreman.Agents do
     end
   end
 
+  # A prune names every prebuild the control plane knows on the box, and
+  # the box deletes the others: ones whose delete it never got, or that
+  # finished after they were forgotten.
+  def run_box_command(%Scope{} = scope, box, "box.gc") do
+    if Scope.admin?(scope),
+      do: send_box_command(scope, box, "box.gc", %{prebuilds: Prebuilds.ids_on_box(box.id)}),
+      else: {:error, :unauthorized}
+  end
+
   def run_box_command(%Scope{} = scope, box, type)
-      when type in ["box.inventory", "box.stats", "box.gc"] do
+      when type in ["box.inventory", "box.stats"] do
     if Scope.admin?(scope),
       do: send_box_command(scope, box, type, %{}),
       else: {:error, :unauthorized}

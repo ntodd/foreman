@@ -20,6 +20,8 @@ defmodule ForemanWeb.AgentChannel do
       # Housekeeping would judge the operations about to be resent by when
       # they were first sent.
       :ok = Agents.restart_clocks(box_id, join.in_flight)
+      # Box commands aren't resent, so a prebuild the agent lost is done for.
+      :ok = Foreman.Prebuilds.fail_lost(box_id, join.in_flight)
       :ok = Agents.register(box_id)
       box = Boxes.agent_joined(box, join)
       Logger.metadata(box_id: box_id)

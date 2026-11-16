@@ -46,7 +46,7 @@ defmodule ForemanWeb.RepoLive.Show do
   defp assign_prebuilds(socket, true) do
     socket
     |> assign(:prebuild_boxes, Boxes.list_boxes(socket.assigns.current_scope))
-    |> assign(:prebuilds, Prebuilds.latest_by_box(socket.assigns.repo))
+    |> assign(:prebuilds, Prebuilds.by_box(socket.assigns.repo))
   end
 
   defp settings_params(repo) do
@@ -353,32 +353,12 @@ defmodule ForemanWeb.RepoLive.Show do
           A new environment of {@repo.default_branch} on a box with a ready prebuild starts from it, with the clone and the devcontainer's images already there. Build again after the devcontainer changes.
         </:subtitle>
         <ul class="divide-y divide-line">
-          <li
+          <.prebuild_box
             :for={box <- @prebuild_boxes}
-            id={"prebuild-#{box.id}"}
-            class="flex flex-wrap items-center justify-between gap-3 px-5 py-3"
-          >
-            <.prebuild_status box={box} prebuild={@prebuilds[box.id]} />
-            <div :if={Boxes.check_vm(box) == :ok} class="flex shrink-0 gap-2">
-              <.button
-                size="sm"
-                phx-click="build_prebuild"
-                phx-value-box={box.id}
-                disabled={match?(%{status: "building"}, @prebuilds[box.id])}
-              >
-                {if @prebuilds[box.id], do: "Rebuild", else: "Build"}
-              </.button>
-              <.button
-                :if={@prebuilds[box.id] && @prebuilds[box.id].status != "building"}
-                size="sm"
-                phx-click="delete_prebuild"
-                phx-value-id={@prebuilds[box.id].id}
-                data-confirm="Delete this prebuild? New environments on this box will build from scratch."
-              >
-                Delete
-              </.button>
-            </div>
-          </li>
+            box={box}
+            repo={@repo}
+            prebuilds={@prebuilds[box.id] || []}
+          />
         </ul>
         <p :if={@prebuild_boxes == []} class="px-5 py-4 text-sm text-ink-3">No boxes yet.</p>
       </.panel>
@@ -397,40 +377,103 @@ defmodule ForemanWeb.RepoLive.Show do
     """
   end
 
+  # A box's prebuilds of the repo (`Prebuilds.by_box/1`): the one new
+  # environments start from, any ready ones they won't, and the latest
+  # attempt when it's none of those.
   attr :box, :map, required: true
-  attr :prebuild, :map, default: nil
+  attr :repo, :map, required: true
+  attr :prebuilds, :list, required: true
 
-  defp prebuild_status(assigns) do
+  defp prebuild_box(assigns) do
     assigns = assign(assigns, :vm, Boxes.check_vm(assigns.box))
 
     ~H"""
-    <div class="min-w-0 flex-1">
-      <div class="text-sm font-medium text-ink">{@box.name}</div>
-      <div class="mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-ink-3">
-        <%= cond do %>
-          <% match?({:error, _}, @vm) -> %>
-            <span>{elem(@vm, 1)}</span>
-          <% is_nil(@prebuild) -> %>
-            <span>None</span>
-          <% @prebuild.status == "building" -> %>
-            <.badge color="amber" size="sm" dot pulse>Building</.badge>
-          <% @prebuild.status == "ready" -> %>
-            <.badge color="emerald" size="sm" dot>Ready</.badge>
-            <span>{@prebuild.branch}</span>
-            <span :if={@prebuild.size_mb}>{size(@prebuild.size_mb)}</span>
-            <span :if={@prebuild.built_at}>
-              built
-              <.local_time
-                id={"prebuild-#{@prebuild.id}-at"}
-                at={@prebuild.built_at}
-                format="relative"
-              />
-            </span>
-          <% true -> %>
-            <.badge color="rose" size="sm" dot>Failed</.badge>
-            <span class="break-all">{@prebuild.error}</span>
-        <% end %>
+    <li id={"prebuild-#{@box.id}"} class="px-5 py-3">
+      <div class="flex flex-wrap items-center justify-between gap-3">
+        <div class="min-w-0 flex-1">
+          <div class="text-sm font-medium text-ink">{@box.name}</div>
+          <div :if={@vm != :ok} class="mt-0.5 text-xs text-ink-3">{elem(@vm, 1)}</div>
+          <div :if={@vm == :ok and @prebuilds == []} class="mt-0.5 text-xs text-ink-3">None</div>
+        </div>
+        <.button
+          :if={@vm == :ok}
+          size="sm"
+          phx-click="build_prebuild"
+          phx-value-box={@box.id}
+          disabled={Enum.any?(@prebuilds, &(&1.status == "building"))}
+        >
+          {if @prebuilds == [], do: "Build", else: "Rebuild"}
+        </.button>
       </div>
+      <ul :if={@prebuilds != []} class="mt-2 space-y-1.5">
+        <li
+          :for={prebuild <- @prebuilds}
+          id={"prebuild-row-#{prebuild.id}"}
+          class="flex flex-wrap items-center justify-between gap-2"
+        >
+          <.prebuild_status
+            prebuild={prebuild}
+            repo={@repo}
+            unused={Prebuilds.unused_because(@repo, prebuild)}
+          />
+          <.button
+            :if={prebuild.status != "building"}
+            size="sm"
+            phx-click="delete_prebuild"
+            phx-value-id={prebuild.id}
+            data-confirm={
+              if prebuild.status == "ready" and is_nil(Prebuilds.unused_because(@repo, prebuild)),
+                do: "Delete this prebuild? New environments on #{@box.name} will build from scratch.",
+                else: "Delete this prebuild?"
+            }
+          >
+            Delete
+          </.button>
+        </li>
+      </ul>
+    </li>
+    """
+  end
+
+  attr :prebuild, :map, required: true
+  attr :repo, :map, required: true
+  attr :unused, :any, default: nil
+
+  defp prebuild_status(assigns) do
+    ~H"""
+    <div class="flex min-w-0 flex-1 flex-wrap items-center gap-x-2 gap-y-1 text-xs text-ink-3">
+      <%= case {@prebuild.status, @unused} do %>
+        <% {"building", _} -> %>
+          <.badge color="amber" size="sm" dot pulse>Building</.badge>
+          <span>{@prebuild.branch}</span>
+        <% {"ready", nil} -> %>
+          <.badge color="emerald" size="sm" dot>Ready</.badge>
+          <span>{@prebuild.branch}</span>
+          <span :if={@prebuild.size_mb}>{size(@prebuild.size_mb)}</span>
+          <span :if={@prebuild.built_at}>
+            built
+            <.local_time
+              id={"prebuild-#{@prebuild.id}-at"}
+              at={@prebuild.built_at}
+              format="relative"
+            />
+          </span>
+        <% {"ready", {:branch, branch}} -> %>
+          <.badge size="sm" dot>Not used</.badge>
+          <span>
+            Built from {branch}, the old default branch: new environments of {@repo.default_branch} won't start from it.
+          </span>
+          <span :if={@prebuild.size_mb}>{size(@prebuild.size_mb)}</span>
+        <% {"ready", {:config, path}} -> %>
+          <.badge size="sm" dot>Not used</.badge>
+          <span class="break-all">
+            Built for <span class="font-mono">{path}</span>, the old devcontainer config: new environments won't start from it.
+          </span>
+          <span :if={@prebuild.size_mb}>{size(@prebuild.size_mb)}</span>
+        <% _failed -> %>
+          <.badge color="rose" size="sm" dot>Failed</.badge>
+          <span class="break-all">{@prebuild.error}</span>
+      <% end %>
     </div>
     """
   end

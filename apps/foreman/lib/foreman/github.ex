@@ -299,6 +299,21 @@ defmodule Foreman.GitHub do
     end
   end
 
+  @doc """
+  Whether `token` reads `repo` and each of its extra repos, by asking
+  GitHub for each. Anything but a yes (an error, GitHub not answering) is
+  a no.
+  """
+  def can_read?(token, %Repos.Repo{} = repo) when is_binary(token) do
+    repo = Foreman.Repo.preload(repo, :owner)
+    extra = Enum.map(repo.extra_repos, &"#{repo.owner.login}/#{&1}")
+
+    Enum.all?(
+      Enum.uniq([repo.full_name | extra]),
+      &match?({:ok, _}, client().get_repo(token, &1))
+    )
+  end
+
   def list_branches(%User{} = user, %Repos.Repo{} = repo) do
     with {:ok, token} <- user_token(user) do
       client().list_branches(token, repo.full_name)

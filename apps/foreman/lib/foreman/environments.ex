@@ -662,13 +662,16 @@ defmodule Foreman.Environments do
     after_result(op, env)
   end
 
-  @doc "Writes a finished operation's outcome to its environment. Returns the environment."
+  @doc """
+  Writes a finished operation's outcome to its environment. Returns the
+  environment; for a box operation, what a prebuild's result leaves to
+  send once it's committed (`Foreman.Prebuilds.record_result/1`).
+  """
   def record_result(%Foreman.Operations.Operation{environment_id: nil} = op) do
     if op.action == "agent.update" and op.status == "failed",
       do: Agents.Releases.update_failed(op)
 
     Foreman.Prebuilds.record_result(op)
-    nil
   end
 
   def record_result(%Foreman.Operations.Operation{} = op) do
@@ -724,6 +727,7 @@ defmodule Foreman.Environments do
 
   @doc "What follows a recorded result: tell the UI, clean up, send the next operation."
   def after_result(_op, nil), do: :ok
+  def after_result(_op, {:prebuilds, _, _} = sends), do: Foreman.Prebuilds.after_result(sends)
 
   def after_result(op, %Environment{} = env) do
     broadcast(env)

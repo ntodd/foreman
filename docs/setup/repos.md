@@ -133,13 +133,18 @@ What runs where:
   repo or environment secrets, no Tailscale key. A hook that needs a
   secret fails in the prebuild, so keep those in `postStartCommand` or
   make them skip without it.
-- Everyone who can make an environment of the repo gets what's on the
-  disk. Don't have a hook write anything there you wouldn't commit.
+- Everyone whose GitHub token reads the repo and its extra repos gets
+  what's on the disk; anyone else's environment builds from nothing.
+  Don't have a hook write anything there you wouldn't commit.
 
 Build again after the devcontainer or its base images change: a
 prebuild isn't refreshed on its own, and an environment from a stale one
 still works, rebuilding the layers that changed. A new build replaces
-the old one once it's ready; **Delete** frees its disk.
+the old one once it's ready; **Delete** frees its disk. The page shows
+the prebuild new environments start from and, when it's another, the
+latest attempt; one built for a default branch or devcontainer config the
+repo no longer uses says it won't be used. **Prune** on the box's page
+also deletes any prebuild disk the control plane no longer knows about.
 
 ## What to remove
 

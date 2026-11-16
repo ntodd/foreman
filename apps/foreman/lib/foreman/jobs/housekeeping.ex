@@ -14,7 +14,7 @@ defmodule Foreman.Jobs.Housekeeping do
 
   import Ecto.Query
 
-  alias Foreman.{Agents, Boxes, Environments, Operations, Repo}
+  alias Foreman.{Agents, Boxes, Environments, Operations, Prebuilds, Repo}
   alias Foreman.Boxes.Box
   alias Foreman.Operations.{Operation, Redactions}
 
@@ -112,11 +112,11 @@ defmodule Foreman.Jobs.Housekeeping do
                (o.action == "box.gc" and o.dispatched_at < ^gc_cutoff) or
                (o.action == "box.prebuild" and o.dispatched_at < ^prebuild_cutoff))
     )
-    |> Enum.each(
-      &Operations.timed_out(&1, "no result from the agent", fn op ->
-        Foreman.Prebuilds.record_result(op)
-      end)
-    )
+    |> Enum.each(fn op ->
+      with {:ok, _op, recorded} <-
+             Operations.timed_out(op, "no result from the agent", &Prebuilds.record_result/1),
+           do: Prebuilds.after_result(recorded)
+    end)
   end
 
   defp settle_updates do

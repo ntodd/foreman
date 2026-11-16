@@ -492,7 +492,10 @@ These are accepted for now, or need someone to try them:
     that reads the repo for an hour; registry credentials are on the
     guest's tmpfs during builds, never the disk. A hook that copies that
     token into a file leaves it for the repo's other users, who can read
-    the repo anyway. Treat what hooks write as you would a commit.
+    the repo anyway. Treat what hooks write as you would a commit. An
+    environment starts from a prebuild only once its user's own GitHub
+    token has read the repo and its extra repos; without a GitHub App
+    configured, nothing checks.
 
 ## Things worth trying
 
