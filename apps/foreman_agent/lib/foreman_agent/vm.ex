@@ -41,6 +41,11 @@ defmodule ForemanAgent.VM do
     }
   end
 
+  @doc "Whether an environment's VM is saved to disk (suspended)."
+  @spec suspended?(Config.t(), String.t()) :: boolean()
+  def suspended?(config, env_id),
+    do: File.regular?(Path.join(paths(config, env_id).snapshot, "config.json"))
+
   @doc "The environments with a VM on this box."
   @spec list(Config.t()) :: [String.t()]
   def list(config) do

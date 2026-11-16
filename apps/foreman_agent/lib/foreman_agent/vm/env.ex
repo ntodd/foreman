@@ -14,7 +14,11 @@ defmodule ForemanAgent.VM.Env do
   reboot (secrets, then start) works as it did.
 
   Stop shuts the guest down after the environment's own stop (so
-  sidecars get theirs), and destroy throws the VM's disks away.
+  sidecars get theirs), and destroy throws the VM's disks away. Suspend
+  writes the VM's memory to disk and stops it; whatever needs the VM next
+  (a start, usually) resumes it from there, and the snapshot, which holds
+  whatever was in the guest's memory (secrets included), is deleted once
+  the VM is back.
   """
 
   alias ForemanAgent.{Env, VM}
@@ -46,8 +50,43 @@ defmodule ForemanAgent.VM.Env do
     end
   end
 
+  def run(%Command{type: "env.suspend", payload: p}, log, ctx) do
+    machine = Machine.impl(ctx.config)
+    paths = VM.paths(ctx.config, p.env_id)
+
+    cond do
+      machine.running?(p.env_id, ctx.config) ->
+        log.("info", "Saving the environment's VM to disk\n")
+        tmp = paths.snapshot <> ".tmp"
+        File.rm_rf!(tmp)
+        File.mkdir_p!(tmp)
+        File.chmod!(tmp, 0o700)
+
+        case machine.snapshot(p.env_id, tmp, ctx.config) do
+          :ok ->
+            Links.stop(p.env_id)
+            File.rm_rf!(paths.snapshot)
+            File.rename!(tmp, paths.snapshot)
+            {:ok, %{"suspended" => true}}
+
+          {:error, message} ->
+            File.rm_rf(tmp)
+            {:error, message}
+        end
+
+      VM.suspended?(ctx.config, p.env_id) ->
+        {:ok, %{"suspended" => true}}
+
+      true ->
+        {:error, "the environment isn't running"}
+    end
+  end
+
   def run(%Command{type: "env.stop", payload: p} = cmd, log, ctx) do
     machine = Machine.impl(ctx.config)
+
+    # A suspended environment comes back first, so its own stop runs.
+    if VM.suspended?(ctx.config, p.env_id), do: resume(p, log, ctx)
 
     if machine.running?(p.env_id, ctx.config) do
       # A guest that never finishes its part doesn't keep the VM up: it's
@@ -109,6 +148,14 @@ defmodule ForemanAgent.VM.Env do
 
       true ->
         relay(cmd, log, ctx)
+    end
+  end
+
+  defp resume(p, log, ctx) do
+    with {:ok, meta} <- existing(ctx.config, p.env_id),
+         {:ok, spec} <-
+           prepare(Map.merge(p, %{slug: meta["slug"], limits: limits(meta)}), ctx, log) do
+      ensure_running(p.env_id, spec, ctx, log)
     end
   end
 
@@ -227,25 +274,65 @@ defmodule ForemanAgent.VM.Env do
   defp ensure_running(env_id, spec, ctx, log) do
     machine = Machine.impl(ctx.config)
 
-    if machine.running?(env_id, ctx.config) do
-      :ok
-    else
-      log.("info", "Booting the environment's VM\n")
+    cond do
+      machine.running?(env_id, ctx.config) ->
+        :ok
 
-      with :ok <- machine.boot(env_id, spec, ctx.config) do
-        case Links.await(env_id, ctx.config, ctx.config.vm_boot_timeout) do
+      VM.suspended?(ctx.config, env_id) ->
+        case restore(env_id, spec, ctx, log) do
           :ok ->
-            log.("info", "VM running (agent #{spec.agent_version})\n")
             :ok
 
-          :timeout ->
-            # Not left running half up: the next attempt boots it afresh.
-            machine.kill(env_id, ctx.config)
-
-            {:error,
-             "the environment's VM didn't come up; its console is in #{VM.paths(ctx.config, env_id).serial}"}
+          {:error, message} ->
+            # The disk is as the VM left it, mid-flight; booting it is like
+            # after a power cut, which beats not starting at all.
+            log.("info", "Couldn't resume the environment (#{message}); booting it instead\n")
+            File.rm_rf(VM.paths(ctx.config, env_id).snapshot)
+            boot(env_id, spec, ctx, log)
         end
-      end
+
+      true ->
+        boot(env_id, spec, ctx, log)
+    end
+  end
+
+  defp boot(env_id, spec, ctx, log) do
+    log.("info", "Booting the environment's VM\n")
+
+    with :ok <- Machine.impl(ctx.config).boot(env_id, spec, ctx.config),
+         :ok <- await(env_id, ctx, "didn't come up") do
+      log.("info", "VM running (agent #{spec.agent_version})\n")
+      :ok
+    end
+  end
+
+  # The guest's clock is stepped to the box's when the link says hello;
+  # the secrets go again after (they may have changed while it was
+  # suspended).
+  defp restore(env_id, spec, ctx, log) do
+    log.("info", "Resuming the environment's VM\n")
+    snapshot = VM.paths(ctx.config, env_id).snapshot
+
+    with :ok <- Machine.impl(ctx.config).restore(env_id, spec, ctx.config),
+         :ok <- await(env_id, ctx, "didn't come back from its snapshot") do
+      # Copy-on-write: the VM still reads the file it maps, which stays
+      # until the VM stops; nothing else can.
+      File.rm_rf(snapshot)
+      log.("info", "VM resumed\n")
+      :ok
+    end
+  end
+
+  defp await(env_id, ctx, what) do
+    case Links.await(env_id, ctx.config, ctx.config.vm_boot_timeout) do
+      :ok ->
+        :ok
+
+      :timeout ->
+        Machine.impl(ctx.config).kill(env_id, ctx.config)
+
+        {:error,
+         "the environment's VM #{what}; its console is in #{VM.paths(ctx.config, env_id).serial}"}
     end
   end
 

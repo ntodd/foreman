@@ -40,6 +40,18 @@ defmodule ForemanProtocol.ProtocolV6Test do
     assert {:error, _} = ForemanProtocol.cast_join(Map.put(@join, "vm", %{"reason" => "x"}))
   end
 
+  test "env.suspend names the environment, and an environment can be reported suspended" do
+    env_id = ForemanProtocol.uuid()
+
+    assert {:ok, cmd} =
+             ForemanProtocol.Command.new("env.suspend", %{env_id: env_id, slug: "hello-1"})
+
+    assert cmd.payload == %{env_id: env_id, slug: "hello-1"}
+
+    assert {:ok, _} =
+             ForemanProtocol.Event.new("env.state", %{env_id: env_id, state: "suspended"})
+  end
+
   test "a join without it is still valid" do
     assert {:ok, join} = ForemanProtocol.cast_join(@join)
     refute Map.has_key?(join, :vm)

@@ -38,6 +38,45 @@ defmodule ForemanAgent.VM.Machine.Cloud do
   end
 
   @impl true
+  def snapshot(env_id, dir, config) do
+    with :ok <- api_ok(api(config, env_id, :put, "vm.pause"), "pause"),
+         :ok <- snapshot_to(config, env_id, dir) do
+      # Stopping the VMM ends the unit; the snapshot is what's left.
+      _ = api(config, env_id, :put, "vmm.shutdown")
+
+      if wait_stopped(env_id, config, 30_000), do: :ok, else: kill(env_id, config)
+    end
+  end
+
+  defp snapshot_to(config, env_id, dir) do
+    body = %{"destination_url" => "file://" <> dir}
+
+    case api(config, env_id, :put, "vm.snapshot", json: body, receive_timeout: 600_000) do
+      :ok ->
+        :ok
+
+      error ->
+        # Back to running, as it was.
+        _ = api(config, env_id, :put, "vm.resume")
+        api_ok(error, "snapshot")
+    end
+  end
+
+  defp api_ok(:ok, _what), do: :ok
+  defp api_ok({:error, reason}, what), do: {:error, "couldn't #{what} the VM: #{inspect(reason)}"}
+
+  @impl true
+  def restore(env_id, spec, config) do
+    paths = VM.paths(config, env_id)
+    Enum.each([paths.api, paths.vsock], &File.rm/1)
+
+    case Helper.restore(config, env_id, spec) do
+      {:ok, _} -> :ok
+      {:error, message} -> {:error, "couldn't resume the environment's VM: #{message}"}
+    end
+  end
+
+  @impl true
   def power_off(env_id, timeout, config) do
     if running?(env_id, config) do
       # ACPI's power button: the guest shuts down (Docker stops its
@@ -103,15 +142,18 @@ defmodule ForemanAgent.VM.Machine.Cloud do
   @doc false
   def unit(env_id), do: "foreman-vm-#{env_id}.service"
 
-  defp api(config, env_id, method, endpoint) do
+  defp api(config, env_id, method, endpoint, opts \\ []) do
     socket = VM.paths(config, env_id).api
 
     case Req.request(
-           method: method,
-           url: "http://localhost/api/v1/#{endpoint}",
-           unix_socket: socket,
-           retry: false,
-           receive_timeout: 10_000
+           [
+             method: method,
+             url: "http://localhost/api/v1/#{endpoint}",
+             unix_socket: socket,
+             retry: false,
+             receive_timeout: 10_000
+           ]
+           |> Keyword.merge(opts)
          ) do
       {:ok, %Req.Response{status: status}} when status in 200..299 -> :ok
       {:ok, %Req.Response{status: status, body: body}} -> {:error, {status, body}}

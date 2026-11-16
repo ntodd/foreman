@@ -48,9 +48,11 @@ defmodule ForemanAgent.VM.Status do
       {:ok, %{"slug" => slug}} ->
         base = %{env_id: env_id, slug: slug, containers: []}
 
-        if machine.running?(env_id, config),
-          do: guest_entry(env_id, slug, base, config),
-          else: Map.put(base, :state, "stopped")
+        cond do
+          machine.running?(env_id, config) -> guest_entry(env_id, slug, base, config)
+          VM.suspended?(config, env_id) -> Map.put(base, :state, "suspended")
+          true -> Map.put(base, :state, "stopped")
+        end
 
       {:error, :none} ->
         nil

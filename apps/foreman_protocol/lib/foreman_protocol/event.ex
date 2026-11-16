@@ -11,7 +11,8 @@ defmodule ForemanProtocol.Event do
 
   @type t :: %__MODULE__{type: String.t(), payload: map()}
 
-  @env_states ["running", "stopped", "partial", "missing"]
+  # suspended: protocol 6, an environment whose VM is saved to disk.
+  @env_states ["running", "stopped", "suspended", "partial", "missing"]
 
   @specs %{
     "op.accepted" => [op_id: {:uuid, required: true}],

@@ -153,7 +153,9 @@ sudo systemctl stop foreman-agent 2>/dev/null || true
 for unit in $(systemctl list-units --plain --no-legend 'foreman-vm-*' | awk '{ print $1 }'); do
   sudo systemctl stop "$unit"
 done
-sudo rm -rf /srv/foreman/vms /var/lib/foreman-vmctl/nets
+# The agent disk is made once per version (a release doesn't change), and
+# every run here builds 0.1.0 afresh.
+sudo rm -rf /srv/foreman/vms /srv/foreman/agent-disks /var/lib/foreman-vmctl/nets
 for tap in $(ip -br link | awk '/^fm-vm/ { print $1 }'); do sudo ip link del "$tap"; done
 
 # -- the box's LAN, with the fixture repo on it -------------------------------
@@ -177,6 +179,12 @@ EOF
 # VM is the boundary now, not a policy on its compose file.
 cp apps/foreman_agent/test/fixtures/repos/hello/.devcontainer/docker-compose.yml "$work/overlay/.devcontainer/"
 cat >> "$work/overlay/.devcontainer/docker-compose.yml" <<EOF
+  # The guest's boot and clock, every second: a resume keeps the
+  # containers running, so nothing in the lifecycle runs again to say.
+  heartbeat:
+    image: alpine:3.22
+    command: ["sh", "-c", "while :; do echo \"PROBE beat \$\$(cat /proc/sys/kernel/random/boot_id) \$\$(date +%s)\"; sleep 1; done"]
+    stop_grace_period: 1s
   dind:
     image: public.ecr.aws/docker/library/docker:29-dind
     privileged: true
@@ -317,6 +325,38 @@ cp_eval 'E2E.log("hello-1", "start")' > "$work/start.log"
 want=$(printf %s vm-secret-1 | sha256sum | cut -c1-16)
 probe secret "$want" start
 echo "ok: the secret reached the environment after a boot"
+
+say "suspend and resume"
+# The heartbeat's latest line: "<boot id> <guest clock>".
+beat() {
+  cp_eval 'E2E.logs("hello-1", "heartbeat")' > "$work/beat.log"
+  grep -q '^LOGS succeeded' "$work/beat.log" || { tail -20 "$work/beat.log" >&2; fail "couldn't read the heartbeat's logs"; }
+  sed -n 's/.*PROBE beat //p' "$work/beat.log" | tail -1
+}
+read -r boot_before _ <<EOF
+$(beat)
+EOF
+[ -n "$boot_before" ] || fail "no heartbeat before the suspend"
+cp_eval 'E2E.act("hello-1", "suspend")' >/dev/null
+wait_for_env hello-1 suspended 180
+systemctl is-active --quiet "$unit" && fail "the VM is still running after suspend"
+sudo test -f "/srv/foreman/vms/$first/snapshot/config.json" || fail "no snapshot"
+echo "ok: suspended, VM off, snapshot on disk"
+# Long enough that a clock nobody put right would show it.
+sleep 45
+cp_eval 'E2E.act("hello-1", "start")' >/dev/null
+wait_for_env hello-1 running 300
+# A beat or two from after the agent put the clock right.
+sleep 5
+read -r boot_after clock_after <<EOF
+$(beat)
+EOF
+[ -n "$boot_after" ] && [ "$boot_after" = "$boot_before" ] ||
+  fail "the VM booted again ($boot_before, then $boot_after) instead of resuming"
+skew=$(( $(date +%s) - clock_after ))
+[ "$skew" -lt 20 ] || fail "the guest's clock is ${skew}s behind after the resume"
+sudo test -e "/srv/foreman/vms/$first/snapshot" && fail "the snapshot outlived the resume"
+echo "ok: resumed on the same boot, clock within ${skew}s, snapshot gone"
 
 say "restarting the agent leaves the VMs running"
 before=$(systemctl show -p MainPID --value "$unit")

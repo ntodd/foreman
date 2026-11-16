@@ -243,6 +243,12 @@ defmodule Foreman.Environments do
 
   def start(scope, env), do: action(scope, env, :start)
   def stop(scope, env), do: action(scope, env, :stop)
+
+  @doc """
+  Suspends a running environment: its VM's memory goes to disk and the VM
+  stops, and a start resumes it where it was, processes and all.
+  """
+  def suspend(scope, env), do: action(scope, env, :suspend)
   def rebuild(scope, env), do: action(scope, env, :rebuild)
 
   @doc """
@@ -437,10 +443,11 @@ defmodule Foreman.Environments do
   # Actions that start or stop the environment. A newer one replaces a
   # queued one going the other way, so the last click wins.
   @opposing %{
-    "start" => ~w(stop),
-    "restart_affected" => ~w(stop),
-    "restart_all" => ~w(stop),
-    "stop" => ~w(start restart_affected restart_all)
+    "start" => ~w(stop suspend),
+    "restart_affected" => ~w(stop suspend),
+    "restart_all" => ~w(stop suspend),
+    "stop" => ~w(start restart_affected restart_all suspend),
+    "suspend" => ~w(start restart_affected restart_all stop)
   }
 
   defp action(%Scope{} = scope, %Environment{} = env, action, args \\ %{}) do
@@ -455,7 +462,9 @@ defmodule Foreman.Environments do
   defp queue_action(scope, env, action, args) do
     desired =
       case action do
-        :stop ->
+        # Suspended is stopped as far as reconciling goes: nothing starts it
+        # but a start.
+        a when a in [:stop, :suspend] ->
           "stopped"
 
         :destroy ->
@@ -602,6 +611,7 @@ defmodule Foreman.Environments do
   defp command_type("pull_rebuild"), do: "env.rebuild"
   defp command_type("start"), do: "env.start"
   defp command_type("stop"), do: "env.stop"
+  defp command_type("suspend"), do: "env.suspend"
   defp command_type("destroy"), do: "env.destroy"
   defp command_type("restart_affected"), do: "env.restart"
   defp command_type("restart_all"), do: "env.restart"
@@ -778,6 +788,11 @@ defmodule Foreman.Environments do
       pending_changes: []
     }
 
+  # Its processes are as they were, with the secrets they had; a start
+  # resumes it.
+  defp result_attrs(%{status: "succeeded", action: "suspend"}, _env),
+    do: %{observed_state: "suspended", status_message: nil}
+
   defp result_attrs(%{status: "succeeded", action: "destroy"}, _env),
     do: %{observed_state: "destroyed", destroyed_at: DateTime.utc_now(), status_message: nil}
 
@@ -824,7 +839,7 @@ defmodule Foreman.Environments do
   # back to running (where a stop starts from), not to error, so what the
   # box reports next still corrects it and reconcile still looks at it.
   defp result_attrs(%{status: status, action: action, error: error} = op, env)
-       when status in ["failed", "cancelled"] and action in ["stop", "destroy"] do
+       when status in ["failed", "cancelled"] and action in ["stop", "suspend", "destroy"] do
     op
     |> revert_desired(env)
     |> Map.merge(%{
@@ -863,6 +878,7 @@ defmodule Foreman.Environments do
   defp revert_desired(_op, _env), do: %{}
 
   defp desired_for("stop"), do: "stopped"
+  defp desired_for("suspend"), do: "stopped"
   defp desired_for("destroy"), do: "destroyed"
   defp desired_for(action) when action in @up, do: "running"
   defp desired_for(_), do: nil
@@ -913,6 +929,7 @@ defmodule Foreman.Environments do
   def transitional_state("restart_affected"), do: "starting"
   def transitional_state("restart_all"), do: "starting"
   def transitional_state("stop"), do: "stopping"
+  def transitional_state("suspend"), do: "suspending"
   def transitional_state("destroy"), do: "destroying"
   def transitional_state(_), do: nil
 
@@ -1011,6 +1028,13 @@ defmodule Foreman.Environments do
     enqueue(env, "start", %{}, nil)
   end
 
+  # A box that was told to keep it running, and has it suspended.
+  defp reconcile(%Environment{desired_state: "running"} = env, "suspended") do
+    Logger.info("resuming #{env.slug} to match its desired state")
+    unless active_action?(env.id, "secrets_write"), do: enqueue(env, "secrets_write", %{}, nil)
+    enqueue(env, "start", %{}, nil)
+  end
+
   defp reconcile(%Environment{desired_state: "running", created_once: true} = env, "missing") do
     Logger.info("recreating #{env.slug}: it's missing from its box")
     enqueue(env, "create", %{}, nil)
@@ -1040,7 +1064,7 @@ defmodule Foreman.Environments do
     end
   end
 
-  @lifecycle ~w(create rebuild pull_rebuild start stop destroy restart_affected restart_all)
+  @lifecycle ~w(create rebuild pull_rebuild start stop suspend destroy restart_affected restart_all)
 
   defp lifecycle_active?(env_id) do
     Repo.exists?(

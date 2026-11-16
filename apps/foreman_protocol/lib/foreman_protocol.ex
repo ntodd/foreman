@@ -18,7 +18,8 @@ defmodule ForemanProtocol do
   # (`can_restart`) and which boot it's on (`boot_id`), which the command
   # names.
   # 6: every environment runs in a VM of its own; the join reports whether
-  # the box can run them (`vm`), and no longer a compose policy (`policy`).
+  # the box can run them (`vm`), and no longer a compose policy (`policy`);
+  # env.suspend, and environments reported suspended.
   @version 6
 
   # Usually the protocol before this one is accepted too. Protocol 5

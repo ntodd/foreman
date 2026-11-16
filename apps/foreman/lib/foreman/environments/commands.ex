@@ -41,11 +41,8 @@ defmodule Foreman.Environments.Commands do
           command(op, "env.start", payload)
         end)
 
-      "stop" ->
-        command(op, "env.stop", base(env))
-
-      "destroy" ->
-        command(op, "env.destroy", base(env))
+      action when action in ["stop", "suspend", "destroy"] ->
+        command(op, "env." <> action, base(env))
 
       "restart_all" ->
         with_secrets(env, fn s -> command(op, "env.restart", restart(env, "all", [], s)) end)

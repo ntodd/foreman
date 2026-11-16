@@ -9,8 +9,8 @@ defmodule ForemanWeb.EnvironmentLive.Index do
   # States, grouped the way the filter offers them.
   @state_groups %{
     "running" => ~w(running),
-    "stopped" => ~w(stopped),
-    "busy" => ~w(pending creating starting stopping destroying),
+    "stopped" => ~w(stopped suspended),
+    "busy" => ~w(pending creating starting stopping suspending destroying),
     "attention" => ~w(error missing partial)
   }
   @state_order [
@@ -232,7 +232,9 @@ defmodule ForemanWeb.EnvironmentLive.Index do
         <td class="py-3 pr-5">
           <div class="flex items-center justify-end gap-1.5">
             <.button
-              :if={env.created_once and env.observed_state in ~w(stopped error missing partial)}
+              :if={
+                env.created_once and env.observed_state in ~w(stopped suspended error missing partial)
+              }
               size="sm"
               icon="hero-play-mini"
               phx-click="start"

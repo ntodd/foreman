@@ -70,6 +70,7 @@ defmodule E2E do
     {:ok, _} =
       case action do
         "stop" -> Environments.stop(scope, env)
+        "suspend" -> Environments.suspend(scope, env)
         "start" -> Environments.start(scope, env)
         "destroy" -> Environments.destroy(scope, env)
       end
@@ -91,6 +92,27 @@ defmodule E2E do
       end
 
     IO.puts("retried #{op.action} for #{slug}")
+  end
+
+  # A service's logs, by way of a logs operation like the environment
+  # page's.
+  def logs(slug, service) do
+    scope = Scope.for_user(admin())
+    {:ok, op} = Environments.logs(scope, live_env(slug), service)
+    op = await_op(op.id, 120)
+    IO.puts("LOGS #{op.status}")
+    IO.puts(Operations.log(op))
+  end
+
+  defp await_op(id, seconds) do
+    op = Repo.get!(Foreman.Operations.Operation, id)
+
+    if Foreman.Operations.Operation.finished?(op) or seconds <= 0 do
+      op
+    else
+      Process.sleep(1000)
+      await_op(id, seconds - 1)
+    end
   end
 
   def secret(slug, name, value) do

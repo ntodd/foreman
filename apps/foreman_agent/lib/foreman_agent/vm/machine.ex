@@ -24,6 +24,16 @@ defmodule ForemanAgent.VM.Machine do
   @doc "Whether the VM is running."
   @callback running?(env_id :: String.t(), Config.t()) :: boolean()
 
+  @doc """
+  Pauses the VM, writes its memory and device state to `dir` (which
+  mustn't exist yet), and stops it. On failure the VM carries on running.
+  """
+  @callback snapshot(env_id :: String.t(), dir :: Path.t(), Config.t()) ::
+              :ok | {:error, String.t()}
+
+  @doc "Starts the VM from its snapshot (the VM's `snapshot` directory), running."
+  @callback restore(env_id :: String.t(), spec(), Config.t()) :: :ok | {:error, String.t()}
+
   @doc "Shuts the guest down, and stops the VM if it doesn't go within `timeout`."
   @callback power_off(env_id :: String.t(), timeout(), Config.t()) :: :ok | {:error, String.t()}
 

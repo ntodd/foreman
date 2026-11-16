@@ -105,24 +105,22 @@ defmodule ForemanWeb.EnvironmentLive.Show do
 
   # -- events ------------------------------------------------------------------
 
+  defp run_action("start", scope, env), do: Environments.start(scope, env)
+  defp run_action("retry", scope, env), do: Environments.retry(scope, env)
+  defp run_action("stop", scope, env), do: Environments.stop(scope, env)
+  defp run_action("suspend", scope, env), do: Environments.suspend(scope, env)
+  defp run_action("rebuild", scope, env), do: Environments.rebuild(scope, env)
+  defp run_action("pull_rebuild", scope, env), do: Environments.pull_rebuild(scope, env)
+  defp run_action("restart_affected", scope, env), do: Environments.restart(scope, env, :affected)
+  defp run_action("restart_all", scope, env), do: Environments.restart(scope, env, :all)
+  defp run_action("logs", scope, env), do: Environments.logs(scope, env)
+  defp run_action(_, _scope, _env), do: {:error, "That isn't something an environment can do."}
+
   @impl true
   def handle_event("action", %{"do" => action}, socket) do
     %{current_scope: scope, env: env} = socket.assigns
 
-    result =
-      case action do
-        "start" -> Environments.start(scope, env)
-        "retry" -> Environments.retry(scope, env)
-        "stop" -> Environments.stop(scope, env)
-        "rebuild" -> Environments.rebuild(scope, env)
-        "pull_rebuild" -> Environments.pull_rebuild(scope, env)
-        "restart_affected" -> Environments.restart(scope, env, :affected)
-        "restart_all" -> Environments.restart(scope, env, :all)
-        "logs" -> Environments.logs(scope, env)
-        _ -> {:error, "That isn't something an environment can do."}
-      end
-
-    case result do
+    case run_action(action, scope, env) do
       {:ok, op} -> {:noreply, socket |> load() |> watch_op(op.id)}
       {:error, reason} -> {:noreply, put_flash(socket, :error, error_message(reason))}
     end
@@ -417,7 +415,9 @@ defmodule ForemanWeb.EnvironmentLive.Show do
         <:actions>
           <.state_badge state={@env.observed_state} />
           <.button
-            :if={@env.created_once and @env.observed_state in ~w(stopped error missing partial)}
+            :if={
+              @env.created_once and @env.observed_state in ~w(stopped suspended error missing partial)
+            }
             phx-click="action"
             phx-value-do="start"
             icon="hero-play-mini"
@@ -446,6 +446,15 @@ defmodule ForemanWeb.EnvironmentLive.Show do
             Stop
           </.button>
           <.dropdown id="env-actions" label="Actions">
+            <.dropdown_item
+              :if={@env.observed_state == "running"}
+              title="Suspend"
+              icon="hero-pause-mini"
+              phx-click={JS.push("action") |> hide_dropdown("env-actions")}
+              phx-value-do="suspend"
+            >
+              Saves the VM's memory to disk and stops it. Start picks up where it left off, running processes and all.
+            </.dropdown_item>
             <.dropdown_item
               :if={@env.observed_state in ~w(running partial)}
               title="Restart"

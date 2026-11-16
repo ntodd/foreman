@@ -331,6 +331,96 @@ defmodule ForemanAgent.VMEnvTest do
     refute line =~ "s3cret-value"
   end
 
+  describe "suspend" do
+    setup ctx do
+      test = self()
+
+      # A guest whose memory a resume keeps: its processes carry on.
+      FakeMachine.configure(
+        test: test,
+        handler: fn cmd, log ->
+          send(test, {:guest, cmd.type, cmd.payload})
+          log.("stdout", "in the guest: #{cmd.type}\n")
+          {:ok, %{"ran" => cmd.type, "guest" => inspect(self())}}
+        end
+      )
+
+      {:ok, _} = run(create(), ctx)
+      flush()
+      :ok
+    end
+
+    test "saves the VM and stops it; the box reports it suspended", ctx do
+      assert {:ok, %{"suspended" => true}} = run(command("env.suspend"), ctx)
+      assert_received {:machine, :snapshot, @env}
+      refute FakeMachine.running?(@env, ctx.config)
+      assert VM.suspended?(ctx.config, @env)
+      refute File.exists?(VM.paths(ctx.config, @env).snapshot <> ".tmp")
+      assert {:ok, [%{env_id: @env, state: "suspended"}]} = Status.inventory(ctx.config)
+    end
+
+    test "a start resumes it rather than booting, and drops the snapshot", ctx do
+      {:ok, _} = run(command("env.suspend"), ctx)
+      flush()
+
+      assert {:ok, %{"ran" => "env.start"}} = run(command("env.start"), ctx)
+      assert_received {:machine, {:restore, %{cpus: _, memory_mb: _}}, @env}
+      refute_received {:machine, {:boot, _}, @env}
+      # The secrets go again: they may have changed while it was suspended.
+      assert_receive {:guest, "env.secrets.write", _}
+      assert_receive {:guest, "env.start", _}
+      refute VM.suspended?(ctx.config, @env)
+    end
+
+    test "a resume that fails boots the VM instead", ctx do
+      {:ok, _} = run(command("env.suspend"), ctx)
+      FakeMachine.kill(@env, ctx.config)
+      flush()
+
+      assert {:ok, _} = run(command("env.start"), ctx)
+      assert_received {:machine, {:restore, _}, @env}
+      assert_received {:machine, {:boot, _}, @env}
+
+      assert_received {:log, "info",
+                       "Couldn't resume the environment (nothing to restore); booting it instead\n"}
+
+      refute VM.suspended?(ctx.config, @env)
+    end
+
+    test "a failed snapshot leaves it running", ctx do
+      FakeMachine.configure(test: self(), snapshot: {:error, "no room"})
+      assert {:error, "no room"} = run(command("env.suspend"), ctx)
+      refute VM.suspended?(ctx.config, @env)
+      refute File.exists?(VM.paths(ctx.config, @env).snapshot <> ".tmp")
+    end
+
+    test "a stop resumes it first, so the environment's own stop runs", ctx do
+      {:ok, _} = run(command("env.suspend"), ctx)
+      flush()
+
+      assert {:ok, %{"ran" => "env.stop"}} = run(command("env.stop"), ctx)
+      assert_received {:machine, {:restore, _}, @env}
+      assert_receive {:guest, "env.stop", _}
+      assert_received {:machine, :power_off, @env}
+      refute VM.suspended?(ctx.config, @env)
+    end
+
+    test "suspending one that isn't running is refused, and a suspended one again is fine", ctx do
+      {:ok, _} = run(command("env.stop"), ctx)
+      assert {:error, "the environment isn't running"} = run(command("env.suspend"), ctx)
+
+      {:ok, _} = run(command("env.start"), ctx)
+      {:ok, _} = run(command("env.suspend"), ctx)
+      assert {:ok, %{"suspended" => true}} = run(command("env.suspend"), ctx)
+    end
+
+    test "destroy takes the snapshot with the rest", ctx do
+      {:ok, _} = run(command("env.suspend"), ctx)
+      assert {:ok, %{}} = run(command("env.destroy"), ctx)
+      refute File.exists?(VM.paths(ctx.config, @env).dir)
+    end
+  end
+
   describe "the box's reports" do
     setup ctx do
       test = self()

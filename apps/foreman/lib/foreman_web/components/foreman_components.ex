@@ -17,15 +17,16 @@ defmodule ForemanWeb.ForemanComponents do
     """
   end
 
-  def busy?(state), do: state in ~w(pending creating starting stopping destroying)
+  def busy?(state), do: state in ~w(pending creating starting stopping suspending destroying)
 
   defp state_color("running"), do: "emerald"
   defp state_color("partial"), do: "amber"
   defp state_color("error"), do: "rose"
   defp state_color("missing"), do: "rose"
 
-  defp state_color(state) when state in ~w(pending creating starting stopping destroying),
-    do: "brand"
+  defp state_color(state)
+       when state in ~w(pending creating starting stopping suspending destroying),
+       do: "brand"
 
   defp state_color(_), do: "zinc"
 
@@ -33,6 +34,8 @@ defmodule ForemanWeb.ForemanComponents do
   def state_label("creating"), do: "Creating"
   def state_label("starting"), do: "Starting"
   def state_label("stopping"), do: "Stopping"
+  def state_label("suspending"), do: "Suspending"
+  def state_label("suspended"), do: "Suspended"
   def state_label("destroying"), do: "Destroying"
   def state_label("running"), do: "Running"
   def state_label("stopped"), do: "Stopped"

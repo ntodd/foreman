@@ -56,6 +56,9 @@ defmodule ForemanProtocol.Command do
     # Protocol 4, and absent unless set.
     "env.start" => @env ++ [compose_env: {:env_map, default: %{}}, registry_auth: @registry_auth],
     "env.stop" => @env,
+    # Protocol 6. Saves the environment's VM's memory to disk and stops
+    # it; the next env.start resumes it.
+    "env.suspend" => @env,
     "env.restart" =>
       @env ++
         [

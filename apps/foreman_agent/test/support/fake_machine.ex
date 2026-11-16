@@ -97,6 +97,46 @@ defmodule ForemanAgent.Test.FakeMachine do
     :ets.lookup(@table, {:vm, env_id}) != []
   end
 
+  # Like Cloud Hypervisor's: the guest's state (here, its processes) is
+  # kept, and the VM stops. A restore picks the same guest back up.
+  @impl true
+  def snapshot(env_id, dir, _config) do
+    report(:snapshot, env_id)
+
+    case opts()[:snapshot] do
+      {:error, message} ->
+        {:error, message}
+
+      _ ->
+        [{_, [bridge | rest]}] = :ets.take(@table, {:vm, env_id})
+        stop(bridge)
+        File.write!(Path.join(dir, "config.json"), "{}")
+        :ets.insert(@table, {{:suspended, env_id}, rest})
+        :ok
+    end
+  end
+
+  @impl true
+  def restore(env_id, spec, config) do
+    report({:restore, spec}, env_id)
+
+    case {opts()[:restore], :ets.take(@table, {:suspended, env_id})} do
+      {{:error, message}, _} ->
+        {:error, message}
+
+      {_, [{_, pids}]} ->
+        paths = VM.paths(config, env_id)
+        guest_socket = Path.join(paths.dir, "g.sock")
+        {:ok, bridge} = VsockBridge.start_link(path: paths.vsock, target: guest_socket)
+        Process.unlink(bridge)
+        put(env_id, [bridge | pids])
+        :ok
+
+      {_, []} ->
+        {:error, "nothing to restore"}
+    end
+  end
+
   @impl true
   def power_off(env_id, _timeout, config) do
     report(:power_off, env_id)
@@ -105,10 +145,11 @@ defmodule ForemanAgent.Test.FakeMachine do
 
   @impl true
   def kill(env_id, _config) do
-    case :ets.take(@table, {:vm, env_id}) do
-      [{_, pids}] -> Enum.each(pids, &stop/1)
-      [] -> :ok
-    end
+    ensure_table()
+
+    for key <- [{:vm, env_id}, {:suspended, env_id}],
+        {_, pids} <- :ets.take(@table, key),
+        do: Enum.each(pids, &stop/1)
 
     :ok
   end
