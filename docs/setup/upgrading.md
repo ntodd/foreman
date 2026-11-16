@@ -146,7 +146,8 @@ delete `/usr/local/sbin/foreman-update`, the two
    is up. Upgrading to 0.3.0 from an older release clears every pin, so
    for that one, stop the agent on the box first (`sudo systemctl stop
    foreman-agent`), pin it once the new control plane is up, then start
-   the agent again.
+   the agent again. Running the install command on a pinned box installs
+   the newest agent first, and the box then moves back to its pin.
 4. Point `FOREMAN_IMAGE` at the new version (in the `.env` beside
    `compose.yml`), then pull and recreate:
 
@@ -233,6 +234,11 @@ and restart, so environments with private features can start without a
 rebuild) came in with 0.4.10. A 0.4.10 control plane refuses agents on
 protocol 2 (older than 0.4.0), and a refused box can't update from it, so
 update those boxes to 0.4.0 or later before upgrading past 0.4.9.
+Protocol 5 (rebooting a box from its page) comes in with the release
+after 0.4.13. Its control plane refuses agents on protocol 3 (older than
+0.4.10) the same way, so update those boxes to 0.4.10 or later first. A
+box that was refused anyway comes back when you run the install command
+on it again.
 
 Following starts with 0.3.0, and 0.3.0 is the first release with
 images, so rolling back from it means building the older version
