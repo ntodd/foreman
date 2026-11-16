@@ -74,10 +74,6 @@ jobs:
             apps/foreman_agent/deps
             apps/foreman_agent/_build
           key: agent-${{ runner.arch }}-${{ env.ELIXIR_VERSION }}-${{ env.OTP_VERSION }}-${{ hashFiles('apps/foreman_agent/mix.lock') }}
-      # The agent reads compose files with Node (ComposeScan).
-      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
-        with:
-          node-version: "22"
       - run: mix deps.get
       - run: mix format --check-formatted
       - run: mix compile --warnings-as-errors
