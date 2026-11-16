@@ -50,7 +50,18 @@ defmodule ForemanAgent.VM.Env do
     machine = Machine.impl(ctx.config)
 
     if machine.running?(p.env_id, ctx.config) do
-      result = relay(cmd, log, ctx)
+      # A guest that never finishes its part doesn't keep the VM up: it's
+      # shut down either way, which stops the environment as surely.
+      result =
+        case relay(cmd, log, ctx, timeout: ctx.config.vm_relay_stop_timeout) do
+          {:ok, _} = ok ->
+            ok
+
+          error ->
+            log.("info", "The environment's own stop didn't finish (#{error_text(error)})\n")
+            {:ok, %{}}
+        end
+
       log.("info", "Shutting the environment's VM down\n")
 
       case machine.power_off(p.env_id, @power_off_timeout, ctx.config) do
@@ -101,7 +112,12 @@ defmodule ForemanAgent.VM.Env do
     end
   end
 
-  defp relay(cmd, log, ctx), do: Link.run(Links.get(cmd.payload.env_id, ctx.config), cmd, log)
+  defp relay(cmd, log, ctx, opts \\ []),
+    do: Link.run(Links.get(cmd.payload.env_id, ctx.config), cmd, log, opts)
+
+  defp error_text({:error, message}) when is_binary(message), do: message
+  defp error_text({:error, message, _}) when is_binary(message), do: message
+  defp error_text(other), do: inspect(other)
 
   defp existing(config, env_id) do
     case VM.read_meta(config, env_id) do

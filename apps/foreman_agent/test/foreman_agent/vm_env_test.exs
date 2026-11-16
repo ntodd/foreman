@@ -41,6 +41,8 @@ defmodule ForemanAgent.VMEnvTest do
         guest_sha256: sha,
         allowed_git_hosts: ["github.com"],
         vm_boot_timeout: 2_000,
+        vm_relay_stop_timeout: 500,
+        vm_relay_gc_timeout: 500,
         proc: Path.join(dir, "proc")
     }
 
@@ -241,6 +243,37 @@ defmodule ForemanAgent.VMEnvTest do
       assert {:ok, %{}} = run(command("env.stop"), ctx)
       refute_received {:machine, :power_off, _}
     end
+  end
+
+  # A guest that hangs on one kind of command.
+  defp hangs_on(type) do
+    FakeMachine.configure(
+      test: self(),
+      handler: fn
+        %{type: ^type}, _log -> Process.sleep(:infinity)
+        _cmd, _log -> {:ok, %{}}
+      end
+    )
+  end
+
+  test "a stop powers the VM off even when the guest never finishes its part", ctx do
+    hangs_on("env.stop")
+    {:ok, _} = run(create(), ctx)
+
+    assert {:ok, _} = run(command("env.stop"), ctx)
+    assert_received {:machine, :power_off, @env}
+    refute FakeMachine.running?(@env, ctx.config)
+  end
+
+  test "gc goes on past a guest that never finishes pruning", ctx do
+    hangs_on("box.gc")
+    {:ok, _} = run(create(), ctx)
+    stale = Path.join(ctx.config.guest_root, String.duplicate("b", 64))
+    File.mkdir_p!(stale)
+
+    assert {:error, message} = Status.gc(ctx.ctx)
+    assert message =~ "didn't finish it in time"
+    refute File.exists?(stale)
   end
 
   test "env.stop runs the environment's stop, then powers the VM off", ctx do

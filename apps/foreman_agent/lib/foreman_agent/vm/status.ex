@@ -145,18 +145,29 @@ defmodule ForemanAgent.VM.Status do
     machine = Machine.impl(config)
     envs = VM.list(config)
 
+    # Every VM at once, each with a deadline: one guest that never answers
+    # doesn't hold up the others, or the pruning on the box after.
+    timeout = config.vm_relay_gc_timeout
+
     failures =
-      for env_id <- envs, machine.running?(env_id, config), reduce: [] do
-        acc ->
+      envs
+      |> Enum.filter(&machine.running?(&1, config))
+      |> Task.async_stream(
+        fn env_id ->
           {:ok, cmd} = Command.new("box.gc", %{})
           ctx.log.("info", "Pruning Docker in #{env_id}\n")
-
-          case Link.run(Links.get(env_id, config), cmd, ctx.log) do
-            {:ok, _} -> acc
-            {:error, message} -> [{env_id, message} | acc]
-            {:error, message, _} -> [{env_id, message} | acc]
-          end
-      end
+          {env_id, Link.run(Links.get(env_id, config), cmd, ctx.log, timeout: timeout)}
+        end,
+        max_concurrency: 4,
+        timeout: timeout + 5_000,
+        on_timeout: :kill_task
+      )
+      |> Enum.flat_map(fn
+        {:ok, {_env_id, {:ok, _}}} -> []
+        {:ok, {env_id, {:error, message}}} -> [{env_id, message}]
+        {:ok, {env_id, {:error, message, _}}} -> [{env_id, message}]
+        {:exit, reason} -> [{"a VM", inspect(reason)}]
+      end)
 
     metas = for env_id <- envs, {:ok, meta} <- [VM.read_meta(config, env_id)], do: meta
 

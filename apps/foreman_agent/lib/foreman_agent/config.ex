@@ -64,6 +64,11 @@ defmodule ForemanAgent.Config do
             vm_disk_gb: 64,
             # How long a booted VM's guest agent gets to answer.
             vm_boot_timeout: 120_000,
+            # How long the guest gets for its part of a stop (its
+            # containers') before the VM is shut down anyway, and for a
+            # Docker prune (each prune in the guest has half an hour).
+            vm_relay_stop_timeout: 300_000,
+            vm_relay_gc_timeout: 2_400_000,
             machine: ForemanAgent.VM.Machine.Cloud,
             tailscale_join_wait: :timer.seconds(30)
 
