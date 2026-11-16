@@ -16,7 +16,7 @@ guest_tar=$(realpath "$1")
 agent_tar=$(realpath "$2")
 fail() { echo "e2e/guest: $*" >&2; exit 1; }
 
-[ -r /dev/kvm ] && [ -w /dev/kvm ] || fail "needs read and write access to /dev/kvm"
+if [ ! -r /dev/kvm ] || [ ! -w /dev/kvm ]; then fail "needs read and write access to /dev/kvm"; fi
 
 # Unix socket paths are short; keep everything under /tmp.
 dir=$(mktemp -d /tmp/fm-guest.XXXXXX)

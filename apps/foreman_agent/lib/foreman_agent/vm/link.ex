@@ -3,7 +3,11 @@ defmodule ForemanAgent.VM.Link do
   The host's end of `ForemanAgent.Channel`: one per running environment
   VM, connected to the agent in it.
 
-  `run/4` sends a command and waits for its result, passing its logs to
+  The link counts as connected once the guest agent has answered its
+  hello: Cloud Hypervisor accepts the vsock connection as soon as `socat`
+  is listening in the guest, which can be before the agent is.
+
+  `run/3` sends a command and waits for its result, passing its logs to
   the caller's log function as they come. When the connection drops, the
   link reconnects and sends every command still waiting again, with the
   same op id: the guest runs each one once (see `ForemanAgent.Ops`) and
@@ -35,6 +39,8 @@ defmodule ForemanAgent.VM.Link do
   @op_events ["op.accepted", "op.log", "op.result"]
   @kept_results 100
   @connect_timeout 2_000
+  # How long the guest agent gets to answer hello on a new connection.
+  @hello_timeout 5_000
 
   def start_link(opts) do
     {gen_opts, opts} = Keyword.split(opts, [:name])
@@ -97,6 +103,8 @@ defmodule ForemanAgent.VM.Link do
        alive?: Keyword.get(opts, :alive?, fn -> true end),
        retry: Keyword.get(opts, :retry, 250),
        socket: nil,
+       # Whether the guest agent has answered this connection's hello.
+       ready: false,
        guest_version: nil,
        # op_id => %{cmd, caller, ref, monitor}
        pending: %{},
@@ -117,7 +125,8 @@ defmodule ForemanAgent.VM.Link do
         monitor = Process.monitor(caller)
         entry = %{cmd: cmd, caller: caller, ref: ref, monitor: monitor}
         state = put_in(state.pending[op_id], entry)
-        send_cmd(state, cmd)
+        # Not ready yet: it goes with the rest once the guest says hello.
+        if state.ready, do: send_cmd(state, cmd)
         {:reply, :ok, state}
 
       {result, kept} ->
@@ -126,7 +135,7 @@ defmodule ForemanAgent.VM.Link do
     end
   end
 
-  def handle_call({:query, _q, _timeout}, _from, %{socket: nil} = state),
+  def handle_call({:query, _q, _timeout}, _from, %{ready: false} = state),
     do: {:reply, {:error, :not_connected}, state}
 
   def handle_call({:query, q, timeout}, from, state) do
@@ -136,15 +145,14 @@ defmodule ForemanAgent.VM.Link do
     {:noreply, %{state | next_query: id + 1, queries: Map.put(state.queries, id, {from, timer})}}
   end
 
-  def handle_call(:connected?, _from, state), do: {:reply, state.socket != nil, state}
+  def handle_call(:connected?, _from, state), do: {:reply, state.ready, state}
 
   @impl true
   def handle_info(:connect, %{socket: nil} = state) do
     case connect(state) do
       {:ok, socket} ->
-        state = %{state | socket: socket}
-        Enum.each(state.pending, fn {_, entry} -> send_cmd(state, entry.cmd) end)
-        {:noreply, state}
+        Process.send_after(self(), {:hello_timeout, socket}, @hello_timeout)
+        {:noreply, %{state | socket: socket, ready: false}}
 
       {:error, reason} ->
         if state.alive?.() do
@@ -177,6 +185,14 @@ defmodule ForemanAgent.VM.Link do
     :gen_tcp.close(socket)
     disconnected(state)
   end
+
+  # Connected, but nothing in the guest answered: try again.
+  def handle_info({:hello_timeout, socket}, %{socket: socket, ready: false} = state) do
+    :gen_tcp.close(socket)
+    disconnected(state)
+  end
+
+  def handle_info({:hello_timeout, _socket}, state), do: {:noreply, state}
 
   def handle_info({:query_timeout, id}, state) do
     case Map.pop(state.queries, id) do
@@ -242,7 +258,7 @@ defmodule ForemanAgent.VM.Link do
       GenServer.reply(from, {:error, :disconnected})
     end)
 
-    {:noreply, %{state | socket: nil, queries: %{}}}
+    {:noreply, %{state | socket: nil, ready: false, queries: %{}}}
   end
 
   defp handle_frame(%{"t" => "event", "event" => wire} = frame, state) do
@@ -275,8 +291,14 @@ defmodule ForemanAgent.VM.Link do
     end
   end
 
-  defp handle_frame(%{"t" => "hello", "agent_version" => version}, state) when is_binary(version),
-    do: %{state | guest_version: String.slice(version, 0, 64)}
+  # The guest agent is there: everything waiting goes now (again, after a
+  # reconnect; the guest runs each op id once).
+  defp handle_frame(%{"t" => "hello", "agent_version" => version}, state)
+       when is_binary(version) do
+    state = %{state | guest_version: String.slice(version, 0, 64), ready: true}
+    Enum.each(state.pending, fn {_, entry} -> send_cmd(state, entry.cmd) end)
+    state
+  end
 
   defp handle_frame(_frame, state), do: state
 

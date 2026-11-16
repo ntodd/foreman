@@ -40,6 +40,8 @@ bind "$base/docker" /var/lib/docker
 bind "$base/containerd" /var/lib/containerd
 bind "$base/srv" /srv/foreman
 bind "$base/agent" /var/lib/foreman-agent
+# The guest agent's (it runs as foreman, not root).
+chown foreman:foreman /srv/foreman /var/lib/foreman-agent
 
 mkdir -p /opt/foreman-agent
 mountpoint -q /opt/foreman-agent || mount -o ro "$agent" /opt/foreman-agent

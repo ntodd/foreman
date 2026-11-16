@@ -191,6 +191,19 @@ defmodule ForemanAgent.GuestChannelTest do
              ForemanAgent.Guest.handle(cmd, fn _, _ -> :ok end)
   end
 
+  test "a guest that never says hello isn't connected, and gets nothing", ctx do
+    start_fake_guest(ctx, fn _ -> [] end)
+    link = start_link(ctx)
+    cmd = command()
+    op_id = cmd.op_id
+    run_async(link, cmd)
+
+    assert_receive {:host_sent, %{"t" => "hello"}}, 5_000
+    refute Link.connected?(link)
+    assert {:error, :not_connected} = Link.query(link, "inventory")
+    refute_receive {:host_sent, %{"t" => "cmd", "cmd" => %{"op_id" => ^op_id}}}, 500
+  end
+
   describe "a hostile guest" do
     # A fake guest that answers the link's command with junk around the
     # real result.
@@ -225,6 +238,8 @@ defmodule ForemanAgent.GuestChannelTest do
       end
     end
 
+    defp hello, do: Channel.encode(%{"t" => "hello", "agent_version" => "0.1.0"})
+
     defp event(type, payload, seq \\ nil) do
       {:ok, event} = ForemanProtocol.Event.new(type, payload)
 
@@ -239,6 +254,9 @@ defmodule ForemanAgent.GuestChannelTest do
       other = ForemanProtocol.uuid()
 
       start_fake_guest(ctx, fn
+        %{"t" => "hello"} ->
+          [hello()]
+
         %{"t" => "cmd", "cmd" => %{"op_id" => op_id}} ->
           [
             "not json",
@@ -279,7 +297,7 @@ defmodule ForemanAgent.GuestChannelTest do
 
           if :counters.get(counter, 1) == 1,
             do: [:binary.copy("x", Channel.max_frame() + 1)],
-            else: []
+            else: [hello()]
 
         %{"t" => "cmd", "cmd" => %{"op_id" => op_id}} ->
           [event("op.result", %{op_id: op_id, status: "ok", result: %{"after" => true}}, 1)]

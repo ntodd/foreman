@@ -24,6 +24,9 @@ RUN apt-get update \
     util-linux docker.io docker-compose-v2 docker-buildx linux-image-virtual \
   && rm -rf /var/lib/apt/lists/* /var/cache/apt/*
 COPY rootfs/ /
+# The guest agent's user, in Docker's group.
+RUN useradd --system --home-dir /var/lib/foreman-agent --shell /usr/sbin/nologin foreman \
+  && usermod -aG docker foreman
 RUN systemctl enable foreman-guest-net foreman-guest-disks foreman-guest-agent foreman-guest-vsock docker fstrim.timer \
   && systemctl mask getty.target console-getty.service serial-getty@ttyS0.service systemd-resolved.service \
     systemd-timesyncd.service systemd-networkd.service systemd-networkd.socket systemd-networkd-wait-online.service \
