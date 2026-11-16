@@ -196,6 +196,18 @@ defmodule ForemanAgent.VMEnvTest do
       assert {:ok, _} = run(create(), ctx)
       refute_received {:machine, {:boot, _}, @env}
     end
+
+    # The guest's secrets are on its tmpfs: a guest that rebooted itself,
+    # or a boot whose push failed, has none.
+    test "writes the secrets into a VM that was already running", ctx do
+      assert {:ok, _} = run(create(), ctx)
+      assert_receive {:guest, "env.secrets.write", _}
+      assert {:ok, _} = run(command("env.start"), ctx)
+      assert_receive {:guest, "env.secrets.write", %{files: %{"secrets.env" => "TOKEN=1\n"}}}
+      assert_receive {:guest, "env.start", _}
+      assert {:ok, _} = run(command("env.restart", %{mode: "all"}), ctx)
+      assert_receive {:guest, "env.secrets.write", _}
+    end
   end
 
   describe "a VM that's stopped" do
@@ -342,6 +354,29 @@ defmodule ForemanAgent.VMEnvTest do
 
     test "ports takes only the VM's own environment", ctx do
       assert Status.ports(ctx.config) == %{@env => [%{port: 4000, process: "beam.smp"}]}
+    end
+
+    test "a console the guest fills is cut back", ctx do
+      serial = VM.paths(ctx.config, @env).serial
+      File.write!(serial, :binary.copy("x", 17 * 1024 * 1024))
+      assert {:ok, _} = Status.stats(ctx.ctx)
+      assert File.stat!(serial).size < 1024 * 1024
+    end
+
+    test "gc removes what an interrupted download or build left, and keeps what's in use", ctx do
+      stale = Path.join(ctx.config.guest_root, ".abc.123")
+      fresh = Path.join(ctx.config.guest_root, ".def.456")
+      building = Path.join(ctx.config.agent_disks, ".9.9.9.img.tmp")
+      for dir <- [stale, fresh], do: File.mkdir_p!(dir)
+      File.write!(building, "half a disk")
+      long_ago = :os.system_time(:second) - 7 * 3600
+      File.touch!(stale, long_ago)
+
+      assert {:ok, _} = Status.gc(ctx.ctx)
+      refute File.exists?(stale)
+      assert File.exists?(fresh)
+      assert File.exists?(building)
+      assert File.exists?(Path.join(ctx.config.guest_root, ctx.sha))
     end
 
     test "stats come from the VM, not the guest", ctx do

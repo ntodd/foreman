@@ -31,7 +31,8 @@ defmodule ForemanAgent.VM.Env do
     with :ok <- Env.check_clone_url(p.clone_url, ctx.config),
          {:ok, _} <- cache_secrets(ctx, p.env_id, p.files),
          {:ok, spec} <- prepare(p, ctx, log),
-         :ok <- ensure_running(p.env_id, spec, ctx, log) do
+         :ok <- ensure_running(p.env_id, spec, ctx, log),
+         :ok <- push_secrets(p.env_id, log, ctx) do
       relay(cmd, log, ctx)
     end
   end
@@ -39,7 +40,8 @@ defmodule ForemanAgent.VM.Env do
   def run(%Command{type: "env.start", payload: p} = cmd, log, ctx) do
     with {:ok, meta} <- existing(ctx.config, p.env_id),
          {:ok, spec} <- prepare(Map.put(p, :limits, limits(meta)), ctx, log),
-         :ok <- ensure_running(p.env_id, spec, ctx, log) do
+         :ok <- ensure_running(p.env_id, spec, ctx, log),
+         :ok <- push_secrets(p.env_id, log, ctx) do
       relay(cmd, log, ctx)
     end
   end
@@ -85,10 +87,18 @@ defmodule ForemanAgent.VM.Env do
   end
 
   # restart, logs, git_status and connect need the environment running.
-  def run(%Command{payload: p} = cmd, log, ctx) do
-    if Machine.impl(ctx.config).running?(p.env_id, ctx.config),
-      do: relay(cmd, log, ctx),
-      else: {:error, "the environment isn't running"}
+  # A restart brings the containers up again, so the secrets go first.
+  def run(%Command{type: type, payload: p} = cmd, log, ctx) do
+    cond do
+      not Machine.impl(ctx.config).running?(p.env_id, ctx.config) ->
+        {:error, "the environment isn't running"}
+
+      type == "env.restart" ->
+        with :ok <- push_secrets(p.env_id, log, ctx), do: relay(cmd, log, ctx)
+
+      true ->
+        relay(cmd, log, ctx)
+    end
   end
 
   defp relay(cmd, log, ctx), do: Link.run(Links.get(cmd.payload.env_id, ctx.config), cmd, log)
@@ -210,9 +220,12 @@ defmodule ForemanAgent.VM.Env do
         case Links.await(env_id, ctx.config, ctx.config.vm_boot_timeout) do
           :ok ->
             log.("info", "VM running (agent #{spec.agent_version})\n")
-            push_secrets(env_id, log, ctx)
+            :ok
 
           :timeout ->
+            # Not left running half up: the next attempt boots it afresh.
+            machine.kill(env_id, ctx.config)
+
             {:error,
              "the environment's VM didn't come up; its console is in #{VM.paths(ctx.config, env_id).serial}"}
         end
@@ -220,8 +233,9 @@ defmodule ForemanAgent.VM.Env do
     end
   end
 
-  # After a boot: the guest's secrets are on its own tmpfs, so they start
-  # out empty.
+  # Before anything that brings the environment up: the guest's secrets
+  # are on its own tmpfs, so a boot (or a reboot the guest did itself)
+  # leaves it with none.
   defp push_secrets(env_id, log, ctx) do
     files = read_cached_secrets(ctx.config, env_id)
 

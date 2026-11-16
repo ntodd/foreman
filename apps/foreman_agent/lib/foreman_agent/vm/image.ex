@@ -219,7 +219,8 @@ defmodule ForemanAgent.VM.Image do
 
   defp make_agent_disk(config, runner, release_dir, version, path, log) do
     File.mkdir_p!(config.agent_disks)
-    tmp = path <> ".tmp"
+    # A dot-name, which box.gc leaves alone while it's being made.
+    tmp = Path.join(Path.dirname(path), "." <> Path.basename(path) <> ".tmp")
     _ = File.rm(tmp)
     size_mb = div(tree_size(release_dir) * 13, 10 * 1_048_576) + 64
     log.("info", "Making the agent disk for #{version}\n")

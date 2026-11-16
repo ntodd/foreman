@@ -108,6 +108,7 @@ defmodule ForemanAgent.VM.Status do
     box = VM.box_size(config.proc)
     {disk_mb, free_mb} = Stats.disk(ctx)
     running = config |> VM.list() |> Enum.filter(&machine.running?(&1, config))
+    trim_consoles(config, running)
 
     before = machine.usage(running, config)
     started = System.monotonic_time(:microsecond)
@@ -177,10 +178,15 @@ defmodule ForemanAgent.VM.Status do
     end
   end
 
+  # Work in progress is a dot-name (a download being unpacked, an agent
+  # disk being made): left alone unless it's hours old, which means
+  # whatever made it was stopped.
+  @stale_work_seconds 6 * 3600
+
   defp prune(dir, keep, ctx) do
     case File.ls(dir) do
       {:ok, names} ->
-        for name <- names, not String.starts_with?(name, "."), name not in keep do
+        for name <- names, name not in keep, unused?(dir, name) do
           ctx.log.("info", "Removing #{Path.join(dir, name)}\n")
           File.rm_rf(Path.join(dir, name))
         end
@@ -188,6 +194,32 @@ defmodule ForemanAgent.VM.Status do
       {:error, _} ->
         :ok
     end
+  end
+
+  defp unused?(dir, "." <> _ = name) do
+    case File.lstat(Path.join(dir, name), time: :posix) do
+      {:ok, %{mtime: mtime}} -> :os.system_time(:second) - mtime > @stale_work_seconds
+      {:error, _} -> false
+    end
+  end
+
+  defp unused?(_dir, _name), do: true
+
+  # A guest can write its console without end, and the box's disk holds
+  # every VM's: past this, it starts again. Cloud Hypervisor's own log too.
+  @console_max 16 * 1024 * 1024
+
+  defp trim_consoles(config, env_ids) do
+    for env_id <- env_ids,
+        path <- [
+          VM.paths(config, env_id).serial,
+          Path.join(VM.paths(config, env_id).dir, "ch.log")
+        ],
+        match?({:ok, %{size: size}} when size > @console_max, File.lstat(path)) do
+      File.write(path, "[foreman: the console passed 16 MB and was cut]\n")
+    end
+
+    :ok
   end
 
   @doc """

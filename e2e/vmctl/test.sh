@@ -82,6 +82,7 @@ expect() { # description, request, answer pattern (grep -E)
 
 # -- refusals --------------------------------------------------------------
 expect "says its version" "version" "ok 1"
+expect "says the box's resolvers, not MagicDNS" "resolvers" "ok 192.168.1.1"
 expect "refuses an unknown request" "reboot" "error unknown request"
 expect "refuses characters outside its vocabulary" "start ../../etc/shadow 1 2" "error unexpected characters"
 expect "refuses a shell metacharacter" "stop \$(id)" "error unexpected characters"
@@ -116,6 +117,16 @@ has "on its tap" "tap=fm-vm0,mac=52:54:00:fa:00:00"
 check "with its address and the box's resolvers, not MagicDNS, on the kernel command line" grep -qx \
   "console=ttyS0 root=/dev/vda rw quiet net.ifnames=0 fm.mac=52:54:00:fa:00:00 fm.ip=10.250.0.2/30 fm.gw=10.250.0.1 fm.dns=192.168.1.1" "$work/last-run"
 has "booting the release's agent disk read-only" "path=$work/srv/agent-disks/1.2.3.img,image_type=raw,readonly=on,serial=fm-agent"
+# systemd opens a unit's output files as root, following symlinks, and the
+# VM's directory is the agent's: nothing there is opened for it.
+check "has systemd open nothing in the VM's directory" sh -c "! grep -q 'append:\|file:\|truncate:' '$work/last-run'"
+has "sends the unit's output to the journal" "StandardOutput=journal"
+has "has Cloud Hypervisor write its own log, as the agent's user" "$work/srv/vms/$env1/ch.log"
+check "after --log-file" grep -A1 -qxF -- "--log-file" "$work/last-run"
+has "sees no other VM's disks" "TemporaryFileSystem=$work/srv:ro"
+has "sees its own directory" "BindPaths=$work/srv/vms/$env1"
+has "sees the guest images and agent disks read-only" "BindReadOnlyPaths=$work/srv/guest $work/srv/agent-disks"
+has "can't see the box's secrets, identity or settings" "InaccessiblePaths=-/run/foreman -/var/lib/foreman-agent -/etc/foreman-agent -$work/state"
 check "gives the box's end its address" grep -q "ip addr replace 10.250.0.1/30 dev fm-vm0" "$work/calls"
 expect "a VM that's running isn't started twice" "start $env1 2 2048 $guest 1.2.3" "ok running"
 printf 'nameserver 100.100.100.100\n' > "$work/resolv.conf"

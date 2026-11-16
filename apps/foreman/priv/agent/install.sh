@@ -17,9 +17,11 @@
 # Docker on the box) keeps Docker's default bridge, where image builds
 # run, off the tailnet. --default-bridge-reaches-tailnet leaves the
 # default bridge out, for a box whose other containers need the tailnet
-# there. --block-lan keeps environments off this box's LAN too (DNS
-# aside); by default they reach it. --vm-subnet A.B gives VMs addresses
-# from A.B.0.0/16 instead of 10.250.0.0/16.
+# there. --block-lan keeps environments off this box's LAN too (DNS to
+# their resolvers aside); by default they reach it, and --no-block-lan
+# goes back to that. --vm-subnet A.B gives VMs addresses from A.B.0.0/16
+# instead of 10.250.0.0/16. A re-run keeps the last run's --block-lan and
+# --vm-subnet unless it's given them.
 #
 # Needs: systemd, nftables, iproute2, e2fsprogs and KVM (/dev/kvm; a box
 # that is itself a VM needs nested virtualization). amd64 only for now.
@@ -34,8 +36,11 @@ POLICY=""
 REENROLL=""
 DEFAULT_BRIDGE_FILTER=1
 BLOCK_LAN=""
+BLOCK_LAN_SET=""
 VM_SUBNET=10.250
+VM_SUBNET_SET=""
 IDENTITY=/var/lib/foreman-agent/identity.json
+SETTINGS=/etc/foreman-agent/install.conf
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -44,8 +49,9 @@ while [ $# -gt 0 ]; do
     --url) FOREMAN_URL="$2"; shift 2 ;;
     --reenroll) REENROLL=1; shift ;;
     --default-bridge-reaches-tailnet) DEFAULT_BRIDGE_FILTER=""; shift ;;
-    --block-lan) BLOCK_LAN=1; shift ;;
-    --vm-subnet) VM_SUBNET="$2"; shift 2 ;;
+    --block-lan) BLOCK_LAN=1; BLOCK_LAN_SET=1; shift ;;
+    --no-block-lan) BLOCK_LAN=""; BLOCK_LAN_SET=1; shift ;;
+    --vm-subnet) VM_SUBNET="$2"; VM_SUBNET_SET=1; shift 2 ;;
     *) echo "unknown option: $1" >&2; exit 64 ;;
   esac
 done
@@ -53,6 +59,15 @@ done
 fail() { echo "foreman: $*" >&2; exit 1; }
 
 [ "$(id -u)" -eq 0 ] || fail "run this as root (sudo)"
+
+# What the last run was given, unless this one says otherwise: the box
+# page's command to re-run this script doesn't know them.
+if [ -r "$SETTINGS" ]; then
+  prev_block_lan=$(sed -n 's/^BLOCK_LAN=\([01]\)$/\1/p' "$SETTINGS")
+  prev_vm_subnet=$(sed -n 's/^VM_SUBNET=\([0-9.]*\)$/\1/p' "$SETTINGS")
+  if [ -z "$BLOCK_LAN_SET" ] && [ "$prev_block_lan" = 1 ]; then BLOCK_LAN=1; fi
+  if [ -z "$VM_SUBNET_SET" ] && [ -n "$prev_vm_subnet" ]; then VM_SUBNET=$prev_vm_subnet; fi
+fi
 
 # An existing identity is kept unless --reenroll: a new token would make a
 # new box in Foreman, and this box's environments belong to the old one.
@@ -75,9 +90,22 @@ case "$VM_SUBNET" in
   10.[0-9] | 10.[1-9][0-9] | 10.1[0-9][0-9] | 10.2[0-4][0-9] | 10.25[0-5] | 172.1[6-9] | 172.2[0-9] | 172.3[01] | 192.168) ;;
   *) fail "--vm-subnet takes the first two octets of a private /16, like 10.250" ;;
 esac
-# Its own VMs' taps aside: a re-run finds those.
-if ip -4 route show 2>/dev/null | grep -v ' dev fm-vm' | grep -q "^$VM_SUBNET\\."; then
-  fail "$VM_SUBNET.0.0/16 is already routed on this box; pick another with --vm-subnet"
+# Its own VMs' taps aside: a re-run finds those. A wider route (a LAN on
+# 10.0.0.0/8, say) or Tailscale's table covers it too.
+pool_routed() {
+  ip -4 route show table all 2>/dev/null | grep -v ' dev fm-vm' | awk -v pool="$VM_SUBNET" '
+    function ip(s,  p) { split(s, p, "."); return ((p[1] * 256 + p[2]) * 256 + p[3]) * 256 + p[4] }
+    $1 ~ /^[0-9.]+(\/[0-9]+)?$/ {
+      n = split($1, a, "/"); bits = (n == 2) ? a[2] : 32
+      if (bits < 1 || bits > 32) next
+      size = 2 ^ (32 - bits); start = int(ip(a[1]) / size) * size
+      lo = ip(pool ".0.0"); hi = lo + 65535
+      if (start <= hi && start + size - 1 >= lo) { found = 1 }
+    }
+    END { exit found ? 0 : 1 }'
+}
+if pool_routed; then
+  fail "$VM_SUBNET.0.0/16 overlaps a route on this box; pick another with --vm-subnet"
 fi
 if [ ! -e /dev/kvm ]; then
   echo "foreman: warning: this box has no /dev/kvm, so it can't run environments until KVM is on (or, for a VM, nested virtualization)" >&2
@@ -107,11 +135,37 @@ if id -nG foreman 2>/dev/null | tr ' ' '\n' | grep -qx docker; then
   echo "foreman: took the foreman user out of the docker group"
 fi
 
-install -d -m 0700 -o foreman -g foreman /var/lib/foreman-agent
-install -d -m 0755 -o foreman -g foreman /srv/foreman
-install -d -m 0700 -o foreman -g foreman /srv/foreman/vms /srv/foreman/guest /srv/foreman/agent-disks
-install -d -m 0700 -o root -g root /var/lib/foreman-vmctl
-install -d -m 0755 -o foreman -g foreman /opt/foreman-agent /opt/foreman-agent/releases
+# The agent stays stopped while this script works in the directories it
+# owns, so nothing can swap one for a symlink between a check and its
+# use. It's started again at the end, or when this script fails.
+agent_stopped=""
+if systemctl is-active --quiet foreman-agent 2>/dev/null; then
+  systemctl stop foreman-agent
+  agent_stopped=1
+fi
+# shellcheck disable=SC2329 # run by the EXIT trap
+restart_agent() {
+  if [ -n "$agent_stopped" ]; then systemctl start foreman-agent 2>/dev/null || true; fi
+}
+trap restart_agent EXIT
+
+# Root's own paths, and the agent's under them: never a symlink, which
+# install -d would follow and chown.
+plain_dir() { # path, mode, owner
+  [ -L "$1" ] && rm -f "$1"
+  install -d -m "$2" -o "$3" -g "$3" "$1"
+}
+[ -L /srv/foreman ] && fail "/srv/foreman is a symlink; make it a directory (or a mount point)"
+[ -L /var/lib/foreman-agent ] && fail "/var/lib/foreman-agent is a symlink"
+[ -L /opt/foreman-agent ] && fail "/opt/foreman-agent is a symlink"
+plain_dir /var/lib/foreman-agent 0700 foreman
+# Root's, so nothing but this script makes entries in it; the agent's
+# directories are below.
+plain_dir /srv/foreman 0755 root
+for dir in vms guest agent-disks; do plain_dir "/srv/foreman/$dir" 0700 foreman; done
+plain_dir /var/lib/foreman-vmctl 0700 root
+plain_dir /opt/foreman-agent 0755 foreman
+plain_dir /opt/foreman-agent/releases 0755 foreman
 install -d -m 0750 -o root -g foreman /etc/foreman-agent
 
 # Secrets live on tmpfs (/run), recreated at boot.
@@ -123,7 +177,7 @@ systemd-tmpfiles --create /etc/tmpfiles.d/foreman.conf
 
 echo "foreman: downloading the agent for $target"
 tmp=$(mktemp -d)
-trap 'rm -rf "$tmp"' EXIT
+trap 'rm -rf "$tmp"; restart_agent' EXIT
 curl -fsSL -D "$tmp/headers" -o "$tmp/agent.tar.gz" "$FOREMAN_URL/agent/releases/latest/$target" ||
   fail "couldn't download the agent from $FOREMAN_URL (has a release been published for $target?)"
 version=$(sed -n 's/^x-foreman-version: *\([^[:space:]]*\).*/\1/ip' "$tmp/headers" | tail -1)
@@ -268,6 +322,19 @@ printf 'source_sha256=%s\ndefault_bridge=%s\n' "$(sha256sum < "$rules" | cut -d'
   > /etc/foreman-agent/firewall.info
 chmod 0644 /etc/foreman-agent/firewall.info
 
+# Loads the rules with the resolvers guests are given (which --block-lan
+# still lets them reach), in one transaction.
+cat > /etc/foreman-agent/firewall-load <<EOF
+#!/bin/sh
+set -u
+dns=\$(printf 'resolvers\\n' | sh /etc/foreman-agent/vmctl 2>/dev/null | sed -n 's/^ok \\([0-9.,]*\\)\$/\\1/p')
+{
+  cat /etc/foreman-agent/firewall.nft
+  if [ -n "\$dns" ]; then printf 'add element inet foreman_guests guest_dns { %s }\\n' "\$dns"; fi
+} | $nft -f -
+EOF
+chmod 0755 /etc/foreman-agent/firewall-load
+
 cat > /etc/systemd/system/foreman-firewall.service <<EOF
 [Unit]
 Description=Foreman box firewall (environments stay off the tailnet)
@@ -278,7 +345,7 @@ Before=docker.service foreman-agent.service
 Type=oneshot
 RemainAfterExit=yes
 RuntimeDirectory=foreman-firewall
-ExecStart=$nft -f /etc/foreman-agent/firewall.nft
+ExecStart=/bin/sh /etc/foreman-agent/firewall-load
 ExecStartPost=/bin/sh /etc/foreman-agent/guest-forward
 ExecStartPost=/bin/cp /etc/foreman-agent/firewall.info /run/foreman-firewall/loaded
 
@@ -296,7 +363,7 @@ set -u
 marker=/run/foreman-firewall/loaded
 # Stopped on purpose: leave it stopped.
 systemctl is-active --quiet foreman-firewall || exit 0
-if $nft -f /etc/foreman-agent/firewall.nft && sh /etc/foreman-agent/guest-forward; then
+if sh /etc/foreman-agent/firewall-load && sh /etc/foreman-agent/guest-forward; then
   [ -e "\$marker" ] || cp /etc/foreman-agent/firewall.info "\$marker"
 else
   rm -f "\$marker"
@@ -315,6 +382,18 @@ Type=oneshot
 # Through sh: /etc is mounted noexec on Flatcar.
 ExecStart=/bin/sh /etc/foreman-agent/firewall-check
 EOF
+
+# nftables.service (and firewalld) flush the whole ruleset when they
+# start or reload, the guests' table with it; load it straight back
+# rather than waiting for the timer.
+for svc in nftables firewalld; do
+  install -d -m 0755 "/etc/systemd/system/$svc.service.d"
+  cat > "/etc/systemd/system/$svc.service.d/foreman.conf" <<'EOF'
+[Service]
+ExecStartPost=-/bin/sh /etc/foreman-agent/firewall-check
+ExecReload=-/bin/sh /etc/foreman-agent/firewall-check
+EOF
+done
 
 cat > /etc/systemd/system/foreman-firewall-check.timer <<'EOF'
 [Unit]
@@ -351,6 +430,10 @@ POOL=$VM_SUBNET
 STATE=/var/lib/foreman-vmctl
 EOF
 chmod 0644 /etc/foreman-agent/vmctl.conf
+if [ -n "$BLOCK_LAN" ]; then block_lan_setting=1; else block_lan_setting=0; fi
+printf '# Written by install.sh: a re-run keeps these unless it is given others.\nBLOCK_LAN=%s\nVM_SUBNET=%s\n' \
+  "$block_lan_setting" "$VM_SUBNET" > "$SETTINGS"
+chmod 0644 "$SETTINGS"
 
 cat > /etc/systemd/system/foreman-vmctl.socket <<'EOF'
 [Unit]

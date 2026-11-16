@@ -36,7 +36,7 @@ cleanup() {
   for pid in "$work"/*.pid; do
     [ -e "$pid" ] && kill "$(cat "$pid")" 2>/dev/null
   done
-  docker rm -f fwtest-published >/dev/null 2>&1 || true
+  docker rm -f fwtest-published fwtest-boxsvc >/dev/null 2>&1 || true
   docker network rm fwtest-env fwtest-other >/dev/null 2>&1 || true
   nft delete table inet foreman 2>/dev/null || true
   nft delete table inet foreman_guests 2>/dev/null || true
@@ -224,10 +224,22 @@ if [ -n "$guest_forward" ]; then
   expect open "the box reaches a guest" "$nc_bin" nc -z -w 3 10.250.0.6 8084
   expect shut "a tailnet peer can't connect into a guest" \
     peer_ns "$nc_bin" nc -z -w 3 10.250.0.6 8084
+  # A container on the box with a published port: Docker's DNAT turns a
+  # connection to the box into one forwarded to the container.
+  docker run -d --name fwtest-boxsvc -p 8087:8080 "$image" nc -lk -p 8080 -e /bin/true >/dev/null
+  sleep 1
+  boxsvc_ip=$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' fwtest-boxsvc)
+  expect shut "a guest can't reach a port Docker publishes on the box" g0_reach "$box_ip" 8087
+  expect shut "a guest can't reach a container on the box's Docker" g0_reach "$boxsvc_ip" 8080
 
   nft -f "$rules"
   expect shut "with --block-lan, a guest can't reach the box's LAN" g0_reach "$lan_ip" 8086
   expect open "with --block-lan, a guest still reaches the internet" guest_internet
+  listen landns fwtest-lan "$lan_ip" 53
+  sleep 1
+  expect shut "with --block-lan, a guest can't use a LAN resolver it wasn't given" g0_reach "$lan_ip" 53
+  nft add element inet foreman_guests guest_dns "{ $lan_ip }"
+  expect open "with --block-lan, a guest reaches the resolver it was given" g0_reach "$lan_ip" 53
 fi
 
 [ "$failures" -eq 0 ] || { echo "$failures check(s) failed" >&2; exit 1; }

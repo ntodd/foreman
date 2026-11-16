@@ -10,6 +10,7 @@
 # "error ...":
 #
 #   version
+#   resolvers                 (the box's upstream resolvers, for its firewall)
 #   start ENV_ID CPUS MEMORY_MB GUEST_SHA256 AGENT_VERSION
 #   restore ENV_ID CPUS MEMORY_MB
 #   stop ENV_ID
@@ -20,13 +21,20 @@
 # directories, and it builds Cloud Hypervisor's command line itself. The
 # VM runs as the agent's user, in a unit of its own (foreman-vm-ENV_ID,
 # in foreman.slice) with CPU, memory and task limits and systemd's
-# sandboxing, so it outlives the agent.
+# sandboxing, so it outlives the agent. Nothing in the VM's directory,
+# which is the agent's, is opened as root: Cloud Hypervisor writes its own
+# log there, as the agent's user, and the unit's output goes to the
+# journal. The unit sees only its own VM's directory under SRV, with the
+# guest images and agent disks read-only, and none of the box's secrets,
+# identity or settings.
 #
 # Each VM gets a /30 from POOL (the first two octets of a /16): index n
 # is POOL.(n/64).(4*(n%64)+1) on the box and +2 in the guest, on tap
 # fm-vm<n>. The index is recorded under STATE until release, so a VM
 # restored from a snapshot comes back on the address it had.
 set -u
+# Byte ranges in the request's patterns, whatever the locale.
+export LC_ALL=C
 
 VERSION=1
 
@@ -137,12 +145,15 @@ run_unit() { # env_id cpus memory_mb vm_dir ch args...
     --uid="$AGENT_USER" --gid="$AGENT_USER" -p SupplementaryGroups=kvm \
     -p "MemoryMax=$((memory + 512))M" -p MemorySwapMax=0 -p "CPUQuota=$((cpus * 100))%" \
     -p TasksMax=1024 -p UMask=0077 -p NoNewPrivileges=yes -p ProtectSystem=strict \
-    -p ProtectHome=yes -p PrivateTmp=yes -p "ReadWritePaths=$vm" -p ProtectKernelTunables=yes \
+    -p ProtectHome=yes -p PrivateTmp=yes -p ProtectKernelTunables=yes \
     -p ProtectKernelModules=yes -p ProtectKernelLogs=yes -p ProtectControlGroups=yes \
     -p RestrictSUIDSGID=yes -p LockPersonality=yes -p CapabilityBoundingSet= \
     -p DevicePolicy=closed -p "DeviceAllow=/dev/kvm rw" -p "DeviceAllow=/dev/net/tun rw" \
-    -p "StandardOutput=append:$vm/ch.log" -p "StandardError=append:$vm/ch.log" \
-    -- "$ch" "$@" >/dev/null 2>&1
+    -p "TemporaryFileSystem=$SRV:ro" -p "BindPaths=$vm" -p "ReadWritePaths=$vm" \
+    -p "BindReadOnlyPaths=$SRV/guest $SRV/agent-disks" \
+    -p "InaccessiblePaths=-/run/foreman -/var/lib/foreman-agent -/etc/foreman-agent -$STATE" \
+    -p StandardOutput=journal -p StandardError=journal \
+    -- "$ch" --log-file "$vm/ch.log" "$@" >/dev/null 2>&1
 }
 
 plain_file() { [ -f "$1" ] && [ ! -L "$1" ]; }
@@ -246,6 +257,7 @@ request=$1
 shift
 case "$request" in
   version) answer "ok $VERSION" ;;
+  resolvers) answer "ok $(resolvers)" ;;
   start) cmd_start "$@" ;;
   restore) cmd_restore "$@" ;;
   stop) cmd_stop "$@" ;;
