@@ -2,11 +2,11 @@ defmodule ForemanProtocol.ProtocolV2Test do
   @moduledoc """
   Protocol 2: `env.secrets.write` can name files the agent should leave
   as they are (a GitHub token the control plane couldn't renew just now),
-  and seccomp has its own policy rule.
+  and seccomp had its own policy rule (gone with the policy in protocol 6).
   """
   use ExUnit.Case, async: true
 
-  alias ForemanProtocol.{Command, Policy}
+  alias ForemanProtocol.Command
 
   @env_id "6f1c1d1e-9a3b-4c1f-8f5e-2d7a9b0c1e2f"
 
@@ -40,11 +40,5 @@ defmodule ForemanProtocol.ProtocolV2Test do
 
       assert [{"keep" <> _, _} | _] = errors
     end
-  end
-
-  test "seccomp is a rule of its own, refused by default" do
-    assert "seccomp" in Policy.rules()
-    assert Policy.defaults()["seccomp"] == "refuse"
-    assert Policy.relaxed(%{"seccomp" => "allow"}) == [{"seccomp", "allow"}]
   end
 end

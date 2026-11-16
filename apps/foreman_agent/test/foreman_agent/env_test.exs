@@ -4,7 +4,6 @@ defmodule ForemanAgent.EnvTest do
   import Mox
 
   alias ForemanAgent.{Config, DockerMock, Env, RunnerMock}
-  alias ForemanAgent.Env.Policy
 
   @moduletag :tmp_dir
 
@@ -44,7 +43,6 @@ defmodule ForemanAgent.EnvTest do
       secrets_root: Path.join(tmp, "run"),
       release_root: Path.join(tmp, "opt"),
       feature_dir: Path.expand("../../../../features/src/foreman", __DIR__),
-      policy_rules: Policy.default_rules(),
       docker_socket: "/var/run/docker.sock"
     }
 
@@ -379,9 +377,8 @@ defmodule ForemanAgent.EnvTest do
       clone = Path.join([config.envs_root, @env_id, "workspace", "storefront"])
       meta = Path.join([config.envs_root, @env_id, "meta"])
 
-      # The repo's compose files are read before compose reads anything
-      # (ComposeScan), so compose itself runs twice: services, then policy.
-      [git, services, policy, read_config, up, _tailscale, _connect] = runs()
+      # Compose runs once, for the services the overlay covers.
+      [git, services, up, _tailscale, _connect] = runs()
 
       {"git", git_args, git_opts} = git
 
@@ -415,26 +412,13 @@ defmodule ForemanAgent.EnvTest do
       # missing services as orphans.
       assert up_opts[:env]["COMPOSE_REMOVE_ORPHANS"] == "true"
 
-      for {_, _, opts} <- [services, policy],
-          do: refute(Map.has_key?(opts[:env], "COMPOSE_REMOVE_ORPHANS"))
+      {_, _, services_opts} = services
+      refute Map.has_key?(services_opts[:env], "COMPOSE_REMOVE_ORPHANS")
 
-      # What features ask for is checked first, against the same config.
-      {"devcontainer", ["read-configuration" | rc_args], rc_opts} = read_config
-      assert "--include-merged-configuration" in rc_args
-
-      for flag <- ["--workspace-folder", "--config", "--override-config", "--additional-features"] do
-        assert arg(rc_args, flag) == arg(up_args, flag)
-      end
-
-      assert rc_opts[:env] == up_opts[:env]
-
-      # Its own id label, which no container has, so the CLI resolves the
-      # features from the config rather than reading an old container's.
-      assert "foreman.check=" <> nonce = arg(rc_args, "--id-label")
-      assert byte_size(nonce) >= 16
-
+      # The environment's VM is the boundary, so it runs where the CLI
+      # runs it: in the VM, outside the containers.
       override = meta |> Path.join("devcontainer.json") |> File.read!() |> JSON.decode!()
-      refute Map.has_key?(override, "initializeCommand")
+      assert override["initializeCommand"] == "touch /tmp/pwned"
 
       assert override["dockerComposeFile"] == [
                Path.join(clone, ".devcontainer/docker-compose.yml"),
@@ -563,13 +547,11 @@ defmodule ForemanAgent.EnvTest do
 
       assert {:ok, _} = Env.run("env.create", payload(%{"features" => orca}), ctx)
 
-      [_git, _services, _policy, {"devcontainer", rc_args, _}, {"devcontainer", up_args, _} | _] =
-        runs()
+      [_git, _services, {"devcontainer", up_args, _} | _] = runs()
 
       expected =
         Map.put(orca, "./.foreman/feature", %{"tailscale" => true})
 
-      assert JSON.decode!(arg(rc_args, "--additional-features")) == expected
       assert JSON.decode!(arg(up_args, "--additional-features")) == expected
     end
 
@@ -616,31 +598,6 @@ defmodule ForemanAgent.EnvTest do
       refute Enum.any?(runs(), &match?({"devcontainer", _, _}, &1))
     end
 
-    test "names the user's feature when the policy refuses it", %{ctx: ctx} do
-      ref = "ghcr.io/mona/features/root:1"
-
-      stub_tools(
-        resolved: %{
-          "configuration" => %{},
-          "mergedConfiguration" => %{"privileged" => true},
-          "featuresConfiguration" => %{
-            "featureSets" => [
-              foreman_feature_set(),
-              %{
-                "sourceInformation" => %{"userFeatureId" => ref},
-                "features" => [%{"id" => "root", "privileged" => true}]
-              }
-            ]
-          }
-        }
-      )
-
-      assert {:error, message} =
-               Env.run("env.create", payload(%{"features" => %{ref => %{}}}), ctx)
-
-      assert message =~ "your feature #{ref}"
-    end
-
     test "refuses clone hosts that aren't allowed, before running anything", %{ctx: ctx} do
       stub_tools()
 
@@ -661,63 +618,6 @@ defmodule ForemanAgent.EnvTest do
 
       ctx = put_in(ctx.config.insecure_git_hosts, ["git.local"])
       assert {:ok, _} = Env.run("env.create", p, ctx)
-    end
-
-    test "stops when the policy refuses the compose config", %{ctx: ctx} do
-      compose = %{
-        "services" => %{
-          "app" => %{
-            "volumes" => [%{"type" => "bind", "source" => "/etc", "target" => "/host-etc"}]
-          }
-        }
-      }
-
-      stub_tools(compose: compose)
-
-      assert {:error, message} = Env.run("env.create", payload(), ctx)
-      assert message =~ "/etc"
-      refute Enum.any?(runs(), &match?({"devcontainer", _, _}, &1))
-    end
-
-    test "refuses a feature that asks for privileged before anything runs", %{ctx: ctx} do
-      stub_tools(
-        resolved: %{
-          "configuration" => %{},
-          "mergedConfiguration" => %{"privileged" => true},
-          "featuresConfiguration" => %{
-            "featureSets" => [
-              foreman_feature_set(),
-              %{
-                "sourceInformation" => %{"userFeatureId" => "ghcr.io/acme/features/sneaky:1"},
-                "features" => [%{"id" => "sneaky", "privileged" => true}]
-              }
-            ]
-          }
-        }
-      )
-
-      assert {:error, message} = Env.run("env.create", payload(), ctx)
-      assert message =~ "ghcr.io/acme/features/sneaky:1"
-      refute Enum.any?(runs(), &match?({"devcontainer", ["up" | _], _}, &1))
-    end
-
-    test "refuses when the CLI didn't resolve the features it was given", %{ctx: ctx} do
-      # The merged config came from somewhere else (an existing container's
-      # labels, say), so what the features ask for wasn't checked.
-      stub_tools(
-        resolved: %{
-          "configuration" => %{},
-          "mergedConfiguration" => %{},
-          "featuresConfiguration" => %{"featureSets" => []}
-        }
-      )
-
-      assert {:error, message} = Env.run("env.create", payload(), ctx)
-      assert message =~ "couldn't check"
-      refute Enum.any?(runs(), &match?({"devcontainer", ["up" | _], _}, &1))
-
-      stub_tools(resolved: %{"configuration" => %{}, "mergedConfiguration" => %{}})
-      assert {:error, _} = Env.run("env.create", payload(), ctx)
     end
 
     test "requires a compose-based devcontainer", %{ctx: ctx} do
@@ -871,65 +771,6 @@ defmodule ForemanAgent.EnvTest do
       assert arg(up_args, "--gpu-availability") == "none"
     end
 
-    test "refuses to start on a box whose default Docker runtime is nvidia", %{ctx: ctx} do
-      stub_tools(docker_info: {:ok, %{"DefaultRuntime" => "nvidia"}})
-
-      assert {:error, message} = Env.run("env.create", payload(), ctx)
-      assert message =~ "default runtime"
-      refute Enum.any?(runs(), &match?({"devcontainer", ["up" | _], _}, &1))
-    end
-
-    test "checks a service's runtime against the runtimes Docker has", %{ctx: ctx, config: config} do
-      stub_tools(
-        compose: %{"services" => %{"app" => %{"runtime" => "gpu"}, "db" => %{}}},
-        docker_info:
-          {:ok,
-           %{
-             "DefaultRuntime" => "runc",
-             "Runtimes" => %{"gpu" => %{"path" => "/usr/bin/nvidia-container-runtime"}}
-           }}
-      )
-
-      ctx = put_in(ctx.config.policy_rules, Map.put(config.policy_rules, :compose_keys, :allow))
-
-      assert {:error, message} = Env.run("env.create", payload(), ctx)
-      assert message =~ "nvidia runtime"
-    end
-
-    test "refuses to start when it can't tell what Docker's default runtime is", %{ctx: ctx} do
-      stub_tools(docker_info: {:error, :econnrefused})
-
-      assert {:error, message} = Env.run("env.create", payload(), ctx)
-      assert message =~ "default runtime"
-      refute Enum.any?(runs(), &match?({"devcontainer", ["up" | _], _}, &1))
-    end
-
-    test "says the box needs the NVIDIA Container Toolkit when Docker has no GPU driver", %{
-      ctx: ctx,
-      config: config
-    } do
-      gpu = %{"driver" => "nvidia", "count" => -1, "capabilities" => ["gpu", "video", "utility"]}
-
-      compose = %{
-        "services" => %{
-          "app" => %{"deploy" => %{"resources" => %{"reservations" => %{"devices" => [gpu]}}}}
-        }
-      }
-
-      stub_tools(
-        compose: compose,
-        outcome:
-          {:error,
-           ~s(Error response from daemon: could not select device driver "nvidia" with capabilities: [[gpu video utility]])}
-      )
-
-      ctx = put_in(ctx.config.policy_rules, Map.put(config.policy_rules, :gpu, :allow))
-
-      assert {:error, message} = Env.run("env.create", payload(), ctx)
-      assert message =~ "NVIDIA Container Toolkit"
-      assert message =~ "could not select device driver"
-    end
-
     test "a device driver failure without a GPU request is reported as it is", %{ctx: ctx} do
       stub_tools(
         outcome: {:error, ~s(could not select device driver "" with capabilities: [[x]])}
@@ -1000,217 +841,12 @@ defmodule ForemanAgent.EnvTest do
 
       assert {:ok, _} = Env.run("env.create", payload(%{"registry_auth" => auth}), ctx)
 
-      [{"devcontainer", _, rc_opts}, {"devcontainer", args, opts}] =
-        Enum.filter(runs(), &match?({"devcontainer", _, _}, &1))
+      [{"devcontainer", args, opts}] = Enum.filter(runs(), &match?({"devcontainer", _, _}, &1))
 
       refute Enum.any?(args, &(&1 =~ "ghp_registry"))
       docker_config = opts[:env]["DOCKER_CONFIG"]
       assert is_binary(docker_config)
-      assert rc_opts[:env]["DOCKER_CONFIG"] == docker_config
       refute File.exists?(docker_config)
-    end
-  end
-
-  # The box's firewall knows environment traffic by its fm- bridge.
-  # Neither the devcontainer CLI (which leaves a running environment
-  # alone) nor compose (which reuses a network it didn't label with a
-  # config hash) moves an existing network onto one, so the agent does
-  # what's safe and checks what the containers really got.
-  describe "Foreman bridges" do
-    @fm_network %{
-      "name" => "storefront-2_default",
-      "driver_opts" => %{"com.docker.network.bridge.name" => "fm-0123456789ab"}
-    }
-
-    defp network(bridge, opts \\ []) do
-      labels =
-        case Keyword.get(opts, :hash, "abc") do
-          nil -> %{}
-          hash -> %{"com.docker.compose.config-hash" => hash}
-        end
-
-      %{
-        "Id" => Keyword.get(opts, :id, "n1"),
-        "Name" => Keyword.get(opts, :name, "storefront-2_default"),
-        "Driver" => "bridge",
-        "Options" => if(bridge, do: %{"com.docker.network.bridge.name" => bridge}, else: %{}),
-        "Labels" => Map.put(labels, "com.docker.compose.project", "storefront-2")
-      }
-    end
-
-    defp attached(network_ids) do
-      [
-        %{
-          "Id" => "c1",
-          "Names" => ["/storefront-2-app-1"],
-          "NetworkSettings" => %{
-            "Networks" => Map.new(network_ids, &{"net-#{&1}", %{"NetworkID" => &1}})
-          }
-        }
-      ]
-    end
-
-    defp commands(runs), do: Enum.map(runs, fn {command, args, _} -> {command, args} end)
-
-    defp index_of(commands, fun), do: Enum.find_index(commands, fun)
-
-    defp up?(command), do: match?({"devcontainer", ["up" | _]}, command)
-
-    defp stop?(command), do: command == {"docker", ["compose", "-p", "storefront-2", "stop"]}
-
-    test "looks up the networks compose will use by name, and leaves Foreman bridges alone", %{
-      ctx: ctx
-    } do
-      stub_tools(
-        compose: %{
-          "name" => "storefront-2",
-          "services" => %{"app" => %{}, "db" => %{}},
-          "networks" => %{"default" => @fm_network}
-        },
-        networks: fn
-          %{"name" => ["storefront-2_default"]} -> [network("fm-0123456789ab")]
-          %{"id" => ["n1"]} -> [network("fm-0123456789ab")]
-        end,
-        containers: attached(["n1"])
-      )
-
-      assert {:ok, _} = Env.run("env.create", payload(), ctx)
-      refute Enum.any?(commands(runs()), &stop?/1)
-    end
-
-    test "stops a project whose network compose will recreate, so the CLI brings it up", %{
-      ctx: ctx
-    } do
-      stub_tools(
-        compose: %{
-          "name" => "storefront-2",
-          "services" => %{"app" => %{}},
-          "networks" => %{"default" => @fm_network}
-        },
-        networks: fn %{"name" => _} -> [network("br-old")] end
-      )
-
-      assert {:ok, _} = Env.run("env.create", payload(), ctx)
-
-      commands = commands(runs())
-      assert index_of(commands, &stop?/1) < index_of(commands, &up?/1)
-      refute Enum.any?(commands, &match?({"docker", ["compose", "-p", _, "down" | _]}, &1))
-      assert Enum.join(logged()) =~ "storefront-2_default"
-    end
-
-    # Taking the project down would lose what its containers hold, an
-    # anonymous volume's data with them.
-    test "refuses before starting anything when compose would reuse a network as it is", %{
-      ctx: ctx
-    } do
-      compose = %{
-        "name" => "storefront-2",
-        "services" => %{"app" => %{}},
-        "networks" => %{"default" => @fm_network}
-      }
-
-      stub_tools(compose: compose)
-      {:ok, _} = Env.run("env.create", payload(), ctx)
-      _ = runs()
-
-      for net <- [
-            network("br-old", hash: nil),
-            network("br-old", hash: ""),
-            network("br-old") |> Map.put("Labels", %{})
-          ] do
-        stub_tools(compose: compose, networks: fn %{"name" => _} -> [net] end)
-
-        assert {:error, message} =
-                 Env.run(
-                   "env.start",
-                   %{env_id: @env_id, slug: "storefront-2", compose_env: %{}},
-                   ctx
-                 )
-
-        assert message =~ "storefront-2_default"
-        assert message =~ "Foreman bridge"
-
-        commands = commands(runs())
-        refute Enum.any?(commands, &up?/1)
-        refute Enum.any?(commands, &match?({"docker", ["compose", "-p", _, "down" | _]}, &1))
-      end
-    end
-
-    test "a network with the same name prefix isn't mistaken for the project's", %{ctx: ctx} do
-      stub_tools(
-        compose: %{
-          "name" => "storefront-2",
-          "services" => %{"app" => %{}},
-          "networks" => %{"default" => @fm_network}
-        },
-        networks: fn %{"name" => _} ->
-          [network("br-other", name: "storefront-2_default-old", hash: nil)]
-        end
-      )
-
-      assert {:ok, _} = Env.run("env.create", payload(), ctx)
-    end
-
-    test "stops the environment and fails when a container is on another bridge", %{ctx: ctx} do
-      stub_tools(
-        networks: fn %{"id" => ["n9"]} -> [network("br-elsewhere", id: "n9")] end,
-        containers: attached(["n9"])
-      )
-
-      assert {:error, message} = Env.run("env.create", payload(), ctx)
-      assert message =~ "storefront-2-app-1"
-      assert message =~ "firewall"
-
-      commands = commands(runs())
-      assert index_of(commands, &up?/1) < index_of(commands, &stop?/1)
-    end
-
-    test "an fm- name on a network that isn't a bridge doesn't count", %{ctx: ctx} do
-      macvlan = network("fm-0123456789ab", id: "n9") |> Map.put("Driver", "macvlan")
-
-      stub_tools(
-        networks: fn %{"id" => ["n9"]} -> [macvlan] end,
-        containers: attached(["n9"])
-      )
-
-      assert {:error, message} = Env.run("env.create", payload(), ctx)
-      assert message =~ "storefront-2-app-1"
-    end
-
-    test "says so when it can't stop an environment on another bridge", %{ctx: ctx} do
-      stub_tools(
-        networks: fn %{"id" => ["n9"]} -> [network("br-elsewhere", id: "n9")] end,
-        containers: attached(["n9"]),
-        compose_stop: {:error, "Error response from daemon: cannot stop"}
-      )
-
-      assert {:error, message} = Env.run("env.create", payload(), ctx)
-      assert message =~ "storefront-2-app-1"
-      refute message =~ "is stopped"
-      assert message =~ "couldn't stop"
-    end
-
-    test "checks the containers even when devcontainer up fails", %{ctx: ctx} do
-      stub_tools(
-        outcome: :error,
-        networks: fn %{"id" => ["n9"]} -> [network("br-elsewhere", id: "n9")] end,
-        containers: attached(["n9"])
-      )
-
-      assert {:error, _} = Env.run("env.create", payload(), ctx)
-      assert Enum.any?(commands(runs()), &stop?/1)
-    end
-
-    test "a container with no network, or another service's, is fine", %{ctx: ctx} do
-      none = %{"Id" => "n0", "Name" => "none", "Driver" => "null", "Options" => %{}}
-
-      stub_tools(
-        networks: fn %{"id" => ["n0"]} -> [none] end,
-        containers:
-          attached(["n0"]) ++ [%{"Id" => "c2", "NetworkSettings" => %{"Networks" => %{}}}]
-      )
-
-      assert {:ok, _} = Env.run("env.create", payload(), ctx)
     end
   end
 
@@ -1280,8 +916,8 @@ defmodule ForemanAgent.EnvTest do
       refute Enum.any?(runs, &match?({"git", _, _}, &1))
 
       merged = Enum.find_index(runs, fn {_, args, _} -> "merge" in args end)
-      read = Enum.find_index(runs, &match?({"devcontainer", ["read-configuration" | _], _}, &1))
-      assert merged < read, "the new config is read after the pull"
+      up = Enum.find_index(runs, &match?({"devcontainer", ["up" | _], _}, &1))
+      assert merged < up, "the new config is used after the pull"
 
       assert [up] = up_runs(runs)
       assert "--remove-existing-container" in up
@@ -1449,12 +1085,10 @@ defmodule ForemanAgent.EnvTest do
 
         assert {:ok, _} = Env.run(unquote(type), payload, ctx)
 
-        [{"devcontainer", _, rc_opts}, {"devcontainer", args, opts}] =
-          Enum.filter(runs(), &match?({"devcontainer", _, _}, &1))
+        [{"devcontainer", args, opts}] = Enum.filter(runs(), &match?({"devcontainer", _, _}, &1))
 
         refute Enum.any?(args, &(&1 =~ "ghp_registry"))
         assert is_binary(opts[:env]["DOCKER_CONFIG"])
-        assert rc_opts[:env]["DOCKER_CONFIG"] == opts[:env]["DOCKER_CONFIG"]
       end
     end
 
@@ -1788,98 +1422,6 @@ defmodule ForemanAgent.EnvTest do
     end
 
     # Sidecars are recreated by compose directly, before the CLI's up.
-    test "affected checks the networks around the sidecars it recreates too", %{ctx: ctx} do
-      stub_tools(
-        compose: %{
-          "name" => "storefront-2",
-          "services" => %{
-            "neon" => %{"environment" => %{"NEON_API_KEY" => "${NEON_API_KEY}"}},
-            "app" => %{}
-          },
-          "networks" => %{
-            "default" => %{
-              "name" => "storefront-2_default",
-              "driver_opts" => %{"com.docker.network.bridge.name" => "fm-0123456789ab"}
-            }
-          }
-        },
-        networks: fn %{"name" => _} ->
-          [
-            %{
-              "Id" => "n1",
-              "Name" => "storefront-2_default",
-              "Driver" => "bridge",
-              "Options" => %{},
-              "Labels" => %{"com.docker.compose.project" => "storefront-2"}
-            }
-          ]
-        end
-      )
-
-      assert {:error, message} =
-               Env.run(
-                 "env.restart",
-                 %{
-                   env_id: @env_id,
-                   slug: "storefront-2",
-                   mode: "affected",
-                   changed: ["NEON_API_KEY"],
-                   compose_env: %{}
-                 },
-                 ctx
-               )
-
-      assert message =~ "storefront-2_default"
-
-      refute Enum.any?(runs(), fn {cmd, args, _} ->
-               cmd == "docker" and "--force-recreate" in args
-             end)
-    end
-
-    test "affected stops the environment when a recreated sidecar lands on another bridge", %{
-      ctx: ctx
-    } do
-      stub_tools(
-        compose: %{
-          "services" => %{
-            "neon" => %{"environment" => %{"NEON_API_KEY" => "${NEON_API_KEY}"}},
-            "app" => %{}
-          }
-        },
-        networks: fn %{"id" => ["n9"]} ->
-          [%{"Id" => "n9", "Name" => "x", "Driver" => "bridge", "Options" => %{}}]
-        end,
-        containers: [
-          %{
-            "Id" => "c1",
-            "Names" => ["/storefront-2-neon-1"],
-            "NetworkSettings" => %{"Networks" => %{"x" => %{"NetworkID" => "n9"}}}
-          }
-        ]
-      )
-
-      assert {:error, message} =
-               Env.run(
-                 "env.restart",
-                 %{
-                   env_id: @env_id,
-                   slug: "storefront-2",
-                   mode: "affected",
-                   changed: ["NEON_API_KEY"],
-                   compose_env: %{}
-                 },
-                 ctx
-               )
-
-      assert message =~ "storefront-2-neon-1"
-      calls = runs()
-      refute Enum.any?(calls, &match?({"devcontainer", ["up" | _], _}, &1))
-
-      assert Enum.any?(calls, fn {cmd, args, _} ->
-               cmd == "docker" and args == ["compose", "-p", "storefront-2", "stop"]
-             end)
-    end
-
     test "all stops the whole project and brings it back up", %{ctx: ctx} do
       assert {:ok, %{"restarted" => "all"}} =
                Env.run(

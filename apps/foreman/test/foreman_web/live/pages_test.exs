@@ -363,55 +363,6 @@ defmodule ForemanWeb.PagesTest do
     refute has_element?(view, "#env-secrets-A-promote")
   end
 
-  test "a box that opens up its policy gets a red alert everywhere it's shown", %{
-    conn: conn,
-    user: user
-  } do
-    open =
-      box_fixture(
-        owner_user_id: user.id,
-        name: "open",
-        policy:
-          Map.merge(ForemanProtocol.Policy.defaults(), %{
-            "privileged" => "allow",
-            "host_bind" => "warn"
-          })
-      )
-
-    {:ok, view, _html} = live(conn, ~p"/boxes/#{open.id}")
-    assert has_element?(view, "#box-policy-alert", "privileged")
-    assert has_element?(view, "#box-policy-alert", "root on the box")
-    assert has_element?(view, "#box-policy-alert", "bind mounts from outside the workspace")
-    assert has_element?(view, "#box-policy-alert", "FOREMAN_POLICY")
-
-    {:ok, view, _html} = live(conn, ~p"/boxes")
-    assert has_element?(view, "#box-#{open.id} [data-role=policy-alert]", "Privileged allowed")
-
-    {:ok, view, _html} = live(conn, ~p"/")
-
-    assert has_element?(
-             view,
-             "#box-card-#{open.id} [data-role=policy-alert]",
-             "Privileged allowed"
-           )
-  end
-
-  test "a box on the default policy, or one that hasn't reported it, has no alert", %{
-    conn: conn,
-    box: box,
-    user: user
-  } do
-    unknown = box_fixture(owner_user_id: user.id, name: "unknown", policy: nil)
-
-    for b <- [box, unknown] do
-      {:ok, view, _html} = live(conn, ~p"/boxes/#{b.id}")
-      refute has_element?(view, "#box-policy-alert")
-    end
-
-    {:ok, view, _html} = live(conn, ~p"/boxes")
-    refute has_element?(view, "[data-role=policy-alert]")
-  end
-
   test "a box that needs a reboot says so on its page and its card", %{conn: conn, user: user} do
     box =
       box_fixture(
@@ -498,12 +449,7 @@ defmodule ForemanWeb.PagesTest do
         owner_user_id: user.id,
         name: "kept",
         firewall: "outdated",
-        firewall_default_bridge: "reaches_tailnet",
-        policy:
-          Map.merge(ForemanProtocol.Policy.defaults(), %{
-            "privileged" => "allow",
-            "host_bind" => "warn"
-          })
+        firewall_default_bridge: "reaches_tailnet"
       )
 
     {:ok, view, _html} = live(conn, ~p"/boxes/#{box.id}")
@@ -511,7 +457,7 @@ defmodule ForemanWeb.PagesTest do
     assert has_element?(
              view,
              "#box-firewall-alert",
-             "sudo sh -s -- --policy host_bind=warn,privileged=allow --default-bridge-reaches-tailnet"
+             "sudo sh -s -- --default-bridge-reaches-tailnet"
            )
   end
 

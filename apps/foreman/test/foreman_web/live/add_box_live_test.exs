@@ -60,14 +60,10 @@ defmodule ForemanWeb.AddBoxLiveTest do
     assert has_element?(view, "#install-command", "/agent/install.sh | sudo sh -s -- --token fj_")
   end
 
-  test "a Mac runs the box as a VM with the Mac launcher, no sudo", %{conn: conn} do
+  # Mac boxes come back with environment VMs on Apple's hypervisor (#180).
+  test "there's no Mac launcher", %{conn: conn} do
     view = add_box(conn)
-    raw = token(view)
-    view |> element("#join-kinds button", "Mac") |> render_click()
-
-    assert has_element?(view, "#install-command", "/agent/mac.sh | sh -s -- --token #{raw}")
-
-    refute render(element(view, "#install-command")) =~ "sudo"
+    refute has_element?(view, "#join-kinds button", "Mac")
   end
 
   test "a Linux machine with KVM can run it as a VM too", %{conn: conn} do

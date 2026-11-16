@@ -18,7 +18,7 @@ defmodule ForemanProtocol do
   # (`can_restart`) and which boot it's on (`boot_id`), which the command
   # names.
   # 6: every environment runs in a VM of its own; the join reports whether
-  # the box can run them (`vm`).
+  # the box can run them (`vm`), and no longer a compose policy (`policy`).
   @version 6
 
   # Usually the protocol before this one is accepted too. Protocol 5
@@ -46,9 +46,6 @@ defmodule ForemanProtocol do
     # this leave it out.
     feature_version: {:version, []},
     in_flight: {{:list, :uuid}, default: []},
-    policy:
-      {{:map_of, {:enum, ForemanProtocol.Policy.rules()},
-        {:enum, ForemanProtocol.Policy.actions()}}, default: %{}},
     # Whether the box's firewall, which keeps environments off the tailnet
     # as the box, is loaded and the one this agent ships with; and whether
     # it leaves Docker's default bridge, where image builds run, out.

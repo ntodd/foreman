@@ -1,8 +1,8 @@
 defmodule ForemanWeb.AgentController do
   @moduledoc """
   What agents fetch over plain HTTP: enrollment, the install script and
-  release tarballs, and for Flatcar boxes the launchers (`mac.sh`,
-  `vm.sh`) and their first-boot config. Enrollment and the config need a
+  release tarballs, and for Flatcar boxes the Linux launcher (`vm.sh`)
+  and their first-boot config. Enrollment and the config need a
   join token; tarballs are signed, and agents verify the signature
   themselves.
   """
@@ -41,12 +41,11 @@ defmodule ForemanWeb.AgentController do
   end
 
   def install_script(conn, _params), do: send_script(conn, "install.sh")
-  def mac_script(conn, _params), do: send_script(conn, "mac.sh")
   def vm_script(conn, _params), do: send_script(conn, "vm.sh")
 
   # sobelow_skip ["Traversal.FileModule"]
   # A fixed path inside the release, one of the three above.
-  defp send_script(conn, name) when name in ["install.sh", "mac.sh", "vm.sh"] do
+  defp send_script(conn, name) when name in ["install.sh", "vm.sh"] do
     script =
       Application.app_dir(:foreman, Path.join("priv/agent", name))
       |> File.read!()

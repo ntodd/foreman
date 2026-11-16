@@ -243,7 +243,6 @@ defmodule Foreman.Boxes do
         hostname: join.hostname,
         os: join.os,
         arch: join.arch,
-        policy: if(join.policy == %{}, do: nil, else: join.policy),
         firewall: Map.get(join, :firewall),
         firewall_default_bridge: Map.get(join, :firewall_default_bridge),
         vm: vm_report(Map.get(join, :vm)),
@@ -363,34 +362,6 @@ defmodule Foreman.Boxes do
   def reboot_needed(%Box{reboot_required: true}), do: :required
   def reboot_needed(%Box{}), do: nil
 
-  @policy_labels %{
-    "privileged" =>
-      "privileged containers (docker-in-docker, privileged: true, SYS_ADMIN and the like)",
-    "host_namespace" => "the host's network, PID or IPC namespace",
-    "docker_socket" => "the Docker socket",
-    "host_bind" => "bind mounts from outside the workspace",
-    "host_file" => "env files, secrets and build contexts from outside the workspace",
-    "devices" => "host devices",
-    "gpu" =>
-      "NVIDIA GPUs. Environments on this box share them, and Foreman doesn't limit or isolate GPU memory between them",
-    "seccomp" => "containers with seccomp turned off (seccomp=unconfined)",
-    "compose_keys" => "compose settings Foreman hasn't reviewed"
-  }
-
-  @doc """
-  The rules a box's agent has opened up from the default (refuse
-  everything), each with what it lets in. Empty for a box on the default
-  policy, and for one whose agent hasn't reported a policy.
-  """
-  def policy_exceptions(%Box{policy: policy}) when is_map(policy) do
-    for {rule, action} <- ForemanProtocol.Policy.relaxed(policy) do
-      %{rule: rule, action: action, label: Map.fetch!(@policy_labels, rule)}
-    end
-    |> Enum.sort_by(&(&1.rule != "privileged"))
-  end
-
-  def policy_exceptions(%Box{}), do: []
-
   @doc """
   What's wrong with a box's firewall, which keeps the code in its
   environments (and its image builds) from reaching the tailnet as the
@@ -407,20 +378,11 @@ defmodule Foreman.Boxes do
   def firewall_problem(%Box{}), do: nil
 
   @doc """
-  The install command that loads a box's firewall again without
-  changing the box: running the script without the box's `--policy` or
-  `--default-bridge-reaches-tailnet` would reset them.
+  The install command that sets the box up again (its firewall, the VM
+  helper) without changing it: running the script without the box's
+  `--default-bridge-reaches-tailnet` would reset that.
   """
   def reinstall_command(%Box{} = box) do
-    policy =
-      case ForemanProtocol.Policy.relaxed(box.policy || %{}) do
-        [] ->
-          []
-
-        rules ->
-          ["--policy", Enum.map_join(rules, ",", fn {rule, action} -> "#{rule}=#{action}" end)]
-      end
-
     bridge =
       if box.firewall_default_bridge == "reaches_tailnet",
         do: ["--default-bridge-reaches-tailnet"],
@@ -428,7 +390,7 @@ defmodule Foreman.Boxes do
 
     base = "curl -fsSL #{Foreman.Config.base_url()}/agent/install.sh | sudo sh"
 
-    case policy ++ bridge do
+    case bridge do
       [] -> base
       flags -> Enum.join([base, "-s", "--" | flags], " ")
     end

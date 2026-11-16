@@ -4,8 +4,6 @@ defmodule ForemanAgent.Config do
   (which `config/runtime.exs` fills from `FOREMAN_*` variables).
   """
 
-  alias ForemanAgent.Env.Policy
-
   @repo_feature Path.expand("../../../../features/src/foreman", __DIR__)
   @release_public_key Application.compile_env(:foreman_agent, :release_public_key)
   @guest_url Application.compile_env(:foreman_agent, :guest_url)
@@ -26,7 +24,6 @@ defmodule ForemanAgent.Config do
             proc: "/proc",
             allowed_git_hosts: ["github.com"],
             insecure_git_hosts: [],
-            policy_rules: %{},
             cleanup_image: "alpine:3.22",
             release_root: "/opt/foreman-agent",
             release_public_key: nil,
@@ -79,7 +76,6 @@ defmodule ForemanAgent.Config do
     env = Application.get_all_env(:foreman_agent)
 
     struct(__MODULE__, Keyword.take(env, Map.keys(%__MODULE__{}) -- [:__struct__]))
-    |> Map.update!(:policy_rules, &Map.merge(Policy.default_rules(), &1))
     |> Map.put(:release_public_key, decode_key(env[:release_public_key] || @release_public_key))
     |> Map.put(:guest_url, present(env[:guest_url_override]) || present(@guest_url))
     |> Map.put(:guest_sha256, present(env[:guest_sha256_override]) || present(@guest_sha256))
@@ -103,33 +99,6 @@ defmodule ForemanAgent.Config do
   end
 
   def put(%__MODULE__{} = config), do: :persistent_term.put(__MODULE__, config)
-
-  @doc "The box's policy as it's reported to the control plane on join."
-  def policy_report(%__MODULE__{policy_rules: rules}),
-    do: Map.new(rules, fn {rule, action} -> {to_string(rule), to_string(action)} end)
-
-  @doc """
-  Parses `FOREMAN_POLICY` entries (`rule=action`) into policy rules.
-  Raises on a rule or action the protocol doesn't know, so a typo stops
-  the agent rather than leaving a rule at its default unnoticed.
-  """
-  @spec parse_policy([String.t()]) :: %{atom() => atom()}
-  def parse_policy(pairs) do
-    rules = ForemanProtocol.Policy.rules()
-    actions = ForemanProtocol.Policy.actions()
-
-    Map.new(pairs, fn pair ->
-      with [rule, action] <- String.split(pair, "=", parts: 2),
-           true <- rule in rules and action in actions do
-        {String.to_atom(rule), String.to_atom(action)}
-      else
-        _ ->
-          raise ArgumentError,
-                "invalid FOREMAN_POLICY entry #{inspect(pair)}; rules: " <>
-                  "#{Enum.join(rules, ", ")}; actions: #{Enum.join(actions, ", ")}"
-      end
-    end)
-  end
 
   # Where install scripts before the bundled CLI put the one they installed
   # with npm, and what they wrote to agent.env: a self-update keeps that

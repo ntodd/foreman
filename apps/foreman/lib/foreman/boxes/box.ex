@@ -23,7 +23,6 @@ defmodule Foreman.Boxes.Box do
     field :capacity, :map
     field :capacity_policy, :string, default: "allow"
     field :contention_threshold, :float, default: 0.9
-    field :policy, :map
     field :firewall, :string
     field :firewall_default_bridge, :string
     field :reboot_required, :boolean

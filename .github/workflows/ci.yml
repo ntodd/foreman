@@ -186,7 +186,7 @@ jobs:
         with:
           node-version: "22"
       - name: ShellCheck
-        run: shellcheck -s sh guest/build.sh guest/rootfs/usr/local/lib/foreman-guest/* e2e/guest/run.sh e2e/vm/run.sh e2e/vmctl/test.sh apps/foreman_agent/priv/vm/guest-forward apps/foreman_agent/priv/vm/vmctl features/src/foreman/install.sh features/src/foreman/scripts/* apps/foreman/priv/agent/install.sh apps/foreman/priv/agent/mac.sh apps/foreman/priv/agent/vm.sh apps/foreman/priv/flatcar/*.sh apps/foreman_agent/rel/tools/bundle.sh apps/foreman_agent/rel/tools/devcontainer.sh scripts/publish-agent-release.sh e2e/*.sh e2e/firewall/test.sh e2e/linux/run.sh e2e/flatcar/run.sh e2e/linux/bin/gh docker/foreman-update e2e/updater/run.sh
+        run: shellcheck -s sh guest/build.sh guest/rootfs/usr/local/lib/foreman-guest/* e2e/guest/run.sh e2e/vm/run.sh e2e/vmctl/test.sh apps/foreman_agent/priv/vm/guest-forward apps/foreman_agent/priv/vm/vmctl features/src/foreman/install.sh features/src/foreman/scripts/* apps/foreman/priv/agent/install.sh apps/foreman/priv/agent/vm.sh apps/foreman/priv/flatcar/*.sh apps/foreman_agent/rel/tools/bundle.sh apps/foreman_agent/rel/tools/devcontainer.sh scripts/publish-agent-release.sh e2e/*.sh e2e/firewall/test.sh e2e/linux/run.sh e2e/flatcar/run.sh e2e/linux/bin/gh docker/foreman-update e2e/updater/run.sh
       - name: Test the VM helper
         run: sh e2e/vmctl/test.sh
       - name: Test the feature in a real devcontainer

@@ -6,7 +6,7 @@
   "workspaceFolder": "/workspaces/${localWorkspaceFolderBasename}",
   "remoteUser": "vscode",
   "postStartCommand": "date +%s%N >> /tmp/poststart.log",
-  // Runs on the box itself; Foreman must drop it.
-  "initializeCommand": "touch /tmp/foreman-initialize-command-ran",
+  // Runs outside the containers: in the environment's VM.
+  "initializeCommand": "touch .initialized",
   "hostRequirements": {"cpus": 2, "memory": "2gb"},
 }

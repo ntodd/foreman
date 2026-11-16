@@ -131,7 +131,6 @@ defmodule ForemanAgent.Connection do
       arch: Updater.target(),
       feature_version: Config.feature_version(Config.get()),
       in_flight: Ops.in_flight(),
-      policy: Config.policy_report(config),
       vm: VM.Status.report(config)
     }
     |> Map.merge(Firewall.report(config))

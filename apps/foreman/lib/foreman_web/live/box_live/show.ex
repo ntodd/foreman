@@ -219,7 +219,6 @@ defmodule ForemanWeb.BoxLive.Show do
       </.header>
 
       <.box_vm_alert box={@box} />
-      <.box_policy_alert box={@box} />
       <.box_firewall_alert box={@box} />
       <.box_reboot_alert box={@box} can_reboot={Scope.admin?(@current_scope) and @online} />
 

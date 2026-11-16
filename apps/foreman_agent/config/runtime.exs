@@ -17,11 +17,6 @@ if config_env() != :test do
     end
   end
 
-  # Every rule refuses by default. A box opens one up as an exception, for
-  # example FOREMAN_POLICY="seccomp=allow", and the control plane shows
-  # that box with a red alert. The rules are ForemanProtocol.Policy's.
-  policy = ForemanAgent.Config.parse_policy(list.("FOREMAN_POLICY", []))
-
   docker_socket =
     case System.get_env("DOCKER_HOST") do
       "unix://" <> path -> path
@@ -56,7 +51,6 @@ if config_env() != :test do
     docker_socket: docker_socket,
     allowed_git_hosts: list.("FOREMAN_ALLOWED_GIT_HOSTS", ["github.com"]),
     insecure_git_hosts: list.("FOREMAN_INSECURE_GIT_HOSTS", []),
-    policy_rules: policy,
     # Not guest_url and guest_sha256: those are read at compile time.
     guest_url_override: System.get_env("FOREMAN_GUEST_URL"),
     guest_sha256_override: System.get_env("FOREMAN_GUEST_SHA256"),

@@ -173,6 +173,16 @@ cat > "$work/overlay/.devcontainer/devcontainer.json" <<EOF
   "postStartCommand": "bash .devcontainer/probe.sh"
 }
 EOF
+# Docker-in-docker, which needs a privileged container: the environment's
+# VM is the boundary now, not a policy on its compose file.
+cp apps/foreman_agent/test/fixtures/repos/hello/.devcontainer/docker-compose.yml "$work/overlay/.devcontainer/"
+cat >> "$work/overlay/.devcontainer/docker-compose.yml" <<EOF
+  dind:
+    image: public.ecr.aws/docker/library/docker:29-dind
+    privileged: true
+    environment:
+      DOCKER_TLS_CERTDIR: ""
+EOF
 cat > "$work/overlay/.devcontainer/probe.sh" <<EOF
 #!/bin/bash
 try() { timeout 4 bash -c "exec 3<>/dev/tcp/\$2/\$3" 2>/dev/null; echo "PROBE \$1 \$?"; }
@@ -188,6 +198,9 @@ try box $box_ip 1
 try first-guest 10.250.0.2 1
 try internet 1.1.1.1 443
 try lan $lan 8080
+# The docker-in-docker sidecar's daemon, once it's up.
+for _ in \$(seq 30); do timeout 2 bash -c "exec 3<>/dev/tcp/dind/2375" 2>/dev/null && break; sleep 1; done
+try dind dind 2375
 EOF
 rm -rf "$work/git"
 e2e/make-git-fixture.sh "$work/git" hello "$work/overlay" >/dev/null
@@ -279,7 +292,8 @@ probe gateway 124 create
 probe box 124 create
 probe internet 0 create
 probe lan 0 create
-echo "ok: the environment reaches the internet and the LAN, not the box"
+probe dind 0 create
+echo "ok: the environment reaches the internet and the LAN, not the box, and runs docker-in-docker"
 
 say "a second environment can't reach the first"
 cp_eval 'E2E.create()' >/dev/null
