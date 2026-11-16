@@ -2,6 +2,8 @@ defmodule ForemanAgent.Application do
   @moduledoc false
   use Application
 
+  alias ForemanAgent.VM.Links
+
   @impl true
   def start(_type, _args) do
     config = ForemanAgent.Config.load()
@@ -40,7 +42,8 @@ defmodule ForemanAgent.Application do
           ]
 
         :host ->
-          [ForemanAgent.Outbox, ForemanAgent.Ops] ++ if(config.connect, do: [link], else: [])
+          Links.child_specs() ++
+            [ForemanAgent.Outbox, ForemanAgent.Ops] ++ if(config.connect, do: [link], else: [])
       end
 
     Supervisor.start_link(children,

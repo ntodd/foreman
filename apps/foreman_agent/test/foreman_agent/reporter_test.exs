@@ -50,7 +50,9 @@ defmodule ForemanAgent.ReporterTest do
       proc = Path.join(System.tmp_dir!(), "reporter-ports-#{System.unique_integer([:positive])}")
       File.mkdir_p!(Path.join(proc, "77/net"))
       previous = ForemanAgent.Config.get()
-      ForemanAgent.Config.put(%{previous | proc: proc})
+      # Ports read from Docker, as the agent in a VM reads them; the box's
+      # own come from its VMs (ForemanAgent.VMEnvTest).
+      ForemanAgent.Config.put(%{previous | proc: proc, mode: :guest})
 
       stub(RunnerMock, :run, fn _cmd, _args, _opts -> {:ok, %{status: 0, output: ""}} end)
       stub(DockerMock, :info, fn -> {:ok, %{}} end)

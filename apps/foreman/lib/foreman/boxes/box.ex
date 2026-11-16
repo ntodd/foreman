@@ -31,6 +31,9 @@ defmodule Foreman.Boxes.Box do
     field :livepatch, :boolean
     field :can_restart, :boolean, default: false
     field :boot_id, :string
+    # Protocol 6: whether it can run environment VMs (string keys: ready,
+    # reason, nested, reflink).
+    field :vm, :map
     field :last_seen_at, :utc_datetime_usec
     field :revoked_at, :utc_datetime_usec
     timestamps()

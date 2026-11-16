@@ -107,6 +107,47 @@ defmodule ForemanWeb.ForemanComponents do
     """
   end
 
+  @doc "The chip on a box card when the box can't run environments."
+  attr :box, :map, required: true
+
+  def box_vm_badge(assigns) do
+    assigns = assign(assigns, :problem, Foreman.Boxes.vm_problem(assigns.box))
+
+    ~H"""
+    <.badge :if={@problem} color="rose" size="sm" data-role="vm-alert">
+      {case @problem do
+        {:agent, _} -> "Agent too old"
+        {:vm, _} -> "Can't run environments"
+      end}
+    </.badge>
+    """
+  end
+
+  @doc """
+  The box page's alert for a box that can't run environments: an agent
+  from before environment VMs, or one that says it can't run them.
+  """
+  attr :box, :map, required: true
+
+  def box_vm_alert(assigns) do
+    assigns =
+      assigns
+      |> assign(:problem, Foreman.Boxes.vm_problem(assigns.box))
+      |> assign(:command, Foreman.Boxes.reinstall_command(assigns.box))
+
+    ~H"""
+    <.callout :if={@problem} kind="danger" id="box-vm-alert">
+      <p class="text-[15px] font-semibold">This box can't run environments</p>
+      <p :if={match?({:agent, _}, @problem)} class="mt-1">
+        Its agent ({elem(@problem, 1)}) ran environments on the box's shared Docker, which this Foreman no longer does: every environment runs in a VM of its own now. Foreman refuses the agent until the install script runs again, which sets the box up for VMs: <span class="font-mono break-all">{@command}</span>. Environments made before then can't start; push their work, then destroy and recreate them.
+      </p>
+      <p :if={match?({:vm, _}, @problem)} class="mt-1">
+        {String.capitalize(elem(@problem, 1))}.
+      </p>
+    </.callout>
+    """
+  end
+
   @doc "The chip on a box card when the box's firewall isn't keeping environments off the tailnet."
   attr :box, :map, required: true
 

@@ -8,7 +8,11 @@ defmodule ForemanAgent.Config do
 
   @repo_feature Path.expand("../../../../features/src/foreman", __DIR__)
   @release_public_key Application.compile_env(:foreman_agent, :release_public_key)
+  @guest_url Application.compile_env(:foreman_agent, :guest_url)
+  @guest_sha256 Application.compile_env(:foreman_agent, :guest_sha256)
 
+  # Read once and cached (get/0), so the size of the map doesn't matter.
+  # credo:disable-for-next-line Credo.Check.Warning.StructFieldAmount
   defstruct url: nil,
             data_dir: "/var/lib/foreman-agent",
             envs_root: "/srv/foreman/envs",
@@ -44,6 +48,23 @@ defmodule ForemanAgent.Config do
             # ForemanAgent.Guest).
             mode: :host,
             guest_socket: "/run/foreman-guest/agent.sock",
+            # Environment VMs, on the box (see ForemanAgent.VM).
+            vm_root: "/srv/foreman/vms",
+            guest_root: "/srv/foreman/guest",
+            agent_disks: "/srv/foreman/agent-disks",
+            vmctl_socket: "/run/foreman-vmctl.sock",
+            # The guest system image: release builds carry its URL and
+            # SHA-256 (FOREMAN_GUEST_URL, FOREMAN_GUEST_SHA256 at build
+            # time); the same variables at run time override them.
+            guest_url: nil,
+            guest_sha256: nil,
+            # A VM's size when the environment has no limits of its own.
+            vm_cpus: 4,
+            vm_memory_mb: 8192,
+            vm_disk_gb: 64,
+            # How long a booted VM's guest agent gets to answer.
+            vm_boot_timeout: 120_000,
+            machine: ForemanAgent.VM.Machine.Cloud,
             tailscale_join_wait: :timer.seconds(30)
 
   @type t :: %__MODULE__{}
@@ -55,6 +76,8 @@ defmodule ForemanAgent.Config do
     struct(__MODULE__, Keyword.take(env, Map.keys(%__MODULE__{}) -- [:__struct__]))
     |> Map.update!(:policy_rules, &Map.merge(Policy.default_rules(), &1))
     |> Map.put(:release_public_key, decode_key(env[:release_public_key] || @release_public_key))
+    |> Map.put(:guest_url, present(env[:guest_url_override]) || present(@guest_url))
+    |> Map.put(:guest_sha256, present(env[:guest_sha256_override]) || present(@guest_sha256))
     |> Map.update!(:feature_dir, &(&1 || default_feature_dir()))
     |> Map.update!(:firewall_rules, &(&1 || default_firewall_rules()))
     |> Map.merge(tools(default_tools_dir(), Map.new([:devcontainer, :node], &{&1, env[&1]})))
@@ -155,7 +178,7 @@ defmodule ForemanAgent.Config do
 
   @doc "Paths no environment may ever bind-mount."
   def protected_paths(%__MODULE__{} = c),
-    do: [c.data_dir, c.envs_root, c.secrets_root, c.release_root]
+    do: [c.data_dir, c.envs_root, c.secrets_root, c.release_root, c.vm_root]
 
   defp default_tools_dir, do: Application.app_dir(:foreman_agent, "priv/tools")
 
@@ -166,6 +189,9 @@ defmodule ForemanAgent.Config do
     priv = Application.app_dir(:foreman_agent, "priv/feature")
     if File.dir?(priv), do: priv, else: @repo_feature
   end
+
+  defp present(value) when is_binary(value) and value != "", do: value
+  defp present(_), do: nil
 
   defp decode_key(nil), do: nil
   defp decode_key(key) when byte_size(key) == 32, do: key

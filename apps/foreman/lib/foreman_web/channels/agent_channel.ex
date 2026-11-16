@@ -14,8 +14,8 @@ defmodule ForemanWeb.AgentChannel do
   @impl true
   def join("agent:" <> box_id, payload, %{assigns: %{box_id: box_id}} = socket) do
     with {:ok, join} <- ForemanProtocol.cast_join(payload),
-         true <- ForemanProtocol.compatible?(join.protocol_version) || {:error, :protocol},
-         %Boxes.Box{revoked_at: nil} = box <- Boxes.get_box(box_id) do
+         %Boxes.Box{revoked_at: nil} = box <- Boxes.get_box(box_id),
+         true <- compatible(box, join) do
       # Before registering: once registered the box is online, and
       # Housekeeping would judge the operations about to be resent by when
       # they were first sent.
@@ -38,6 +38,16 @@ defmodule ForemanWeb.AgentChannel do
   end
 
   def join(_topic, _payload, _socket), do: {:error, %{reason: "unauthorized"}}
+
+  # A refused agent's box says why on its page.
+  defp compatible(box, join) do
+    if ForemanProtocol.compatible?(join.protocol_version) do
+      true
+    else
+      Boxes.agent_refused(box, join)
+      {:error, :protocol}
+    end
+  end
 
   @impl true
   def handle_info(:after_join, socket) do

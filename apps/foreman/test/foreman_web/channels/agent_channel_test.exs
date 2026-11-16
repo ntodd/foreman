@@ -93,10 +93,33 @@ defmodule ForemanWeb.AgentChannelTest do
                subscribe_and_join(
                  socket,
                  "agent:#{box.id}",
-                 join_payload(%{"protocol_version" => ForemanProtocol.version() - 1})
+                 Map.delete(join_payload(), "firewall")
                )
 
       assert Repo.reload!(box).firewall == nil
+    end
+
+    test "records whether the box can run environment VMs", %{box: box} do
+      {:ok, socket} = connect(AgentSocket, %{}, connect_info: signed_connect_info(box))
+      vm = %{"ready" => false, "reason" => "this box has no /dev/kvm"}
+
+      assert {:ok, _, _} =
+               subscribe_and_join(socket, "agent:#{box.id}", join_payload(%{"vm" => vm}))
+
+      assert %{"ready" => false, "reason" => "this box has no /dev/kvm"} = Repo.reload!(box).vm
+      assert Foreman.Boxes.vm_problem(Repo.reload!(box)) == {:vm, "this box has no /dev/kvm"}
+    end
+
+    test "refuses an agent from before environment VMs, and says so on its box", %{box: box} do
+      {:ok, socket} = connect(AgentSocket, %{}, connect_info: signed_connect_info(box))
+      payload = join_payload(%{"protocol_version" => 5, "agent_version" => "0.4.13"})
+
+      assert {:error, %{reason: "unsupported protocol version"}} =
+               subscribe_and_join(socket, "agent:#{box.id}", payload)
+
+      box = Repo.reload!(box)
+      assert box.protocol_version == 5
+      assert Foreman.Boxes.vm_problem(box) == {:agent, "0.4.13"}
     end
 
     test "an agent that doesn't report a policy leaves it unknown", %{box: box} do

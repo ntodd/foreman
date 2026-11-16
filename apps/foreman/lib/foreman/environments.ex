@@ -104,6 +104,7 @@ defmodule Foreman.Environments do
            cpu_limit: number(attrs["cpu_limit"]),
            memory_limit_mb: integer(attrs["memory_limit_mb"])
          },
+         :ok <- check_vm(box),
          :ok <- check_placement(box, repo, limits, attrs["confirm"] in ["true", true]) do
       branch = blank(attrs["branch"]) || repo.default_branch
       insert_environment(scope, user, repo, box, branch, limits)
@@ -133,6 +134,22 @@ defmodule Foreman.Environments do
   end
 
   defp fetch_box(_, _), do: {:error, "pick a box"}
+
+  # Every environment runs in a VM of its own; a box that can't run them
+  # gets none.
+  defp check_vm(box) do
+    case Foreman.Boxes.vm_problem(box) do
+      nil ->
+        :ok
+
+      {:agent, _} ->
+        {:error,
+         "#{box.name}'s agent predates environment VMs; run the install script on it again"}
+
+      {:vm, reason} ->
+        {:error, "#{box.name} can't run environments: #{reason}"}
+    end
+  end
 
   defp check_placement(box, repo, limits, confirmed?) do
     case Capacity.check_placement(box, live_for_box(box.id), repo, limits) do

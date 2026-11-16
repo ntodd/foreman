@@ -21,6 +21,17 @@ defmodule E2E do
     IO.puts("ENV=#{env.id} SLUG=#{env.slug}")
   end
 
+  # Like create/0, but prints the refusal instead of raising.
+  def try_create do
+    scope = Scope.for_user(admin())
+    repo = Foreman.Repos.get_repo_by_full_name(System.get_env("E2E_REPO", "acme/hello"))
+
+    case Environments.create_environment(scope, %{"repo_id" => repo.id, "box_id" => box().id}) do
+      {:ok, env} -> IO.puts("ENV=#{env.id} SLUG=#{env.slug}")
+      {:error, message} -> IO.puts("REFUSED #{message}")
+    end
+  end
+
   def status do
     admin()
     box = box()
@@ -41,6 +52,15 @@ defmodule E2E do
     env = Repo.get_by!(Foreman.Environments.Environment, slug: slug)
     [op | _] = Operations.list_for_environment(env.id, 1)
     IO.puts(Operations.log(op))
+  end
+
+  # The log of the latest operation of one kind (a secrets write can come
+  # after the start you're after).
+  def log(slug, action) do
+    admin()
+    env = Repo.get_by!(Foreman.Environments.Environment, slug: slug)
+    op = env.id |> Operations.list_for_environment(20) |> Enum.find(&(&1.action == action))
+    IO.puts(if op, do: Operations.log(op), else: "no #{action} operation")
   end
 
   def act(slug, action) do
@@ -100,6 +120,16 @@ defmodule E2E do
     IO.puts(
       "REBOOT required=#{box.reboot_required} can_restart=#{box.can_restart} " <>
         "boot=#{box.boot_id} packages=#{Enum.join(box.reboot_packages, ",")}"
+    )
+  end
+
+  # Whether the box can run environment VMs, as its agent last said.
+  def vm_status do
+    admin()
+    vm = box().vm || %{}
+
+    IO.puts(
+      "VM ready=#{vm["ready"]} nested=#{vm["nested"]} reflink=#{vm["reflink"]} reason=#{inspect(vm["reason"])}"
     )
   end
 

@@ -56,8 +56,32 @@ jobs:
       contents: read
       pull-requests: read
 
-  agent:
+  # The guest system image every environment VM boots (amd64 only for now).
+  # The amd64 agent is built with its URL on this release and its SHA-256,
+  # and downloads and checks it itself.
+  guest:
     needs: [check, ci]
+    runs-on: ubuntu-24.04
+    outputs:
+      sha256: ${{ steps.build.outputs.sha256 }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Build the guest image
+        id: build
+        env:
+          VERSION: ${{ needs.check.outputs.version }}
+        run: |
+          guest/build.sh out
+          mv out/foreman-guest-linux-amd64.tar "out/foreman-guest-$VERSION-linux-amd64.tar"
+          echo "sha256=$(sha256sum "out/foreman-guest-$VERSION-linux-amd64.tar" | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: guest
+          path: out/foreman-guest-*.tar
+          if-no-files-found: error
+
+  agent:
+    needs: [check, ci, guest]
     strategy:
       matrix:
         include:
@@ -73,10 +97,18 @@ jobs:
           VERSION: ${{ needs.check.outputs.version }}
           PUBLIC_KEY: ${{ vars.FOREMAN_RELEASE_PUBLIC_KEY }}
           ARCH: ${{ matrix.arch }}
+          GUEST_SHA256: ${{ needs.guest.outputs.sha256 }}
         run: |
+          guest_url="" guest_sha256=""
+          if [ "$ARCH" = amd64 ]; then
+            guest_url="https://github.com/$GITHUB_REPOSITORY/releases/download/v$VERSION/foreman-guest-$VERSION-linux-amd64.tar"
+            guest_sha256=$GUEST_SHA256
+          fi
           docker build -f docker/box.Dockerfile --target agent-tarball \
             --build-arg FOREMAN_AGENT_VERSION="$VERSION" \
             --build-arg FOREMAN_RELEASE_PUBLIC_KEY="$PUBLIC_KEY" \
+            --build-arg FOREMAN_GUEST_URL="$guest_url" \
+            --build-arg FOREMAN_GUEST_SHA256="$guest_sha256" \
             -o out .
           mv out/foreman_agent.tar.gz "out/foreman_agent-$VERSION-linux-$ARCH.tar.gz"
       # On this runner's architecture, before anything is signed or published.
@@ -212,6 +244,10 @@ jobs:
         with:
           name: agents
           path: out
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: guest
+          path: out
       - name: Publish the GitHub release
         env:
           VERSION: ${{ needs.check.outputs.version }}
@@ -250,4 +286,4 @@ jobs:
             echo "To register these agents on a control plane by hand: \`scripts/publish-agent-release.sh $VERSION\`"
           } > notes.md
           gh release create "$GITHUB_REF_NAME" --verify-tag --title "Foreman $VERSION" \
-            --notes-file notes.md out/*.tar.gz out/*.sig
+            --notes-file notes.md out/*.tar.gz out/*.sig out/foreman-guest-*.tar

@@ -11,7 +11,7 @@ defmodule ForemanAgent.StatsTest do
 
   defp ctx do
     %{
-      config: %Config{envs_root: "/srv/foreman/envs"},
+      config: %Config{envs_root: "/srv/foreman/envs", mode: :guest},
       runner: RunnerMock,
       docker: DockerMock,
       log: fn _, _ -> :ok end

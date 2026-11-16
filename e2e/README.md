@@ -42,19 +42,19 @@ any Chromium works.
 ## On an emulated Linux box
 
 The control plane release image, and a box image with what the install
-script expects of a box (systemd, Docker Engine, git, Node) and nothing
-of Foreman's. The box container runs privileged to boot systemd and host
-its own Docker daemon, the way a real box's Docker runs on its host; the
-environments inside it don't. `run.sh` builds both, publishes agents with
+script expects of a box (systemd, nftables, iproute2, e2fsprogs) and
+nothing of Foreman's; it has Docker too, like a box that also runs the
+control plane. The box container runs privileged to boot systemd. CI's
+Crew VMs have no KVM, so the box can't run environment VMs; this run
+checks that it says so instead (`e2e/vm/run.sh` runs environments for
+real). `run.sh` builds both images, publishes agents with
 `scripts/publish-agent-release.sh` (`bin/gh` stands in for the GitHub
 release), and installs the agent with the install script the control
 plane serves. It checks enrollment, single-use join tokens, a re-run of
-the install script, create, what's inside an environment (identity,
-feature, read-only secrets, no published ports, uid mapping, 0600
-secrets other users can't read), secrets delivery, a box reboot (tmpfs
-secrets restored and the environment restarted), a signed agent
-self-update, destroy, `--reenroll` after a revoke, and the systemd unit
-rolling back an update that crash-loops. CI runs it on every push.
+the install script, the box's VM report and an environment refused for
+it, the VM helper being root's, a box reboot, a signed agent
+self-update, `--reenroll` after a revoke, and the systemd unit rolling
+back an update that crash-loops. CI runs it on every push.
 
 ```sh
 e2e/linux/run.sh                 # SKIP_BUILD=1 to reuse images
@@ -91,6 +91,33 @@ guest/build.sh tmp/guest
 docker build -f docker/box.Dockerfile --target agent-tarball -o tmp/agent .
 e2e/guest/run.sh tmp/guest/foreman-guest-linux-amd64.tar tmp/agent/foreman_agent.tar.gz
 ```
+
+## Environment VMs, for real
+
+`vm/run.sh` runs environments in Cloud Hypervisor VMs on the machine it
+runs on: the control plane release image in Docker, the agent installed
+with the served install script, and a git server for the fixture repo on
+a stand-in for the box's LAN (a network namespace). Each environment's
+`postStartCommand` probes what it can reach and prints the result into
+its operation's log. It checks the box's VM report, the VM helper being
+root's, a VM's unit (its user, limits, no capabilities, seccomp), that an
+environment reaches the internet and the LAN but not the box or another
+environment, a secret reaching the guest after a stop and a start, an
+agent restart leaving the VMs running, and destroy leaving nothing behind.
+
+It installs the agent and changes the machine's network, so it refuses
+to run without `E2E_VM_THROWAWAY=1`; CI runs it on a GitHub-hosted runner,
+which has KVM and is thrown away after. It needs KVM, Docker, sudo,
+python3, zstd and Elixir (for `mix foreman_agent.sign`).
+
+```sh
+E2E_VM_THROWAWAY=1 e2e/vm/run.sh
+```
+
+`vmctl/test.sh` checks the root helper for environment VMs
+(`priv/vm/vmctl`) with stand-ins for `ip`, `systemctl` and `systemd-run`:
+what it refuses, the addresses it hands out, and the command line it
+builds. It needs no root.
 
 ## A Flatcar box, for real
 

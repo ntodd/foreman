@@ -26,6 +26,10 @@ defmodule ForemanAgent.HandlerTest do
   defp restore(key, value), do: Application.put_env(:foreman_agent, key, value)
 
   test "a crash in an environment command comes back as a redacted error" do
+    # As the agent in a VM runs it.
+    previous = ForemanAgent.Config.get()
+    on_exit(fn -> ForemanAgent.Config.put(previous) end)
+    ForemanAgent.Config.put(%{previous | mode: :guest})
     secret = "sk_live_0123456789abcdef"
     boom = fn _, _, _ -> raise "couldn't use #{secret}" end
     stub(RunnerMock, :run, boom)
@@ -51,11 +55,13 @@ defmodule ForemanAgent.HandlerTest do
     previous = ForemanAgent.Config.get()
     on_exit(fn -> ForemanAgent.Config.put(previous) end)
 
+    # Environment commands as the agent in a VM runs them.
     config = %{
       previous
       | envs_root: Path.join(tmp, "envs"),
         secrets_root: Path.join(tmp, "run"),
-        data_dir: Path.join(tmp, "data")
+        data_dir: Path.join(tmp, "data"),
+        mode: :guest
     }
 
     ForemanAgent.Config.put(config)

@@ -208,7 +208,9 @@ defmodule ForemanWeb.BoxLive.Show do
         <:subtitle>
           {@box.hostname || "Never connected"}<span :if={@box.arch}> · {@box.arch}</span><span :if={
             @box.agent_version
-          }> · {agent_label(@box, @target_version)}</span>
+          }> · {agent_label(@box, @target_version)}</span><span :if={vm_label(@box.vm)}> · {vm_label(
+            @box.vm
+          )}</span>
         </:subtitle>
         <:actions>
           <.badge :if={@summary.contention} color="amber">Contention</.badge>
@@ -216,6 +218,7 @@ defmodule ForemanWeb.BoxLive.Show do
         </:actions>
       </.header>
 
+      <.box_vm_alert box={@box} />
       <.box_policy_alert box={@box} />
       <.box_firewall_alert box={@box} />
       <.box_reboot_alert box={@box} can_reboot={Scope.admin?(@current_scope) and @online} />
@@ -489,4 +492,13 @@ defmodule ForemanWeb.BoxLive.Show do
       do: "agent #{box.agent_version}",
       else: "agent #{box.agent_version}, updating to #{target}"
   end
+
+  # How the box runs environment VMs: under its own KVM, or nested (it's a
+  # VM itself), and whether new disks are reflinks or full copies.
+  defp vm_label(%{"ready" => true} = vm) do
+    where = if vm["nested"], do: "VMs nested", else: "VMs on KVM"
+    if vm["reflink"], do: where, else: where <> ", full-copy disks"
+  end
+
+  defp vm_label(_vm), do: nil
 end

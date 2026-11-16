@@ -1,0 +1,310 @@
+#!/bin/sh
+# End-to-end run of environment VMs on a real Linux host: the control
+# plane release image in Docker, the agent installed on this machine with
+# the served install script, and environments in Cloud Hypervisor VMs.
+# Covers enrollment and the box's VM report, a VM's unit and sandbox, what
+# an environment can reach (the box, another environment, the box's LAN,
+# the internet), secrets across a stop and start, an agent restart that
+# leaves VMs running, and destroy.
+#
+#   E2E_VM_THROWAWAY=1 e2e/vm/run.sh
+#
+# It installs the agent on this machine and changes its network (taps,
+# nftables, iptables, a network namespace), so it only runs on a machine
+# you're about to throw away: CI's GitHub-hosted runner, or a VM made for
+# it. Needs KVM, Docker, sudo, git, python3, openssl, zstd, and Elixir for
+# mix foreman_agent.sign (through mise if it's installed).
+#
+# E2E_AGENT_TARBALL, E2E_GUEST_TAR and E2E_CP_IMAGE use what's already
+# built instead of building it; E2E_AGENT_SIG, a signature made with the
+# keys in tmp/e2e-vm/release-keys.env, instead of signing it here.
+#
+# The commands in single quotes run in the control plane.
+# shellcheck disable=SC2016
+set -eu
+
+[ "${E2E_VM_THROWAWAY:-}" = 1 ] || {
+  echo "e2e/vm/run.sh changes this machine; set E2E_VM_THROWAWAY=1 on one you'll throw away" >&2
+  exit 64
+}
+
+cd "$(dirname "$0")/../.."
+root=$(pwd)
+work=$root/tmp/e2e-vm
+mkdir -p "$work"
+version=0.1.0
+cp_name=foreman-e2e-vm-cp
+port=4100
+url=http://127.0.0.1:$port
+lan=192.168.77.2
+
+say() { printf '\n== %s\n' "$*"; }
+fail() {
+  printf '\nFAILED: %s\n' "$*" >&2
+  logs
+  exit 1
+}
+
+logs() {
+  echo "== control plane" >&2
+  docker logs --tail 60 "$cp_name" >&2 2>&1 || true
+  echo "== agent" >&2
+  sudo journalctl --no-pager -n 120 -u foreman-agent >&2 || true
+  for log in /srv/foreman/vms/*/serial.log /srv/foreman/vms/*/ch.log; do
+    [ -e "$log" ] || continue
+    echo "== $log" >&2
+    sudo tail -n 40 "$log" >&2 || true
+  done
+}
+
+wait_for() { # description, seconds, command...
+  desc=$1 timeout=$2
+  shift 2
+  i=0
+  until "$@" >/dev/null 2>&1; do
+    i=$((i + 2))
+    [ $i -lt "$timeout" ] || fail "timed out waiting for: $desc"
+    sleep 2
+  done
+  echo "ok: $desc"
+}
+
+if command -v mise >/dev/null 2>&1; then mix="mise x -- mix"; else mix=mix; fi
+
+cp_eval() {
+  docker exec "$cp_name" env -u PHX_SERVER /app/bin/foreman eval "Code.eval_file(\"/e2e/linux/eval.exs\"); $1" 2>&1
+}
+
+env_observed() { cp_eval 'E2E.status()' | grep "^ENV $1 " | sed 's/.*observed=\([a-z]*\).*/\1/'; }
+wait_for_env() { # slug, state, seconds
+  i=0
+  until [ "$(env_observed "$1")" = "$2" ]; do
+    if [ "$(env_observed "$1")" = error ]; then
+      cp_eval 'E2E.status()' >&2
+      cp_eval "E2E.log(\"$1\")" | tail -60 >&2
+      fail "$1 errored waiting for $2"
+    fi
+    i=$((i + 5))
+    [ $i -lt "$3" ] || { cp_eval "E2E.log(\"$1\")" | tail -60 >&2; fail "timed out waiting for $1 $2"; }
+    sleep 5
+  done
+  echo "ok: $1 $2"
+}
+
+# -- build -------------------------------------------------------------------
+target=linux-amd64
+assets=$work/release-$version
+mkdir -p "$assets"
+tarball=$assets/foreman_agent-$version-$target.tar.gz
+
+if [ -z "${E2E_GUEST_TAR:-}" ]; then
+  say "build the guest image"
+  guest/build.sh "$work/guest" >/dev/null
+  E2E_GUEST_TAR=$work/guest/foreman-guest-linux-amd64.tar
+fi
+guest_sha=$(sha256sum "$E2E_GUEST_TAR" | cut -d' ' -f1)
+
+say "release keys"
+if [ ! -s "$work/release-keys.env" ]; then
+  (cd apps/foreman_agent && $mix foreman_agent.sign --keygen | grep FOREMAN_) > "$work/release-keys.env.new"
+  mv "$work/release-keys.env.new" "$work/release-keys.env"
+fi
+# shellcheck source=/dev/null
+. "$work/release-keys.env"
+
+if [ -n "${E2E_AGENT_TARBALL:-}" ]; then
+  cp "$E2E_AGENT_TARBALL" "$tarball"
+else
+  say "build agent $version"
+  docker build -q -f docker/box.Dockerfile --target agent-tarball \
+    --build-arg "FOREMAN_AGENT_VERSION=$version" \
+    --build-arg "FOREMAN_RELEASE_PUBLIC_KEY=$FOREMAN_RELEASE_PUBLIC_KEY" \
+    -o "$work/agent" . >/dev/null
+  cp "$work/agent/foreman_agent.tar.gz" "$tarball"
+fi
+if [ -n "${E2E_AGENT_SIG:-}" ]; then
+  cp "$E2E_AGENT_SIG" "$tarball.sig"
+else
+  (cd apps/foreman_agent && FOREMAN_RELEASE_PRIVATE_KEY=$FOREMAN_RELEASE_PRIVATE_KEY $mix foreman_agent.sign "$version" "$target" "$tarball" | tail -1) > "$tarball.sig"
+fi
+
+if [ -z "${E2E_CP_IMAGE:-}" ]; then
+  say "build the control plane image"
+  E2E_CP_IMAGE=foreman-e2e-vm-cp
+  docker build -q -f docker/control-plane.Dockerfile -t "$E2E_CP_IMAGE" . >/dev/null
+fi
+
+# What an earlier run on this machine left: its VMs and their taps.
+for unit in $(systemctl list-units --plain --no-legend 'foreman-vm-*' | awk '{ print $1 }'); do
+  sudo systemctl stop "$unit"
+done
+sudo rm -rf /srv/foreman/vms /var/lib/foreman-vmctl/nets
+for tap in $(ip -br link | awk '/^fm-vm/ { print $1 }'); do sudo ip link del "$tap"; done
+
+# -- the box's LAN, with the fixture repo on it -------------------------------
+say "a git server on the box's LAN"
+# The probe each environment runs when it starts (its postStartCommand),
+# printed into the operation's log: what it can reach. Exit status 0 is
+# connected, 1 refused (reachable), 124 timed out (dropped).
+box_ip=$(ip -4 route get 1.1.1.1 | sed -n 's/.* src \([0-9.]*\).*/\1/p')
+mkdir -p "$work/overlay/.devcontainer"
+cat > "$work/overlay/.devcontainer/devcontainer.json" <<EOF
+{
+  "name": "hello",
+  "dockerComposeFile": ["docker-compose.yml"],
+  "service": "app",
+  "workspaceFolder": "/workspaces/\${localWorkspaceFolderBasename}",
+  "remoteUser": "vscode",
+  "postStartCommand": "bash .devcontainer/probe.sh"
+}
+EOF
+cat > "$work/overlay/.devcontainer/probe.sh" <<EOF
+#!/bin/bash
+try() { timeout 4 bash -c "exec 3<>/dev/tcp/\$2/\$3" 2>/dev/null; echo "PROBE \$1 \$?"; }
+echo "PROBE user \$(id -un)"
+# The devcontainer CLI gives the container's user the guest agent's uid, so
+# the 0600 secrets and the clone are the user's own.
+[ "\$(stat -c %u /run/foreman/secrets.env)" = "\$(id -u)" ] && echo "PROBE secrets-owner self" || echo "PROBE secrets-owner other"
+touch .probe-write 2>/dev/null; echo "PROBE workspace-writable \$?"
+secret=\$(. /run/foreman/secrets.env 2>/dev/null; printf %s "\${SIDECAR_TOKEN:-none}" | sha256sum | cut -c1-16)
+echo "PROBE secret \$secret"
+try gateway 10.250.0.1 1
+try box $box_ip 1
+try first-guest 10.250.0.2 1
+try internet 1.1.1.1 443
+try lan $lan 8080
+EOF
+rm -rf "$work/git"
+e2e/make-git-fixture.sh "$work/git" hello "$work/overlay" >/dev/null
+
+sudo ip netns del e2e-lan 2>/dev/null || true
+sudo ip link del e2e-lan0 2>/dev/null || true
+sudo ip netns add e2e-lan
+sudo ip link add e2e-lan0 type veth peer name lan0 netns e2e-lan
+sudo ip addr add 192.168.77.1/24 dev e2e-lan0
+sudo ip link set e2e-lan0 up
+sudo ip netns exec e2e-lan ip link set lo up
+sudo ip netns exec e2e-lan ip addr add "$lan/24" dev lan0
+sudo ip netns exec e2e-lan ip link set lan0 up
+sudo ip netns exec e2e-lan ip route add default via 192.168.77.1
+(cd "$work/git" && sudo ip netns exec e2e-lan python3 -m http.server 8080 --bind "$lan" >/dev/null 2>&1 &)
+
+# -- the control plane ---------------------------------------------------------
+say "start the control plane"
+docker rm -f "$cp_name" >/dev/null 2>&1 || true
+docker volume rm -f foreman-e2e-vm-data >/dev/null 2>&1 || true
+docker create --name "$cp_name" --network host \
+  -e SECRET_KEY_BASE="$(openssl rand -base64 48 | tr -d '\n')" \
+  -e FOREMAN_ENCRYPTION_KEY="$(openssl rand -base64 32)" \
+  -e FOREMAN_AGENT_RELEASE_PUBLIC_KEY="$FOREMAN_RELEASE_PUBLIC_KEY" \
+  -e PHX_HOST=127.0.0.1 -e PORT="$port" -e FOREMAN_LISTEN_IP=127.0.0.1 \
+  -e FOREMAN_BASE_URL="$url" -e FOREMAN_FORCE_SSL=false -e FOREMAN_SECURE_COOKIES=false \
+  -e FOREMAN_GIT_BASE_URL="http://$lan:8080" \
+  -v foreman-e2e-vm-data:/var/lib/foreman "$E2E_CP_IMAGE" >/dev/null
+docker cp e2e/. "$cp_name:/e2e"
+docker start "$cp_name" >/dev/null
+wait_for "control plane listening" 120 curl -fsS "$url/healthz"
+
+token=$(docker exec "$cp_name" env -u PHX_SERVER E2E_ADMIN=e2e E2E_BOX=vmbox /app/bin/foreman eval 'Code.eval_file("/e2e/seed.exs")' 2>/dev/null |
+  sed -n 's/^E2E_JOIN_TOKEN=//p')
+[ -n "$token" ] || fail "no join token"
+PATH="$root/e2e/linux/bin:$PATH" E2E_RELEASE_ASSETS="$assets" FOREMAN_CONTAINER="$cp_name" \
+  scripts/publish-agent-release.sh "$version" | grep -q "published agent $version for $target" ||
+  fail "publish-agent-release.sh"
+
+# -- the box -------------------------------------------------------------------
+say "install the agent with the served install script"
+# Not /tmp or /var/tmp: the agent's unit has private ones.
+sudo install -d -m 0755 /var/lib/foreman-e2e
+sudo install -m 0644 "$E2E_GUEST_TAR" /var/lib/foreman-e2e/guest.tar
+# The fixture repo's host, which the agent refuses by default, and the
+# guest image this run built. A drop-in: the install script owns the unit.
+sudo mkdir -p /etc/systemd/system/foreman-agent.service.d
+printf '[Service]\nEnvironment=FOREMAN_ALLOWED_GIT_HOSTS=%s FOREMAN_INSECURE_GIT_HOSTS=%s FOREMAN_GUEST_URL=file:///var/lib/foreman-e2e/guest.tar FOREMAN_GUEST_SHA256=%s FOREMAN_VM_CPUS=2 FOREMAN_VM_MEMORY_MB=3072 FOREMAN_VM_DISK_GB=20\n' \
+  "$lan" "$lan" "$guest_sha" | sudo tee /etc/systemd/system/foreman-agent.service.d/e2e.conf >/dev/null
+# A machine an earlier run enrolled with another control plane enrolls again.
+reenroll=""
+if sudo test -s /var/lib/foreman-agent/identity.json; then reenroll=--reenroll; fi
+curl -fsSL "$url/agent/install.sh" | sudo sh -s -- $reenroll --token "$token" | tee "$work/install.log"
+grep -q "foreman: enrolled" "$work/install.log" || fail "install.sh didn't enroll"
+id -nG foreman | grep -qw docker && fail "the agent is in the docker group"
+echo "ok: enrolled, not in the docker group"
+[ "$(sudo stat -c '%U %a' /etc/foreman-agent/vmctl)" = "root 755" ] || fail "the VM helper isn't root's"
+systemctl is-active --quiet foreman-vmctl.socket || fail "the VM helper's socket isn't listening"
+echo "ok: the VM helper is root's and listening"
+sudo nft list table inet foreman_guests >/dev/null || fail "the VM firewall table isn't loaded"
+echo "ok: the VM firewall table is loaded"
+
+vm_ready() { cp_eval 'E2E.vm_status()' | grep -q "^VM ready=true"; }
+wait_for "the box reports it can run VMs" 60 vm_ready
+cp_eval 'E2E.vm_status()' | grep "^VM"
+
+# -- an environment --------------------------------------------------------------
+say "create an environment"
+first=$(cp_eval 'E2E.create()' | sed -n 's/^ENV=\([^ ]*\) .*/\1/p')
+[ -n "$first" ] || fail "no environment"
+wait_for_env hello-1 running 900
+unit=foreman-vm-$first.service
+systemctl is-active --quiet "$unit" || fail "$unit isn't running"
+[ "$(systemctl show -p User --value "$unit")" = foreman ] || fail "the VM doesn't run as foreman"
+[ "$(systemctl show -p MemoryMax --value "$unit")" = $(((3072 + 512) * 1024 * 1024)) ] || fail "the VM's memory isn't limited"
+[ "$(systemctl show -p CPUQuotaPerSecUSec --value "$unit")" = 2s ] || fail "the VM's CPU isn't limited"
+pid=$(systemctl show -p MainPID --value "$unit")
+grep -q '^CapEff:\s*0000000000000000$' "/proc/$pid/status" || fail "the VM has capabilities"
+grep -q '^NoNewPrivs:\s*1$' "/proc/$pid/status" || fail "the VM can gain privileges"
+grep -q '^Seccomp:\s*2$' "/proc/$pid/status" || fail "the VM has no seccomp filter"
+echo "ok: the VM runs as foreman in $unit, limited, without capabilities, under seccomp"
+cp_eval 'E2E.log("hello-1", "create")' > "$work/create.log"
+grep "^PROBE" "$work/create.log" || fail "the probe didn't run"
+probe() { grep -q "^PROBE $1 $2\$" "$work/$3.log" || fail "probe $1: wanted $2, got $(grep "^PROBE $1 " "$work/$3.log")"; }
+probe user vscode create
+probe secrets-owner self create
+probe workspace-writable 0 create
+probe gateway 124 create
+probe box 124 create
+probe internet 0 create
+probe lan 0 create
+echo "ok: the environment reaches the internet and the LAN, not the box"
+
+say "a second environment can't reach the first"
+cp_eval 'E2E.create()' >/dev/null
+wait_for_env hello-2 running 600
+cp_eval 'E2E.log("hello-2", "create")' > "$work/create2.log"
+probe first-guest 124 create2
+probe gateway 124 create2
+echo "ok: environments don't reach each other"
+
+say "secrets survive a stop and start"
+cp_eval 'E2E.secret("hello-1", "SIDECAR_TOKEN", "vm-secret-1")' >/dev/null
+sleep 5
+cp_eval 'E2E.act("hello-1", "stop")' >/dev/null
+wait_for_env hello-1 stopped 180
+systemctl is-active --quiet "$unit" && fail "the VM is still running after stop"
+echo "ok: stopped, VM off"
+cp_eval 'E2E.act("hello-1", "start")' >/dev/null
+wait_for_env hello-1 running 300
+systemctl is-active --quiet "$unit" || fail "the VM didn't boot again"
+cp_eval 'E2E.log("hello-1", "start")' > "$work/start.log"
+want=$(printf %s vm-secret-1 | sha256sum | cut -c1-16)
+probe secret "$want" start
+echo "ok: the secret reached the environment after a boot"
+
+say "restarting the agent leaves the VMs running"
+before=$(systemctl show -p MainPID --value "$unit")
+sudo systemctl restart foreman-agent
+wait_for "the agent rejoined" 60 sh -c "docker logs $cp_name 2>&1 | grep -c 'agent vmbox joined' | grep -q '^[2-9]'"
+[ "$(systemctl show -p MainPID --value "$unit")" = "$before" ] || fail "the VM restarted with the agent"
+sleep 20
+[ "$(env_observed hello-1)" = running ] || fail "hello-1 isn't running after the agent restart"
+echo "ok: same VM process, environment still running"
+
+say "destroy"
+cp_eval 'E2E.act("hello-1", "destroy")' >/dev/null
+cp_eval 'E2E.act("hello-2", "destroy")' >/dev/null
+wait_for_env hello-1 destroyed 180
+wait_for_env hello-2 destroyed 180
+[ -z "$(ls -A /srv/foreman/vms 2>/dev/null)" ] || fail "VM disks left behind: $(ls /srv/foreman/vms)"
+ip -br link | grep -q '^fm-vm' && fail "taps left behind"
+echo "ok: nothing left on the box"
+
+say "PASSED"

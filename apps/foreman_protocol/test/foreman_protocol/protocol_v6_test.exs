@@ -1,0 +1,47 @@
+defmodule ForemanProtocol.ProtocolV6Test do
+  @moduledoc """
+  Protocol 6: every environment runs in a VM of its own. The join says
+  whether the box can run them. Agents on protocol 5 ran environments on
+  the box's shared Docker, which this protocol removed, so they're
+  refused rather than accepted as the protocol before this one.
+  """
+  use ExUnit.Case, async: true
+
+  @join %{
+    "agent_version" => "0.5.0",
+    "protocol_version" => 6,
+    "hostname" => "box",
+    "os" => "linux",
+    "arch" => "linux-amd64"
+  }
+
+  test "this build speaks protocol 6 and refuses agents on 5" do
+    assert ForemanProtocol.version() == 6
+    assert ForemanProtocol.oldest() == 6
+    assert ForemanProtocol.compatible?(6)
+    refute ForemanProtocol.compatible?(5)
+    refute ForemanProtocol.compatible?(7)
+    refute ForemanProtocol.compatible?("6")
+  end
+
+  test "the join reports whether the box can run environment VMs" do
+    assert {:ok, join} =
+             ForemanProtocol.cast_join(
+               Map.put(@join, "vm", %{"ready" => true, "nested" => true, "reflink" => false})
+             )
+
+    assert join.vm == %{ready: true, nested: true, reflink: false}
+  end
+
+  test "and why it can't" do
+    vm = %{"ready" => false, "reason" => "this box has no /dev/kvm"}
+    assert {:ok, join} = ForemanProtocol.cast_join(Map.put(@join, "vm", vm))
+    assert join.vm.reason == "this box has no /dev/kvm"
+    assert {:error, _} = ForemanProtocol.cast_join(Map.put(@join, "vm", %{"reason" => "x"}))
+  end
+
+  test "a join without it is still valid" do
+    assert {:ok, join} = ForemanProtocol.cast_join(@join)
+    refute Map.has_key?(join, :vm)
+  end
+end

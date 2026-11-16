@@ -86,7 +86,8 @@ defmodule Foreman.Fixtures do
         can_restart: Map.get(attrs, :can_restart, false),
         boot_id: Map.get(attrs, :boot_id),
         agent_version: "0.1.0",
-        protocol_version: 1,
+        protocol_version: Map.get(attrs, :protocol_version, ForemanProtocol.version()),
+        vm: Map.get(attrs, :vm),
         feature_version: Map.get(attrs, :feature_version)
       }
       |> Repo.insert!()

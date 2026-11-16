@@ -184,7 +184,8 @@ defmodule ForemanAgent.Env do
     end
   end
 
-  defp check_clone_url(url, config) do
+  @doc false
+  def check_clone_url(url, config) do
     uri = URI.parse(url)
     host = uri.host && String.downcase(uri.host)
     port_host = if uri.port in [80, 443, nil], do: host, else: "#{host}:#{uri.port}"

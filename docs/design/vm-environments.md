@@ -658,6 +658,7 @@ cloud-hypervisor \
 ```
 
 - Passing no `ip`, `mask` or `mtu` to `--net` is what lets it use a tap it doesn't own the configuration of, with no `CAP_NET_ADMIN`.
+- With `--landlock` and a tap, the rules need `/dev/net/tun` (read and write) and the tap's sysfs directory, `/sys/devices/virtual/net/<tap>` (read): Cloud Hypervisor adds the disks and kernel to its rules itself, but not those, and fails with "Failed to read the TAP flags from sysfs". Found in the first run with networking; the spikes' Landlock test had no NIC.
 - Suspend: `ch-remote --api-socket api.sock pause`, then `snapshot file://<dir>`, then `shutdown-vmm`.
 - Resume: `cloud-hypervisor --api-socket api.sock --restore source_url=file://<dir>,memory_restore_mode=copyonwrite,resume=true`. Passing `--landlock` together with `--restore` failed in the test with a request for a kernel. It isn't needed: the saved config carries the Landlock settings.
 - A snapshot is `config.json`, `state.json` and `memory-ranges`.

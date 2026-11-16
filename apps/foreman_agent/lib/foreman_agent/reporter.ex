@@ -10,7 +10,7 @@ defmodule ForemanAgent.Reporter do
   """
   use GenServer
 
-  alias ForemanAgent.{Config, Firewall, Handler, HostMetrics, Outbox, Ports, Reboot, Stats}
+  alias ForemanAgent.{Config, Firewall, Handler, HostMetrics, Outbox, Ports, Reboot, Stats, VM}
   alias ForemanProtocol.Event
 
   require Logger
@@ -162,8 +162,16 @@ defmodule ForemanAgent.Reporter do
     end
   end
 
+  # The agent in each VM reads its own environment's ports.
   defp ports(state) do
-    case Ports.collect(Handler.ctx(fn _, _ -> :ok end), state.port_names) do
+    config = Config.get()
+
+    collected =
+      if config.mode == :host,
+        do: {VM.Status.ports(config), state.port_names},
+        else: Ports.collect(Handler.ctx(fn _, _ -> :ok end), state.port_names)
+
+    case collected do
       {:error, message} ->
         Logger.warning(message)
         state
@@ -182,7 +190,7 @@ defmodule ForemanAgent.Reporter do
   end
 
   defp stats do
-    case Stats.collect(Handler.ctx(fn _, _ -> :ok end)) do
+    case Handler.stats(Handler.ctx(fn _, _ -> :ok end)) do
       {:ok, stats} -> push("box.stats", stats)
       {:error, message} -> Logger.warning(message)
     end

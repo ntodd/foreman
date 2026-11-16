@@ -7,17 +7,25 @@
 # identity (no token needed). To enroll again, for
 # example after the box was revoked, pass --reenroll with a new token.
 #
-# It also installs the box's firewall, which keeps environments (and
-# Docker's default bridge, where image builds run) from reaching the
-# tailnet as this box. --default-bridge-reaches-tailnet leaves the
-# default bridge out, for a box whose other containers need the tailnet
-# there; builds can then reach it too.
+# Every environment runs in a VM of its own (Cloud Hypervisor, which the
+# agent release carries), with its own kernel and Docker. The agent runs
+# as the unprivileged `foreman` user; foreman-vmctl, a small root helper
+# this script installs, gives each VM its tap, address and systemd unit.
 #
-# Needs: systemd, Docker Engine with Compose v2.24+, git and nftables. The
-# agent release carries its own Node and devcontainer CLI. The agent runs
-# as the `foreman` user, which
-# joins the docker group: that is root-equivalent on this box, so only
-# install it on boxes whose owner you trust with every environment on it.
+# It also installs the box's firewall, which keeps environments off the
+# tailnet as this box and off each other and the box itself, and (with
+# Docker on the box) keeps Docker's default bridge, where image builds
+# run, off the tailnet. --default-bridge-reaches-tailnet leaves the
+# default bridge out, for a box whose other containers need the tailnet
+# there. --block-lan keeps environments off this box's LAN too (DNS
+# aside); by default they reach it. --vm-subnet A.B gives VMs addresses
+# from A.B.0.0/16 instead of 10.250.0.0/16.
+#
+# Needs: systemd, nftables, iproute2, e2fsprogs and KVM (/dev/kvm; a box
+# that is itself a VM needs nested virtualization). amd64 only for now.
+# Docker isn't needed. /srv/foreman holds the VMs' disks: on XFS (or
+# btrfs) a new environment's disk is a reflink, made at once; on ext4 it's
+# a full copy.
 set -eu
 
 FOREMAN_URL="__FOREMAN_URL__"
@@ -25,6 +33,8 @@ TOKEN=""
 POLICY=""
 REENROLL=""
 DEFAULT_BRIDGE_FILTER=1
+BLOCK_LAN=""
+VM_SUBNET=10.250
 IDENTITY=/var/lib/foreman-agent/identity.json
 
 while [ $# -gt 0 ]; do
@@ -34,6 +44,8 @@ while [ $# -gt 0 ]; do
     --url) FOREMAN_URL="$2"; shift 2 ;;
     --reenroll) REENROLL=1; shift ;;
     --default-bridge-reaches-tailnet) DEFAULT_BRIDGE_FILTER=""; shift ;;
+    --block-lan) BLOCK_LAN=1; shift ;;
+    --vm-subnet) VM_SUBNET="$2"; shift 2 ;;
     *) echo "unknown option: $1" >&2; exit 64 ;;
   esac
 done
@@ -52,42 +64,53 @@ if [ -n "$enroll" ]; then
   [ -n "$TOKEN" ] || fail "--token is required (create one on the Boxes page)"
 fi
 command -v systemctl >/dev/null 2>&1 || fail "systemd is required"
-command -v docker >/dev/null 2>&1 || fail "Docker Engine is required"
-command -v git >/dev/null 2>&1 || fail "git is required"
+command -v systemd-run >/dev/null 2>&1 || fail "systemd-run is required"
+command -v ip >/dev/null 2>&1 || fail "iproute2 is required (apt install iproute2)"
+command -v mkfs.ext4 >/dev/null 2>&1 || fail "e2fsprogs is required (apt install e2fsprogs)"
+command -v flock >/dev/null 2>&1 || fail "flock is required (apt install util-linux)"
 nft=$(command -v nft 2>/dev/null || true)
 [ -n "$nft" ] || fail "nftables is required for the box's firewall (apt install nftables)"
+case "$VM_SUBNET" in
+  *.*.* | *[!0-9.]*) fail "--vm-subnet takes the first two octets of a private /16, like 10.250" ;;
+  10.[0-9] | 10.[1-9][0-9] | 10.1[0-9][0-9] | 10.2[0-4][0-9] | 10.25[0-5] | 172.1[6-9] | 172.2[0-9] | 172.3[01] | 192.168) ;;
+  *) fail "--vm-subnet takes the first two octets of a private /16, like 10.250" ;;
+esac
+# Its own VMs' taps aside: a re-run finds those.
+if ip -4 route show 2>/dev/null | grep -v ' dev fm-vm' | grep -q "^$VM_SUBNET\\."; then
+  fail "$VM_SUBNET.0.0/16 is already routed on this box; pick another with --vm-subnet"
+fi
+if [ ! -e /dev/kvm ]; then
+  echo "foreman: warning: this box has no /dev/kvm, so it can't run environments until KVM is on (or, for a VM, nested virtualization)" >&2
+fi
 # The firewall rejects environment traffic out of tailscale0, which on a
 # box using an exit node is all of it.
 if command -v tailscale >/dev/null 2>&1 && tailscale status --json 2>/dev/null | grep -q '"ExitNodeStatus"'; then
   fail "this box sends its traffic through a Tailscale exit node, and the box's firewall would cut environments off from the internet; turn it off with: tailscale set --exit-node="
 fi
 
-compose=$(docker compose version --short 2>/dev/null || true)
-[ -n "$compose" ] || fail "the Docker Compose plugin is required"
-# The overlay uses the `!reset` tag, reliable from Compose 2.24.
-compose_version=${compose#v}
-compose_major=${compose_version%%.*}
-compose_minor=${compose_version#*.}
-compose_minor=${compose_minor%%.*}
-case "$compose_major$compose_minor" in
-  *[!0-9]* | "") fail "couldn't read the Docker Compose version ($compose)" ;;
-esac
-if [ "$compose_major" -lt 2 ] || { [ "$compose_major" -eq 2 ] && [ "$compose_minor" -lt 24 ]; }; then
-  fail "Docker Compose $compose is too old; 2.24 or newer is needed. Install Docker from Docker's apt repository (https://docs.docker.com/engine/install/), which ships a current docker-compose-plugin"
-fi
-
 case "$(uname -m)" in
   x86_64) target=linux-amd64 ;;
-  aarch64 | arm64) target=linux-arm64 ;;
+  aarch64 | arm64)
+    target=linux-arm64
+    echo "foreman: warning: environment VMs aren't supported on arm64 yet; this box enrolls but can't run environments" >&2
+    ;;
   *) fail "unsupported architecture $(uname -m)" ;;
 esac
 
 echo "foreman: creating the foreman user"
 id foreman >/dev/null 2>&1 || useradd --system --home-dir /var/lib/foreman-agent --shell /usr/sbin/nologin foreman
-usermod -aG docker foreman
+# Agents before environment VMs ran environments on the box's Docker, as
+# a member of the docker group, which is root in all but name. This one
+# doesn't need it.
+if id -nG foreman 2>/dev/null | tr ' ' '\n' | grep -qx docker; then
+  gpasswd -d foreman docker >/dev/null
+  echo "foreman: took the foreman user out of the docker group"
+fi
 
 install -d -m 0700 -o foreman -g foreman /var/lib/foreman-agent
-install -d -m 0755 -o foreman -g foreman /srv/foreman /srv/foreman/envs
+install -d -m 0755 -o foreman -g foreman /srv/foreman
+install -d -m 0700 -o foreman -g foreman /srv/foreman/vms /srv/foreman/guest /srv/foreman/agent-disks
+install -d -m 0700 -o root -g root /var/lib/foreman-vmctl
 install -d -m 0755 -o foreman -g foreman /opt/foreman-agent /opt/foreman-agent/releases
 install -d -m 0750 -o root -g foreman /etc/foreman-agent
 
@@ -122,6 +145,8 @@ tar -xzf "$tmp/agent.tar.gz" -C "$new"
 # this script, served to a box pinned to it) wouldn't run environments.
 set -- "$new"/lib/foreman_agent-*/priv/tools/bin/devcontainer
 [ -x "$1" ] || { rm -rf "$new"; fail "agent $version doesn't carry the devcontainer CLI; install a newer agent (unpin this box in Foreman, or publish the release that came with this control plane)"; }
+set -- "$new"/lib/foreman_agent-*/priv/vm/vmctl
+[ -f "$1" ] || { rm -rf "$new"; fail "agent $version doesn't run environment VMs; install a newer agent (unpin this box in Foreman)"; }
 chown -R foreman:foreman "$new"
 rm -rf "$dest.old"
 if [ -d "$dest" ]; then mv "$dest" "$dest.old"; fi
@@ -167,6 +192,20 @@ umask 022
 # seconds.
 set -- "$dest"/lib/foreman_agent-*/priv/firewall/foreman.nft
 [ -f "$1" ] || fail "the agent release has no firewall rules"
+rules=$1
+# --block-lan keeps the lines marked for it; by default they go.
+if [ -n "$BLOCK_LAN" ]; then
+  sed 's/ # block-lan$//' "$rules" > /etc/foreman-agent/firewall.nft.src
+else
+  sed '/# block-lan$/d' "$rules" > /etc/foreman-agent/firewall.nft.src
+fi
+set -- /etc/foreman-agent/firewall.nft.src
+# A box without Docker has no default bridge to filter.
+no_docker=""
+if [ -n "$DEFAULT_BRIDGE_FILTER" ] && ! command -v docker >/dev/null 2>&1; then
+  DEFAULT_BRIDGE_FILTER=""
+  no_docker=1
+fi
 if [ -n "$DEFAULT_BRIDGE_FILTER" ]; then
   default_bridge=$(docker network inspect bridge --format '{{index .Options "com.docker.network.bridge.name"}}' 2>/dev/null || true)
   # Guessing would leave builds unfiltered without a word.
@@ -223,8 +262,9 @@ mv /etc/foreman-agent/firewall.nft.new /etc/foreman-agent/firewall.nft
 # from (an agent that updated itself past them reports them outdated),
 # and whether the default bridge is left out. The unit puts it in /run
 # while the rules are loaded.
-if [ -n "$DEFAULT_BRIDGE_FILTER" ]; then bridge_mode=filtered; else bridge_mode=reaches_tailnet; fi
-printf 'source_sha256=%s\ndefault_bridge=%s\n' "$(sha256sum < "$1" | cut -d' ' -f1)" "$bridge_mode" \
+rm -f /etc/foreman-agent/firewall.nft.src
+if [ -n "$DEFAULT_BRIDGE_FILTER" ] || [ -n "$no_docker" ]; then bridge_mode=filtered; else bridge_mode=reaches_tailnet; fi
+printf 'source_sha256=%s\ndefault_bridge=%s\n' "$(sha256sum < "$rules" | cut -d' ' -f1)" "$bridge_mode" \
   > /etc/foreman-agent/firewall.info
 chmod 0644 /etc/foreman-agent/firewall.info
 
@@ -239,6 +279,7 @@ Type=oneshot
 RemainAfterExit=yes
 RuntimeDirectory=foreman-firewall
 ExecStart=$nft -f /etc/foreman-agent/firewall.nft
+ExecStartPost=/bin/sh /etc/foreman-agent/guest-forward
 ExecStartPost=/bin/cp /etc/foreman-agent/firewall.info /run/foreman-firewall/loaded
 
 [Install]
@@ -255,7 +296,7 @@ set -u
 marker=/run/foreman-firewall/loaded
 # Stopped on purpose: leave it stopped.
 systemctl is-active --quiet foreman-firewall || exit 0
-if $nft -f /etc/foreman-agent/firewall.nft; then
+if $nft -f /etc/foreman-agent/firewall.nft && sh /etc/foreman-agent/guest-forward; then
   [ -e "\$marker" ] || cp /etc/foreman-agent/firewall.info "\$marker"
 else
   rm -f "\$marker"
@@ -288,12 +329,64 @@ AccuracySec=1s
 WantedBy=timers.target
 EOF
 
+# Environment VMs are routed through the box, which needs IPv4
+# forwarding. On from boot (before the network is up), not just when the
+# firewall loads: turning it on later makes the kernel switch LRO off on
+# every NIC, and some drivers (atlantic, for one) reset the link to do it.
+printf '# Written by the Foreman install script: environment VMs are routed through this box.\nnet.ipv4.ip_forward = 1\n' \
+  > /etc/sysctl.d/90-foreman.conf
+
+# Environment VMs: the root helper and what it reads. Root's own copies,
+# outside anything the agent can write, so the agent can't change what
+# runs as root.
+set -- "$dest"/lib/foreman_agent-*/priv/vm
+install -m 0755 -o root -g root "$1/vmctl" /etc/foreman-agent/vmctl
+install -m 0755 -o root -g root "$1/guest-forward" /etc/foreman-agent/guest-forward
+cat > /etc/foreman-agent/vmctl.conf <<EOF
+# Read by /etc/foreman-agent/vmctl, as root. Written by install.sh.
+SRV=/srv/foreman
+AGENT_ROOT=/opt/foreman-agent
+AGENT_USER=foreman
+POOL=$VM_SUBNET
+STATE=/var/lib/foreman-vmctl
+EOF
+chmod 0644 /etc/foreman-agent/vmctl.conf
+
+cat > /etc/systemd/system/foreman-vmctl.socket <<'EOF'
+[Unit]
+Description=Foreman VM helper socket
+
+[Socket]
+ListenStream=/run/foreman-vmctl.sock
+SocketUser=root
+SocketGroup=foreman
+SocketMode=0660
+Accept=yes
+MaxConnections=32
+
+[Install]
+WantedBy=sockets.target
+EOF
+
+cat > /etc/systemd/system/foreman-vmctl@.service <<'EOF'
+[Unit]
+Description=Foreman VM helper
+
+[Service]
+# Through sh: /etc is mounted noexec on Flatcar.
+ExecStart=/bin/sh /etc/foreman-agent/vmctl
+StandardInput=socket
+StandardOutput=socket
+StandardError=journal
+RuntimeMaxSec=120
+EOF
+
 cat > /etc/systemd/system/foreman-agent.service <<'EOF'
 [Unit]
 Description=Foreman agent
-After=network-online.target docker.service foreman-firewall.service
-Wants=network-online.target
-Requires=docker.service foreman-firewall.service
+After=network-online.target foreman-firewall.service foreman-vmctl.socket
+Wants=network-online.target foreman-vmctl.socket
+Requires=foreman-firewall.service
 OnFailure=foreman-agent-rollback.service
 StartLimitIntervalSec=120
 StartLimitBurst=5
@@ -410,7 +503,7 @@ fi
 
 systemctl daemon-reload
 systemctl enable foreman-firewall foreman-agent
-systemctl enable --now foreman-firewall-check.timer foreman-restart.path
+systemctl enable --now foreman-firewall-check.timer foreman-restart.path foreman-vmctl.socket
 if [ "$os_id" = flatcar ]; then systemctl enable --now foreman-flatcar-update.timer; fi
 # Loads the rules again on a re-run, in case they changed.
 systemctl restart foreman-firewall
@@ -419,6 +512,20 @@ systemctl restart foreman-firewall
 systemctl reset-failed foreman-agent 2>/dev/null || true
 systemctl restart foreman-agent
 rm -rf "$dest.old"
+
+# Whether a new environment's disk is a reflink or a full copy.
+probe=/srv/foreman/.reflink-probe
+echo probe > "$probe"
+if cp --reflink=always "$probe" "$probe.copy" 2>/dev/null; then
+  echo "foreman: /srv/foreman can reflink: new environments' disks are made at once"
+else
+  echo "foreman: /srv/foreman can't reflink (XFS or btrfs can): each new environment's disk is a full copy"
+fi
+rm -f "$probe" "$probe.copy"
+
+if [ -d /srv/foreman/envs ] && [ -n "$(ls -A /srv/foreman/envs 2>/dev/null)" ]; then
+  echo "foreman: environments from before VMs are still in /srv/foreman/envs and Docker; push their work, then destroy and recreate them in Foreman"
+fi
 
 if [ -z "$enroll" ]; then
   echo "foreman: updated; this box keeps its enrollment ($IDENTITY)."

@@ -246,6 +246,7 @@ defmodule Foreman.Boxes do
         policy: if(join.policy == %{}, do: nil, else: join.policy),
         firewall: Map.get(join, :firewall),
         firewall_default_bridge: Map.get(join, :firewall_default_bridge),
+        vm: vm_report(Map.get(join, :vm)),
         last_seen_at: DateTime.utc_now()
       )
       |> Repo.update!()
@@ -254,6 +255,42 @@ defmodule Foreman.Boxes do
     Foreman.Activity.box_joined(box, last_seen)
     box
   end
+
+  defp vm_report(nil), do: nil
+  defp vm_report(vm), do: Map.new(vm, fn {k, v} -> {to_string(k), v} end)
+
+  @doc """
+  Records an agent refused at join for its protocol, so the box's page can
+  say why it's offline: an agent from before environment VMs needs the
+  install script run again.
+  """
+  def agent_refused(%Box{} = box, join) do
+    box =
+      box
+      |> Ecto.Changeset.change(
+        agent_version: join.agent_version,
+        protocol_version: join.protocol_version
+      )
+      |> Repo.update!()
+
+    broadcast(box, :updated)
+    box
+  end
+
+  @doc """
+  Why a box can't run environments, or nil when it can (or hasn't said):
+  `{:agent, version}` for an agent that predates environment VMs, which
+  Foreman refuses until the install script runs again, or `{:vm, reason}`
+  for one that reported it can't run them.
+  """
+  def vm_problem(%Box{protocol_version: v, agent_version: agent})
+      when is_integer(v) and v < 6,
+      do: {:agent, agent}
+
+  def vm_problem(%Box{vm: %{"ready" => false} = vm}),
+    do: {:vm, vm["reason"] || "it can't run VMs"}
+
+  def vm_problem(%Box{}), do: nil
 
   @doc "Records the box firewall an agent reports between joins."
   def record_firewall(box_id, firewall) do

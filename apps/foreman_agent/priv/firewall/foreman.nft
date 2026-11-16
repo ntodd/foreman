@@ -64,3 +64,65 @@ table inet foreman {
 		iifname "docker0" jump environment # default-bridge
 	}
 }
+
+# Environment VMs. Each VM is routed to the box over a tap of its own,
+# fm-vm<n>, with a /30 for the box's end and the guest's (the root helper,
+# foreman-vmctl, sets them up). The guest is the environment's, so
+# anything in the environment can take it over and send what it likes:
+# it reaches the internet (and, unless install.sh --block-lan, the box's
+# LAN) through the box's NAT, and nothing else. The table above already
+# keeps it off the tailnet (its taps are fm-...).
+table inet foreman_guests
+delete table inet foreman_guests
+
+table inet foreman_guests {
+	# Nothing from a guest reaches the box itself (sshd, a control plane
+	# on the same machine, anything listening on any of its addresses),
+	# apart from replies to the box's own connections.
+	chain from_guest_to_box {
+		ct state established,related accept
+		counter drop
+	}
+
+	chain from_guest {
+		# A guest sends from its own address only: anything that isn't
+		# routed back through the tap it came in on (a neighbour's
+		# address, the box's, a made-up one) is dropped.
+		fib saddr . iif oif missing counter drop
+		fib saddr type local counter drop
+		meta nfproto ipv6 counter drop
+		# Not the tailnet at all, MagicDNS included: the table above lets
+		# Docker's networks use it, but a guest has its own resolvers.
+		ip daddr 100.64.0.0/10 counter reject with icmpx type admin-prohibited
+		# Guests don't reach each other.
+		oifname "fm-vm*" counter drop
+	}
+
+	# install.sh --block-lan keeps guests off the box's LAN (and a cloud
+	# instance's metadata endpoint), DNS aside.
+	chain lan {
+		udp dport 53 accept # block-lan
+		tcp dport 53 accept # block-lan
+		ip daddr { 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 169.254.0.0/16 } counter reject with icmpx type admin-prohibited # block-lan
+	}
+
+	chain input {
+		type filter hook input priority filter - 9; policy accept;
+		iifname "fm-vm*" jump from_guest_to_box
+	}
+
+	chain forward {
+		type filter hook forward priority filter - 9; policy accept;
+		iifname "fm-vm*" jump from_guest
+		iifname "fm-vm*" jump lan
+		# Nothing starts a connection into a guest from outside the box;
+		# replies to the guest's own get back in.
+		oifname "fm-vm*" ct state established,related accept
+		oifname "fm-vm*" counter drop
+	}
+
+	chain postrouting {
+		type nat hook postrouting priority srcnat; policy accept;
+		iifname "fm-vm*" oifname != "fm-vm*" masquerade
+	}
+}

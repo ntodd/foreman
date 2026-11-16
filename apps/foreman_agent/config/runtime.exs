@@ -10,6 +10,13 @@ if config_env() != :test do
     end
   end
 
+  int = fn name, default ->
+    case System.get_env(name) do
+      value when value in [nil, ""] -> default
+      value -> String.to_integer(value)
+    end
+  end
+
   # Every rule refuses by default. A box opens one up as an exception, for
   # example FOREMAN_POLICY="seccomp=allow", and the control plane shows
   # that box with a red alert. The rules are ForemanProtocol.Policy's.
@@ -50,5 +57,11 @@ if config_env() != :test do
     allowed_git_hosts: list.("FOREMAN_ALLOWED_GIT_HOSTS", ["github.com"]),
     insecure_git_hosts: list.("FOREMAN_INSECURE_GIT_HOSTS", []),
     policy_rules: policy,
+    # Not guest_url and guest_sha256: those are read at compile time.
+    guest_url_override: System.get_env("FOREMAN_GUEST_URL"),
+    guest_sha256_override: System.get_env("FOREMAN_GUEST_SHA256"),
+    vm_cpus: int.("FOREMAN_VM_CPUS", 4),
+    vm_memory_mb: int.("FOREMAN_VM_MEMORY_MB", 8192),
+    vm_disk_gb: int.("FOREMAN_VM_DISK_GB", 64),
     connect: mode == :host and System.get_env("FOREMAN_URL") not in [nil, ""]
 end
