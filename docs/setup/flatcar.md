@@ -95,21 +95,158 @@ change the box's size from its next start.
 The box starts with the machine. When the machine shuts down, systemd
 shuts the box down first.
 
-## On bare metal, or another hypervisor
+## On Proxmox
 
-**Add a box → Flatcar** offers the box's first-boot config for amd64 and
-arm64. It holds the join token and the box's Tailscale key, so keep it to
-yourself. Boot Flatcar's live image (USB or PXE, see
-[Installing to disk](https://www.flatcar.org/docs/latest/deploy/bare-metal/installing-to-disk/))
-and install it with the config:
+Flatcar publishes a disk image for Proxmox VE, and a VM made from it
+takes the box's first-boot config from its cloud-init drive. Proxmox is
+a [community-supported](https://www.flatcar.org/docs/latest/deploy/virt-options/proxmoxve/)
+Flatcar platform: it works, but Flatcar's release tests don't run on it.
+The commands below are Flatcar's own, with the box's config and size
+added. Run them as root on the Proxmox host.
 
-```sh
-sudo flatcar-install -d /dev/sda -i studio-amd64.ign
-sudo reboot
-```
+Before the first box, let a storage hold snippets, which is where
+Proxmox reads custom cloud-init files from: **Datacenter → Storage →
+local → Edit → Content**, and add **Snippets**. The examples use `local`
+for the snippet and `local-lvm` for disks; use your own storage names.
 
-Any hypervisor that can boot Flatcar takes the same config: Proxmox,
-libvirt or a cloud, each the way Flatcar's docs describe.
+1. In Foreman, **Boxes → Add a box → Flatcar**, and download the amd64
+   config (`studio-amd64.ign` for a box named `studio`). The join token
+   in it lasts an hour, so the box has to boot for the first time within
+   the hour.
+
+2. Copy it to the Proxmox host's snippets, readable by root alone. It
+   holds the join token and the box's Tailscale key:
+
+   ```sh
+   scp studio-amd64.ign root@pve:/var/lib/vz/snippets/studio.ign
+   ssh root@pve chmod 600 /var/lib/vz/snippets/studio.ign
+   ```
+
+3. On the Proxmox host, download Flatcar's image, make the VM, grow its
+   disk and start it:
+
+   ```sh
+   VM_ID=123   # any free id
+   wget https://stable.release.flatcar-linux.net/amd64-usr/current/flatcar_production_proxmoxve_image.img
+
+   qm create "$VM_ID" --name studio \
+     --bios ovmf --efidisk0 local-lvm:1 \
+     --arch x86_64 --machine q35 --args "-machine sata=off" \
+     --cpu host --cores 8 --memory 16384 \
+     --net0 "virtio,bridge=vmbr0" --ipconfig0 "ip=dhcp" \
+     --virtio0 "local-lvm:0,import-from=$PWD/flatcar_production_proxmoxve_image.img" --boot order=virtio0 \
+     --scsihw virtio-scsi-pci --scsi0 local-lvm:cloudinit \
+     --cicustom "user=local:snippets/studio.ign" \
+     --onboot 1
+
+   qm disk resize "$VM_ID" virtio0 100G
+   qm start "$VM_ID"
+   ```
+
+   The image's disk is small; Flatcar grows its filesystem into
+   whatever the disk is resized to when it boots. `--cores`, `--memory`
+   and the disk size are the box's, so set them for the environments it
+   will run. `--cpu host` gives the box the machine's own CPU features,
+   and `--onboot 1` starts it with the host.
+
+4. Watch the VM's console in Proxmox. The box prints its progress as
+   `foreman-box: …` lines and ends with `enrolled; this box shows as
+   online in Foreman`. It usually takes a minute or two.
+
+5. Once it has enrolled, the token and the key in the snippet are spent,
+   but they're still on the host. Proxmox reads the file each time the
+   VM starts, so put an empty config in its place rather than deleting
+   it:
+
+   ```sh
+   echo '{"ignition":{"version":"3.4.0"}}' > /var/lib/vz/snippets/studio.ign
+   ```
+
+   Flatcar only applies a first-boot config once, so the box doesn't
+   notice.
+
+Things to know:
+
+- **The network.** The box takes its address from DHCP on the bridge and
+  only connects out: to the control plane over the tailnet, and to
+  Flatcar, the extension bakery, registries and your git host over the
+  internet. Nothing needs to reach it. Give it a DHCP reservation if you
+  want a fixed address.
+- **The gateway.** The box's firewall keeps environments from reaching
+  the VM's gateway address, DNS aside (see
+  [security.md](../security.md)). If the Proxmox host does the VM's NAT,
+  that address is the host, which is the point. Anything environments
+  need should live somewhere other than the gateway's own address.
+- **No login.** The config from Add a box has no password and no SSH
+  key, so nobody can log in to the box, the console included. For a
+  shell as `core`, ask the control plane for the config with your public
+  key instead of downloading it from the page, from a machine that
+  reaches the control plane:
+
+  ```sh
+  curl -fsS -X POST https://desktop.tail1234.ts.net/agent/flatcar/ignition \
+    --data-urlencode "join_token=fj_..." --data-urlencode "arch=amd64" \
+    --data-urlencode "ssh_keys[]=$(cat ~/.ssh/id_ed25519.pub)" -o studio.ign
+  ```
+
+- **One VM, one box.** A box's identity is on its disk. Don't clone an
+  enrolled VM or turn it into a template; make each box from the image
+  with a token and a config of its own.
+- **Removing it.** Revoke the box in Foreman, `qm stop` and `qm destroy`
+  the VM, delete its snippet, and remove its node from the tailnet.
+
+## On bare metal
+
+Flatcar installs from its live image onto the machine's disk, with the
+box's config beside it. The machine needs a wired network with DHCP
+and a disk you don't mind losing: **the install erases it.**
+
+1. In Foreman, **Boxes → Add a box → Flatcar**, and download the config
+   for the machine's architecture. It holds the join token and the box's
+   Tailscale key, so keep it to yourself. The token lasts an hour.
+
+2. Boot the machine from Flatcar's
+   [live ISO](https://www.flatcar.org/docs/latest/deploy/bare-metal/booting-with-iso/)
+   on a USB stick. It starts a shell on the console without asking for
+   a password. The ISO only boots in BIOS (CSM) mode; on a machine that
+   is UEFI only, boot any Linux live image instead and fetch
+   `flatcar-install` as
+   [Installing to disk](https://www.flatcar.org/docs/latest/deploy/bare-metal/installing-to-disk/)
+   describes. The installed box boots either way.
+
+3. Get the config onto the live system. From a second USB stick:
+
+   ```sh
+   lsblk                       # find the stick, say /dev/sdb1
+   sudo mount /dev/sdb1 /mnt
+   cp /mnt/studio-amd64.ign .
+   sudo umount /mnt
+   ```
+
+   Or over the network: `sudo passwd core` on the console, then `scp`
+   the file to `core@` the machine's address.
+
+4. Find the disk to install to, and install. `flatcar-install` downloads
+   Flatcar, checks its signature and writes it over the whole disk:
+
+   ```sh
+   lsblk                       # the machine's own disk, say /dev/nvme0n1
+   sudo flatcar-install -d /dev/nvme0n1 -C stable -i studio-amd64.ign
+   ```
+
+5. Take the USB sticks out and `sudo reboot`. On its first boot from the
+   disk the box sets itself up and enrolls; the console shows the same
+   `foreman-box: …` lines, ending with `enrolled`. The box deletes the
+   config from its disk when it's done. Delete your copy too.
+
+The **No login** note above applies here as well: without an SSH key in
+the config, the installed box has no way in.
+
+## On another hypervisor
+
+Any hypervisor that can boot Flatcar takes the same config: libvirt or
+a cloud, each the way [Flatcar's docs](https://www.flatcar.org/docs/latest/)
+describe. A box only needs to connect out.
 
 ## The box on the tailnet
 

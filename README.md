@@ -127,7 +127,7 @@ regenerate them; see [e2e/README.md](e2e/README.md).
 | Personal (a Linux desktop, SQLite) | [docs/setup/personal.md](docs/setup/personal.md) |
 | Team (EC2 + Postgres/Neon, a box per developer) | [docs/setup/team.md](docs/setup/team.md) |
 | A Mac as a box (a Flatcar VM, started at login) | [docs/setup/mac.md](docs/setup/mac.md) |
-| Flatcar boxes (a VM on Linux, or bare metal) | [docs/setup/flatcar.md](docs/setup/flatcar.md) |
+| Flatcar boxes (a VM on Linux or Proxmox, or bare metal) | [docs/setup/flatcar.md](docs/setup/flatcar.md) |
 | Upgrading, backups and rolling back | [docs/setup/upgrading.md](docs/setup/upgrading.md) |
 | The GitHub App | [docs/setup/github-app.md](docs/setup/github-app.md) |
 | Tailscale | [docs/setup/tailscale.md](docs/setup/tailscale.md) |
