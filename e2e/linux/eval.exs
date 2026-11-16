@@ -153,12 +153,13 @@ defmodule E2E do
     end
   end
 
-  # How long an environment's operation of one kind took, queued to done.
+  # How long an environment's operation of one kind took on the box, from
+  # when the agent took it (not how long it waited in the queue).
   def took(slug, action) do
     admin()
     env = Repo.get_by!(Foreman.Environments.Environment, slug: slug)
     op = env.id |> Operations.list_for_environment(20) |> Enum.find(&(&1.action == action))
-    IO.puts("TOOK #{DateTime.diff(op.finished_at, op.inserted_at)}")
+    IO.puts("TOOK #{DateTime.diff(op.finished_at, op.started_at || op.dispatched_at)}")
   end
 
   def secret(slug, name, value) do

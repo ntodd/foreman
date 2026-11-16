@@ -115,7 +115,7 @@ has "limited to its CPUs" "CPUQuota=200%"
 has "limited to its memory and some" "MemoryMax=2560M"
 has "on its tap" "tap=fm-vm0,mac=52:54:00:fa:00:00"
 check "with its address and the box's resolvers, not MagicDNS, on the kernel command line" grep -qx \
-  "console=ttyS0 root=/dev/vda rw quiet net.ifnames=0 fm.mac=52:54:00:fa:00:00 fm.ip=10.250.0.2/30 fm.gw=10.250.0.1 fm.dns=192.168.1.1" "$work/last-run"
+  "console=ttyS0 root=/dev/vda rw quiet net.ifnames=0 fm.mac=52:54:00:fa:00:00 fm.ip=10.250.0.2/30 fm.gw=10.250.0.1 fm.dns=192.168.1.1 fm.env=$env1" "$work/last-run"
 has "booting the release's agent disk read-only" "path=$work/srv/agent-disks/1.2.3.img,image_type=raw,readonly=on,serial=fm-agent"
 # systemd opens a unit's output files as root, following symlinks, and the
 # VM's directory is the agent's: nothing there is opened for it.
@@ -132,7 +132,7 @@ check "keeps the guests' resolvers for the firewall's loader" grep -qx "192.168.
 expect "a VM that's running isn't started twice" "start $env1 2 2048 $guest 1.2.3" "ok running"
 printf 'nameserver 100.100.100.100\n' > "$work/resolv.conf"
 expect "a second VM gets the next address" "start $env2 1 1024 $guest 1.2.3" "ok started fm-vm1 10.250.0.6"
-check "a box with only MagicDNS gives its guests 1.1.1.1" grep -q "fm.dns=1.1.1.1\$" "$work/last-run"
+check "a box with only MagicDNS gives its guests 1.1.1.1" grep -q "fm.dns=1.1.1.1 " "$work/last-run"
 
 # -- release and restore -----------------------------------------------------
 expect "releases a VM" "release $env1" "ok"

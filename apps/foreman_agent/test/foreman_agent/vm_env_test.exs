@@ -662,15 +662,21 @@ defmodule ForemanAgent.VMEnvTest do
       on_exit(fn -> Application.delete_env(:foreman_agent, :runner) end)
     end
 
-    defp prebuild_command do
+    defp prebuild_command(extra \\ %{}) do
       {:ok, cmd} =
-        Command.new("box.prebuild", %{
-          prebuild_id: @prebuild,
-          repo: "acme/hello",
-          clone_url: "https://github.com/acme/hello.git",
-          branch: "main",
-          files: %{"github-token" => "ghs_clonetoken"}
-        })
+        Command.new(
+          "box.prebuild",
+          Map.merge(
+            %{
+              prebuild_id: @prebuild,
+              repo: "acme/hello",
+              clone_url: "https://github.com/acme/hello.git",
+              branch: "main",
+              files: %{"github-token" => "ghs_clonetoken"}
+            },
+            extra
+          )
+        )
 
       cmd
     end
@@ -773,6 +779,57 @@ defmodule ForemanAgent.VMEnvTest do
       assert {:ok, _} = Status.gc(ctx.ctx)
       refute File.exists?(paths.dir)
       assert File.exists?(VM.paths(ctx.config, @env).dir)
+    end
+
+    test "a build whose VM had to be forced off isn't kept", ctx do
+      FakeMachine.configure(
+        test: self(),
+        power_off: :killed,
+        handler: fn cmd, _log -> {:ok, %{"ran" => cmd.type}} end
+      )
+
+      assert {:error, message} = handle(prebuild_command())
+      assert message =~ "didn't shut down"
+      refute VM.Prebuild.exists?(ctx.config, @prebuild)
+      refute File.exists?(VM.paths(ctx.config, @prebuild).dir)
+    end
+
+    test "a build that breaks partway still gives back its VM", ctx do
+      # Nowhere to keep the disk.
+      File.write!(ctx.config.prebuilds_root, "not a directory")
+      assert {:error, _} = handle(prebuild_command())
+      assert_received {:machine, :release, @prebuild}
+      refute File.exists?(VM.paths(ctx.config, @prebuild).dir)
+    end
+
+    test "builds in a VM the size of the repo's environments", ctx do
+      assert {:ok, _} = handle(prebuild_command(%{limits: %{cpus: 1, memory_mb: 3072}}))
+      assert_received {:machine, {:boot, %{memory_mb: 3072}}, @prebuild}
+    end
+
+    test "box.gc deletes the prebuilds the control plane doesn't know, and only when it says",
+         ctx do
+      prebuilt(ctx.config, "kept")
+      other = "5d4c3b2a-1f0e-4d9c-8b7a-6f5e4d3c2b1a"
+      File.mkdir_p!(VM.Prebuild.dir(ctx.config, other))
+      File.write!(VM.Prebuild.disk(ctx.config, other), "forgotten")
+
+      assert {:ok, _} = Status.gc(ctx.ctx, %{})
+      assert VM.Prebuild.exists?(ctx.config, other)
+
+      assert {:ok, _} = Status.gc(ctx.ctx, %{prebuilds: [@prebuild]})
+      assert VM.Prebuild.exists?(ctx.config, @prebuild)
+      refute File.exists?(VM.Prebuild.dir(ctx.config, other))
+    end
+
+    test "at the agent's start, prebuild VMs nothing is building any more go", ctx do
+      paths = VM.paths(ctx.config, @prebuild)
+      File.mkdir_p!(paths.dir)
+      VM.write_meta(ctx.config, @prebuild, %{"slug" => "prebuild-3c2b1a09", "kind" => "prebuild"})
+
+      :ok = VM.Env.recover(ctx.config)
+      refute File.exists?(paths.dir)
+      assert_received {:machine, :release, @prebuild}
     end
 
     test "box.prebuild.delete removes it", ctx do

@@ -14,11 +14,14 @@ Group=foreman
 SupplementaryGroups=docker
 AmbientCapabilities=CAP_SYS_TIME
 Environment=FOREMAN_AGENT_MODE=guest
-Environment=HOME=/var/lib/foreman-agent
+# HOME on tmpfs: a disk made from a prebuild has whatever the prebuild's
+# code left on it, and nothing there (a docker CLI plugin, a git config)
+# may run as the agent.
+Environment=HOME=/run/foreman-agent/home
 Environment=FOREMAN_AGENT_DATA_DIR=/var/lib/foreman-agent
 Environment=RELEASE_TMP=/run/foreman-agent
 # Secrets live in /run/foreman (tmpfs), and outlive a restart of the agent.
-RuntimeDirectory=foreman foreman-guest foreman-agent
+RuntimeDirectory=foreman foreman-guest foreman-agent foreman-agent/home
 RuntimeDirectoryMode=0711
 RuntimeDirectoryPreserve=yes
 WorkingDirectory=/var/lib/foreman-agent

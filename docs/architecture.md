@@ -223,10 +223,15 @@ A create on that box and branch carries the prebuild's id, once the
 user's own GitHub token has shown it reads the repo and its extra repos
 (with no GitHub App configured, there's no one to ask). The box
 copies the disk (a reflink on XFS) instead of making an empty one, and
-the guest agent takes over the prebuild's clone and its Docker data: it
-renames them to the environment's, removes the prebuild's own containers
-and volumes, and runs `devcontainer up` as usual, which makes the
-environment's containers from the cache. Building another replaces the
+names the environment on the guest's kernel command line. A disk made
+for someone else loses its containers, volumes, networks and guest-agent
+state before Docker starts (some containers restart on their own), and
+keeps its images and build cache. The guest agent then takes over the
+prebuild's clone: it resets the clone's git settings and hooks to a fresh
+clone's, fetches the branch with the environment's own token and checks
+it out (cloning afresh if that fails), and runs `devcontainer up` as
+usual, which makes the environment's containers from the cache. The
+guest agent's home is on tmpfs, so nothing the prebuild left runs as it. Building another replaces the
 ready one; `box.prebuild.delete` frees a box's copy, and `box.gc` names
 every prebuild the control plane knows on the box so it deletes the
 rest. A build fails when the box's agent rejoins without it, and one that

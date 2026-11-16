@@ -132,6 +132,12 @@ defmodule ForemanAgent.VM.Env do
           Links.stop(p.env_id)
           result
 
+        # It didn't shut down in time and was stopped: said so, for a
+        # prebuild, whose disk isn't kept from a guest stopped mid-write.
+        :killed ->
+          Links.stop(p.env_id)
+          with {:ok, map} <- result, do: {:ok, Map.put(map, "forced_off", true)}
+
         {:error, message} ->
           {:error, message}
       end
@@ -193,6 +199,9 @@ defmodule ForemanAgent.VM.Env do
   @spec recover(ForemanAgent.Config.t()) :: :ok
   def recover(config) do
     machine = Machine.impl(config)
+
+    # A prebuild being built when the agent stopped: nothing will finish it.
+    for id <- VM.list(config, :all) -- VM.list(config), do: Prebuild.discard(config, id)
 
     runner = ForemanAgent.Runner.impl()
 

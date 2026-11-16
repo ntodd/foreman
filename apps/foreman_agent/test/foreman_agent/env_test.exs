@@ -117,12 +117,7 @@ defmodule ForemanAgent.EnvTest do
 
       case {command, args} do
         {"git", args} ->
-          dest = List.last(args)
-          File.mkdir_p!(Path.join(dest, ".git/info"))
-          File.mkdir_p!(Path.join(dest, ".devcontainer"))
-          File.write!(Path.join(dest, ".devcontainer/devcontainer.json"), devcontainer)
-          File.write!(Path.join(dest, ".devcontainer/docker-compose.yml"), "services: {}\n")
-          {:ok, %{status: 0, output: "Cloning into '#{dest}'...\n"}}
+          fake_git(args, devcontainer, opts)
 
         {"docker", ["compose" | _] = args} ->
           fake_docker(args, compose, containers, opts)
@@ -168,6 +163,24 @@ defmodule ForemanAgent.EnvTest do
           flunk("unexpected command: #{inspect(other)}")
       end
     end)
+  end
+
+  # git, run on the clone after a prebuild's is taken over: `:git_refresh`
+  # answers it.
+  defp fake_git(args, devcontainer, opts) do
+    if "clone" in args,
+      do: fake_clone(args, devcontainer),
+      else:
+        Keyword.get(opts, :git_refresh, fn _args -> {:ok, %{status: 0, output: ""}} end).(args)
+  end
+
+  defp fake_clone(args, devcontainer) do
+    dest = List.last(args)
+    File.mkdir_p!(Path.join(dest, ".git/info"))
+    File.mkdir_p!(Path.join(dest, ".devcontainer"))
+    File.write!(Path.join(dest, ".devcontainer/devcontainer.json"), devcontainer)
+    File.write!(Path.join(dest, ".devcontainer/docker-compose.yml"), "services: {}\n")
+    {:ok, %{status: 0, output: "Cloning into '#{dest}'...\n"}}
   end
 
   # The environment's devcontainer, as Docker would have it: the CLI
@@ -873,48 +886,73 @@ defmodule ForemanAgent.EnvTest do
   describe "prebuilds" do
     @prebuild_id "0b0e5c55-7d0b-4c8e-9e6f-3a2b1c0d9e8f"
 
-    # What building a prebuild leaves on the disk: the clone, its git
-    # config naming the prebuild's credential helper, and the saved spec.
+    # What building a prebuild leaves on the disk: the clone, the saved
+    # spec, and whatever the prebuild's own code left in the clone's git
+    # directory.
     defp prebuilt_disk(config) do
       from = Env.paths(config, @prebuild_id, "acme/storefront")
-      File.mkdir_p!(Path.join(from.clone, ".git"))
+      File.mkdir_p!(Path.join(from.clone, ".git/hooks"))
       File.mkdir_p!(Path.join(from.clone, ".devcontainer"))
       File.write!(Path.join(from.clone, ".devcontainer/devcontainer.json"), @devcontainer)
       File.write!(Path.join(from.clone, ".devcontainer/docker-compose.yml"), "services: {}\n")
+      File.write!(Path.join(from.clone, "node_modules.txt"), "built by the prebuild")
 
       File.write!(Path.join(from.clone, ".git/config"), """
+      [core]
+      \tfsmonitor = /tmp/evil
       [credential]
-      \thelper =
-      \thelper = #{from.meta}/git-credential
+      \thelper = /tmp/evil
       """)
 
+      File.write!(Path.join(from.clone, ".git/hooks/post-checkout"), "#!/bin/sh\nevil\n")
       File.mkdir_p!(from.meta)
 
       File.write!(
         Path.join(from.meta, "spec.term"),
-        :erlang.term_to_binary(%{slug: "prebuild-0b0e5c55"})
+        :erlang.term_to_binary(%{slug: "prebuild-0b0e5c55", env_id: @prebuild_id})
       )
 
       from
     end
 
-    test "an environment made from one takes over its clone", %{ctx: ctx, config: config} do
-      stub_tools()
+    defp record_git(test) do
+      fn args ->
+        send(test, {:git_run, args})
+        {:ok, %{status: 0, output: ""}}
+      end
+    end
+
+    test "an environment takes over a prebuild's clone, brought up to date with its own token",
+         %{ctx: ctx, config: config} do
+      stub_tools(git_refresh: record_git(self()))
       from = prebuilt_disk(config)
 
       assert {:ok, _} = Env.run("env.create", payload(%{"prebuild_id" => @prebuild_id}), ctx)
 
       runs = runs()
-      refute Enum.any?(runs, &match?({"git", _, _}, &1))
+      refute Enum.any?(runs, fn {cmd, args, _} -> cmd == "git" and "clone" in args end)
       refute File.exists?(from.env_dir)
+      assert_received {:log, "info", "Starting from the prebuild\n"}
 
       to = Env.paths(config, @env_id, "acme/storefront")
+      # What the prebuild's code left can't run as the agent, or in git later.
       git_config = File.read!(Path.join(to.clone, ".git/config"))
-      assert git_config =~ "helper = #{to.meta}/git-credential"
-      refute git_config =~ @prebuild_id
+      refute git_config =~ "evil"
+      assert git_config =~ "url = https://github.com/acme/storefront.git"
+      assert File.ls!(Path.join(to.clone, ".git/hooks")) == []
 
-      assert File.read!(Path.join(to.meta, "git-credential")) =~
-               Path.join(to.secrets, "github-token")
+      helper = Path.join(to.meta, "git-credential")
+      assert File.read!(helper) =~ Path.join(to.secrets, "github-token")
+      assert_received {:git_run, fetch}
+      assert ("credential.helper=" <> helper) in fetch
+      assert "fetch" in fetch
+      assert_received {:git_run, checkout}
+
+      assert ["checkout", "-f", "-B", "main", "refs/remotes/origin/main"] ==
+               Enum.take(checkout, -5)
+
+      # What the prebuild's hooks made stays.
+      assert File.exists?(Path.join(to.clone, "node_modules.txt"))
 
       # The prebuild's own containers and volumes go.
       assert Enum.any?(runs, fn
@@ -924,14 +962,41 @@ defmodule ForemanAgent.EnvTest do
                _ ->
                  false
              end)
+    end
 
-      assert_received {:log, "info", "Starting from the prebuild\n"}
+    test "a prebuild's clone that can't be brought up to date is cloned afresh",
+         %{ctx: ctx, config: config} do
+      stub_tools(
+        git_refresh: fn
+          ["-c" | _] = args ->
+            if "fetch" in args,
+              do: {:ok, %{status: 128, output: "fatal: couldn't find remote ref main"}},
+              else: {:ok, %{status: 0, output: ""}}
+        end
+      )
+
+      prebuilt_disk(config)
+      assert {:ok, _} = Env.run("env.create", payload(%{"prebuild_id" => @prebuild_id}), ctx)
+      assert Enum.any?(runs(), fn {cmd, args, _} -> cmd == "git" and "clone" in args end)
+
+      refute File.exists?(
+               Path.join(Env.paths(config, @env_id, "acme/storefront").clone, "node_modules.txt")
+             )
+    end
+
+    test "a create from a prebuild that fails never comes back as the prebuild",
+         %{ctx: ctx, config: config} do
+      stub_tools(outcome: :error, git_refresh: record_git(self()))
+      prebuilt_disk(config)
+
+      assert {:error, _} = Env.run("env.create", payload(%{"prebuild_id" => @prebuild_id}), ctx)
+      refute File.exists?(Path.join(Env.paths(config, @env_id).meta, "spec.term"))
     end
 
     test "without the prebuild's files, it clones as usual", %{ctx: ctx} do
       stub_tools()
       assert {:ok, _} = Env.run("env.create", payload(%{"prebuild_id" => @prebuild_id}), ctx)
-      assert Enum.any?(runs(), &match?({"git", _, _}, &1))
+      assert Enum.any?(runs(), fn {cmd, args, _} -> cmd == "git" and "clone" in args end)
     end
 
     test "building one keeps its Dockerfiles' base images by tag", %{ctx: ctx, config: config} do
@@ -944,9 +1009,14 @@ defmodule ForemanAgent.EnvTest do
           "db" => %{"image" => "postgres:17"},
           "worker" => %{
             "build" => %{"context" => context, "dockerfile_inline" => "FROM alpine:3.22\n"}
-          }
+          },
+          # A Dockerfile outside the clone isn't read.
+          "outside" => %{"build" => %{"context" => config.data_dir, "dockerfile" => "Dockerfile"}}
         }
       }
+
+      File.mkdir_p!(config.data_dir)
+      File.write!(Path.join(config.data_dir, "Dockerfile"), "FROM outside:1\n")
 
       stub_tools(
         compose: compose,
@@ -955,7 +1025,10 @@ defmodule ForemanAgent.EnvTest do
           ARG VARIANT=3
           FROM --platform=linux/amd64 mcr.microsoft.com/devcontainers/base:debian AS base
           FROM base AS dev
-          from node:${VARIANT}
+          FROM node:${VARIANT}
+          RUN python3 - <<EOF
+          from os import path
+          EOF
           FROM scratch
           FROM python:3.12-slim@sha256:#{String.duplicate("a", 64)}
           """)

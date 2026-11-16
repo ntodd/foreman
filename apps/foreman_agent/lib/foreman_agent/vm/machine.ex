@@ -40,8 +40,12 @@ defmodule ForemanAgent.VM.Machine do
   """
   @callback unpause(env_id :: String.t(), Config.t()) :: :ok | {:error, String.t()}
 
-  @doc "Shuts the guest down, and stops the VM if it doesn't go within `timeout`."
-  @callback power_off(env_id :: String.t(), timeout(), Config.t()) :: :ok | {:error, String.t()}
+  @doc """
+  Shuts the guest down, and stops the VM if it doesn't go within `timeout`
+  (`:killed`).
+  """
+  @callback power_off(env_id :: String.t(), timeout(), Config.t()) ::
+              :ok | :killed | {:error, String.t()}
 
   @doc "Stops the VM at once."
   @callback kill(env_id :: String.t(), Config.t()) :: :ok | {:error, String.t()}

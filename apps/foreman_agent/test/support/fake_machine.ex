@@ -167,6 +167,7 @@ defmodule ForemanAgent.Test.FakeMachine do
   def power_off(env_id, _timeout, config) do
     report(:power_off, env_id)
     kill(env_id, config)
+    if opts()[:power_off] == :killed, do: :killed, else: :ok
   end
 
   @impl true

@@ -425,6 +425,7 @@ cp_eval 'E2E.log("hello-3", "create")' > "$work/create3.log"
 grep -q "Starting from a prebuild" "$work/create3.log" || fail "the box didn't start hello-3's disk from the prebuild"
 grep -q "Starting from the prebuild" "$work/create3.log" || fail "the guest didn't take over the prebuild's clone"
 grep -q "Cloning acme/hello" "$work/create3.log" && fail "hello-3 cloned again"
+grep -q "Container prebuild-" "$work/create3.log" && fail "the prebuild's containers came back in hello-3's VM"
 probe secrets-owner self create3
 probe first-guest 124 create3
 cold=$(cp_eval 'E2E.took("hello-2", "create")' | sed -n 's/^TOOK //p')

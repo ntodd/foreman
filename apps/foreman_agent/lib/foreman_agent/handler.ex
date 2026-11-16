@@ -65,9 +65,9 @@ defmodule ForemanAgent.Handler do
     end
   end
 
-  def handle(%Command{type: "box.gc"}, log) do
+  def handle(%Command{type: "box.gc", payload: p}, log) do
     ctx = ctx(log)
-    if ctx.config.mode == :host, do: VM.Status.gc(ctx), else: gc(ctx)
+    if ctx.config.mode == :host, do: VM.Status.gc(ctx, p), else: gc(ctx)
   end
 
   def handle(%Command{type: "box.restart", payload: %{boot_id: boot_id}}, _log),

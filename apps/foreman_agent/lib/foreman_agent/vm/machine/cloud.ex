@@ -111,7 +111,7 @@ defmodule ForemanAgent.VM.Machine.Cloud do
         :ok
       else
         Logger.warning("the VM for #{env_id} didn't power off; stopping it")
-        kill(env_id, config)
+        with :ok <- kill(env_id, config), do: :killed
       end
     else
       :ok

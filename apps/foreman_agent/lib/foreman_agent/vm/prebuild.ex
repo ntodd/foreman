@@ -50,7 +50,8 @@ defmodule ForemanAgent.VM.Prebuild do
 
     log.("info", "Building a prebuild of #{p.repo} (#{p.branch})\n")
 
-    result =
+    # The VM goes however the build ends, a crash included.
+    try do
       with {:ok, create} <- create_command(cmd),
            {:ok, up} <- Env.run(create, log, ctx),
            :ok <- stop(id, log, ctx),
@@ -62,9 +63,10 @@ defmodule ForemanAgent.VM.Prebuild do
            "feature_version" => up["feature_version"]
          }}
       end
-
-    discard(config, id)
-    normalize(result)
+      |> normalize()
+    after
+      discard(config, id)
+    end
   end
 
   # The same op id: a resend after a reconnect runs it once in the guest.
@@ -80,6 +82,7 @@ defmodule ForemanAgent.VM.Prebuild do
         config_path: p.config_path,
         files: p.files,
         tailscale: p.tailscale,
+        limits: Map.get(p, :limits, %{}),
         prebuild: true
       }
       |> put_present(:registry_auth, Map.get(p, :registry_auth)),
@@ -113,9 +116,17 @@ defmodule ForemanAgent.VM.Prebuild do
     {:ok, stop} = Command.new("env.stop", %{env_id: id, slug: slug(id)})
 
     case Env.run(stop, log, ctx) do
-      {:ok, _} -> :ok
-      {:error, message} -> {:error, "couldn't stop the prebuild's VM: #{message}"}
-      {:error, message, _} -> {:error, "couldn't stop the prebuild's VM: #{message}"}
+      {:ok, %{"forced_off" => true}} ->
+        {:error, "the prebuild's VM didn't shut down, so its disk isn't kept"}
+
+      {:ok, _} ->
+        :ok
+
+      {:error, message} ->
+        {:error, "couldn't stop the prebuild's VM: #{message}"}
+
+      {:error, message, _} ->
+        {:error, "couldn't stop the prebuild's VM: #{message}"}
     end
   end
 
@@ -124,7 +135,11 @@ defmodule ForemanAgent.VM.Prebuild do
     File.rm_rf!(target)
     File.mkdir_p!(target)
     File.chmod!(target, 0o700)
-    File.rename!(VM.paths(config, id).data, disk(config, id))
+
+    case File.rename(VM.paths(config, id).data, disk(config, id)) do
+      :ok -> :ok
+      {:error, reason} -> raise "couldn't keep the prebuild's disk: #{:file.format_error(reason)}"
+    end
 
     File.write!(
       Path.join(target, "prebuild.json"),

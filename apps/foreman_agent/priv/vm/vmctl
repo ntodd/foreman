@@ -184,7 +184,7 @@ cmd_start() { # env_id cpus memory_mb guest_sha256 agent_version
   printf '%s\n' "$dns" > "$STATE/guest-dns"
   nft add element inet foreman_guests guest_dns "{ $dns }" >/dev/null 2>&1 || true
   set -- --kernel "$guest/vmlinuz" \
-    --cmdline "console=ttyS0 root=/dev/vda rw quiet net.ifnames=0 fm.mac=$mac fm.ip=$guest_ip/30 fm.gw=$host_ip fm.dns=$dns" \
+    --cmdline "console=ttyS0 root=/dev/vda rw quiet net.ifnames=0 fm.mac=$mac fm.ip=$guest_ip/30 fm.gw=$host_ip fm.dns=$dns fm.env=$id" \
     --disk "path=$vm/root.raw,image_type=raw,direct=on,num_queues=$queues,serial=fm-root" \
     --disk "path=$vm/data.raw,image_type=raw,direct=on,num_queues=$queues,serial=fm-data" \
     --disk "path=$agent_disk,image_type=raw,readonly=on,serial=fm-agent" \

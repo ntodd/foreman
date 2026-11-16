@@ -126,8 +126,12 @@ What runs where:
   install or download is on the disk. The environment made from it gets
   containers of its own, and the CLI runs those hooks again in them,
   then `postStartCommand`; hooks that skip work already done are fast.
-- Named volumes aren't kept: the environment's are its own, under its
-  own name. A database a hook seeded is seeded again.
+- Named volumes and containers aren't kept: the environment's are its
+  own, under its own name. A database a hook seeded is seeded again.
+- The clone is brought up to the branch's tip when the environment is
+  made, with that user's own token, so a prebuild a few days old gives
+  today's code (and rebuilds whatever layers changed). Files the hooks
+  made in the tree, like `node_modules`, stay.
 - The prebuild clones with a GitHub token that reads the repo (and its
   extra repos) and nothing else, and has no one's secrets: no user,
   repo or environment secrets, no Tailscale key. A hook that needs a

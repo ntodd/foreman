@@ -96,7 +96,7 @@ defmodule ForemanAgent.Env do
   # -- create / rebuild / start --------------------------------------------
 
   defp up(p, ctx, opts) do
-    adopt_prebuild(p, ctx)
+    adopted? = adopt_prebuild(p, ctx)
     paths = paths(ctx.config, p.env_id, p.repo)
     spec = Map.drop(p, [:files, :compose_env, :registry_auth, :pull, :prebuild_id, :prebuild])
     # A clone this rebuild makes is already up to date.
@@ -105,7 +105,7 @@ defmodule ForemanAgent.Env do
     with :ok <- check_clone_url(p.clone_url, ctx.config),
          :ok <- ensure_dirs(paths),
          {:ok, _} <- write_secrets(paths, p.files),
-         :ok <- ensure_clone(paths, p, ctx),
+         :ok <- if(adopted?, do: refresh_clone(paths, p, ctx), else: ensure_clone(paths, p, ctx)),
          :ok <- if(pull?, do: pull(p, ctx), else: :ok),
          {:ok, prepared} <- prepare(paths, spec, p.compose_env, ctx),
          {:ok, result} <- devcontainer_up(paths, spec, prepared, p, ctx, opts) do
@@ -132,24 +132,22 @@ defmodule ForemanAgent.Env do
 
   # A disk made from a prebuild (ForemanAgent.VM.Prebuild) has the
   # prebuild's clone, built images and saved spec under the prebuild's id.
-  # The environment takes them over: the clone is kept like any that has
-  # come up, and the CLI makes the environment's own containers from the
-  # images already there. The prebuild's containers and volumes go; the
-  # environment's are its own, under its own name.
+  # The environment takes the clone over (refresh_clone/3 brings it up to
+  # date) and the CLI makes the environment's own containers from the
+  # images already there. The prebuild's spec goes, so nothing starts this
+  # environment as the prebuild before its own is saved, and so do the
+  # prebuild's containers and volumes: the environment's are its own,
+  # under its own name. Never raises: a disk it can't take over is built
+  # on as it is.
   defp adopt_prebuild(%{prebuild_id: id, env_id: env_id}, ctx) when is_binary(id) do
     from = paths(ctx.config, id)
     to = paths(ctx.config, env_id)
 
-    if File.dir?(from.env_dir) and not File.exists?(to.env_dir) do
+    with {:ok, %File.Stat{type: :directory}} <- File.lstat(from.env_dir),
+         false <- File.exists?(to.env_dir),
+         :ok <- File.rename(from.env_dir, to.env_dir) do
       ctx.log.("info", "Starting from the prebuild\n")
-      :ok = File.rename(from.env_dir, to.env_dir)
-      # The clone's git config names the credential helper by its path.
-      for git_config <- Path.wildcard(Path.join(to.workspace, "*/.git/config"), match_dot: true) do
-        content = File.read!(git_config)
-        File.write!(git_config, String.replace(content, from.env_dir <> "/", to.env_dir <> "/"))
-      end
-
-      write_credential_helper(to)
+      _ = File.rm(spec_path(to))
 
       case compose(ctx, Prebuild.slug(id), ["down", "--volumes", "--remove-orphans"]) do
         {:ok, _} ->
@@ -158,12 +156,96 @@ defmodule ForemanAgent.Env do
         {:error, message} ->
           ctx.log.("info", "Couldn't remove the prebuild's containers: #{message}\n")
       end
-    end
 
-    :ok
+      true
+    else
+      _ -> false
+    end
   end
 
-  defp adopt_prebuild(_p, _ctx), do: :ok
+  defp adopt_prebuild(_p, _ctx), do: false
+
+  # A prebuild's clone, made this environment's: git's settings and hooks
+  # back to what a fresh clone has (the prebuild's code could have changed
+  # them, and git runs here as the agent), then the branch fetched with
+  # this environment's own token and checked out, so it starts from the
+  # branch as it is now. What the prebuild's hooks made in the tree stays.
+  # Anything that doesn't work out, it's cloned afresh.
+  defp refresh_clone(paths, p, ctx) do
+    git_dir = Path.join(paths.clone, ".git")
+    helper = write_credential_helper(paths)
+    tracking = "refs/remotes/origin/" <> p.branch
+
+    result =
+      with {:ok, %File.Stat{type: :directory}} <- File.lstat(paths.clone),
+           {:ok, %File.Stat{type: :directory}} <- File.lstat(git_dir),
+           :ok <- reset_git_dir(git_dir, p),
+           {:ok, _} <-
+             git_in(
+               paths.clone,
+               helper,
+               p,
+               ["fetch", "--no-tags", "origin", "+refs/heads/#{p.branch}:#{tracking}"],
+               ctx
+             ),
+           {:ok, _} <-
+             git_in(paths.clone, helper, p, ["checkout", "-f", "-B", p.branch, tracking], ctx) do
+        :ok
+      end
+
+    case result do
+      :ok ->
+        :ok
+
+      other ->
+        ctx.log.(
+          "info",
+          "Couldn't bring the prebuild's clone up to date (#{inspect_short(other)}); cloning afresh\n"
+        )
+
+        with :ok <- remove_in(ctx, paths.workspace, Path.basename(paths.clone)),
+             do: clone(paths, p, ctx)
+    end
+  end
+
+  defp reset_git_dir(git_dir, p) do
+    config = """
+    [core]
+    \trepositoryformatversion = 0
+    \tfilemode = true
+    \tbare = false
+    \tlogallrefupdates = true
+    [remote "origin"]
+    \turl = #{p.clone_url}
+    \tfetch = +refs/heads/*:refs/remotes/origin/*
+    [branch "#{p.branch}"]
+    \tremote = origin
+    \tmerge = refs/heads/#{p.branch}
+    """
+
+    hooks = Path.join(git_dir, "hooks")
+
+    with :ok <- SafeFS.write_atomic(Path.join(git_dir, "config"), config, 0o644),
+         {:ok, _} <- File.rm_rf(hooks) do
+      File.mkdir(hooks)
+    end
+  end
+
+  defp git_in(dir, helper, p, args, ctx) do
+    opts =
+      ["-c", "credential.helper=", "-c", "credential.helper=" <> helper] ++
+        ["-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false"] ++
+        ["-c", "protocol.allow=never", "-c", "protocol.https.allow=always"] ++
+        http_protocol(p.clone_url)
+
+    case cmd(ctx, ctx.config.git, opts ++ ["-C", dir | args], env: %{}, label: "git #{hd(args)}") do
+      {:ok, out} -> {:ok, out}
+      {:error, output} -> {:error, "git #{hd(args)} failed: #{last_lines(output)}"}
+    end
+  end
+
+  defp inspect_short({:error, message}) when is_binary(message), do: message
+  defp inspect_short(other), do: inspect(other)
 
   # BuildKit keeps a build's base images in its cache without tagging
   # them, so an environment's own build from a prebuild would ask the
@@ -171,7 +253,7 @@ defmodule ForemanAgent.Env do
   # and the build takes them as they are. Best effort: a prebuild without
   # them still works.
   defp keep_base_images(paths, prepared, p, ctx) do
-    case base_images(prepared.builds) do
+    case base_images(prepared.builds, paths.clone) do
       [] ->
         :ok
 
@@ -208,18 +290,30 @@ defmodule ForemanAgent.Env do
 
   defp build_source(_build), do: nil
 
-  defp read_content({:ok, content}), do: [content]
-  defp read_content(_), do: []
+  # Inside the clone and no bigger than a Dockerfile, read without
+  # following a symlink out of it: the repo names the path.
+  defp read_dockerfile(clone, path) do
+    rel = Path.relative_to(path, clone)
 
-  @from ~r/^\s*FROM\s+(?:--\S+\s+)*(\S+)(?:\s+AS\s+(\S+))?/im
+    with :relative <- Path.type(rel),
+         {:ok, content} <- SafeFS.read(clone, rel, max_bytes: 1_000_000) do
+      [content]
+    else
+      _ -> []
+    end
+  end
+
+  # FROM as Dockerfiles write it: a lowercase "from" is more likely a line
+  # of Python in a heredoc than an instruction.
+  @from ~r/^\s*FROM\s+(?:--\S+\s+)*(\S+)(?:\s+(?:AS|as)\s+(\S+))?/m
 
   # The images a Dockerfile's stages start from, less earlier stages,
   # scratch, and any named by a build argument.
-  defp base_images(builds) do
+  defp base_images(builds, clone) do
     builds
     |> Enum.flat_map(fn
       {:inline, content} -> [content]
-      {:file, path} -> read_content(File.read(path))
+      {:file, path} -> read_dockerfile(clone, path)
     end)
     |> Enum.flat_map(fn content ->
       froms = Regex.scan(@from, content)

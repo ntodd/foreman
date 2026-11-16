@@ -140,13 +140,19 @@ defmodule ForemanAgent.VM.Status do
   @doc """
   Prunes Docker in every running VM, drops guest images and agent disks
   no VM uses any more, and the VMs of prebuilds nothing is building (an
-  agent that stopped mid-build leaves one).
+  agent that stopped mid-build leaves one). With `prebuilds` (the ones the
+  control plane knows on this box), deletes the box's others.
   """
-  @spec gc(map()) :: {:ok, map()} | {:error, String.t()}
-  def gc(ctx) do
+  @spec gc(map(), map()) :: {:ok, map()} | {:error, String.t()}
+  def gc(ctx, payload \\ %{}) do
     config = ctx.config
     machine = Machine.impl(config)
     envs = VM.list(config)
+
+    # First, before anything slow: a build started after the control plane
+    # listed its prebuilds can't have finished yet.
+    with %{prebuilds: known} when is_list(known) <- payload,
+         do: prune_prebuilds(config, known, ctx)
 
     # Every VM at once, each with a deadline: one guest that never answers
     # doesn't hold up the others, or the pruning on the box after.
@@ -201,6 +207,23 @@ defmodule ForemanAgent.VM.Status do
     case failures do
       [] -> {:ok, %{}}
       _ -> {:error, Enum.map_join(failures, "; ", fn {id, m} -> "#{id}: #{m}" end)}
+    end
+  end
+
+  defp prune_prebuilds(config, known, ctx) do
+    case File.ls(config.prebuilds_root) do
+      {:ok, names} ->
+        for name <- names, name =~ ~r/\A[0-9a-f-]{36}\z/, name not in known do
+          ctx.log.(
+            "info",
+            "Removing the prebuild #{name}, which the control plane doesn't know\n"
+          )
+
+          File.rm_rf(Path.join(config.prebuilds_root, name))
+        end
+
+      {:error, _} ->
+        :ok
     end
   end
 
