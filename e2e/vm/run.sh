@@ -72,6 +72,12 @@ wait_for() { # description, seconds, command...
 
 if command -v mise >/dev/null 2>&1; then mix="mise x -- mix"; else mix=mix; fi
 
+# A click on a page of the running control plane (see e2e/lv-click.mjs),
+# for what needs the box's connection, which an eval doesn't have.
+lv_click() { # path, event, value-json
+  docker run --rm --network host -v "$root/e2e:/e2e:ro" public.ecr.aws/docker/library/node:22-alpine \
+    node /e2e/lv-click.mjs "$url" "$cookie" "$@"
+}
 cp_eval() {
   docker exec "$cp_name" env -u PHX_SERVER /app/bin/foreman eval "Code.eval_file(\"/e2e/linux/eval.exs\"); $1" 2>&1
 }
@@ -235,6 +241,7 @@ docker create --name "$cp_name" --network host \
   -e FOREMAN_AGENT_RELEASE_PUBLIC_KEY="$FOREMAN_RELEASE_PUBLIC_KEY" \
   -e PHX_HOST=127.0.0.1 -e PORT="$port" -e FOREMAN_LISTEN_IP=127.0.0.1 \
   -e FOREMAN_BASE_URL="$url" -e FOREMAN_FORCE_SSL=false -e FOREMAN_SECURE_COOKIES=false \
+  -e FOREMAN_EXTRA_ORIGINS="$url" \
   -e FOREMAN_GIT_BASE_URL="http://$lan:8080" \
   -v foreman-e2e-vm-data:/var/lib/foreman "$E2E_CP_IMAGE" >/dev/null
 docker cp e2e/. "$cp_name:/e2e"
@@ -327,9 +334,13 @@ probe secret "$want" start
 echo "ok: the secret reached the environment after a boot"
 
 say "suspend and resume"
-# The heartbeat's latest line: "<boot id> <guest clock>".
+# The heartbeat's latest line: "<boot id> <guest clock>", from the
+# environment page's Container logs.
+cookie=$(cp_eval 'E2E.session_cookie()' | sed -n 's/^COOKIE=//p')
 beat() {
-  cp_eval 'E2E.logs("hello-1", "heartbeat")' > "$work/beat.log"
+  previous=$(cp_eval 'E2E.last_logs("hello-1")' | sed -n 's/^LAST=//p')
+  lv_click "/environments/$first" action '{"do":"logs"}' >/dev/null || fail "couldn't ask for the logs"
+  cp_eval "E2E.await_logs(\"hello-1\", \"$previous\")" > "$work/beat.log"
   grep -q '^LOGS succeeded' "$work/beat.log" || { tail -20 "$work/beat.log" >&2; fail "couldn't read the heartbeat's logs"; }
   sed -n 's/.*PROBE beat //p' "$work/beat.log" | tail -1
 }

@@ -94,25 +94,36 @@ defmodule E2E do
     IO.puts("retried #{op.action} for #{slug}")
   end
 
-  # A service's logs, by way of a logs operation like the environment
-  # page's.
-  def logs(slug, service) do
-    scope = Scope.for_user(admin())
-    {:ok, op} = Environments.logs(scope, live_env(slug), service)
-    op = await_op(op.id, 120)
-    IO.puts("LOGS #{op.status}")
-    IO.puts(Operations.log(op))
+  # The latest logs operation's id, before asking for another (through
+  # the environment page, in the running control plane: one queued from
+  # an eval waits for something there to notice it).
+  def last_logs(slug) do
+    admin()
+    IO.puts("LAST=#{latest_logs(slug) |> then(&(&1 && &1.id)) || "none"}")
   end
 
-  defp await_op(id, seconds) do
-    op = Repo.get!(Foreman.Operations.Operation, id)
+  # Waits for a logs operation newer than `previous` to finish, and prints it.
+  def await_logs(slug, previous, seconds \\ 180) do
+    admin()
+    op = latest_logs(slug)
 
-    if Foreman.Operations.Operation.finished?(op) or seconds <= 0 do
-      op
-    else
-      Process.sleep(1000)
-      await_op(id, seconds - 1)
+    cond do
+      op && op.id != previous && Foreman.Operations.Operation.finished?(op) ->
+        IO.puts("LOGS #{op.status}")
+        IO.puts(Operations.log(op))
+
+      seconds <= 0 ->
+        IO.puts("LOGS #{(op && op.id != previous && op.status) || "never asked for"}")
+
+      true ->
+        Process.sleep(1000)
+        await_logs(slug, previous, seconds - 1)
     end
+  end
+
+  defp latest_logs(slug) do
+    env = live_env(slug)
+    env.id |> Operations.list_for_environment(20) |> Enum.find(&(&1.action == "logs"))
   end
 
   def secret(slug, name, value) do
