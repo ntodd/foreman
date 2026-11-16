@@ -136,12 +136,21 @@ if [ -n "$enroll" ] && [ -e "$IDENTITY" ]; then
   mv "$IDENTITY" "$IDENTITY.replaced-$(date +%s)"
 fi
 
+# Install scripts before the release carried the devcontainer CLI put one
+# here with npm and named it in agent.env. A box pinned to an agent from
+# then is moved back to it after this script, and that agent still needs
+# both. An agent that carries its own CLI ignores this path.
+legacy_cli=/opt/foreman-agent/node/node_modules/.bin/devcontainer
+legacy_cli_env=""
+if [ -x "$legacy_cli" ]; then legacy_cli_env="FOREMAN_DEVCONTAINER_CLI=$legacy_cli"; fi
+
 umask 077
 join_token=""
 if [ -n "$enroll" ]; then join_token="$TOKEN"; fi
 cat > /etc/foreman-agent/agent.env <<EOF
 FOREMAN_URL=$FOREMAN_URL
 FOREMAN_JOIN_TOKEN=$join_token
+$legacy_cli_env
 FOREMAN_POLICY=$POLICY
 HOME=/var/lib/foreman-agent
 RELEASE_TMP=/var/lib/foreman-agent/tmp
@@ -169,13 +178,17 @@ if [ -n "$DEFAULT_BRIDGE_FILTER" ]; then
 else
   sed '/# default-bridge$/d' "$1" > /etc/foreman-agent/firewall.nft.new
 fi
-# A box in a VM (a Flatcar box from the Mac or Linux launcher) has the
-# machine it runs on as its gateway, and under QEMU's user-mode network
-# the gateway's address is that machine's loopback, where services expect
-# only local clients. Environments, and image builds unless the default
-# bridge is left out, don't reach it, apart from DNS (vmnet's resolver is
-# there).
-if systemd-detect-virt --vm --quiet 2>/dev/null; then
+# A Flatcar box in a VM (from the Mac or Linux launcher, or on another
+# hypervisor) has the machine it runs on as its gateway, and under QEMU's
+# user-mode network the gateway's address is that machine's loopback,
+# where services expect only local clients. Environments, and image
+# builds unless the default bridge is left out, don't reach it, apart
+# from DNS (vmnet's resolver is there). Only on Flatcar: a box someone
+# set up on another Linux in a VM may have environments that use
+# something on its gateway, and re-running this script mustn't cut that
+# off.
+os_id=$(sed -n 's/^ID=//p' /etc/os-release /usr/lib/os-release 2>/dev/null | head -n 1 | tr -d '"')
+if [ "$os_id" = flatcar ] && systemd-detect-virt --vm --quiet 2>/dev/null; then
   gateway=$(ip -4 route show default 2>/dev/null | awk '$1 == "default" && $2 == "via" { print $3; exit }')
   case "$gateway" in *[!0-9.]*) gateway="" ;; esac
   if [ -n "$gateway" ]; then
@@ -345,7 +358,6 @@ EOF
 # reboot manager would then reboot the box whenever it liked. Foreman
 # shows the update as a reboot the box needs instead (the flag the agent
 # reports), and the box reboots when an admin asks.
-os_id=$(sed -n 's/^ID=//p' /etc/os-release /usr/lib/os-release 2>/dev/null | head -n 1 | tr -d '"')
 if [ "$os_id" = flatcar ]; then
   echo "foreman: Flatcar: OS updates wait for a reboot from Foreman"
   install -d -m 0755 /etc/flatcar
@@ -407,9 +419,6 @@ systemctl restart foreman-firewall
 systemctl reset-failed foreman-agent 2>/dev/null || true
 systemctl restart foreman-agent
 rm -rf "$dest.old"
-# Install scripts before the release carried the devcontainer CLI put one
-# here with npm.
-rm -rf /opt/foreman-agent/node
 
 if [ -z "$enroll" ]; then
   echo "foreman: updated; this box keeps its enrollment ($IDENTITY)."

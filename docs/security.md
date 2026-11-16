@@ -144,9 +144,11 @@ first-boot config the control plane makes for a join token:
   install's copy of the config) is readable by you alone.
 - The VM's gateway is the machine it runs on, and under QEMU's user-mode
   network the gateway's address reaches that machine's loopback, where
-  services expect only local clients. The install script sees the box is
-  a VM and adds a table to its firewall that rejects environments' (and
-  image builds') traffic to the gateway, DNS aside. The box itself still
+  services expect only local clients. On a Flatcar box that is a VM, the
+  install script adds a table to the box's firewall that rejects
+  environments' (and image builds') traffic to the gateway, DNS aside.
+  A box on another Linux in a VM doesn't get it: its environments may
+  use something on the gateway. The box itself still
   reaches it, which a control plane on the same machine relies on, so
   code that gets root in the box can too.
 - The box's own tailnet node is governed by the tailnet policy like any
