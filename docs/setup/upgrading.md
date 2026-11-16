@@ -255,12 +255,12 @@ The steps:
 3. **Back up and upgrade the control plane**, as above. Every box then
    shows "Agent too old" on its card, and its page has the command to
    run on it.
-4. **Put `/srv/foreman` on XFS** on each box where you can (recommended):
-   a new environment's disk is then a reflink, made at once, rather than
-   a full copy ([personal.md](personal.md#disks-for-environments)). Now,
-   with no environments on the box, is the easy time. Copy out anything
-   you still need from the old clones in `/srv/foreman/envs` first: the
-   new mount hides them.
+4. **Put `/srv/foreman` on its own disk** if you want one (optional):
+   ext4 is fine, and XFS saves space with reflinks at a cost to write
+   speed ([personal.md](personal.md#disks-for-environments)). Now, with no
+   environments on the box, is the easy time. Copy out anything you still
+   need from the old clones in `/srv/foreman/envs` first: the new mount
+   hides them.
 5. **Run the install script on every box**, with `--block-lan` or
    `--vm-subnet` if you want them, and `--default-bridge-reaches-tailnet`
    if the box had it:

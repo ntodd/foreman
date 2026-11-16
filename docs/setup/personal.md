@@ -16,8 +16,8 @@ environment runs in a VM of its own on the desktop.
 - systemd
 - Tailscale, logged in to your tailnet
 - Room in `/srv/foreman` for environments' disks: each one's data disk
-  can grow to 64 GB. On XFS or btrfs a new environment's disk takes no
-  time and no space to make; see [Disks for environments](#disks-for-environments).
+  can grow to 64 GB, and a suspended one keeps its memory there too. ext4
+  is fine; see [Disks for environments](#disks-for-environments).
 
 On a fresh Ubuntu machine, install Docker from
 [Docker's apt repository](https://docs.docker.com/engine/install/ubuntu/)
@@ -244,9 +244,17 @@ changes; its own data disk (Docker's data, the clone), a sparse file
 that grows to at most 64 GB; and the agent release, shared and
 read-only. On a filesystem with reflinks, XFS or btrfs, the copy is a
 reflink: made at once, with no extra space. On ext4 it's a full copy,
-which takes longer and takes its full size. The install script says
-which you have, and the box's page shows "full-copy disks" when it
-can't reflink.
+which takes its full size. The install script says which you have, and
+the box's page shows "full-copy disks" when it can't reflink.
+
+ext4 is fine, and on the production box it was the better choice. A full
+copy of a 1.5 GB prebuild took under half a second on fast NVMe, and the
+whole path from a prebuild to a running environment was quicker than
+with reflinks, because a reflinked disk pays on its first write to every
+block it shares: random writes there ran at a few thousand IOPS before
+the blocks were rewritten, against hundreds of thousands on a copy.
+Those numbers came from XFS on a loop device, which exaggerates the cost,
+so measure on a real volume before choosing XFS for its space savings.
 
 The script doesn't make filesystems. To put `/srv/foreman` on XFS, give
 it a spare disk or partition, before the box has environments (on a

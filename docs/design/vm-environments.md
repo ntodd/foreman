@@ -540,7 +540,16 @@ The full VM end-to-end run passed inside it: install, isolation probes, stop and
 - **The guest agent's user.** As root in the guest, the devcontainer CLI gave the container's user root's uid, so the 0600 secrets and the clone weren't theirs. The guest agent runs as an unprivileged user with `CAP_SYS_TIME` alone, for putting the clock right.
 - **Connected isn't ready.** The guest's vsock listener accepts before its agent is up, so the box waits for the guest agent's hello before it sends anything.
 - **A resume reruns nothing.** `postStartCommand` doesn't run again after a resume (the containers never stopped), so checks that need to see a resume read a running container's output instead.
-- **Production box (bare KVM, Ubuntu).** Partial numbers before the box was needed elsewhere: guest boot to Docker ready 0.90–1.21 s, a cold create (clone, pulls, `devcontainer up`) 24–29 s, an 8 GB snapshot 4.81 s.
+- **Production box** (Threadripper 9980X, 64 cores with SMT, 125 GB, Debian 13 on bare KVM, ext4 on NVMe), with this implementation's agent, guest image and vmctl:
+  - Boot to Docker ready 0.90–1.21 s; to the guest agent's hello 1.44–1.50 s with a NIC. A cold create (clone, pulls, `devcontainer up`) 24–30 s.
+  - `env.start` after a power-off 1.98–2.11 s (4.83–5.64 s before the compose policy went); launch to running 3.44–3.62 s. About 0.7 s of that is the devcontainer CLI resolving the Foreman feature's dependencies from ghcr.io on every start, so environments still need the network to start.
+  - A new environment from a prebuild on ext4 (a full copy of a 1.52 GB disk, 0.33–0.48 s) was up 6.0–6.4 s after the copy started; with reflinks on a loop XFS 6.9–7.2 s. A reflinked disk's first random writes to shared blocks ran at 2.7–5.3k IOPS (p99 about 300 ms) against 400k on a full copy on the same filesystem, and 96–98k even after every block was rewritten. ext4 is the default to recommend (STO-5 understated the cost; measure on a real XFS volume before choosing it).
+  - Resume (copy-on-write) to the guest agent's hello 0.10–0.11 s, to the environment up 0.64–0.72 s, 516–648 MB resident after. The guest clock is behind by the time since the snapshot until the agent steps it at hello (then within 10 ms). An 8 GB snapshot takes 3.35 s and 8,193 MB of disk.
+  - Guests run at host speed: stress-ng within 1.3% at 4 and 16 vCPUs, and a kernel build at -j16 in 107.8 s against 111.1 s on the host.
+  - fio in a guest's data disk: 542–582k random-read and 589–594k random-write IOPS at 4K, about 9–11 GiB/s sequential write.
+  - Network: guest to the LAN through NAT 4.1 Gbit/s (CH's defaults: one queue pair, no offloads), LAN to guest 14 Gbit/s.
+  - Density: 32 environments (2 vCPU / 4 GB) started at once from a prebuild were all up in 9.5 s, at 928–960 MB each (30.2 GB in all), idling at 16% of one thread together. Memory bounds density (about 100 idle environments here), not CPU. Free page reporting gave back 4 GB a guest freed within about 15 s.
+  - Not good for hostile tenants as it stands: the CPU reports Transient Scheduler Attacks unmitigated (no microcode from Debian yet), and SMT is on without core scheduling.
 
 ## Open questions
 
