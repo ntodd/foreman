@@ -522,8 +522,8 @@ The full VM end-to-end run passed inside it: install, isolation probes, stop and
 2. **A real tailnet join from a guest.** Reachability only (NET-17).
 3. **Reflink on bare KVM, and btrfs.** Reflink was measured nested.
 4. **Flatcar on metal** ([#179](https://github.com/ntodd/foreman/issues/179)).
-5. **The agent.** Everything ran from shell scripts. The host agent, the helper and the guest agent protocol are designs.
-6. **The split system and data disks** (ARC-11).
+5. **The agent under load.** The host agent, the helper and the guest agent are built and run end to end (`e2e/vm/run.sh`) nested on a CI runner and in a throwaway VM, with the isolation probes, suspend and resume, and prebuilds. Not yet on a busy bare-metal box for days.
+6. ~~The split system and data disks~~ (ARC-11): built, and run end to end.
 7. **Attacks on Cloud Hypervisor's device emulation.**
 8. **Network throughput** (NET-7), and DNS through the box (NET-6).
 9. **Long runs.** Nothing ran for more than a few minutes. No soak test, no more than eight VMs, no memory pressure across VMs.
@@ -531,6 +531,16 @@ The full VM end-to-end run passed inside it: install, isolation probes, stop and
 11. **A real repository.** The environment was the agent's `hello` fixture: an app container on `mcr.microsoft.com/devcontainers/base:debian` with an Alpine sidecar.
 12. **Per-VM uids** (LIM-9), and the allowance in LIM-5.
 13. **Guest memory under the host's page cache pressure** after a copy-on-write restore, where the snapshot's pages are page cache.
+
+### Found while building it
+
+- **Forwarding and LRO.** Turning IPv4 forwarding on at runtime turns LRO off on every NIC, and on the production box's Aquantia NIC (atlantic) that resets the link: the box dropped off the network for a few seconds. The install script writes `/etc/sysctl.d/90-foreman.conf`, so forwarding is on from boot and the firewall unit's own setting changes nothing. A box sees the reset once, at install.
+- **MagicDNS as a guest's resolver.** On a box on the tailnet, systemd-resolved lists `100.100.100.100`, which guests can't reach (the firewall rejects `100.64.0.0/10`). The helper leaves tailnet resolvers out (NET-6).
+- **Landlock and taps.** See [Appendix B](#appendix-b-cloud-hypervisor-invocations): the rules need the tap's sysfs directory and `/dev/net/tun`.
+- **The guest agent's user.** As root in the guest, the devcontainer CLI gave the container's user root's uid, so the 0600 secrets and the clone weren't theirs. The guest agent runs as an unprivileged user with `CAP_SYS_TIME` alone, for putting the clock right.
+- **Connected isn't ready.** The guest's vsock listener accepts before its agent is up, so the box waits for the guest agent's hello before it sends anything.
+- **A resume reruns nothing.** `postStartCommand` doesn't run again after a resume (the containers never stopped), so checks that need to see a resume read a running container's output instead.
+- **Production box (bare KVM, Ubuntu).** Partial numbers before the box was needed elsewhere: guest boot to Docker ready 0.90–1.21 s, a cold create (clone, pulls, `devcontainer up`) 24–29 s, an 8 GB snapshot 4.81 s.
 
 ## Open questions
 
