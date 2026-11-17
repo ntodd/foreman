@@ -46,11 +46,12 @@ defmodule ForemanAgent.GuestChannelTest do
     outbox = :"outbox-#{System.unique_integer([:positive])}"
     start_supervised!({Outbox, name: outbox}, id: :outbox)
 
-    ops =
-      start_supervised!(
-        {Ops, name: nil, handler: handler, sink: &Outbox.push(outbox, &1)},
-        id: :ops
-      )
+    ops = :"ops-#{System.unique_integer([:positive])}"
+
+    start_supervised!(
+      {Ops, name: ops, handler: handler, sink: &Outbox.push(outbox, &1)},
+      id: :ops
+    )
 
     session =
       [
@@ -213,6 +214,22 @@ defmodule ForemanAgent.GuestChannelTest do
     # attached to for it to reach the box.
     send(pid, {:finish, {:ok, %{"after" => true}}})
     assert_receive {:result, {:ok, %{"after" => true}}}, 5_000
+  end
+
+  # A new Ops knows nothing of what the old one ran: the session closes,
+  # and the box hears of the new instance at the next hello.
+  test "an Ops that restarts fails what it was running, rather than leaving it waiting", ctx do
+    %{ops: ops} = start_guest(ctx)
+    link = start_link(ctx)
+    cmd = command()
+    op_id = cmd.op_id
+    run_async(link, cmd)
+    assert_receive {:started, ^op_id, _pid}, 5_000
+
+    old = GenServer.whereis(ops)
+    Process.exit(old, :kill)
+
+    assert_receive {:result, {:error, "the environment's VM restarted while running it"}}, 5_000
   end
 
   test "a command that runs past its timeout fails, and is cancelled in the guest", ctx do

@@ -51,8 +51,9 @@ defmodule ForemanAgent.Guest.Session do
        queries: Keyword.get_lazy(opts, :queries, &ForemanAgent.Guest.queries/0),
        clock: Keyword.get(opts, :clock, &ForemanAgent.Guest.sync_clock/1),
        configure: Keyword.get(opts, :configure, &ForemanAgent.Guest.configure/1),
-       # The monitor on the Outbox this session attached to.
-       attached: nil
+       # The monitors on the Outbox this session attached to, and on Ops.
+       attached: nil,
+       ops_watch: nil
      }}
   end
 
@@ -80,6 +81,13 @@ defmodule ForemanAgent.Guest.Session do
   # Its supervisor logs why it stopped.
   def handle_info({:DOWN, ref, :process, _pid, _reason}, %{attached: ref} = state) do
     Logger.info("the outbox stopped; closing the host connection so it attaches again")
+    {:stop, :normal, state}
+  end
+
+  # A new Ops knows nothing of what the old one ran; the host hears of it
+  # (a new instance) at the next hello, and fails what it had sent.
+  def handle_info({:DOWN, ref, :process, _pid, _reason}, %{ops_watch: ref} = state) do
+    Logger.info("operations stopped; closing the host connection so it hears of the new ones")
     {:stop, :normal, state}
   end
 
@@ -177,9 +185,11 @@ defmodule ForemanAgent.Guest.Session do
   # closes the session (see the moduledoc).
   defp attach(state) do
     if state.attached, do: Process.demonitor(state.attached, [:flush])
+    if state.ops_watch, do: Process.demonitor(state.ops_watch, [:flush])
     attached = Process.monitor(state.outbox)
+    ops_watch = Process.monitor(state.ops)
     :ok = Outbox.attach(state.outbox, self())
-    %{state | attached: attached}
+    %{state | attached: attached, ops_watch: ops_watch}
   end
 
   defp run_query(fun) do
