@@ -211,9 +211,15 @@ defmodule ForemanWeb.ForemanComponents do
     """
   end
 
-  @doc "A labelled capacity bar: used (or provisioned) of total."
+  @doc """
+  A labelled capacity bar: used (or provisioned) of total. With `used`,
+  the bar also carries what's in use: it shows the larger of the two and
+  takes the color of whichever is further past its threshold, usage being
+  held to `Foreman.Capacity.used_threshold/1`.
+  """
   attr :label, :string, required: true
   attr :value, :any, required: true
+  attr :used, :any, default: nil
   attr :max, :any, required: true
   attr :unit, :string, default: ""
   attr :threshold, :float, default: 0.9
@@ -221,25 +227,42 @@ defmodule ForemanWeb.ForemanComponents do
 
   def capacity_bar(assigns) do
     max = if is_number(assigns.max) and assigns.max > 0, do: assigns.max, else: nil
-    ratio = if max, do: (assigns.value || 0) / max, else: 0
+    value = assigns.value || 0
+    shown = if assigns.used, do: Kernel.max(value, assigns.used), else: assigns.value
+    ratio = if max, do: (shown || 0) / max, else: 0
+
+    level =
+      if max do
+        provisioned = bar_level(value / max, assigns.threshold)
+
+        if assigns.used,
+          do:
+            Kernel.max(
+              provisioned,
+              bar_level(assigns.used / max, Foreman.Capacity.used_threshold(assigns.threshold))
+            ),
+          else: provisioned
+      end
 
     assigns =
       assigns
+      |> assign(:shown, shown)
       |> assign(:ratio, ratio)
+      |> assign(:level, level)
       |> assign(:max_value, max && round(max * 100))
-      |> assign(:bar_value, max && round(min(assigns.value || 0, max) * 100))
+      |> assign(:bar_value, max && round(min(shown || 0, max) * 100))
 
     ~H"""
     <div class="space-y-1.5">
       <div class="flex items-baseline justify-between gap-2 text-xs">
         <span class="text-ink-2">{@label}</span>
         <span class="tabular-nums text-ink-3">
-          {fmt(@value, @format)}<span :if={@max_value}> / {fmt(@max, @format)}</span>{@unit}
+          {fmt(@shown, @format)}<span :if={@max_value}> / {fmt(@max, @format)}</span>{@unit}
         </span>
       </div>
       <progress
         :if={@max_value}
-        class={["bar", bar_class(@ratio, @threshold)]}
+        class={["bar", bar_class(@level)]}
         value={@bar_value}
         max={@max_value}
         aria-label={@label}
@@ -252,14 +275,18 @@ defmodule ForemanWeb.ForemanComponents do
 
   # Amber past the threshold or 100%, whichever comes first, and red past
   # both: a box set to overcommit is amber while it does and red past
-  # what it allows.
-  defp bar_class(ratio, threshold) do
+  # what it allows. 0 is fine, 1 amber, 2 red.
+  defp bar_level(ratio, threshold) do
     cond do
-      ratio > max(threshold, 1) -> "bar-danger"
-      ratio > min(threshold, 1) -> "bar-warning"
-      true -> nil
+      ratio > max(threshold, 1) -> 2
+      ratio > min(threshold, 1) -> 1
+      true -> 0
     end
   end
+
+  defp bar_class(2), do: "bar-danger"
+  defp bar_class(1), do: "bar-warning"
+  defp bar_class(_), do: nil
 
   defp fmt(nil, _), do: "0"
   defp fmt(value, fun) when is_function(fun, 1), do: fun.(value)

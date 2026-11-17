@@ -95,6 +95,35 @@ defmodule Foreman.CapacityTest do
       assert Capacity.box_summary(box, [env]).contention
     end
 
+    test "memory in use past 90% is contention under a memory threshold past 100%", %{box: box} do
+      box = %{box | memory_threshold: 1.2}
+      env = limited(1, 1024)
+
+      Tracker.record(box.id, %{
+        capacity: %{},
+        environments: %{env.id => %{cpu_percent: 10.0, memory_mb: 30_000}}
+      })
+
+      assert Capacity.box_summary(box, [env]).contention
+    end
+
+    test "a resource the box doesn't report doesn't hide the other" do
+      box = box_fixture(capacity: %{"cpus" => 16})
+      refute Capacity.box_summary(box, [limited(8, 65_536)]).contention
+      assert Capacity.box_summary(box, [limited(16, 1024)]).contention
+    end
+
+    test "a box built without thresholds uses 0.9 for both", %{box: box} do
+      box = %{box | cpu_threshold: nil, memory_threshold: nil}
+      refute Capacity.box_summary(box, [limited(14, 1024)]).contention
+      assert Capacity.box_summary(box, [limited(15, 1024)]).contention
+
+      assert {:contention, message} =
+               Capacity.check_placement(box, [], repo_fixture(), %{memory_limit_mb: 30_000})
+
+      assert message =~ "past 90% of its memory"
+    end
+
     test "a busy box under a threshold below 90% still uses that threshold", %{box: box} do
       box = %{box | cpu_threshold: 0.5}
       env = limited(1, 1024)
