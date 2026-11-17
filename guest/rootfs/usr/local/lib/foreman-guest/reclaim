@@ -22,9 +22,9 @@
 # block, they keep those blocks from coalescing (#203's run on the
 # production box found about 100 MiB of them holding back some 1,400
 # blocks). So the helper sets vm.percpu_pagelist_high_fraction high,
-# which shrinks every list's high mark, runs the per-CPU work on every
-# CPU through stat_refresh until the lists are down to it, compacts
-# again, and puts the fraction back as it was, however it ends.
+# which lowers every list's floor, runs the per-CPU work on every CPU
+# through stat_refresh until the lists are down to it, compacts again,
+# and puts the fraction back as it was, however it ends.
 set -u
 export LC_ALL=C
 
@@ -56,6 +56,8 @@ write() {
 }
 
 fraction=/proc/sys/vm/percpu_pagelist_high_fraction
+# What the drain sets it to, which puts every list's floor at four batches.
+raised=1000000
 # The fraction to put back, while the drain may have changed it.
 old=""
 
@@ -70,31 +72,53 @@ read_fraction() {
   esac
 }
 
-# Puts the fraction back to $old, if it isn't already, and checks it took.
+# Puts the fraction back to $old, and checks it took. Only the helper's
+# own value is put back: one something else set since is left, and said.
 # $old is only cleared once that's settled, so a stop part way through
 # tries again on the way out. A failure goes to the journal: the guest's
 # lists stay small until someone puts it back.
 restore() {
   [ -n "$old" ] || return 0
-  if ! { read_fraction && [ "$now" = "$old" ]; }; then
-    write "$old" "$fraction"
-    if ! { read_fraction && [ "$now" = "$old" ]; }; then
-      echo "couldn't put vm.percpu_pagelist_high_fraction back to $old: it's ${now:-unreadable}" >&2
-      old=""
-      return 1
+  if read_fraction && [ "$now" != "$raised" ]; then
+    if [ "$now" != "$old" ]; then
+      echo "left vm.percpu_pagelist_high_fraction at $now, which something else set during the drain (it was $old)" >&2
     fi
+    old=""
+    return 0
+  fi
+  write "$old" "$fraction"
+  if ! { read_fraction && [ "$now" = "$old" ]; }; then
+    echo "couldn't put vm.percpu_pagelist_high_fraction back to $old: it's ${now:-unreadable}" >&2
+    old=""
+    return 1
   fi
   old=""
 }
 
-# Runs the per-CPU lists' decay on every CPU, enough times for lists at
-# their highest to come down to the high mark: each pass takes an eighth.
+# The per-CPU lists' high marks, in order. A list's high only falls to
+# its floor, a step a pass, and the list is drained down to it; one never
+# used yet starts at 0 and jumps to the floor when first used, which is
+# why they aren't summed.
+highs() { awk '$1 == "high:" { printf "%s ", $2 }' /proc/zoneinfo 2>/dev/null; }
+
+# Runs the per-CPU lists' decay on every CPU until their high marks stop
+# moving. A pass lowers a list's high by at most an eighth and drains at
+# most a few thousand pages from it, so a list near its most can take a
+# hundred passes and more. At least 24, which drained #203's lists to
+# their floor, so a zoneinfo that can't be read still drains; at most
+# 1000.
 refresh() {
   i=0
-  while [ "$i" -lt 24 ]; do
+  last=$(highs)
+  while [ "$i" -lt 1000 ]; do
     write 1 /proc/sys/vm/stat_refresh || return 1
     i=$((i + 1))
+    high=$(highs)
+    if [ "$i" -ge 24 ] && [ "$high" = "$last" ]; then return 0; fi
+    last=$high
   done
+  echo "the per-CPU lists were still coming down after $i passes" >&2
+  return 1
 }
 
 # A stop (RuntimeMaxSec) is TERM: put the fraction back on the way out.
@@ -117,7 +141,7 @@ t2=$(ms)
 drain=failed
 if read_fraction; then
   old=$now
-  if write 1000000 "$fraction" && refresh && write 1 /proc/sys/vm/compact_memory; then
+  if write "$raised" "$fraction" && refresh && write 1 /proc/sys/vm/compact_memory; then
     drain=ok
   fi
   restore || drain=failed
