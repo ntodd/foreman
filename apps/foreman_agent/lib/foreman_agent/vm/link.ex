@@ -260,7 +260,8 @@ defmodule ForemanAgent.VM.Link do
         if state.alive?.() do
           {:noreply, retry_later(state)}
         else
-          Logger.info(
+          # Debug: whoever waits on a VM that's still starting asks again.
+          Logger.debug(
             "the VM at #{state.path} isn't running (#{inspect(reason, printable_limit: 100)})"
           )
 
