@@ -162,7 +162,8 @@ the box.
   VM's cgroup. Anything that isn't a valid hello,
   event or reply is dropped, an event only reaches the operation it
   names, and inventory and ports replies only count for the VM's own
-  environment, under the slug the box knows it by. The box's agent
+  environment, under the slug the box knows it by. A reclaim reply is
+  checked field by field, and nothing on the box counts on what it says. The box's agent
   scrubs a command's secret values from the logs and errors the guest
   sends back, as it does for its own commands. Every guest has the same
   vsock CID and no path to another.
@@ -170,7 +171,13 @@ the box.
   its secrets, its clone and its containers. It runs as its own user in
   the VM, in Docker's group, with `CAP_SYS_TIME` (the box sets the
   guest's clock) and nothing else, and refuses the box's own commands
-  (updates, reboots).
+  (updates, reboots). A root helper in the guest image reclaims the
+  guest's page cache for it: it takes a byte count from the agent's
+  group and writes four kernel files (`memory.reclaim`, and
+  `compact_memory`, `percpu_pagelist_high_fraction` and `stat_refresh`
+  in `/proc/sys/vm`), under systemd's sandbox, putting the fraction back
+  as it found it. Anything in Docker's group is root in the guest
+  already; the helper is there to keep the agent's own privileges narrow.
 - Each VM has its own copy of the guest's root disk and its own data
   disk. The agent disk (the box's agent release) is shared and
   read-only.

@@ -54,7 +54,7 @@ defmodule ForemanAgent.Application do
 
           Links.child_specs() ++
             [ForemanAgent.Outbox, ForemanAgent.Ops] ++
-            if(config.connect, do: [recover, link], else: [])
+            if(config.connect, do: [recover, link, ForemanAgent.VM.Reclaimer], else: [])
       end
 
     Supervisor.start_link(children,

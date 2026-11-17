@@ -12,6 +12,7 @@ defmodule ForemanAgent.Guest do
   """
 
   alias ForemanAgent.{Config, Handler, Ports, Runner}
+  alias ForemanAgent.Guest.Reclaim
   alias ForemanProtocol.Command
 
   require Logger
@@ -43,7 +44,8 @@ defmodule ForemanAgent.Guest do
           {:error, message} -> {:error, message}
           {report, _names} -> {:ok, stringify(report)}
         end
-      end
+      end,
+      "reclaim" => &Reclaim.run/1
     }
   end
 

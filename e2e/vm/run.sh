@@ -76,6 +76,10 @@ if command -v mise >/dev/null 2>&1; then mix="mise x -- mix"; else mix=mix; fi
 # A click on a page of the running control plane (see e2e/lv-click.mjs),
 # for what needs the box's connection, which an eval doesn't have.
 lv_click() { # path, event, value-json
+  if command -v node >/dev/null && node -e 'process.exit(typeof WebSocket === "function" ? 0 : 1)'; then
+    node "$root/e2e/lv-click.mjs" "$url" "$cookie" "$@"
+    return
+  fi
   docker run --rm --network host -v "$root/e2e:/e2e:ro" public.ecr.aws/docker/library/node:22-alpine \
     node /e2e/lv-click.mjs "$url" "$cookie" "$@"
 }

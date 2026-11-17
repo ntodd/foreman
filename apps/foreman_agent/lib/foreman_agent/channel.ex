@@ -19,7 +19,9 @@ defmodule ForemanAgent.Channel do
       the op id the control plane gave it, and `now`.
     * `cancel`: `op_id` of a command to cancel.
     * `ack`: `seq` of an event the host has taken.
-    * `query`: `id` and `q` (`inventory` or `ports`).
+    * `query`: `id`, `q` (`inventory`, `ports` or `reclaim`) and, for
+      `reclaim`, `args`: `keep_mb`, the MiB of page cache to keep (see
+      `ForemanAgent.Guest.Reclaim`).
 
   Guest to host:
 

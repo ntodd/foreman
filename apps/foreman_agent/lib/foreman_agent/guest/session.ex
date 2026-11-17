@@ -22,8 +22,9 @@ defmodule ForemanAgent.Guest.Session do
 
     * `:ops`, `:outbox` - the servers commands and events go through (a
       pid or a locally registered name)
-    * `:queries` - `%{"inventory" => fun, "ports" => fun}`, each returning
-      `{:ok, term}` or `{:error, message}`
+    * `:queries` - `%{"inventory" => fun, "ports" => fun, "reclaim" => fun}`,
+      each returning `{:ok, term}` or `{:error, message}`. A function of one
+      argument gets the query's `args` (an empty map when there are none).
     * `:clock` - `fn host_now_ms -> any end`, called with the host's time
     * `:configure` - `fn config_map -> any end`, called with the host's config
   """
@@ -162,12 +163,13 @@ defmodule ForemanAgent.Guest.Session do
     state
   end
 
-  defp handle_frame(%{"t" => "query", "id" => id, "q" => q}, state) when is_integer(id) do
+  defp handle_frame(%{"t" => "query", "id" => id, "q" => q} = frame, state) when is_integer(id) do
     session = self()
+    args = if is_map(frame["args"]), do: frame["args"], else: %{}
 
     case Map.fetch(state.queries, q) do
       {:ok, fun} ->
-        Task.start(fn -> send(session, {:reply, id, run_query(fun)}) end)
+        Task.start(fn -> send(session, {:reply, id, run_query(fun, args)}) end)
 
       :error ->
         send(session, {:reply, id, {:error, "unknown query"}})
@@ -192,8 +194,8 @@ defmodule ForemanAgent.Guest.Session do
     %{state | attached: attached, ops_watch: ops_watch}
   end
 
-  defp run_query(fun) do
-    fun.()
+  defp run_query(fun, args) do
+    if is_function(fun, 1), do: fun.(args), else: fun.()
   rescue
     e -> {:error, "query failed: #{Exception.message(e)}"}
   end

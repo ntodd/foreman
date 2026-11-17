@@ -1,0 +1,153 @@
+#!/bin/sh
+# Gives the box back memory the guest's page cache holds, when the guest
+# agent asks (ForemanAgent.Guest.Reclaim). foreman-guest-reclaim@.service
+# runs it as root for each connection on /run/foreman-reclaim.sock, which
+# only root and the agent's group can open: the agent has no capabilities
+# for any file it writes.
+#
+# The request is one line, the bytes of page cache to reclaim. The answer
+# is one line:
+#
+#   ok reclaim=ok|partial|failed compact=ok|failed drain=ok|failed reclaim_ms=N compact_ms=N drain_ms=N
+#   error <why>
+#
+# memory.reclaim at the root cgroup evicts the coldest pages first, and
+# fails with EAGAIN when it gets less than it was asked for (partial).
+# Then compaction: free page reporting only gives the box free blocks of
+# 2 MiB or more.
+#
+# Then the drain. A big reclaim leaves free pages on the per-CPU lists,
+# which since 6.7 grow during big frees and only shrink from per-CPU
+# vmstat work, which idle CPUs don't run. Scattered a few to a 2 MiB
+# block, they keep those blocks from coalescing (#203's run on the
+# production box found about 100 MiB of them holding back some 1,400
+# blocks). So the helper sets vm.percpu_pagelist_high_fraction high,
+# which lowers every list's floor, runs the per-CPU work on every CPU
+# through stat_refresh until the lists are down to it, compacts again,
+# and puts the fraction back as it was, however it ends.
+set -u
+export LC_ALL=C
+
+# A short line at most, read to the end of the request.
+req=$(head -c 32 | head -n 1)
+case $req in
+  "" | *[!0-9]*)
+    echo "error bad request"
+    exit 0
+    ;;
+esac
+# Up to 1 TiB.
+if [ "${#req}" -gt 13 ] || [ "$req" -gt 1099511627776 ]; then
+  echo "error bad request"
+  exit 0
+fi
+
+ms() { date +%s%3N; }
+
+# Writes $1 to the file $2. Returns 2 for EAGAIN, 1 for any other failure,
+# which goes to the journal.
+write() {
+  if err=$(/usr/bin/printf '%s\n' "$1" 2>&1 > "$2"); then return 0; fi
+  echo "writing $2: $err" >&2
+  case $err in
+    *"Resource temporarily unavailable"*) return 2 ;;
+    *) return 1 ;;
+  esac
+}
+
+fraction=/proc/sys/vm/percpu_pagelist_high_fraction
+# What the drain sets it to, which puts every list's floor at four batches.
+raised=1000000
+# The fraction to put back, while the drain may have changed it.
+old=""
+
+# Reads the fraction into $now: a whole number, or a failure. Not with
+# read, which takes a byte at a time, and a sysctl read past the start is
+# the end of the file.
+now=""
+read_fraction() {
+  now=$(cat "$fraction" 2>/dev/null)
+  case $now in
+    "" | *[!0-9]*) return 1 ;;
+  esac
+}
+
+# Puts the fraction back to $old, and checks it took. Only the helper's
+# own value is put back: one something else set since is left, and said.
+# $old is only cleared once that's settled, so a stop part way through
+# tries again on the way out. A failure goes to the journal: the guest's
+# lists stay small until someone puts it back.
+restore() {
+  [ -n "$old" ] || return 0
+  if read_fraction && [ "$now" != "$raised" ]; then
+    if [ "$now" != "$old" ]; then
+      echo "left vm.percpu_pagelist_high_fraction at $now, which something else set during the drain (it was $old)" >&2
+    fi
+    old=""
+    return 0
+  fi
+  write "$old" "$fraction"
+  if ! { read_fraction && [ "$now" = "$old" ]; }; then
+    echo "couldn't put vm.percpu_pagelist_high_fraction back to $old: it's ${now:-unreadable}" >&2
+    old=""
+    return 1
+  fi
+  old=""
+}
+
+# The per-CPU lists' high marks, in order. A list's high only falls to
+# its floor, a step a pass, and the list is drained down to it; one never
+# used yet starts at 0 and jumps to the floor when first used, which is
+# why they aren't summed.
+highs() { awk '$1 == "high:" { printf "%s ", $2 }' /proc/zoneinfo 2>/dev/null; }
+
+# Runs the per-CPU lists' decay on every CPU until their high marks stop
+# moving. A pass lowers a list's high by at most an eighth and drains at
+# most a few thousand pages from it, so a list near its most can take a
+# hundred passes and more. At least 24, which drained #203's lists to
+# their floor, so a zoneinfo that can't be read still drains; at most
+# 1000.
+refresh() {
+  i=0
+  last=$(highs)
+  while [ "$i" -lt 1000 ]; do
+    write 1 /proc/sys/vm/stat_refresh || return 1
+    i=$((i + 1))
+    high=$(highs)
+    if [ "$i" -ge 24 ] && [ "$high" = "$last" ]; then return 0; fi
+    last=$high
+  done
+  echo "the per-CPU lists were still coming down after $i passes" >&2
+  return 1
+}
+
+# A stop (RuntimeMaxSec) is TERM: put the fraction back on the way out.
+trap restore EXIT
+trap 'exit 143' TERM
+trap 'exit 129' HUP
+trap 'exit 130' INT
+
+t0=$(ms)
+write "$req" /sys/fs/cgroup/memory.reclaim
+case $? in
+  0) reclaim=ok ;;
+  2) reclaim=partial ;;
+  *) reclaim=failed ;;
+esac
+t1=$(ms)
+if write 1 /proc/sys/vm/compact_memory; then compact=ok; else compact=failed; fi
+t2=$(ms)
+
+drain=failed
+if read_fraction; then
+  old=$now
+  if write "$raised" "$fraction" && refresh && write 1 /proc/sys/vm/compact_memory; then
+    drain=ok
+  fi
+  restore || drain=failed
+else
+  echo "reading $fraction: ${now:-nothing}" >&2
+fi
+t3=$(ms)
+
+echo "ok reclaim=$reclaim compact=$compact drain=$drain reclaim_ms=$((t1 - t0)) compact_ms=$((t2 - t1)) drain_ms=$((t3 - t2))"
