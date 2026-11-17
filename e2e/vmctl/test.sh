@@ -195,7 +195,7 @@ has "sees no other VM's disks" "TemporaryFileSystem=$work/srv:ro"
 has "sees its own directory" "BindPaths=$work/srv/vms/$env1"
 has "sees the guest images and agent disks read-only" "BindReadOnlyPaths=$work/srv/guest $work/srv/agent-disks"
 has "can't see the box's secrets, identity or settings, or reach this helper" \
-  "InaccessiblePaths=-/run/foreman -/var/lib/foreman-agent -/etc/foreman-agent -$work/state -/run/foreman-vmctl.sock -/sys/fs/cgroup -/run/systemd -/run/dbus"
+  "InaccessiblePaths=-/run/foreman -/var/lib/foreman-agent -/etc/foreman-agent -$work/state -/run/foreman-vmctl.sock -/sys/fs/cgroup/foreman.slice -/run/systemd/private -/run/dbus/system_bus_socket"
 has "uses its tap group as the primary VM group" "--gid=foreman-tap0"
 has "hides processes outside the VM's ptrace permissions" "ProtectProc=ptraceable"
 check "its tap requires its own group" grep -q 'ip tuntap add dev fm-vm0 mode tap user foreman group foreman-tap0' "$work/calls"

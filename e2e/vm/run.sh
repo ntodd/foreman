@@ -51,6 +51,7 @@ logs() {
   docker logs --tail 60 "$cp_name" >&2 2>&1 || true
   echo "== agent" >&2
   sudo journalctl --no-pager -n 120 -u foreman-agent >&2 || true
+  sudo journalctl --no-pager -n 40 -u 'foreman-vm-*.service' >&2 || true
   # The VMs' directories are the agent's alone.
   sudo sh -c 'for log in /srv/foreman/vms/*/serial.log /srv/foreman/vms/*/ch.log; do
     [ -e "$log" ] || continue
