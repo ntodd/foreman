@@ -40,9 +40,14 @@ defmodule ForemanAgent.Channel do
   @port 1024
   @max_to_guest 4 * 1024 * 1024
   @max_to_host 1024 * 1024
-  # What decoding one frame may cost.
-  @decode_heap 8 * 1024 * 1024
-  @decode_timeout 1_000
+  # What decoding one guest frame may cost. The guest is hostile and the
+  # decode runs in the host agent's BEAM, not the VM's cgroup, so this is
+  # held to what a legitimate frame needs. A big integer, a deep tree or a
+  # map of many keys is killed by the heap in a few milliseconds; the
+  # largest honest frames (a 1 MiB string, an environment's inventory or
+  # ports) decode in a few ms, well under the heap and the timeout.
+  @decode_heap 2 * 1024 * 1024
+  @decode_timeout 200
 
   @doc "The vsock port the guest agent listens on."
   def port, do: @port
@@ -66,8 +71,8 @@ defmodule ForemanAgent.Channel do
 
   A frame can be built to be costly to decode (deep nesting, numbers with
   a million digits), so it's decoded in a process of its own with a heap
-  of at most `:max_heap` bytes (default 8 MiB) and `:timeout`
-  milliseconds (default 1 second). One that needs more is malformed.
+  of at most `:max_heap` bytes (default 2 MiB) and `:timeout`
+  milliseconds (default 200). One that needs more is malformed.
   """
   @spec decode(binary(), keyword()) :: {:ok, map()} | {:error, :malformed}
   def decode(data, opts \\ []) when is_binary(data) do

@@ -281,32 +281,34 @@ defmodule ForemanAgent.VM.Status do
 
   @doc """
   Whether this box can run environment VMs, for the control plane (the
-  join's `vm`): the reason it can't when it can't, whether its VMs are
-  nested (the box is itself a VM), and whether its disks can reflink.
+  join's `vm`): the reason it can't when it can't (a kernel without
+  Landlock among them), whether its VMs are nested (the box is itself a
+  VM), and whether its disks can reflink.
   """
   @spec report(ForemanAgent.Config.t()) :: map()
   def report(config) do
-    checks = [
-      {Updater.target() == "linux-amd64",
-       "environment VMs aren't supported on #{Updater.target()} yet"},
-      {is_binary(config.guest_url) and is_binary(config.guest_sha256),
-       "this agent wasn't built with a guest image"},
-      {File.exists?("/dev/kvm"),
-       "this box has no /dev/kvm (KVM, or nested virtualization, is off)"},
-      {helper_ok?(config), "the VM helper is missing or too old; re-run the install script"}
-    ]
+    reason =
+      cond do
+        Updater.target() != "linux-amd64" ->
+          "environment VMs aren't supported on #{Updater.target()} yet"
 
-    reason = Enum.find_value(checks, fn {ok?, why} -> if ok?, do: nil, else: why end)
+        not (is_binary(config.guest_url) and is_binary(config.guest_sha256)) ->
+          "this agent wasn't built with a guest image"
+
+        not File.exists?("/dev/kvm") ->
+          "this box has no /dev/kvm (KVM, or nested virtualization, is off)"
+
+        true ->
+          # A helper that's too old, or a kernel without Landlock, which
+          # every VM is confined with.
+          case Helper.ready(config) do
+            :ok -> nil
+            {:error, why} -> why
+          end
+      end
 
     %{ready: reason == nil, nested: nested?(), reflink: reflink?(config)}
     |> then(&if(reason, do: Map.put(&1, :reason, reason), else: &1))
-  end
-
-  defp helper_ok?(config) do
-    case Helper.installed_version(config) do
-      {:ok, version} -> version >= Helper.version()
-      {:error, _} -> false
-    end
   end
 
   # A box that's a VM itself runs its environments nested, which is slower.
