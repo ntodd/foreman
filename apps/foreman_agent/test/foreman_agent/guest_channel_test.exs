@@ -668,7 +668,10 @@ defmodule ForemanAgent.GuestChannelTest do
 
       Process.sleep(250)
       early = count_received(:acked)
-      assert early < total, "read all #{total} tiny frames at once (#{early}); only bytes were charged"
+
+      assert early < total,
+             "read all #{total} tiny frames at once (#{early}); only bytes were charged"
+
       assert early <= 8
 
       got =
@@ -728,7 +731,10 @@ defmodule ForemanAgent.GuestChannelTest do
 
       Process.sleep(250)
       early = count_received(:acked)
-      assert early < total, "read all #{total} frames at once (#{early}); the rate limit didn't bite"
+
+      assert early < total,
+             "read all #{total} frames at once (#{early}); the rate limit didn't bite"
+
       assert early <= 6
 
       # The rest arrive as the bucket refills.
