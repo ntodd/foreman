@@ -14,7 +14,7 @@ defmodule ForemanAgent.Connection do
   """
   use Slipstream, restart: :permanent
 
-  alias ForemanAgent.{Config, Firewall, Identity, Ops, Outbox, Reporter, Text, Updater}
+  alias ForemanAgent.{Config, Firewall, Identity, Ops, Outbox, Reporter, Text, Updater, VM}
   alias ForemanProtocol.{Auth, Command, Event}
 
   require Logger
@@ -131,7 +131,7 @@ defmodule ForemanAgent.Connection do
       arch: Updater.target(),
       feature_version: Config.feature_version(Config.get()),
       in_flight: Ops.in_flight(),
-      policy: Config.policy_report(config)
+      vm: VM.Status.report(config)
     }
     |> Map.merge(Firewall.report(config))
     |> ForemanProtocol.dump_join()

@@ -34,6 +34,12 @@ defmodule Foreman.Operations.Redactions do
     :ok
   end
 
+  @doc "Records what to redact for an operation that has no environment."
+  def put_values(op_id, values) do
+    :ets.insert(@table, {op_id, Redaction.prepare(values)})
+    :ok
+  end
+
   def redact(op_id, text) do
     Redaction.redact(values(op_id), text)
   end

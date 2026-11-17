@@ -1,0 +1,2 @@
+# What initializeCommand leaves, so it never reads as a change.
+.initialized

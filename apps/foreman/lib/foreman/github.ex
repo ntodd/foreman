@@ -275,6 +275,46 @@ defmodule Foreman.GitHub do
     end
   end
 
+  @doc """
+  A token for a prebuild of `repo` to clone with: the app's installation
+  token, reading the repo (and its extra repos) and nothing else. A
+  prebuild belongs to no user, so it can't have a user's token.
+  """
+  def prebuild_token(%Repos.Repo{} = repo) do
+    repo = Foreman.Repo.preload(repo, :owner)
+
+    cond do
+      not configured?() ->
+        {:error, :not_configured}
+
+      is_nil(repo.owner.installation_id) ->
+        {:error, :not_installed}
+
+      true ->
+        client().repo_read_token(
+          app(),
+          repo.owner.installation_id,
+          Enum.uniq([repo.name | repo.extra_repos])
+        )
+    end
+  end
+
+  @doc """
+  Whether `token` reads `repo` and each of `names` (repos of the same
+  owner; by default the repo's extra repos), by asking GitHub for each.
+  Anything but a yes (an error, GitHub not answering) is a no.
+  """
+  def can_read?(token, %Repos.Repo{} = repo, names \\ nil) when is_binary(token) do
+    repo = Foreman.Repo.preload(repo, :owner)
+    names = names || repo.extra_repos
+    others = Enum.map(names, &"#{repo.owner.login}/#{&1}")
+
+    Enum.all?(
+      Enum.uniq([repo.full_name | others]),
+      &match?({:ok, _}, client().get_repo(token, &1))
+    )
+  end
+
   def list_branches(%User{} = user, %Repos.Repo{} = repo) do
     with {:ok, token} <- user_token(user) do
       client().list_branches(token, repo.full_name)

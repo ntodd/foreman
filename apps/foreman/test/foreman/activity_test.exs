@@ -97,8 +97,7 @@ defmodule Foreman.ActivityTest do
           protocol_version: 1,
           hostname: "dev",
           os: "linux",
-          arch: "x86_64",
-          policy: %{}
+          arch: "x86_64"
         })
 
     defp seen(box, seconds_ago) do

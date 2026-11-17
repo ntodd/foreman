@@ -8,7 +8,7 @@ defmodule Foreman.Environments.Commands do
   secret hashes it applied, whether it carried a token).
   """
 
-  alias Foreman.{Accounts, Config, GitHub, Repo, Secrets, Tailscale}
+  alias Foreman.{Accounts, Config, GitHub, Prebuilds, Repo, Secrets, Tailscale}
   alias Foreman.Environments.Environment
   alias Foreman.Operations.Operation
   alias ForemanProtocol.Command
@@ -41,11 +41,8 @@ defmodule Foreman.Environments.Commands do
           command(op, "env.start", payload)
         end)
 
-      "stop" ->
-        command(op, "env.stop", base(env))
-
-      "destroy" ->
-        command(op, "env.destroy", base(env))
+      action when action in ["stop", "suspend", "destroy"] ->
+        command(op, "env." <> action, base(env))
 
       "restart_all" ->
         with_secrets(env, fn s -> command(op, "env.restart", restart(env, "all", [], s)) end)
@@ -96,19 +93,42 @@ defmodule Foreman.Environments.Commands do
     end
   end
 
-  # Pull and rebuild is a rebuild that fast-forwards the clone first.
-  defp up_command("create"), do: {"env.create", %{}}
-  defp up_command("rebuild"), do: {"env.rebuild", %{}}
-  defp up_command("pull_rebuild"), do: {"env.rebuild", %{pull: true}}
+  # Pull and rebuild is a rebuild that fast-forwards the clone first. A
+  # create starts from the box's prebuild of the repo's branch, if it has
+  # one the user may start from.
+  defp up_command("create", env, token) do
+    case prebuild_id(env, token) do
+      nil -> {"env.create", %{}}
+      prebuild_id -> {"env.create", %{prebuild_id: prebuild_id}}
+    end
+  end
+
+  defp up_command("rebuild", _env, _token), do: {"env.rebuild", %{}}
+  defp up_command("pull_rebuild", _env, _token), do: {"env.rebuild", %{pull: true}}
+
+  # A prebuild holds the repo's content (and its extra repos'), cloned with
+  # the app's token, so the user's own token has to show it reads all of it
+  # first. Without a token, or one GitHub won't say yes to, the environment
+  # clones and builds from nothing like any other. Without GitHub (a local
+  # git server) there's no one to ask.
+  defp prebuild_id(env, token) do
+    with %{id: id, repos: repos} <- Prebuilds.ready(env.repo, env.box_id, env.branch) do
+      cond do
+        not GitHub.configured?() -> id
+        is_binary(token) and GitHub.can_read?(token, env.repo, repos) -> id
+        true -> nil
+      end
+    end
+  end
 
   defp up(op, env) do
-    {type, extra} = up_command(op.action)
-    secrets = secrets(env)
-    identity = Accounts.effective_identity(env.user, env.repo)
-    features = features(env)
     # A build shouldn't wait on GitHub: without a token it goes ahead, and
     # the token follows with the next refresh.
     {token, token_notice, token_status} = github_token(env)
+    {type, extra} = up_command(op.action, env, token)
+    secrets = secrets(env)
+    identity = Accounts.effective_identity(env.user, env.repo)
+    features = features(env)
 
     with {:ok, ts_key, env} <- tailscale_key(env, op.action) do
       files =

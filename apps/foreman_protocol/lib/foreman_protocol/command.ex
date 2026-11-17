@@ -47,8 +47,29 @@ defmodule ForemanProtocol.Command do
                registry_auth: @registry_auth
              ]
 
+  # What a prebuild is made from: the repo at a branch, with the Foreman
+  # feature (and Tailscale, which joins nothing without a key), and a
+  # GitHub token to clone with in `files`. No secrets of anyone's.
+  @prebuild_spec [
+    prebuild_id: {:uuid, required: true},
+    repo: {:repo, required: true},
+    clone_url: {:git_url, required: true},
+    branch: {:git_ref, required: true},
+    config_path: {:relative_path, default: ".devcontainer/devcontainer.json"},
+    files: {:files, default: %{}},
+    tailscale:
+      {{:object, enabled: {:boolean, default: false}, tags: {{:list, :ts_tag}, default: []}},
+       default: %{}},
+    # The repo's limits, so it builds in a VM the size its environments get.
+    limits: {{:object, cpus: {:positive_number, []}, memory_mb: {:integer, []}}, default: %{}},
+    registry_auth: @registry_auth
+  ]
+
   @specs %{
-    "env.create" => @up_spec,
+    # Protocol 6: `prebuild_id`, a prebuild on this box to start from;
+    # `prebuild`, set by a box for the agent in a VM it's building a
+    # prebuild in.
+    "env.create" => @up_spec ++ [prebuild_id: {:uuid, []}, prebuild: {:boolean, []}],
     # `pull`: fast-forward the clone to its branch first. Protocol 3, and
     # absent unless set.
     "env.rebuild" => @up_spec ++ [pull: {:boolean, []}],
@@ -56,6 +77,9 @@ defmodule ForemanProtocol.Command do
     # Protocol 4, and absent unless set.
     "env.start" => @env ++ [compose_env: {:env_map, default: %{}}, registry_auth: @registry_auth],
     "env.stop" => @env,
+    # Protocol 6. Saves the environment's VM's memory to disk and stops
+    # it; the next env.start resumes it.
+    "env.suspend" => @env,
     "env.restart" =>
       @env ++
         [
@@ -82,7 +106,13 @@ defmodule ForemanProtocol.Command do
       @env ++ [hook: {:connect_name, required: true}, action: {:connect_name, required: true}],
     "box.inventory" => [],
     "box.stats" => [],
-    "box.gc" => [],
+    # `prebuilds` (protocol 6): the prebuilds the control plane knows on
+    # this box; the box deletes any others. Absent, it leaves them alone.
+    "box.gc" => [prebuilds: {{:list, :uuid}, []}],
+    # Protocol 6. Builds a prebuild: an environment's disk with the repo
+    # cloned and its devcontainer built, that new environments start from.
+    "box.prebuild" => @prebuild_spec,
+    "box.prebuild.delete" => [prebuild_id: {:uuid, required: true}],
     # Protocol 5. Reboots the box, if it's still on the boot the control
     # plane saw (box.reboot's `boot_id`): a resend after the reboot is
     # done already. Sent only to agents that report `can_restart`.

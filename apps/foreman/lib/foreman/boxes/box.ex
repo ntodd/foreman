@@ -23,7 +23,6 @@ defmodule Foreman.Boxes.Box do
     field :capacity, :map
     field :capacity_policy, :string, default: "allow"
     field :contention_threshold, :float, default: 0.9
-    field :policy, :map
     field :firewall, :string
     field :firewall_default_bridge, :string
     field :reboot_required, :boolean
@@ -31,6 +30,9 @@ defmodule Foreman.Boxes.Box do
     field :livepatch, :boolean
     field :can_restart, :boolean, default: false
     field :boot_id, :string
+    # Protocol 6: whether it can run environment VMs (string keys: ready,
+    # reason, nested, reflink).
+    field :vm, :map
     field :last_seen_at, :utc_datetime_usec
     field :revoked_at, :utc_datetime_usec
     timestamps()

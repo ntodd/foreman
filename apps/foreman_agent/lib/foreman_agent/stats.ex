@@ -105,7 +105,13 @@ defmodule ForemanAgent.Stats do
   @doc "Total and free MB on the filesystem holding the environments."
   def disk(ctx) do
     # A hung filesystem (a dead NFS mount) can hang df.
-    case ctx.runner.run("df", ["-Pk", ctx.config.envs_root], env: %{}, timeout: 10_000) do
+    # On a box, where the VMs' disks are; in a VM, where the clone is.
+    dir =
+      if ctx.config.mode == :host,
+        do: Path.dirname(ctx.config.vm_root),
+        else: ctx.config.envs_root
+
+    case ctx.runner.run("df", ["-Pk", dir], env: %{}, timeout: 10_000) do
       {:ok, %{status: 0, output: output}} -> parse_df(output)
       _ -> {0, 0}
     end

@@ -11,13 +11,26 @@ defmodule ForemanAgent.Ops do
   - **Cancellable:** `op.cancel` kills a running operation's process and
     every process its commands started (`ForemanAgent.Runner.Tree`), or
     drops a queued one. One it doesn't know is recorded as cancelled, so it
-    won't run if it turns up later. The environment's next operation waits
-    until the cancelled one's processes are gone.
+    won't run if it turns up later; one that finished has its result sent
+    again. The environment's next operation waits until the cancelled
+    one's processes are gone.
+  - **Nothing outlives it:** a new Ops (after a crash or a restart) knows
+    nothing of what the old one ran, and a resend would run beside it. So
+    when Ops stops, it stops its running operations the way a cancel does,
+    and waits for them.
 
   Each operation runs in its own process and reports `op.accepted`,
   `op.log` and `op.result` events to the sink.
   """
-  use GenServer
+
+  # How long a cancelled operation's commands get to exit after SIGTERM.
+  @cancel_grace 10_000
+  # How long Ops waits, as it stops, for its operations to be stopped:
+  # the grace, and time for the SIGKILLs after it.
+  @stop_wait @cancel_grace + 4_000
+
+  # The supervisor gives terminate/2 time to wait.
+  use GenServer, shutdown: @stop_wait + 1_000
 
   alias ForemanAgent.Runner.Tree
   alias ForemanAgent.Text
@@ -26,8 +39,6 @@ defmodule ForemanAgent.Ops do
   require Logger
 
   @max_done 500
-  # How long a cancelled operation's commands get to exit after SIGTERM.
-  @cancel_grace 10_000
 
   def start_link(opts) do
     {name, opts} = Keyword.pop(opts, :name, __MODULE__)
@@ -41,10 +52,22 @@ defmodule ForemanAgent.Ops do
   @spec in_flight(GenServer.server()) :: [String.t()]
   def in_flight(server \\ __MODULE__), do: GenServer.call(server, :in_flight)
 
+  @doc """
+  A random id this server picks when it starts. What it knows of the
+  operations it ran goes when it stops, so a new id means a resend may
+  run an operation again (see `ForemanAgent.VM.Link`).
+  """
+  @spec instance(GenServer.server()) :: String.t()
+  def instance(server \\ __MODULE__), do: GenServer.call(server, :instance)
+
   @impl true
   def init(opts) do
+    # So terminate/2 runs when the supervisor stops it.
+    Process.flag(:trap_exit, true)
+
     {:ok,
      %{
+       instance: ForemanProtocol.uuid(),
        handler: Keyword.get(opts, :handler, &ForemanAgent.Handler.handle/2),
        sink: Keyword.get(opts, :sink, &ForemanAgent.Outbox.push/1),
        running: %{},
@@ -86,6 +109,7 @@ defmodule ForemanAgent.Ops do
   end
 
   def handle_call(:in_flight, _from, state), do: {:reply, MapSet.to_list(state.known), state}
+  def handle_call(:instance, _from, state), do: {:reply, state.instance, state}
 
   @impl true
   def handle_info({:op_done, op_id, result}, state) do
@@ -111,6 +135,34 @@ defmodule ForemanAgent.Ops do
       {:error, {key, draining}} ->
         {:noreply, maybe_start(%{state | draining: draining}, key)}
     end
+  end
+
+  # Operations are linked (see start/3); their DOWN says how they ended.
+  def handle_info({:EXIT, _pid, _reason}, state), do: {:noreply, state}
+
+  # Stops every running operation the way a cancel does, and waits for
+  # them and for the ones a cancel is still stopping, so none is left
+  # running when a new Ops starts.
+  #
+  # Killed outright (or past the supervisor's shutdown timeout), Ops gets
+  # no terminate. Its operations are linked to it, so they die with it,
+  # and MuonTrap kills each one's direct child as its port closes; but
+  # what those started (a `docker compose up`, say) can run on. Catching
+  # those takes a cgroup per command (see `ForemanAgent.Runner.Tree`).
+  @impl true
+  def terminate(_reason, state) do
+    reapers = for {_op_id, %{pid: pid}} <- state.running, do: reap(pid)
+    deadline = System.monotonic_time(:millisecond) + @stop_wait
+
+    Enum.each(reapers ++ Map.keys(state.draining), fn reaper ->
+      wait = max(deadline - System.monotonic_time(:millisecond), 0)
+
+      receive do
+        {:DOWN, _ref, :process, ^reaper, _reason} -> :ok
+      after
+        wait -> :ok
+      end
+    end)
   end
 
   # The reason can carry the command's payload (secrets included), so the
@@ -157,11 +209,15 @@ defmodule ForemanAgent.Ops do
       end
     end
 
+    # Linked, so it goes if Ops is killed (see terminate/2).
     {pid, ref} =
-      spawn_monitor(fn ->
-        Logger.metadata(op_id: op_id)
-        send(parent, {:op_done, op_id, handler.(cmd, log)})
-      end)
+      Process.spawn(
+        fn ->
+          Logger.metadata(op_id: op_id)
+          send(parent, {:op_done, op_id, handler.(cmd, log)})
+        end,
+        [:link, :monitor]
+      )
 
     %{
       state
@@ -241,9 +297,12 @@ defmodule ForemanAgent.Ops do
 
   # After a restart, a cancel can arrive before the control plane's resend
   # of the operation it's for. Recorded as cancelled, the resend gets that
-  # result instead of running. One that already finished keeps its result.
+  # result instead of running. One that already finished keeps its result,
+  # and sends it again: whoever cancelled it may have missed it, and keeps
+  # cancelling until it hears (see `ForemanAgent.VM.Link`).
   defp tombstone(state, target) do
     if Map.has_key?(state.done, target) do
+      state.sink.(state.done[target])
       state
     else
       event = result_event(target, {:error, "cancelled"})

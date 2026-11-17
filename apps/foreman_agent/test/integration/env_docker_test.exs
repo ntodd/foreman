@@ -32,7 +32,7 @@ defmodule ForemanAgent.Integration.EnvDockerTest do
     File.rm_rf!(root)
     File.mkdir_p!(root)
 
-    base_url = GitServer.start(Path.join(root, "git"), ["hello", "sneaky", "innocent"])
+    base_url = GitServer.start(Path.join(root, "git"), ["hello"])
 
     config = %Config{
       data_dir: Path.join(root, "data"),
@@ -45,7 +45,6 @@ defmodule ForemanAgent.Integration.EnvDockerTest do
       docker_socket: docker_socket(),
       allowed_git_hosts: ["127.0.0.1"],
       insecure_git_hosts: ["127.0.0.1"],
-      policy_rules: Env.Policy.default_rules(),
       feature_dir: Path.expand("../../../../features/src/foreman", __DIR__)
     }
 
@@ -227,23 +226,9 @@ defmodule ForemanAgent.Integration.EnvDockerTest do
 
     assert inspect =~ ~s("Name":"no")
 
-    # Each copy's network is on its own Foreman bridge, which the box's
-    # firewall matches on.
-    for {env_id, slug} <- [{@env1, @slug1}, {@env2, @slug2}] do
-      {bridge, 0} =
-        System.cmd("docker", [
-          "network",
-          "inspect",
-          "#{slug}_default",
-          "--format",
-          ~s({{index .Options "com.docker.network.bridge.name"}})
-        ])
-
-      assert String.trim(bridge) == Env.Overlay.bridge_name(env_id, "#{slug}_default")
-    end
-
-    # initializeCommand never ran on the box.
-    refute File.exists?("/tmp/foreman-initialize-command-ran")
+    # initializeCommand runs outside the containers: on a box, in the
+    # environment's own VM.
+    assert File.exists?(Path.join([config.envs_root, @env1, "workspace/hello/.initialized"]))
 
     # -- secrets, identity and the feature ----------------------------------
     app1 = c1["app"]["Id"]
@@ -466,265 +451,5 @@ defmodule ForemanAgent.Integration.EnvDockerTest do
       ])
 
     assert volumes == ""
-  end
-
-  test "the policy sees through include, extends and interpolation", %{
-    config: config,
-    base_url: base_url
-  } do
-    ctx = ctx(config)
-    env_id = "#{@run}44-4444-4444-8444-444444444444"
-
-    payload =
-      create_payload(env_id, "sneaky-#{@run}-1", base_url, %{
-        "repo" => "acme/sneaky",
-        "clone_url" => base_url <> "/sneaky.git",
-        "tailscale" => %{"enabled" => false}
-      })
-
-    # HOME for the agent's children is the agent's own home, which is
-    # inside its data directory here, as on a real box.
-    ctx = put_in(ctx.config.data_dir, System.user_home!())
-
-    assert {:error, message} = Env.run("env.create", payload, ctx)
-    assert message =~ "protected"
-    assert message =~ "helper"
-    assert containers(env_id) == %{}
-  end
-
-  test "the policy refuses a feature that asks for privileged in its own metadata", %{
-    config: config,
-    base_url: base_url
-  } do
-    env_id = "#{@run}55-5555-4555-8555-555555555555"
-
-    payload =
-      create_payload(env_id, "innocent-#{@run}-1", base_url, %{
-        "repo" => "acme/innocent",
-        "clone_url" => base_url <> "/innocent.git",
-        "tailscale" => %{"enabled" => false}
-      })
-
-    assert {:error, message} = Env.run("env.create", payload, ctx(config))
-    assert message =~ "./innocent"
-    assert message =~ "privileged"
-    assert containers(env_id) == %{}
-  end
-
-  # The CLI reports a feature passed with --additional-features under the
-  # ref it was given, which is how a refusal tells the user's own apart.
-  test "the policy names a user's own feature it refuses", %{
-    config: config,
-    base_url: base_url
-  } do
-    env_id = "#{@run}66-6666-4666-8666-666666666666"
-    ref = "ghcr.io/devcontainers/features/docker-in-docker:2"
-
-    payload =
-      create_payload(env_id, "hello-#{@run}-9", base_url, %{
-        "tailscale" => %{"enabled" => false},
-        "features" => %{ref => %{}}
-      })
-
-    assert {:error, message} = Env.run("env.create", payload, ctx(config))
-    assert message =~ "your feature #{ref} (from your Foreman settings)"
-    assert message =~ "privileged"
-    assert containers(env_id) == %{}
-  end
-
-  test "the policy refuses a compose file rewritten from inside the environment", %{
-    config: config,
-    base_url: base_url
-  } do
-    ctx = ctx(config)
-    env_id = "#{@run}33-3333-4333-8333-333333333333"
-
-    payload =
-      create_payload(env_id, "hello-#{@run}-3", base_url, %{"tailscale" => %{"enabled" => false}})
-
-    assert {:ok, _} = Env.run("env.create", payload, ctx)
-
-    on_exit(fn ->
-      System.cmd("docker", ["compose", "-p", "hello-#{@run}-3", "down", "--volumes"],
-        stderr_to_stdout: true
-      )
-    end)
-
-    app = containers(env_id)["app"]["Id"]
-
-    # Something in the environment adds a bind mount of the agent's state.
-    evil = """
-    services:
-      app:
-        volumes:
-          - #{config.data_dir}:/stolen
-    """
-
-    {_, 0} =
-      exec(app, [
-        "bash",
-        "-c",
-        "cat > /workspaces/hello/.devcontainer/docker-compose.override.yml <<'EOF'\n#{evil}EOF"
-      ])
-
-    {_, 0} =
-      exec(app, [
-        "bash",
-        "-c",
-        ~s(cd /workspaces/hello/.devcontainer && sed -i 's/"docker-compose.yml"\\]/"docker-compose.yml", "docker-compose.override.yml"]/' devcontainer.json)
-      ])
-
-    assert {:ok, _} = Env.run("env.stop", %{env_id: env_id, slug: "hello-#{@run}-3"}, ctx)
-
-    assert {:error, message} =
-             Env.run(
-               "env.start",
-               %{env_id: env_id, slug: "hello-#{@run}-3", compose_env: %{}},
-               ctx
-             )
-
-    assert message =~ "protected"
-
-    assert {:ok, _} = Env.run("env.destroy", %{env_id: env_id, slug: "hello-#{@run}-3"}, ctx)
-  end
-
-  # Environments created before Foreman named their bridges: one running
-  # on compose's own network, labelled with a config hash, so compose
-  # recreates it once the project stops; and one whose network compose
-  # would reuse as it is (an older compose made it without the label),
-  # which is refused rather than taken down with its containers.
-  test "an environment from before Foreman's bridges moves onto one when it starts", %{
-    config: config,
-    base_url: base_url
-  } do
-    ctx = ctx(config)
-    env_id = "#{@run}77-7777-4777-8777-777777777777"
-    slug = "hello-#{@run}-4"
-    payload = create_payload(env_id, slug, base_url, %{"tailscale" => %{"enabled" => false}})
-    start = %{env_id: env_id, slug: slug, compose_env: %{"HELLO_TOKEN" => "token-one"}}
-
-    assert {:ok, _} = Env.run("env.create", payload, ctx)
-
-    on_exit(fn ->
-      System.cmd("docker", ["compose", "-p", slug, "down", "--volumes"], stderr_to_stdout: true)
-    end)
-
-    bridge = fn ->
-      {out, 0} =
-        System.cmd("docker", [
-          "network",
-          "inspect",
-          "#{slug}_default",
-          "--format",
-          ~s({{index .Options "com.docker.network.bridge.name"}})
-        ])
-
-      String.trim(out)
-    end
-
-    repo_file =
-      Path.join([config.envs_root, env_id, "workspace/hello/.devcontainer/docker-compose.yml"])
-
-    compose = fn args ->
-      {_, 0} =
-        System.cmd("docker", ["compose", "-p", slug | args],
-          env: [{"HELLO_TOKEN", "token-one"}],
-          stderr_to_stdout: true
-        )
-    end
-
-    # Running on compose's network, without the overlay.
-    compose.(["down"])
-    compose.(["-f", repo_file, "up", "-d"])
-    refute String.starts_with?(bridge.(), "fm-")
-
-    assert {:ok, _} = Env.run("env.start", start, ctx)
-    assert bridge.() == Env.Overlay.bridge_name(env_id, "#{slug}_default")
-
-    # A network compose didn't label with a config hash.
-    compose.(["down"])
-
-    {_, 0} =
-      System.cmd("docker", [
-        "network",
-        "create",
-        "--label",
-        "com.docker.compose.project=#{slug}",
-        "--label",
-        "com.docker.compose.network=default",
-        "#{slug}_default"
-      ])
-
-    assert {:error, message} = Env.run("env.start", start, ctx)
-    assert message =~ "#{slug}_default"
-    assert containers(env_id) == %{}
-  end
-
-  # read-configuration looks for an existing container by the CLI's own
-  # labels, and takes the merged config from that container instead of
-  # resolving features. A repo that gives its service those labels, then
-  # adds a privileged feature, must still be refused.
-  test "a container label can't hide a feature from the policy", %{
-    config: config,
-    base_url: base_url
-  } do
-    ctx = ctx(config)
-    env_id = "66666666-6666-4666-8666-666666666666"
-    payload = create_payload(env_id, "hello-6", base_url, %{"tailscale" => %{"enabled" => false}})
-
-    assert {:ok, _} = Env.run("env.create", payload, ctx)
-
-    on_exit(fn ->
-      System.cmd("docker", ["compose", "-p", "hello-6", "down", "--volumes"],
-        stderr_to_stdout: true
-      )
-    end)
-
-    clone = Env.paths(config, env_id, "acme/hello").clone
-    devcontainer = Path.join(clone, ".devcontainer")
-
-    # First the label, so the next container carries it.
-    compose = File.read!(Path.join(devcontainer, "docker-compose.yml"))
-
-    File.write!(
-      Path.join(devcontainer, "docker-compose.yml"),
-      String.replace(
-        compose,
-        "    command: sleep infinity\n",
-        "    command: sleep infinity\n    labels:\n      devcontainer.local_folder: #{clone}\n",
-        global: false
-      )
-    )
-
-    first = Env.run("env.rebuild", payload, ctx)
-
-    # Then a feature that asks for privileged.
-    File.cp_r!(
-      Path.expand("../fixtures/repos/innocent/.devcontainer/innocent", __DIR__),
-      Path.join(devcontainer, "innocent")
-    )
-
-    json = File.read!(Path.join(devcontainer, "devcontainer.json"))
-
-    File.write!(
-      Path.join(devcontainer, "devcontainer.json"),
-      String.replace(
-        json,
-        ~s("remoteUser": "vscode",),
-        ~s("remoteUser": "vscode", "features": {"./innocent": {}},)
-      )
-    )
-
-    second = Env.run("env.rebuild", payload, ctx)
-
-    assert match?({:error, _}, first) or match?({:error, _}, second),
-           "both rebuilds passed: #{inspect({first, second})}"
-
-    for {_, container} <- containers(env_id) do
-      {privileged, 0} =
-        System.cmd("docker", ["inspect", "-f", "{{.HostConfig.Privileged}}", container["Id"]])
-
-      assert String.trim(privileged) == "false", "a container came up privileged"
-    end
   end
 end

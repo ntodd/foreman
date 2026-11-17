@@ -47,8 +47,8 @@ Environments created before the client was set up aren't on the
 tailnet. Rebuild them to join.
 
 Keys are tagged, so the devices they create don't expire. A node's
-identity lives in a volume, so the key is only used on the first boot
-and rebuilds keep the same node.
+identity lives in a volume on the environment's own disk, so the key is
+only used on the first boot and rebuilds keep the same node.
 
 ## The control plane host
 
@@ -124,33 +124,46 @@ node can't open connections to your laptops or to each other.
 
 ### Boxes on the tailnet
 
-That only covers the environment's own node. Ordinary traffic out of a
-container leaves through the box: Docker forwards it to the host, and a
-host on the tailnet routes `100.64.0.0/10` over its own Tailscale
-interface. Peers would see the box, and code in any environment on it
-would get the box's grants. The personal setup runs the agent on the
-control plane's host, which is on the tailnet, so most personal installs
-are in this situation.
+That only covers the environment's own node. Each environment runs in a
+VM of its own, and ordinary traffic out of the VM leaves through the box:
+the box routes it, and a box on the tailnet routes `100.64.0.0/10` over
+its own Tailscale interface. Peers would see the box, and code in any
+environment on it would get the box's grants. The personal setup runs
+the agent on the control plane's host, which is on the tailnet, so most
+personal installs are in this situation.
 
-So the agent's install script adds a firewall to the box, an nftables
-table (`inet foreman`) loaded by `foreman-firewall.service`. Every
-environment network is a bridge named `fm-...`. Nothing arriving on
-those bridges, or on Docker's default bridge (where Docker's builder runs
-a Dockerfile's RUN steps and features' install scripts), may go to
-tailnet addresses (`100.64.0.0/10`, `fd7a:115c:a1e0::/48`), to the box's
-own tailnet addresses (ports published on them included), or out of
-`tailscale0` (subnet routes the box accepts); it's rejected. MagicDNS
-(port 53 on `100.100.100.100` and `fd7a:115c:a1e0::53`) is let through,
-in case Docker hands an environment's lookups to it. Containers on other
-networks aren't affected, and environments reach the tailnet through
-their own node as before.
+So the agent's install script adds a firewall to the box, loaded by
+`foreman-firewall.service`. Each VM is on a tap of its own, named
+`fm-vm<n>`. The firewall's table for them (`inet foreman_guests`)
+masquerades what they send out through the box, and:
 
-A box with other containers on Docker's default bridge (`docker run`
-without `--network`) that need the tailnet can leave that bridge out:
-install with `--default-bridge-reaches-tailnet` (and pass it again on a
-re-run). Image builds on that box can then reach the tailnet as the box.
-Either way, Docker fetches a Dockerfile's `ADD <url>` itself, from the
-box rather than the default bridge, so that isn't covered.
+- nothing from a VM reaches the box itself, on any of its addresses,
+  tailnet ones included, apart from replies to the box's own
+  connections
+- nothing goes from one VM to another
+- nothing a VM sends goes to tailnet addresses (`100.64.0.0/10`),
+  MagicDNS (`100.100.100.100`) included; VMs get the box's upstream
+  resolvers instead, never a loopback or tailnet one, and 1.1.1.1 when
+  the box has none of those
+- a VM sends only from its own address, and only IPv4
+- nothing outside the box starts a connection into a VM
+
+VMs reach the box's LAN by default; install with `--block-lan` (and
+pass it again on a re-run) to keep them off RFC 1918 and link-local
+addresses, DNS aside. The other table (`inet foreman`) also rejects
+anything arriving on an `fm-` interface bound for the tailnet, the box's
+own tailnet addresses or `tailscale0` (subnet routes the box accepts).
+Environments reach the tailnet through their own node, as before.
+
+On a box that also runs Docker (the personal setup's control plane, say),
+`inet foreman` keeps Docker's default bridge off the tailnet too,
+MagicDNS aside: that's where `docker run` without `--network` and
+image builds on the box itself end up. Environments don't use the box's
+Docker. A box whose other containers on the default bridge need the
+tailnet can leave that bridge out: install with
+`--default-bridge-reaches-tailnet` (and pass it again on a re-run).
+Docker and ufw both set iptables' forward policy to drop, so the
+firewall also lets the VMs' traffic through there.
 
 The rules assume Tailscale's interface is `tailscale0`, the default, and
 treat any interface named `fm-...` as an environment's. A box that
@@ -158,8 +171,8 @@ routes everything through an exit node can't run the firewall (the
 install script refuses it), and one that starts using an exit node later
 cuts its environments off from the internet. Anything that flushes the
 whole ruleset (`nft flush ruleset`, or stopping or reloading
-`nftables.service` on Debian) removes the table too, and a timer
-(`foreman-firewall-check.timer`) loads it again within 15 seconds. The
+`nftables.service` on Debian) removes the tables too, and a timer
+(`foreman-firewall-check.timer`) loads them again within 15 seconds. The
 agent reports whether the firewall is loaded when it connects and
 whenever that changes, and the box's page says so when it isn't, or when its rules differ from the
 ones the agent ships with.
@@ -213,7 +226,9 @@ grants only add access, so one like that lets everyone back in.
   certificate transparency logs; keep them bland.
 - **Userspace networking:** Tailscale runs without a TUN device or
   `NET_ADMIN`, and doesn't change the container's routes, firewall or
-  DNS (compose service names resolve as usual). Everything you connect
+  DNS (compose service names resolve as usual, and the VM's resolvers
+  answer the rest; MagicDNS names resolve only for connections through
+  the proxy). Everything you connect
   into works normally: Tailscale SSH, an environment's ports, `tailscale
   serve`. Connections an environment makes out to other tailnet machines
   go through the proxy on `127.0.0.2:1055`; a repo that needs that sets
@@ -253,6 +268,6 @@ destroyed. Add
 the tag to `tagOwners` and to the OAuth client's tags first: an auth key
 with a tag the client doesn't own fails every create. Environments made
 before you set it don't have the tag until they're recreated.
-- **Without Tailscale configured,** environments still build and run;
-  the feature skips Tailscale, and you connect with `docker exec` on the
-  box.
+- **Without Tailscale configured,** environments still build and run,
+  and the feature skips Tailscale, but nothing can reach them: each is
+  in a VM whose only way in is its tailnet node.

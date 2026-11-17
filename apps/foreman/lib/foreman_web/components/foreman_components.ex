@@ -17,15 +17,16 @@ defmodule ForemanWeb.ForemanComponents do
     """
   end
 
-  def busy?(state), do: state in ~w(pending creating starting stopping destroying)
+  def busy?(state), do: state in ~w(pending creating starting stopping suspending destroying)
 
   defp state_color("running"), do: "emerald"
   defp state_color("partial"), do: "amber"
   defp state_color("error"), do: "rose"
   defp state_color("missing"), do: "rose"
 
-  defp state_color(state) when state in ~w(pending creating starting stopping destroying),
-    do: "brand"
+  defp state_color(state)
+       when state in ~w(pending creating starting stopping suspending destroying),
+       do: "brand"
 
   defp state_color(_), do: "zinc"
 
@@ -33,6 +34,8 @@ defmodule ForemanWeb.ForemanComponents do
   def state_label("creating"), do: "Creating"
   def state_label("starting"), do: "Starting"
   def state_label("stopping"), do: "Stopping"
+  def state_label("suspending"), do: "Suspending"
+  def state_label("suspended"), do: "Suspended"
   def state_label("destroying"), do: "Destroying"
   def state_label("running"), do: "Running"
   def state_label("stopped"), do: "Stopped"
@@ -54,54 +57,42 @@ defmodule ForemanWeb.ForemanComponents do
     """
   end
 
-  @doc """
-  The chip on a box card when the box's agent accepts more than the
-  default policy. Privileged is called out by name.
-  """
+  @doc "The chip on a box card when the box can't run environments."
   attr :box, :map, required: true
 
-  def box_policy_badge(assigns) do
-    assigns = assign(assigns, :exceptions, Foreman.Boxes.policy_exceptions(assigns.box))
+  def box_vm_badge(assigns) do
+    assigns = assign(assigns, :problem, Foreman.Boxes.vm_problem(assigns.box))
 
     ~H"""
-    <.badge :if={@exceptions != []} color="rose" size="sm" data-role="policy-alert">
-      {if Enum.any?(@exceptions, &(&1.rule == "privileged")),
-        do: "Privileged allowed",
-        else: "Policy relaxed"}
+    <.badge :if={@problem} color="rose" size="sm" data-role="vm-alert">
+      {case @problem do
+        {:agent, _} -> "Agent too old"
+        {:vm, _} -> "Can't run environments"
+      end}
     </.badge>
     """
   end
 
-  @doc "The box page's alert for a box that accepts more than the default policy."
+  @doc """
+  The box page's alert for a box that can't run environments: an agent
+  from before environment VMs, or one that says it can't run them.
+  """
   attr :box, :map, required: true
 
-  def box_policy_alert(assigns) do
-    exceptions = Foreman.Boxes.policy_exceptions(assigns.box)
-
+  def box_vm_alert(assigns) do
     assigns =
       assigns
-      |> assign(:exceptions, exceptions)
-      |> assign(:privileged, Enum.any?(exceptions, &(&1.rule == "privileged")))
+      |> assign(:problem, Foreman.Boxes.vm_problem(assigns.box))
+      |> assign(:command, Foreman.Boxes.reinstall_command(assigns.box))
 
     ~H"""
-    <.callout :if={@exceptions != []} kind="danger" id="box-policy-alert" class="border-2">
-      <p class="text-[15px] font-semibold">
-        {if @privileged,
-          do: "Environments on this box can run privileged",
-          else: "This box accepts more than the default policy"}
+    <.callout :if={@problem} kind="danger" id="box-vm-alert">
+      <p class="text-[15px] font-semibold">This box can't run environments</p>
+      <p :if={match?({:agent, _}, @problem)} class="mt-1">
+        Its agent ({elem(@problem, 1)}) ran environments on the box's shared Docker, which this Foreman no longer does: every environment runs in a VM of its own now. Foreman refuses the agent until the install script runs again, which sets the box up for VMs: <span class="font-mono break-all">{@command}</span>. Environments made before then can't start; push their work, then destroy and recreate them.
       </p>
-      <p :if={@privileged} class="mt-1">
-        Privileged code is root on the box: it can read every environment's secrets, the agent's key and anything else on the machine. Only allow it on a box that holds nothing else you care about.
-      </p>
-      <ul class="mt-2 list-disc space-y-0.5 pl-5">
-        <li :for={e <- @exceptions}>
-          {if e.action == "allow", do: "Allowed", else: "Allowed with a warning"}: {e.label}
-        </li>
-      </ul>
-      <p class="mt-2 text-xs">
-        Set by <span class="font-mono">FOREMAN_POLICY</span>
-        in <span class="font-mono">/etc/foreman-agent/agent.env</span>
-        on the box. Remove it and restart the agent to refuse these again.
+      <p :if={match?({:vm, _}, @problem)} class="mt-1">
+        {String.capitalize(elem(@problem, 1))}.
       </p>
     </.callout>
     """
@@ -416,6 +407,8 @@ defmodule ForemanWeb.ForemanComponents do
   def action_label("box.stats"), do: "Refresh stats"
   def action_label("box.gc"), do: "Prune images and caches"
   def action_label("box.restart"), do: "Reboot"
+  def action_label("box.prebuild"), do: "Build a prebuild"
+  def action_label("box.prebuild.delete"), do: "Delete a prebuild"
   def action_label("agent.update"), do: "Update agent"
   def action_label("op.cancel"), do: "Cancel an operation"
   def action_label(other), do: other

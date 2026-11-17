@@ -1,8 +1,9 @@
 defmodule Foreman.Boxes.Flatcar do
   @moduledoc """
   The first-boot config (Ignition) for a box that runs Flatcar Container
-  Linux, on bare metal or as a VM (the Mac and Linux launchers,
-  `priv/agent/mac.sh` and `priv/agent/vm.sh`, boot it with this).
+  Linux, on bare metal or as a VM (the Linux launcher, `priv/agent/vm.sh`,
+  boots it with this; the Mac launcher comes back with environment VMs on
+  Apple's hypervisor, ntodd/foreman#180).
 
   Flatcar has Docker, git and nftables already. The config adds:
 

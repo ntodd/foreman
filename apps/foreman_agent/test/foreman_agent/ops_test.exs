@@ -174,19 +174,57 @@ defmodule ForemanAgent.OpsTest do
     refute_receive {:started, ^target, _}, 200
   end
 
-  test "a cancel for an operation that finished leaves its result alone", %{ops: ops} do
+  # So whoever sent the cancel hears the operation is over, even if its
+  # first result was lost.
+  test "a cancel for an operation that finished sends its result again", %{ops: ops} do
     cmd = stop_cmd(@env1)
     target = cmd.op_id
     Ops.submit(ops, cmd)
     assert_receive {:started, ^target, pid}, @timeout
-    finish(pid)
+    finish(pid, {:ok, %{"done" => true}})
     assert_receive {:event, "op.result", %{op_id: ^target, status: "ok"}}, @timeout
 
     Ops.submit(ops, command("op.cancel", %{target_op_id: target}))
-    refute_receive {:event, "op.result", %{op_id: ^target}}, 200
+
+    assert_receive {:event, "op.result",
+                    %{op_id: ^target, status: "ok", result: %{"done" => true}}},
+                   @timeout
 
     assert :duplicate = Ops.submit(ops, cmd)
     assert_receive {:event, "op.result", %{op_id: ^target, status: "ok"}}, @timeout
+    refute_receive {:started, ^target, _}, 50
+  end
+
+  describe "operations don't outlive Ops" do
+    defp start_op(ops) do
+      cmd = stop_cmd(@env1)
+      op_id = cmd.op_id
+      Ops.submit(ops, cmd)
+      assert_receive {:started, ^op_id, pid}, @timeout
+      Process.monitor(pid)
+    end
+
+    test "when its supervisor stops it", %{ops: ops} do
+      ref = start_op(ops)
+      :ok = stop_supervised(Ops)
+      assert_receive {:DOWN, ^ref, :process, _, _}, @timeout
+    end
+
+    test "when it crashes", %{ops: ops} do
+      ref = start_op(ops)
+
+      ExUnit.CaptureLog.capture_log(fn ->
+        catch_exit(GenServer.call(ops, :not_a_call))
+      end)
+
+      assert_receive {:DOWN, ^ref, :process, _, _}, @timeout
+    end
+
+    test "when it's killed", %{ops: ops} do
+      ref = start_op(ops)
+      Process.exit(ops, :kill)
+      assert_receive {:DOWN, ^ref, :process, _, _}, @timeout
+    end
   end
 
   test "in_flight lists running and queued op ids", %{ops: ops} do

@@ -2,6 +2,10 @@ defmodule ForemanAgent.Application do
   @moduledoc false
   use Application
 
+  alias ForemanAgent.VM.Links
+
+  require Logger
+
   @impl true
   def start(_type, _args) do
     config = ForemanAgent.Config.load()
@@ -30,7 +34,28 @@ defmodule ForemanAgent.Application do
     }
 
     children =
-      [ForemanAgent.Outbox, ForemanAgent.Ops] ++ if(config.connect, do: [link], else: [])
+      case config.mode do
+        # In an environment's VM: commands come from the box's agent.
+        :guest ->
+          [
+            ForemanAgent.Outbox,
+            {ForemanAgent.Ops, handler: &ForemanAgent.Guest.handle/2},
+            {ForemanAgent.Guest.Server, path: config.guest_socket}
+          ]
+
+        # Before connecting: what a suspend cut short by the agent's own
+        # stop left is put right before any command can reach it.
+        :host ->
+          recover = %{
+            id: :vm_recover,
+            start: {__MODULE__, :recover_vms, [config]},
+            restart: :temporary
+          }
+
+          Links.child_specs() ++
+            [ForemanAgent.Outbox, ForemanAgent.Ops] ++
+            if(config.connect, do: [recover, link], else: [])
+      end
 
     Supervisor.start_link(children,
       strategy: :one_for_one,
@@ -38,5 +63,15 @@ defmodule ForemanAgent.Application do
       max_seconds: 60,
       name: ForemanAgent.Supervisor
     )
+  end
+
+  @doc false
+  def recover_vms(config) do
+    ForemanAgent.VM.Env.recover(config)
+    :ignore
+  rescue
+    e ->
+      Logger.error("couldn't check the VMs at start: #{Exception.message(e)}")
+      :ignore
   end
 end

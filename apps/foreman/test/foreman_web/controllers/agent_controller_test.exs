@@ -60,7 +60,11 @@ defmodule ForemanWeb.AgentControllerTest do
     refute body =~ "__FOREMAN_URL__"
   end
 
-  for script <- ["mac.sh", "vm.sh"] do
+  test "doesn't serve the Mac launcher any more", %{conn: conn} do
+    assert conn |> get("/agent/mac.sh") |> response(404)
+  end
+
+  for script <- ["vm.sh"] do
     test "serves the #{script} launcher with the control plane's URL", %{conn: conn} do
       conn = get(conn, "/agent/#{unquote(script)}")
       body = response(conn, 200)

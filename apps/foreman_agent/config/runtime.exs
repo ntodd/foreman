@@ -10,10 +10,12 @@ if config_env() != :test do
     end
   end
 
-  # Every rule refuses by default. A box opens one up as an exception, for
-  # example FOREMAN_POLICY="seccomp=allow", and the control plane shows
-  # that box with a red alert. The rules are ForemanProtocol.Policy's.
-  policy = ForemanAgent.Config.parse_policy(list.("FOREMAN_POLICY", []))
+  int = fn name, default ->
+    case System.get_env(name) do
+      value when value in [nil, ""] -> default
+      value -> String.to_integer(value)
+    end
+  end
 
   docker_socket =
     case System.get_env("DOCKER_HOST") do
@@ -21,7 +23,22 @@ if config_env() != :test do
       _ -> System.get_env("FOREMAN_DOCKER_SOCKET", "/var/run/docker.sock")
     end
 
+  # In an environment's VM the agent takes its commands from the box's
+  # agent, not the control plane (ForemanAgent.Guest).
+  mode =
+    case System.get_env("FOREMAN_AGENT_MODE", "host") do
+      "host" ->
+        :host
+
+      "guest" ->
+        :guest
+
+      other ->
+        raise ArgumentError, "FOREMAN_AGENT_MODE must be host or guest, not #{inspect(other)}"
+    end
+
   config :foreman_agent,
+    mode: mode,
     url: System.get_env("FOREMAN_URL"),
     join_token: System.get_env("FOREMAN_JOIN_TOKEN"),
     data_dir: System.get_env("FOREMAN_AGENT_DATA_DIR", "/var/lib/foreman-agent"),
@@ -34,6 +51,11 @@ if config_env() != :test do
     docker_socket: docker_socket,
     allowed_git_hosts: list.("FOREMAN_ALLOWED_GIT_HOSTS", ["github.com"]),
     insecure_git_hosts: list.("FOREMAN_INSECURE_GIT_HOSTS", []),
-    policy_rules: policy,
-    connect: System.get_env("FOREMAN_URL") not in [nil, ""]
+    # Not guest_url and guest_sha256: those are read at compile time.
+    guest_url_override: System.get_env("FOREMAN_GUEST_URL"),
+    guest_sha256_override: System.get_env("FOREMAN_GUEST_SHA256"),
+    vm_cpus: int.("FOREMAN_VM_CPUS", 4),
+    vm_memory_mb: int.("FOREMAN_VM_MEMORY_MB", 8192),
+    vm_disk_gb: int.("FOREMAN_VM_DISK_GB", 64),
+    connect: mode == :host and System.get_env("FOREMAN_URL") not in [nil, ""]
 end

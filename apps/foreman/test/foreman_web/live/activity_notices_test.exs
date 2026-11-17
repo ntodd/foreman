@@ -76,8 +76,7 @@ defmodule ForemanWeb.ActivityNoticesTest do
       protocol_version: 1,
       hostname: "dev",
       os: "linux",
-      arch: "x86_64",
-      policy: %{}
+      arch: "x86_64"
     })
 
     html = notice(view, :info)

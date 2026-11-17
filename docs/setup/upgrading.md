@@ -19,8 +19,11 @@ installed on its host, an admin does it from the Deployment page
 
 Foreman doesn't back up boxes. A box's identity is
 `/var/lib/foreman-agent/identity.json` (lose it and the box enrolls
-again as a new one), and work that isn't pushed lives in
-`/srv/foreman/envs/*/workspace`.
+again as a new one), and work that isn't pushed lives on each
+environment's data disk, `/srv/foreman/vms/<env_id>/data.raw`. It's an
+ext4 image: with the environment stopped, `sudo mount -o ro,loop` it
+somewhere to look inside, and the clone is under
+`srv/envs/<env_id>/workspace/`.
 
 ## Backing up SQLite
 
@@ -171,27 +174,24 @@ to.
 
 Some releases change what the install script sets up on a box, which a
 self-update can't do: the box firewall, for one, which keeps
-environments off the tailnet as the box (see
-[tailscale.md](tailscale.md#boxes-on-the-tailnet)), and the unit that
-reboots a box from its page (a box without it says so in its reboot
-alert, and offers no Reboot). A box whose agent
-reports no firewall, or older rules than the agent ships with, gets an
-alert on its page and its cards. Run the install command on it again;
-an enrolled box needs no token, but pass any `--policy` or
-`--default-bridge-reaches-tailnet` it had:
+environments off the box, each other and the tailnet as the box (see
+[tailscale.md](tailscale.md#boxes-on-the-tailnet)); the VM helper; and
+the unit that reboots a box from its page (a box without it says so in
+its reboot alert, and offers no Reboot). A box whose agent reports no
+firewall, or older rules than the agent ships with, gets an alert on
+its page and its cards, and one whose VM helper is missing or too old
+says it can't run environments. Run the install command on it again;
+an enrolled box needs no token, but pass any `--block-lan`,
+`--vm-subnet` or `--default-bridge-reaches-tailnet` it had:
 
 ```sh
 curl -fsSL https://desktop.tail1234.ts.net/agent/install.sh | sudo sh
 ```
 
-Restart its environments afterwards (stop and start them): one that
-kept running through the upgrade is still on the Docker network it was
-created with, and only moves onto its own bridge, which the firewall
-knows it by, when it next starts.
-
 Upgrade the control plane before agents, which following does for you:
-the control plane accepts agents on its protocol and the one before,
-but an older control plane refuses newer agents.
+the control plane usually accepts agents on its protocol and the one
+before, but an older control plane refuses newer agents. Protocol 6 is
+the exception; see [Moving to environment VMs](#moving-to-environment-vms).
 
 ### Coming from `docker run`
 
@@ -212,6 +212,97 @@ one refuses to start when `DATABASE_URL` is set.
 Compose warns that `foreman-data` already exists but wasn't created by
 compose, and uses it; that's expected. The upgrade unpins every box, so
 they all follow the new control plane's agent from then on.
+
+## Moving to environment VMs
+
+The first release on protocol 6 runs every environment in a Cloud
+Hypervisor VM of its own, with its own kernel and Docker, instead of on
+the box's shared Docker ([architecture.md](../architecture.md#environment-vms)).
+That changes what a box needs, and existing environments don't move
+across, so this upgrade takes more than following the release:
+
+- **Boxes** need amd64 Linux with KVM (`/dev/kvm`; a box that is itself
+  a VM needs nested virtualization), systemd, nftables, iproute2,
+  e2fsprogs and util-linux. They no longer need Docker or git. An arm64
+  box still enrolls but can't run environments yet.
+- **Mac boxes** are gone until
+  [#180](https://github.com/ntodd/foreman/issues/180) ([mac.md](mac.md)).
+- **Every box** needs the install script run on it again. The control
+  plane refuses protocol 5 agents, which run environments on shared
+  Docker, and a refused box can't update itself.
+- **Environments** made before the upgrade can't start on the new agent.
+  Push their work first; afterwards you make them again.
+- **The compose policy** and `FOREMAN_POLICY` are gone. Privileged
+  containers and docker-in-docker work
+  ([repos.md](repos.md#what-an-environment-can-do)), and `--policy`
+  does nothing any more.
+- **No way back:** once boxes run protocol 6 agents, the control plane
+  can't be rolled back past this release.
+
+The steps:
+
+1. **Check each box**: `uname -m` says `x86_64`, and `/dev/kvm` exists.
+   A Flatcar box from `vm.sh` needs nested virtualization on the machine
+   it runs on, and one on Proxmox the CPU type `host`
+   ([flatcar.md](flatcar.md#on-a-linux-machine-as-a-vm)). A box without
+   KVM enrolls after the upgrade but can't run environments, and its page
+   says why.
+2. **Push the work in every environment** while the old agents still run.
+   Afterwards Foreman can't start them, or check them for unpushed work
+   before a destroy. On a Mac box, destroy its environments too, then
+   revoke the box and remove it (`~/.foreman-box/bin/foreman-box
+   uninstall --yes`).
+3. **Back up and upgrade the control plane**, as above. Every box then
+   shows "Agent too old" on its card, and its page has the command to
+   run on it.
+4. **Put `/srv/foreman` on its own disk** if you want one (optional):
+   ext4 is fine, and XFS saves space with reflinks at a cost to write
+   speed ([personal.md](personal.md#disks-for-environments)). Now, with no
+   environments on the box, is the easy time. Copy out anything you still
+   need from the old clones in `/srv/foreman/envs` first: the new mount
+   hides them.
+5. **Run the install script on every box**, with `--block-lan` or
+   `--vm-subnet` if you want them, and `--default-bridge-reaches-tailnet`
+   if the box had it:
+
+   ```sh
+   curl -fsSL https://desktop.tail1234.ts.net/agent/install.sh | sudo sh
+   ```
+
+   It installs the new agent, the VM helper and the new firewall, takes
+   the `foreman` user out of the `docker` group, turns IPv4 forwarding
+   on from boot (`/etc/sysctl.d/90-foreman.conf`), and says whether
+   `/srv/foreman` can reflink. If forwarding wasn't on already (Docker
+   turns it on), the kernel turns LRO off on the box's network cards,
+   and some drivers (atlantic, for one) reset the link to do that: the
+   box may drop off the network for a moment, this once. The box then
+   rejoins, and its page shows "VMs on KVM" or "VMs nested" (with
+   "full-copy disks" when it can't reflink), or why it can't run
+   environments.
+6. **Make the environments again.** Starting an old one fails ("this
+   environment has no VM on this box"). Destroy it in Foreman and create
+   a new one rather than rebuilding it: the new one gets a fresh clone,
+   its own VM and its own Tailscale node. Each new environment's first
+   build pulls its images into its own VM, and the first on a box
+   downloads the guest image.
+7. **Clean up the old environments by hand.** Destroying one removes
+   Foreman's record, its tailnet device and the box's copy of its
+   secrets, but not its clone, which stays in
+   `/srv/foreman/envs/<env_id>/`, or its containers and volumes, which
+   stay in the box's Docker. Once nothing in them is needed:
+
+   ```sh
+   sudo docker ps -a --filter label=foreman.env_id    # the old environments' containers
+   p=storefront-1                                      # an old environment's name, its compose project
+   sudo docker rm -f $(sudo docker ps -aq --filter label=com.docker.compose.project=$p)
+   sudo docker volume rm $(sudo docker volume ls -q --filter label=com.docker.compose.project=$p)
+   sudo docker network rm $(sudo docker network ls -q --filter label=com.docker.compose.project=$p)
+   sudo rm -rf /srv/foreman/envs                       # every old clone
+   ```
+
+   Their images and build cache are still in the box's Docker too. A box
+   that doesn't use Docker for anything else can drop it altogether; a
+   personal desktop still runs the control plane in it.
 
 ## Rolling back
 
@@ -238,7 +329,10 @@ Protocol 5 (rebooting a box from its page) came in with 0.5.0. A 0.5.0
 control plane refuses agents on protocol 3 (older than 0.4.10) the same
 way, so update those boxes to 0.4.10 or later before upgrading past
 0.4.13. A box that was refused anyway comes back when you run the
-install command on it again.
+install command on it again. Protocol 6 (environment VMs) refuses every
+older agent, protocol 5 included, and a control plane from before it
+refuses protocol 6 agents, so neither side can go back past it; see
+[Moving to environment VMs](#moving-to-environment-vms).
 
 Following starts with 0.3.0, and 0.3.0 is the first release with
 images, so rolling back from it means building the older version
@@ -338,8 +432,9 @@ there.
 Agents before 0.4.9 downloaded from the public URL, so on such a box
 the update fails (often with `TLS client alert: Bad Certificate`) and
 rolls back. Reinstall it once by hand with the same `--url` it was
-installed with (and any `--policy` or `--default-bridge-reaches-tailnet`
-it had); an enrolled box needs no token:
+installed with (and any `--block-lan`, `--vm-subnet` or
+`--default-bridge-reaches-tailnet` it had); an enrolled box needs no
+token:
 
 ```sh
 curl -fsSL http://127.0.0.1:4000/agent/install.sh | sudo sh -s -- --url http://127.0.0.1:4000

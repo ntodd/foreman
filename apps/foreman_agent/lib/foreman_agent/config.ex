@@ -4,11 +4,13 @@ defmodule ForemanAgent.Config do
   (which `config/runtime.exs` fills from `FOREMAN_*` variables).
   """
 
-  alias ForemanAgent.Env.Policy
-
   @repo_feature Path.expand("../../../../features/src/foreman", __DIR__)
   @release_public_key Application.compile_env(:foreman_agent, :release_public_key)
+  @guest_url Application.compile_env(:foreman_agent, :guest_url)
+  @guest_sha256 Application.compile_env(:foreman_agent, :guest_sha256)
 
+  # Read once and cached (get/0), so the size of the map doesn't matter.
+  # credo:disable-for-next-line Credo.Check.Warning.StructFieldAmount
   defstruct url: nil,
             data_dir: "/var/lib/foreman-agent",
             envs_root: "/srv/foreman/envs",
@@ -22,7 +24,6 @@ defmodule ForemanAgent.Config do
             proc: "/proc",
             allowed_git_hosts: ["github.com"],
             insecure_git_hosts: [],
-            policy_rules: %{},
             cleanup_image: "alpine:3.22",
             release_root: "/opt/foreman-agent",
             release_public_key: nil,
@@ -39,6 +40,37 @@ defmodule ForemanAgent.Config do
             boot_id: "/proc/sys/kernel/random/boot_id",
             join_token: nil,
             connect: true,
+            # :host on a box; :guest in an environment's VM, where the
+            # agent serves the box's agent on guest_socket (see
+            # ForemanAgent.Guest).
+            mode: :host,
+            guest_socket: "/run/foreman-guest/agent.sock",
+            # Environment VMs, on the box (see ForemanAgent.VM).
+            vm_root: "/srv/foreman/vms",
+            guest_root: "/srv/foreman/guest",
+            agent_disks: "/srv/foreman/agent-disks",
+            prebuilds_root: "/srv/foreman/prebuilds",
+            vmctl_socket: "/run/foreman-vmctl.sock",
+            # The guest system image: release builds carry its URL and
+            # SHA-256 (FOREMAN_GUEST_URL, FOREMAN_GUEST_SHA256 at build
+            # time); the same variables at run time override them.
+            guest_url: nil,
+            guest_sha256: nil,
+            # A VM's size when the environment has no limits of its own.
+            vm_cpus: 4,
+            vm_memory_mb: 8192,
+            vm_disk_gb: 64,
+            # How long a booted VM's guest agent gets to answer.
+            vm_boot_timeout: 120_000,
+            # How long the guest gets for its part of a stop (its
+            # containers') before the VM is shut down anyway, and for a
+            # Docker prune (each prune in the guest has half an hour).
+            vm_relay_stop_timeout: 300_000,
+            vm_relay_gc_timeout: 2_400_000,
+            # A prebuild's build, past which the box gives it up and gives
+            # its VM back (the control plane gives up at five hours).
+            prebuild_timeout: 16_200_000,
+            machine: ForemanAgent.VM.Machine.Cloud,
             tailscale_join_wait: :timer.seconds(30)
 
   @type t :: %__MODULE__{}
@@ -48,8 +80,9 @@ defmodule ForemanAgent.Config do
     env = Application.get_all_env(:foreman_agent)
 
     struct(__MODULE__, Keyword.take(env, Map.keys(%__MODULE__{}) -- [:__struct__]))
-    |> Map.update!(:policy_rules, &Map.merge(Policy.default_rules(), &1))
     |> Map.put(:release_public_key, decode_key(env[:release_public_key] || @release_public_key))
+    |> Map.put(:guest_url, present(env[:guest_url_override]) || present(@guest_url))
+    |> Map.put(:guest_sha256, present(env[:guest_sha256_override]) || present(@guest_sha256))
     |> Map.update!(:feature_dir, &(&1 || default_feature_dir()))
     |> Map.update!(:firewall_rules, &(&1 || default_firewall_rules()))
     |> Map.merge(tools(default_tools_dir(), Map.new([:devcontainer, :node], &{&1, env[&1]})))
@@ -70,33 +103,6 @@ defmodule ForemanAgent.Config do
   end
 
   def put(%__MODULE__{} = config), do: :persistent_term.put(__MODULE__, config)
-
-  @doc "The box's policy as it's reported to the control plane on join."
-  def policy_report(%__MODULE__{policy_rules: rules}),
-    do: Map.new(rules, fn {rule, action} -> {to_string(rule), to_string(action)} end)
-
-  @doc """
-  Parses `FOREMAN_POLICY` entries (`rule=action`) into policy rules.
-  Raises on a rule or action the protocol doesn't know, so a typo stops
-  the agent rather than leaving a rule at its default unnoticed.
-  """
-  @spec parse_policy([String.t()]) :: %{atom() => atom()}
-  def parse_policy(pairs) do
-    rules = ForemanProtocol.Policy.rules()
-    actions = ForemanProtocol.Policy.actions()
-
-    Map.new(pairs, fn pair ->
-      with [rule, action] <- String.split(pair, "=", parts: 2),
-           true <- rule in rules and action in actions do
-        {String.to_atom(rule), String.to_atom(action)}
-      else
-        _ ->
-          raise ArgumentError,
-                "invalid FOREMAN_POLICY entry #{inspect(pair)}; rules: " <>
-                  "#{Enum.join(rules, ", ")}; actions: #{Enum.join(actions, ", ")}"
-      end
-    end)
-  end
 
   # Where install scripts before the bundled CLI put the one they installed
   # with npm, and what they wrote to agent.env: a self-update keeps that
@@ -150,7 +156,7 @@ defmodule ForemanAgent.Config do
 
   @doc "Paths no environment may ever bind-mount."
   def protected_paths(%__MODULE__{} = c),
-    do: [c.data_dir, c.envs_root, c.secrets_root, c.release_root]
+    do: [c.data_dir, c.envs_root, c.secrets_root, c.release_root, c.vm_root]
 
   defp default_tools_dir, do: Application.app_dir(:foreman_agent, "priv/tools")
 
@@ -161,6 +167,9 @@ defmodule ForemanAgent.Config do
     priv = Application.app_dir(:foreman_agent, "priv/feature")
     if File.dir?(priv), do: priv, else: @repo_feature
   end
+
+  defp present(value) when is_binary(value) and value != "", do: value
+  defp present(_), do: nil
 
   defp decode_key(nil), do: nil
   defp decode_key(key) when byte_size(key) == 32, do: key

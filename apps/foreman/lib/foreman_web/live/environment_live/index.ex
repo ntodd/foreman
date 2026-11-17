@@ -9,8 +9,8 @@ defmodule ForemanWeb.EnvironmentLive.Index do
   # States, grouped the way the filter offers them.
   @state_groups %{
     "running" => ~w(running),
-    "stopped" => ~w(stopped),
-    "busy" => ~w(pending creating starting stopping destroying),
+    "stopped" => ~w(stopped suspended),
+    "busy" => ~w(pending creating starting stopping suspending destroying),
     "attention" => ~w(error missing partial)
   }
   @state_order [
@@ -232,7 +232,9 @@ defmodule ForemanWeb.EnvironmentLive.Index do
         <td class="py-3 pr-5">
           <div class="flex items-center justify-end gap-1.5">
             <.button
-              :if={env.created_once and env.observed_state in ~w(stopped error missing partial)}
+              :if={
+                env.created_once and env.observed_state in ~w(stopped suspended error missing partial)
+              }
               size="sm"
               icon="hero-play-mini"
               phx-click="start"
@@ -295,7 +297,7 @@ defmodule ForemanWeb.EnvironmentLive.Index do
           id={"box-card-#{card.box.id}"}
           class={[
             "group rounded-xl border bg-raised p-4 shadow-xs transition-shadow hover:shadow-raised",
-            if(Foreman.Boxes.policy_exceptions(card.box) == [],
+            if(Foreman.Boxes.vm_problem(card.box) == nil,
               do: "border-line",
               else: "border-danger/50 ring-1 ring-danger/30"
             )
@@ -307,7 +309,7 @@ defmodule ForemanWeb.EnvironmentLive.Index do
               <span class="truncate text-sm font-semibold text-ink">{card.box.name}</span>
             </div>
             <div class="flex items-center gap-1.5">
-              <.box_policy_badge box={card.box} />
+              <.box_vm_badge box={card.box} />
               <.box_firewall_badge box={card.box} />
               <.box_reboot_badge box={card.box} />
               <.badge :if={card.summary.contention} color="amber" size="sm">Contention</.badge>

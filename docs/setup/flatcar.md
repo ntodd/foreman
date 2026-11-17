@@ -1,28 +1,37 @@
 # Flatcar boxes
 
 A box can run [Flatcar Container Linux](https://www.flatcar.org/)
-instead of a general-purpose distribution: as a VM on a Mac (see
-[mac.md](mac.md)) or on a Linux machine with KVM, or straight on the
-hardware. Flatcar is a small, read-only OS built to run containers. It
-updates itself to its other partition and rolls back if the new one
-doesn't boot, and it has Docker, git and nftables already.
+instead of a general-purpose distribution: as a VM on a Linux machine
+with KVM (or Proxmox), or straight on the hardware. Flatcar is a small,
+read-only OS built to run containers. It updates itself to its other
+partition and rolls back if the new one doesn't boot, and it has KVM,
+nftables and the rest of what the install script needs already.
+
+Every environment runs in a VM of its own on any box. On a Flatcar box
+that is itself a VM, those environment VMs run nested inside it, which
+costs speed (see [Performance](#performance)). On a Debian or Ubuntu
+machine with the install script, they run straight on its KVM; that's
+the default, and the faster one. Flatcar on bare metal runs them
+straight on KVM too, but hasn't been tested with environment VMs yet
+([#179](https://github.com/ntodd/foreman/issues/179)). Mac boxes aren't
+supported until [#180](https://github.com/ntodd/foreman/issues/180)
+([mac.md](mac.md)).
 
 What a Flatcar box gets you over the install script on Ubuntu:
 
 - **The OS updates itself.** Nothing to `apt upgrade`. An update waits
   for a reboot, which Foreman shows on the box's page, and an admin
   reboots it from there.
-- **As a VM, environments are walled off from the machine it runs on.**
-  Code in an environment that gets out of its container is in the VM,
-  not on your desktop.
+- **As a VM, the box is a second wall.** Code that gets out of an
+  environment's VM is in the box's VM, not on your desktop.
 - **It's set up from Foreman.** "Add a box" makes the box's first-boot
   config, and the box sets itself up and enrolls on its first boot.
 
 ## How a box sets itself up
 
-**Boxes → Add a box** creates the join token as usual and offers four
-ways in: **Linux** (the install script), **Mac**, **Linux VM** and
-**Flatcar**. The last three boot Flatcar with a first-boot config
+**Boxes → Add a box** creates the join token as usual and offers three
+ways in: **Linux** (the install script), **Linux VM** and **Flatcar**.
+The last two boot Flatcar with a first-boot config
 ([Ignition](https://www.flatcar.org/docs/latest/provisioning/ignition/))
 that the control plane makes for the token. On its first boot the box:
 
@@ -32,8 +41,8 @@ that the control plane makes for the token. On its first boot the box:
 2. Joins the tailnet with a key of its own (see
    [The box on the tailnet](#the-box-on-the-tailnet)).
 3. Waits until the control plane answers, then runs its install script
-   with the join token, which installs the agent, the box's firewall and
-   the reboot unit, and enrolls the box.
+   with the join token, which installs the agent, the VM helper, the
+   box's firewall and the reboot unit, and enrolls the box.
 4. Deletes the join token and the Tailscale key from the disk.
 
 Progress shows on the box's console (`foreman-box logs` for the
@@ -49,9 +58,15 @@ curl -fsSL https://desktop.tail1234.ts.net/agent/vm.sh | sudo sh -s -- --token f
 ```
 
 Run it on the machine that hosts the box. It needs systemd and KVM
-(`/dev/kvm`). On Debian and Ubuntu it installs QEMU and the UEFI firmware
-if they're missing (`qemu-system-x86 ovmf`, or `qemu-system-arm
-qemu-efi-aarch64` on arm64); elsewhere, install them first. Then it:
+(`/dev/kvm`) with nested virtualization, since the box runs each of its
+environments in a VM of its own. Recent kernels turn nesting on by
+default; `cat /sys/module/kvm_intel/parameters/nested` (or `kvm_amd`)
+prints `Y` or `1` when it's on. The box gets the machine's CPU model
+(`-cpu host`), virtualization included, and the box's page says "VMs
+nested" once it has enrolled. On Debian and Ubuntu the script installs
+QEMU and the UEFI firmware if they're missing (`qemu-system-x86 ovmf`,
+or `qemu-system-arm qemu-efi-aarch64` on arm64, where a box enrolls but
+can't run environments yet); elsewhere, install them first. Then it:
 
 - downloads Flatcar, checks it against the digest pinned in the script,
   and writes the box's disk, `/var/lib/foreman-box/disk.img`, a sparse
@@ -68,15 +83,19 @@ qemu-efi-aarch64` on arm64); elsewhere, install them first. Then it:
 | `--disk GiB` | 100 | the disk's size; the file grows into it |
 | `--ssh-port N` | 2222 | where `foreman-box ssh` reaches the box, on 127.0.0.1 |
 
+Size the box for its environments: each environment's VM gets 4 CPUs
+and 8 GB unless its limits say otherwise, never more than the box has,
+and a data disk that can grow to 64 GB inside the box's disk.
+
 The box reaches the network through QEMU's user-mode networking (IPv4):
 it connects out through this machine, and nothing on this machine's
 network changes, Docker's included. Nothing can connect in, which a box
 doesn't need; the agent dials out. From inside the VM, this machine is
 the gateway, `10.0.2.2`, which reaches its loopback: a control plane on
 the same machine can listen on 127.0.0.1 and the box still reaches it.
-The box's firewall keeps environments from reaching it. Freed memory goes back to the machine (the
-balloon's free page reporting), so a box that ran a big build doesn't
-hold on to it.
+The box's firewall keeps environments from reaching it. Freed memory
+goes back to the machine (the balloon's free page reporting), so a box
+that ran a big build doesn't hold on to it.
 
 Running the script again updates the launcher and keeps the box, its
 disk and its enrollment; it needs no token. `--cpus` and `--memory` then
@@ -146,8 +165,11 @@ for the snippet and `local-lvm` for disks; use your own storage names.
    The image's disk is small; Flatcar grows its filesystem into
    whatever the disk is resized to when it boots. `--cores`, `--memory`
    and the disk size are the box's, so set them for the environments it
-   will run. `--cpu host` gives the box the machine's own CPU features,
-   and `--onboot 1` starts it with the host.
+   will run (each environment's VM gets 4 CPUs and 8 GB by default).
+   `--cpu host` gives the box the machine's own CPU features, including
+   the virtualization its environment VMs need; the Proxmox host needs
+   nested virtualization on, as on any Linux machine above. `--onboot 1`
+   starts the box with the host.
 
 4. Watch the VM's console in Proxmox. The box prints its progress as
    `foreman-box: …` lines and ends with `enrolled; this box shows as
@@ -198,8 +220,11 @@ Things to know:
 ## On bare metal
 
 Flatcar installs from its live image onto the machine's disk, with the
-box's config beside it. The machine needs a wired network with DHCP
-and a disk you don't mind losing: **the install erases it.**
+box's config beside it. The machine needs a wired network with DHCP,
+virtualization on in its firmware, and a disk you don't mind losing:
+**the install erases it.** Environment VMs on a Flatcar box on metal
+run straight on its KVM, as on Ubuntu, but this hasn't been tested yet
+([#179](https://github.com/ntodd/foreman/issues/179)).
 
 1. In Foreman, **Boxes → Add a box → Flatcar**, and download the config
    for the machine's architecture. It holds the join token and the box's
@@ -246,7 +271,10 @@ the config, the installed box has no way in.
 
 Any hypervisor that can boot Flatcar takes the same config: libvirt or
 a cloud, each the way [Flatcar's docs](https://www.flatcar.org/docs/latest/)
-describe. A box only needs to connect out.
+describe. A box only needs to connect out, and needs nested
+virtualization (the host's CPU model, or at least its virtualization
+extensions) to run environments. Without it the box enrolls, and its
+page says it has no `/dev/kvm`.
 
 ## The box on the tailnet
 
@@ -270,8 +298,8 @@ control plane:
 Without an OAuth client, "Add a box" takes a key you made in the
 Tailscale console (**Settings → Keys**), stored encrypted with the token.
 Without either, the box only reaches the control plane if its network
-does: a Mac's VM, for one, goes out through the Mac, and so reaches the
-tailnet if the Mac is on it.
+does: a box from `vm.sh`, for one, goes out through the machine it runs
+on, and so reaches the tailnet if that machine is on it.
 
 The box's own node is like any box's: its firewall keeps environments
 from reaching the tailnet as the box, and environments join the tailnet
@@ -287,7 +315,8 @@ Foreman doesn't remove its node; remove it in the admin console.
   flags one, as `flatcar-<version>`.
 - **Compose and Tailscale** update from the bakery (systemd-sysupdate,
   daily), and a new one is flagged the same way.
-- **The agent** updates itself from the control plane, as on any box.
+- **The agent** updates itself from the control plane, as on any box,
+  and with it Cloud Hypervisor and the guest image environment VMs boot.
 
 A flagged update shows as **This box needs a reboot** on the box's page,
 with **Reboot now**. Environments stop for the reboot and come back once
@@ -296,28 +325,36 @@ partition doesn't boot, Flatcar goes back to the old one.
 
 ## Performance
 
-A VM costs little where it counts. Measured with the launchers as they
-ship, the box against Docker with the same four CPUs and 8 GB, on a
-clean `mix compile` of the control plane (deps and NIFs included), `npm
-ci --offline` of a React, Next, MUI, Jest and webpack tree, and fio:
+On a Flatcar box that is a VM, environments run in VMs nested inside
+it, and nesting costs CPU-bound and I/O-bound work. Measured on one
+machine (an i7-12700 on Ubuntu), with an environment VM of 4 vCPUs and
+8 GB, on a clean `mix compile` of the control plane and 4K random I/O
+with fio:
 
-| Linux, i7-12700 | Docker on the host | Flatcar VM (`vm.sh`) |
+| | Clean `mix compile` | 4K random read / write IOPS |
 |---|---|---|
-| `mix compile` | 36.3 s | 34.5 s |
-| `npm ci` | 3.6 s | 4.2 s |
-| 4K random read | 435K IOPS | 346K IOPS |
-| 4K random write | 398K IOPS | 360K IOPS |
-| 1 MB sequential write | 6.0 GB/s | 6.0 GB/s |
-| A 470 MB download | 65 MB/s | 67 MB/s |
+| Environment VM on the machine's own KVM (Debian or Ubuntu with the install script) | 34.4–35.7 s | 487k / 460k |
+| Environment VM nested in a Flatcar VM (`vm.sh`) | 37–57 s over nine runs, median about 44 | about 155k / 155k |
 
-| Mac, M4 Max | Docker Desktop, volume | Docker Desktop, bind mount | Flatcar VM (`mac.sh`) |
-|---|---|---|---|
-| `mix compile` | 19.0 s | 23.4 s | 19.4 s |
-| `npm ci` | 4.9 s | 28.5 s | 4.4 s |
-| 4K random read | 191K IOPS | 65K IOPS | 321K IOPS |
-| 4K random write | 156K IOPS | 51K IOPS | 270K IOPS |
-| 1 MB sequential write | 14.7 GB/s | 4.4 GB/s | 16.2 GB/s |
+Compiles vary more and take longer nested, and random I/O runs at about
+a third of the speed. Starting is close: Docker was ready in an
+environment VM 1.28–1.44 s after launch on the machine's own KVM, and
+1.61–1.80 s nested. The full measurements are in
+[design/vm-environments.md](../design/vm-environments.md#validation-results).
+
+Where speed matters, install the box on Debian or Ubuntu with the
+install script instead. Flatcar on bare metal has no VM in between
+either, but is untested
+([#179](https://github.com/ntodd/foreman/issues/179)).
 
 The box's disk is a sparse file, so the first write to a part of it
-costs the host an allocation; rewrites run at full speed. Flatcar on
-bare metal is just Linux, with no VM at all.
+costs the host an allocation; rewrites run at full speed.
+
+## Core scheduling
+
+Cloud Hypervisor keeps two VMs' vCPUs off a core's sibling hyperthreads
+where the kernel has core scheduling, so one environment can't watch
+another through a shared core. Flatcar's kernel doesn't have it
+(`CONFIG_SCHED_CORE` is unset), so on a Flatcar box two environments'
+vCPUs can share a core. Keep a Flatcar box to environments whose owners
+trust each other, as a single-owner box's are.

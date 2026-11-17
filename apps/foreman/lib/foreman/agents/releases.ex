@@ -299,8 +299,8 @@ defmodule Foreman.Agents.Releases do
   Sends agent.update to a box whose target version (see
   `target_version/1`) differs from what it runs. Not while an update is
   still under way, not while the box's environments have operations
-  running (the agent restarts), and not for a version that already failed
-  on this box.
+  running or it's building a prebuild (the agent restarts), and not for a
+  version that already failed on this box.
   """
   def maybe_update(%Box{} = box) do
     # The Dispatch cron and an agent joining can both get here at once;
@@ -463,11 +463,13 @@ defmodule Foreman.Agents.Releases do
 
   defp updating?(box), do: active_updates(box) != []
 
+  # A prebuild's build runs for as long as an environment's, and a restart
+  # loses it just the same.
   defp busy?(box) do
     Repo.exists?(
       from o in Operation,
         where:
-          o.box_id == ^box.id and not is_nil(o.environment_id) and
+          o.box_id == ^box.id and (not is_nil(o.environment_id) or o.action == "box.prebuild") and
             o.status in ["dispatched", "running"]
     )
   end

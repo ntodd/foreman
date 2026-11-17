@@ -1,0 +1,33 @@
+[Unit]
+Description=Foreman guest agent
+After=foreman-guest-disks.service docker.service
+Requires=foreman-guest-disks.service
+Wants=docker.service
+
+[Service]
+# Not root: the devcontainer CLI gives the container's user the uid of
+# whoever runs it, which is how the clone and the 0600 secrets are the
+# container user's own. Docker's group to run environments, and the
+# clock (the host's time after a VM is resumed) and nothing else.
+User=foreman
+Group=foreman
+SupplementaryGroups=docker
+AmbientCapabilities=CAP_SYS_TIME
+Environment=FOREMAN_AGENT_MODE=guest
+# HOME on tmpfs: a disk made from a prebuild has whatever the prebuild's
+# code left on it, and nothing there (a docker CLI plugin, a git config)
+# may run as the agent.
+Environment=HOME=/run/foreman-agent/home
+Environment=FOREMAN_AGENT_DATA_DIR=/var/lib/foreman-agent
+Environment=RELEASE_TMP=/run/foreman-agent
+# Secrets live in /run/foreman (tmpfs), and outlive a restart of the agent.
+RuntimeDirectory=foreman foreman-guest foreman-agent foreman-agent/home
+RuntimeDirectoryMode=0711
+RuntimeDirectoryPreserve=yes
+WorkingDirectory=/var/lib/foreman-agent
+ExecStart=/opt/foreman-agent/bin/foreman_agent start
+Restart=always
+RestartSec=1
+
+[Install]
+WantedBy=multi-user.target

@@ -4,14 +4,21 @@
 # namespace, reached over an interface named tailscale0 the way a box on
 # the tailnet reaches its peers.
 #
-#   sudo e2e/firewall/test.sh apps/foreman_agent/priv/firewall/foreman.nft
+#   sudo e2e/firewall/test.sh apps/foreman_agent/priv/firewall/foreman.nft [guest-forward]
+#
+# Environment VMs are stood in for by network namespaces on veth pairs
+# named like their taps (fm-vm<n>), routed and with a /30 each, the way
+# foreman-vmctl sets them up. With guest-forward (priv/vm/guest-forward),
+# their traffic goes through Docker's FORWARD policy the way the install
+# script lets it.
 #
 # It changes the host's network (an interface, routes, an nftables table
 # and Docker networks), so don't run it on a real box or a shared one:
 # CI runs it in a privileged docker:dind container.
 set -eu
 
-rules=${1:?usage: test.sh <rules.nft>}
+rules=${1:?usage: test.sh <rules.nft> [guest-forward]}
+guest_forward=${2:-}
 [ "$(id -u)" -eq 0 ] || { echo "run as root" >&2; exit 1; }
 
 box=100.64.0.1    # the box's own tailnet address
@@ -29,9 +36,16 @@ cleanup() {
   for pid in "$work"/*.pid; do
     [ -e "$pid" ] && kill "$(cat "$pid")" 2>/dev/null
   done
-  docker rm -f fwtest-published >/dev/null 2>&1 || true
+  docker rm -f fwtest-published fwtest-boxsvc >/dev/null 2>&1 || true
   docker network rm fwtest-env fwtest-other >/dev/null 2>&1 || true
   nft delete table inet foreman 2>/dev/null || true
+  nft delete table inet foreman_guests 2>/dev/null || true
+  for n in 0 1; do
+    ip link del "fm-vm$n" 2>/dev/null || true
+    ip netns del "fwtest-guest$n" 2>/dev/null || true
+  done
+  ip link del fwtest-lan0 2>/dev/null || true
+  ip netns del fwtest-lan 2>/dev/null || true
   ip link del tailscale0 2>/dev/null || true
   ip netns del fwtest-peer 2>/dev/null || true
   rm -rf "$work"
@@ -124,7 +138,7 @@ internet() { reach fwtest-env 1.1.1.1 443 || reach fwtest-env 8.8.8.8 443; }
 expect open "an environment still reaches the internet" internet
 expect open "the default bridge still reaches the internet" sh -c "docker run --rm $image nc -z -w 3 1.1.1.1 443 || docker run --rm $image nc -z -w 3 8.8.8.8 443"
 
-tables() { [ "$(nft list tables | grep -c 'inet foreman')" -eq 1 ]; }
+tables() { [ "$(nft list tables | grep -cx 'table inet foreman')" -eq 1 ]; }
 expect open "loading the rules again leaves one foreman table" tables
 
 # A box that opts out of filtering the default bridge (the install
@@ -134,6 +148,130 @@ sed '/# default-bridge$/d' "$rules" > "$work/opted-out.nft"
 nft -f "$work/opted-out.nft"
 expect open "opted out, the default bridge reaches a tailnet peer" reach bridge "$peer" 8080
 expect shut "opted out, an environment still can't" reach fwtest-env "$peer" 8080
+
+# -- environment VMs ------------------------------------------------------
+if [ -n "$guest_forward" ]; then
+  # Back to the full rules, and no table for VMs yet: the holes first.
+  nft delete table inet foreman_guests
+  nft -f "$rules"
+  nft delete table inet foreman_guests
+
+  # Two guests, each on a /30 of its own behind a "tap", as foreman-vmctl
+  # makes them: guest n is 10.250.0.(4n+2), the box's end 10.250.0.(4n+1).
+  for n in 0 1; do
+    ns=fwtest-guest$n
+    ip netns add "$ns"
+    ip link add "fm-vm$n" type veth peer name eth0 netns "$ns"
+    ip addr add "10.250.0.$((4 * n + 1))/30" dev "fm-vm$n"
+    ip link set "fm-vm$n" up
+    ip netns exec "$ns" ip link set lo up
+    ip netns exec "$ns" ip addr add "10.250.0.$((4 * n + 2))/30" dev eth0
+    ip netns exec "$ns" ip link set eth0 up
+    ip netns exec "$ns" ip route add default via "10.250.0.$((4 * n + 1))"
+  done
+  g0() { ip netns exec fwtest-guest0 "$@"; }
+  g0_reach() { g0 "$nc_bin" nc -z -w 3 "$1" "$2" >/dev/null 2>&1; }
+
+  # The box's LAN: a machine on 192.168.77.0/24, in a namespace of its own.
+  ip netns add fwtest-lan
+  ip link add fwtest-lan0 type veth peer name lan0 netns fwtest-lan
+  ip addr add 192.168.77.1/24 dev fwtest-lan0
+  ip link set fwtest-lan0 up
+  ip netns exec fwtest-lan ip link set lo up
+  ip netns exec fwtest-lan ip addr add 192.168.77.2/24 dev lan0
+  ip netns exec fwtest-lan ip link set lan0 up
+  lan_ip=192.168.77.2
+  listen lan fwtest-lan "$lan_ip" 8086
+
+  # What the box listens on: the tap's gateway, its other address, and
+  # guest 1's server.
+  box_ip=$(ip -4 route get 1.1.1.1 | sed -n 's/.* src \([0-9.]*\).*/\1/p')
+  listen gateway "" 10.250.0.1 8083
+  listen boxip "" "$box_ip" 8085
+  listen guest1 fwtest-guest1 10.250.0.6 8084
+  # A tailnet peer that knows a route to the guests, to try connecting in.
+  peer_ns ip route add 10.250.0.0/16 dev fwtest-peer0
+  sleep 1
+
+  sh "$guest_forward"
+  sh "$guest_forward" # running it again doesn't add the rules twice
+  expect open "guest-forward adds its rules once" \
+    sh -c "[ \"\$(iptables -S FORWARD | grep -c 'fm-vm+')\" -eq 2 ]"
+  expect open "without the VM table, a guest reaches the box on its tap" g0_reach 10.250.0.1 8083
+  expect open "without the VM table, a guest reaches another guest" g0_reach 10.250.0.6 8084
+
+  # As the install script loads them by default: the lines for
+  # --block-lan left out.
+  sed '/# block-lan$/d' "$rules" > "$work/open-lan.nft"
+  nft -f "$work/open-lan.nft"
+  expect shut "a guest can't reach the box on its tap" g0_reach 10.250.0.1 8083
+  expect shut "a guest can't reach the box's other addresses" g0_reach "$box_ip" 8085
+  expect shut "a guest can't reach another guest" g0_reach 10.250.0.6 8084
+  expect shut "a guest can't reach a tailnet peer" g0_reach "$peer" 8080
+  expect shut "a guest can't reach the box's tailnet address" g0_reach "$box" 8081
+  expect shut "a guest can't use the box's MagicDNS" g0_reach 100.100.100.100 53
+  expect open "a guest reaches the box's LAN" g0_reach "$lan_ip" 8086
+  guest_internet() { g0_reach 1.1.1.1 443 || g0_reach 8.8.8.8 443; }
+  expect open "a guest reaches the internet" guest_internet
+  spoofed() {
+    g0 ip addr add 10.250.0.6/32 dev eth0
+    g0 "$nc_bin" nc -z -w 3 -s 10.250.0.6 1.1.1.1 443 >/dev/null 2>&1
+    status=$?
+    g0 ip addr del 10.250.0.6/32 dev eth0
+    return $status
+  }
+  expect shut "a guest can't send from another guest's address" spoofed
+  expect open "the box reaches a guest" "$nc_bin" nc -z -w 3 10.250.0.6 8084
+  expect shut "a tailnet peer can't connect into a guest" \
+    peer_ns "$nc_bin" nc -z -w 3 10.250.0.6 8084
+  # A container on the box with a published port: Docker's DNAT turns a
+  # connection to the box into one forwarded to the container.
+  docker run -d --name fwtest-boxsvc -p 8087:8080 "$image" nc -lk -p 8080 -e /bin/true >/dev/null
+  sleep 1
+  boxsvc_ip=$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' fwtest-boxsvc)
+  expect shut "a guest can't reach a port Docker publishes on the box" g0_reach "$box_ip" 8087
+  expect shut "a guest can't reach a container on the box's Docker" g0_reach "$boxsvc_ip" 8080
+  # Docker's networks, whatever their bridges are named, by subnet: the
+  # loader puts them in a set. Newer Docker drops direct routes to its
+  # containers itself, so the set is checked with the LAN's subnet, which
+  # a guest otherwise reaches.
+  nft add element inet foreman_guests docker_nets "{ 192.168.77.0/24 }"
+  expect shut "a guest can't reach a subnet in the box's Docker networks" g0_reach "$lan_ip" 8086
+  nft -f "$work/open-lan.nft"
+  expect open "a guest reaches it again once it's out of the set" g0_reach "$lan_ip" 8086
+
+  # A connection a guest made while the table was gone (another service
+  # flushing the ruleset) is cut once it's back: only replies to the box's
+  # own connections come in from a guest.
+  "$nc_bin" nc -lk -s 10.250.0.1 -p 8089 -e /bin/cat >/dev/null 2>&1 &
+  echo $! > "$work/echo.pid"
+  sleep 1
+  held_connection() {
+    nft delete table inet foreman_guests
+    g0 bash -c 'exec 3<>/dev/tcp/10.250.0.1/8089 || exit 2
+      echo one >&3; read -r -t 3 _ <&3 || exit 3
+      sleep 4
+      echo two >&3; read -r -t 3 _ <&3' &
+    held=$!
+    sleep 2
+    nft -f "$work/open-lan.nft"
+    wait "$held"
+    rc=$?
+    # A connection that never worked proves nothing: report it as open.
+    if [ "$rc" -eq 2 ] || [ "$rc" -eq 3 ]; then return 0; fi
+    return "$rc"
+  }
+  expect shut "a guest's connection to the box from while the table was gone is cut when it's back" held_connection
+
+  nft -f "$rules"
+  expect shut "with --block-lan, a guest can't reach the box's LAN" g0_reach "$lan_ip" 8086
+  expect open "with --block-lan, a guest still reaches the internet" guest_internet
+  listen landns fwtest-lan "$lan_ip" 53
+  sleep 1
+  expect shut "with --block-lan, a guest can't use a LAN resolver it wasn't given" g0_reach "$lan_ip" 53
+  nft add element inet foreman_guests guest_dns "{ $lan_ip }"
+  expect open "with --block-lan, a guest reaches the resolver it was given" g0_reach "$lan_ip" 53
+fi
 
 [ "$failures" -eq 0 ] || { echo "$failures check(s) failed" >&2; exit 1; }
 echo "all checks passed"

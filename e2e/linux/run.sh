@@ -1,7 +1,9 @@
 #!/bin/sh
 # End-to-end run on Linux: the control plane release image, and a box
-# (docker-in-docker) running the agent release. Covers enrollment,
-# create, secrets delivery, a reboot of the box, self-update and destroy.
+# (a privileged container booting systemd) running the agent release.
+# Covers enrollment, the box saying it can't run environment VMs without
+# KVM (CI's Crew VMs have none; e2e/vm/run.sh runs environments for real),
+# a reboot of the box, self-update, re-enrollment and a rollback.
 #
 #   e2e/linux/run.sh            build images, run, leave the stack up
 #   e2e/linux/run.sh --down     tear the stack down (and its volumes)
@@ -49,7 +51,7 @@ fail() { printf '\nFAILED: %s\n' "$*" >&2; exit 1; }
 cp_eval() {
   out=$($compose exec -T cp env -u PHX_SERVER /app/bin/foreman eval "Code.eval_file(\"/e2e/linux/eval.exs\"); $1" 2>&1) ||
     { echo "$out" >&2; fail "eval failed: $1"; }
-  echo "$out" | grep -E '^(ENV|BOX|  OP|queued|set |desired|published|revoked)' || true
+  echo "$out" | grep -E '^(ENV|BOX|  OP|queued|set |desired|published|revoked|VM|REFUSED)' || true
 }
 
 box() { $compose exec -T box "$@"; }
@@ -64,24 +66,6 @@ wait_for() {
     sleep 5
   done
   echo "ok: $desc"
-}
-
-env_observed() { cp_eval 'E2E.status()' | grep "ENV $1 " | sed 's/.*observed=\([a-z]*\).*/\1/'; }
-env_is() { [ "$(env_observed "$1")" = "$2" ]; }
-# Like wait_for env_is, but gives up as soon as the environment errors.
-wait_for_env() {
-  i=0
-  until [ "$(env_observed "$1")" = "$2" ]; do
-    if [ "$(env_observed "$1")" = error ]; then
-      cp_eval 'E2E.status()' >&2
-      $compose exec -T cp env -u PHX_SERVER /app/bin/foreman eval "Code.eval_file(\"/e2e/linux/eval.exs\"); E2E.log(\"$1\")" 2>&1 | tail -40 >&2
-      fail "$1 errored waiting for $2"
-    fi
-    i=$((i + 5))
-    [ $i -lt "$3" ] || fail "timed out waiting for: $1 $2"
-    sleep 5
-  done
-  echo "ok: $1 $2"
 }
 
 # How many times box $1 has joined (on version $2, if given). Waits take
@@ -201,72 +185,26 @@ wait_for "agent rejoined" 60 joined_more box1 "$n"
 [ "$(box sha256sum /var/lib/foreman-agent/identity.json)" = "$identity" ] || fail "the re-run changed the identity"
 echo "ok: same identity after a re-run"
 
-say "create an environment"
-cp_eval 'E2E.create()'
-wait_for_env hello-1 running 900
+say "a box without KVM says so, and gets no environments"
+vm_status() { cp_eval 'E2E.vm_status()' | grep "^VM"; }
+vm_reported() { vm_status | grep -q '^VM ready=false'; }
+wait_for "the box's VM report" 60 vm_reported
+# No /dev/kvm here, or (on an arm64 runner) an architecture without VMs yet.
+reason=$(vm_status | sed -n 's/.* reason="\(.*\)"$/\1/p')
+[ -n "$reason" ] || fail "the box didn't say why it can't run VMs: $(vm_status)"
+cp_eval 'E2E.try_create()' | grep -qF "can't run environments: $reason" ||
+  fail "an environment was placed on a box that can't run VMs"
+echo "ok: $(vm_status)"
+box test -S /run/foreman-vmctl.sock || fail "the VM helper's socket isn't there"
+[ "$(box stat -c '%U %a' /etc/foreman-agent/vmctl)" = "root 755" ] || fail "the VM helper isn't root's"
+box id -nG foreman | grep -qw docker && fail "the agent is still in the docker group"
+echo "ok: the VM helper is root's, and the agent isn't in the docker group"
 
-app=$(box docker ps -q --filter label=foreman.env_id --filter label=com.docker.compose.service=app)
-[ -n "$app" ] || fail "no app container"
-echo "ok: app container $app"
-
-say "inside the environment"
-box docker exec -u vscode "$app" bash -lc 'git config user.email' | grep -q e2e@example.com || fail "git identity missing"
-echo "ok: git identity"
-box docker exec "$app" test -f /usr/local/share/foreman/profile.sh || fail "the Foreman feature isn't installed"
-box docker exec "$app" sh -c 'command -v tailscale' >/dev/null && fail "tailscale installed though the control plane has no tailnet"
-echo "ok: Foreman feature installed (without Tailscale, which isn't configured here)"
-box docker exec -u root "$app" sh -c 'touch /run/foreman/x' 2>/dev/null && fail "secrets mount is writable"
-echo "ok: /run/foreman is read-only"
-ports=$(box docker ps --filter label=foreman.env_id --format '{{.Ports}}' | tr -d '[:space:]')
-[ -z "$ports" ] || fail "published ports: $ports"
-echo "ok: nothing published"
-
-# On Linux the devcontainer CLI maps the container user to the agent's uid,
-# so the workspace and the 0600 secrets are readable without loosening them.
-foreman_uid=$(box id -u foreman)
-vscode_uid=$(box docker exec "$app" id -u vscode)
-[ "$foreman_uid" = "$vscode_uid" ] || fail "vscode is uid $vscode_uid, foreman is $foreman_uid"
-echo "ok: container user is the agent's uid ($foreman_uid)"
-secrets_dir=$(box sh -c 'ls -d /run/foreman/envs/*')
-[ "$(box stat -c %a "$secrets_dir")" = "700" ] || fail "secrets dir isn't 0700"
-[ "$(box stat -c %a "$secrets_dir/secrets.env")" = "600" ] || fail "secrets.env isn't 0600"
-box su -s /bin/sh nobody -c "cat $secrets_dir/secrets.env" 2>/dev/null && fail "another user on the box can read secrets"
-echo "ok: secrets are 0600, unreadable by other box users"
-# Tailscale SSH starts a clean login shell; the saved container environment
-# fills it in, readable only by the devcontainer's user.
-[ "$(box docker exec -u root "$app" stat -c '%u %a' /etc/foreman/container.env)" = "$vscode_uid 600" ] ||
-  fail "the saved container environment isn't 0600 and vscode's"
-box docker exec -u vscode "$app" env -i HOME=/home/vscode bash -lc 'echo "$FOREMAN_ENV"' | grep -qx hello-1 ||
-  fail "a clean login shell doesn't get the container's environment"
-echo "ok: a clean login shell gets the container's environment, from a file only vscode can read"
-
-say "the agent finds the ports listening in the environment"
-# A server as the devcontainer's user, the way one started over SSH runs,
-# and the installed agent release reading it from the box's /proc.
-box docker exec -d -u vscode "$app" perl -MIO::Socket::INET -e \
-  'my $s = IO::Socket::INET->new(LocalPort => 4321, Listen => 5, Proto => "tcp", ReuseAddr => 1) or die; sleep 3600'
-agent_ports() {
-  box runuser -u foreman -- env RELEASE_TMP=/tmp /opt/foreman-agent/current/bin/foreman_agent eval \
-    '{:ok, _} = Application.ensure_all_started(:req)
-     ctx = %{config: ForemanAgent.Config.get(), docker: ForemanAgent.Docker.Engine}
-     {report, _} = ForemanAgent.Ports.collect(ctx, %{})
-     IO.inspect(report)'
-}
-port_named() { agent_ports | grep -q "%{port: $1, process: \"$2\"}"; }
-wait_for "port 4321 reported, named perl" 60 port_named 4321 perl
-
-say "a secret change reaches new shells, and marks the environment pending restart"
-cp_eval 'E2E.secret("hello-1", "SIDECAR_TOKEN", "linux-secret-1")'
-wait_for "secret in a login shell" 120 sh -c "$compose exec -T box docker exec -u vscode $app bash -lc 'echo \$SIDECAR_TOKEN' | grep -q linux-secret-1"
-cp_eval 'E2E.status()' | grep -q "ENV hello-1" || fail "status"
-
-say "reboot the box: tmpfs secrets vanish, containers stay stopped until the control plane is back"
+say "reboot the box: the agent comes back"
 n=$(joins box1)
 $compose restart box
 wait_for "agent rejoined" 180 joined_more box1 "$n"
-wait_for_env hello-1 running 300
-box docker exec -u vscode "$app" bash -lc 'echo $SIDECAR_TOKEN' | grep -q linux-secret-1 || fail "secrets not restored after reboot"
-echo "ok: secrets restored and environment restarted after reboot"
+echo "ok: rejoined after a reboot"
 
 say "self-update to 0.1.1"
 # Pinned to what it runs, so registering 0.1.1 (unpinned boxes follow the
@@ -281,16 +219,7 @@ current_is 0.1.1 || fail "current isn't 0.1.1"
 # Once the new release has joined, the agent clears the rollback state, so
 # a crash much later can't roll it back to a stale release.
 wait_for "rollback state cleared after the join" 60 no_rollback_state
-env_is hello-1 running || fail "environment didn't survive the agent update"
-echo "ok: self-updated, environment still running"
-
-say "destroy"
-cp_eval 'E2E.act("hello-1", "destroy")'
-wait_for_env hello-1 destroyed 240
-[ -z "$(box docker ps -aq --filter label=foreman.env_id)" ] || fail "containers left behind"
-[ -z "$(box docker volume ls -q --filter label=com.docker.compose.project=hello-1)" ] || fail "volumes left behind"
-[ -z "$(box ls /srv/foreman/envs)" ] || fail "workspace left behind"
-echo "ok: nothing left on the box"
+echo "ok: self-updated"
 
 say "revoke the box, then enroll it again with --reenroll and a new token"
 # The revoke runs in an eval VM, so its disconnect doesn't reach the

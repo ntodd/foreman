@@ -74,10 +74,6 @@ jobs:
             apps/foreman_agent/deps
             apps/foreman_agent/_build
           key: agent-${{ runner.arch }}-${{ env.ELIXIR_VERSION }}-${{ env.OTP_VERSION }}-${{ hashFiles('apps/foreman_agent/mix.lock') }}
-      # The agent reads compose files with Node (ComposeScan).
-      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
-        with:
-          node-version: "22"
       - run: mix deps.get
       - run: mix format --check-formatted
       - run: mix compile --warnings-as-errors
@@ -186,9 +182,34 @@ jobs:
         with:
           node-version: "22"
       - name: ShellCheck
-        run: shellcheck -s sh features/src/foreman/install.sh features/src/foreman/scripts/* apps/foreman/priv/agent/install.sh apps/foreman/priv/agent/mac.sh apps/foreman/priv/agent/vm.sh apps/foreman/priv/flatcar/*.sh apps/foreman_agent/rel/tools/bundle.sh apps/foreman_agent/rel/tools/devcontainer.sh scripts/publish-agent-release.sh e2e/*.sh e2e/firewall/test.sh e2e/linux/run.sh e2e/flatcar/run.sh e2e/linux/bin/gh docker/foreman-update e2e/updater/run.sh
+        run: shellcheck -s sh guest/build.sh guest/rootfs/usr/local/lib/foreman-guest/* e2e/guest/run.sh e2e/vm/run.sh e2e/vmctl/test.sh apps/foreman_agent/priv/vm/guest-forward apps/foreman_agent/priv/vm/vmctl features/src/foreman/install.sh features/src/foreman/scripts/* apps/foreman/priv/agent/install.sh apps/foreman/priv/agent/vm.sh apps/foreman/priv/flatcar/*.sh apps/foreman_agent/rel/tools/bundle.sh apps/foreman_agent/rel/tools/devcontainer.sh scripts/publish-agent-release.sh e2e/*.sh e2e/firewall/test.sh e2e/linux/run.sh e2e/flatcar/run.sh e2e/linux/bin/gh docker/foreman-update e2e/updater/run.sh
+      - name: Test the VM helper
+        run: sh e2e/vmctl/test.sh
       - name: Test the feature in a real devcontainer
         run: npx --yes @devcontainers/cli@0.89.0 features test --features foreman --base-image mcr.microsoft.com/devcontainers/base:debian --skip-scenarios features
+
+  # The guest system image, booted under Cloud Hypervisor with the agent
+  # release on its agent disk, and the agent on the box driving the one in
+  # the VM over hybrid vsock (e2e/guest/run.sh). Crew's VMs have no KVM,
+  # so this runs on a GitHub-hosted runner (amd64), which does.
+  guest:
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Build the guest image
+        run: guest/build.sh "$RUNNER_TEMP/guest"
+      - name: Build the agent release
+        run: docker build -f docker/box.Dockerfile --target agent-tarball -o "$RUNNER_TEMP/agent" .
+      - name: Give the runner's user KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+          ls -l /dev/kvm
+      - name: Boot it
+        run: e2e/guest/run.sh "$RUNNER_TEMP/guest/foreman-guest-linux-amd64.tar" "$RUNNER_TEMP/agent/foreman_agent.tar.gz"
 
   # The box firewall against a fake tailnet: a peer behind an interface
   # named tailscale0, as a box on the tailnet has. The test changes its
@@ -207,9 +228,10 @@ jobs:
           docker run -d --privileged --name "$RUN" public.ecr.aws/docker/library/docker:29-dind >/dev/null
           docker cp e2e/firewall/test.sh "$RUN":/test.sh
           docker cp apps/foreman_agent/priv/firewall/foreman.nft "$RUN":/foreman.nft
+          docker cp apps/foreman_agent/priv/vm/guest-forward "$RUN":/guest-forward
           docker exec "$RUN" sh -c 'for _ in $(seq 60); do docker info >/dev/null 2>&1 && exit 0; sleep 1; done; exit 1'
           docker exec "$RUN" apk add -q nftables iproute2
-          docker exec -e FWTEST_IMAGE=public.ecr.aws/docker/library/busybox:1.37-musl "$RUN" sh /test.sh /foreman.nft
+          docker exec -e FWTEST_IMAGE=public.ecr.aws/docker/library/busybox:1.37-musl "$RUN" sh /test.sh /foreman.nft /guest-forward
 
   images:
     if: github.event_name != 'schedule'
@@ -333,6 +355,40 @@ jobs:
         run: |
           e2e/linux/run.sh --down || true
           docker image rm -f "$E2E_PROJECT-cp" "$E2E_PROJECT-box" 2>/dev/null || true
+
+  # Environments in real VMs: the agent installed with the served install
+  # script on a GitHub-hosted runner, which has KVM (Crew's VMs don't) and
+  # is thrown away after; the control plane in Docker beside it; two
+  # environments, what they can reach, secrets across a stop and start, an
+  # agent restart and destroy (e2e/vm/run.sh).
+  e2e-vm:
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # For mix foreman_agent.sign, which makes the release keys and signs
+      # the agent the run publishes.
+      - uses: erlef/setup-beam@54075bcc5e249e4758d363f27d099f55d843f124 # v1.24.1
+        with:
+          elixir-version: ${{ env.ELIXIR_VERSION }}
+          otp-version: ${{ env.OTP_VERSION }}
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            apps/foreman_agent/deps
+            apps/foreman_agent/_build
+          key: agent-dev-${{ runner.arch }}-${{ env.ELIXIR_VERSION }}-${{ env.OTP_VERSION }}-${{ hashFiles('apps/foreman_agent/mix.lock') }}
+      - name: Compile the agent
+        working-directory: apps/foreman_agent
+        run: mix deps.get && mix compile
+      - name: Give the runner KVM and what the install script needs
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+          sudo apt-get install -y -qq nftables zstd >/dev/null
+      - run: E2E_VM_THROWAWAY=1 e2e/vm/run.sh
 
   # A control plane host that boots systemd, runs the control plane from
   # docker/compose.yml and installs the updater: refused requests, an

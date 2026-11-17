@@ -90,4 +90,24 @@ defmodule ForemanWeb.EnvironmentActionsMenuTest do
     view |> element("#env-actions [role=menuitem]", "Destroy") |> render_click()
     assert has_element?(view, "#destroy-modal")
   end
+
+  test "suspends a running environment, and offers Start for a suspended one", %{
+    conn: conn,
+    env: env
+  } do
+    env |> Ecto.Changeset.change(observed_state: "running") |> Foreman.Repo.update!()
+    {:ok, view, _html} = live(conn, ~p"/environments/#{env.id}")
+    assert has_element?(view, "#env-actions [role=menuitem]", "Saves the VM's memory to disk")
+    view |> element("#env-actions [role=menuitem][phx-value-do=suspend]") |> render_click()
+    assert [%{action: "suspend"} | _] = Operations.list_for_environment(env.id)
+
+    env
+    |> Ecto.Changeset.change(observed_state: "suspended", created_once: true)
+    |> Foreman.Repo.update!()
+
+    {:ok, view, _html} = live(conn, ~p"/environments/#{env.id}")
+    refute has_element?(view, "#env-actions [phx-value-do=suspend]")
+    assert has_element?(view, "button[phx-value-do=start]", "Start")
+    assert render(view) =~ "Suspended"
+  end
 end

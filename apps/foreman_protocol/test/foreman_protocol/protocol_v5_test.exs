@@ -11,13 +11,6 @@ defmodule ForemanProtocol.ProtocolV5Test do
 
   @boot_id "0b5a1f0e-7d1c-4c5e-9a43-5f1e2d3c4b5a"
 
-  test "this build speaks protocol 5 and still accepts agents on 4" do
-    assert ForemanProtocol.version() == 5
-    assert ForemanProtocol.compatible?(5)
-    assert ForemanProtocol.compatible?(4)
-    refute ForemanProtocol.compatible?(3)
-  end
-
   describe "box.restart" do
     test "names the boot it reboots" do
       assert {:ok, cmd} = Command.new("box.restart", %{"boot_id" => @boot_id})

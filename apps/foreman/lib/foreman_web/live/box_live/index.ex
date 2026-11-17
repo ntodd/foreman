@@ -82,7 +82,7 @@ defmodule ForemanWeb.BoxLive.Index do
   end
 
   def handle_event("join_kind", %{"kind" => kind}, %{assigns: %{join: %{} = join}} = socket)
-      when kind in ["linux", "mac", "vm", "flatcar"] do
+      when kind in ["linux", "vm", "flatcar"] do
     join = %{join | kind: kind}
 
     # The configs carry the box's Tailscale key, minted the first time.
@@ -121,22 +121,18 @@ defmodule ForemanWeb.BoxLive.Index do
     url = Foreman.Config.base_url()
 
     case kind do
-      "mac" -> "curl -fsSL #{url}/agent/mac.sh | sh -s -- --token #{token}"
       "vm" -> "curl -fsSL #{url}/agent/vm.sh | sudo sh -s -- --token #{token}"
       _ -> "curl -fsSL #{url}/agent/install.sh | sudo sh -s -- --token #{token}"
     end
   end
 
-  defp join_label(%{kind: "mac", name: name}),
-    do:
-      "Run this on the Mac that hosts #{name}. It runs the box as a Flatcar VM (Apple's hypervisor, through vfkit) that starts at login:"
-
   defp join_label(%{kind: "vm", name: name}),
     do:
-      "Run this on the Linux machine that hosts #{name}. It needs KVM, and runs the box as a Flatcar VM under QEMU, apart from the host and updating itself:"
+      "Run this on the Linux machine that hosts #{name}. It needs KVM with nested virtualization, and runs the box as a Flatcar VM under QEMU, apart from the host and updating itself. Environments run nested in it, which is slower than a box on the machine itself:"
 
   defp join_label(%{name: name}),
-    do: "Run this on #{name} (Linux with systemd, Docker Engine with Compose, git and nftables):"
+    do:
+      "Run this on #{name} (amd64 Linux with KVM, systemd, nftables, iproute2 and e2fsprogs; each environment runs in a VM of its own):"
 
   @impl true
   def handle_info({:box_metrics, box_id, point}, socket) do
@@ -204,7 +200,7 @@ defmodule ForemanWeb.BoxLive.Index do
           id={"box-#{card.box.id}"}
           class={[
             "rounded-xl border bg-raised p-5 shadow-xs transition-shadow hover:shadow-raised",
-            if(Foreman.Boxes.policy_exceptions(card.box) == [],
+            if(Foreman.Boxes.vm_problem(card.box) == nil,
               do: "border-line",
               else: "border-danger/50 ring-1 ring-danger/30"
             )
@@ -220,7 +216,7 @@ defmodule ForemanWeb.BoxLive.Index do
               </p>
             </div>
             <div class="flex items-center gap-1.5">
-              <.box_policy_badge box={card.box} />
+              <.box_vm_badge box={card.box} />
               <.box_firewall_badge box={card.box} />
               <.box_reboot_badge box={card.box} />
               <.badge :if={card.summary.contention} color="amber" size="sm">Contention</.badge>
@@ -318,7 +314,6 @@ defmodule ForemanWeb.BoxLive.Index do
                 :for={
                   {kind, label} <- [
                     {"linux", "Linux"},
-                    {"mac", "Mac"},
                     {"vm", "Linux VM"},
                     {"flatcar", "Flatcar"}
                   ]
@@ -378,10 +373,10 @@ defmodule ForemanWeb.BoxLive.Index do
               </p>
             </div>
             <.callout
-              :if={@join.kind in ["mac", "vm", "flatcar"] and not @tailscale?}
+              :if={@join.kind in ["vm", "flatcar"] and not @tailscale?}
               kind="warning"
             >
-              Without a Tailscale OAuth client, a Flatcar box only joins the tailnet with a key pasted when the token was made. Without one, it reaches Foreman only if its network can (a Mac's own tailnet, say).
+              Without a Tailscale OAuth client, a Flatcar box only joins the tailnet with a key pasted when the token was made. Without one, it reaches Foreman only if its network can (its host's tailnet, say).
             </.callout>
             <.callout kind="info">
               The token is shown once. The agent generates its own key and uses the token to enroll; after that, the token is spent.

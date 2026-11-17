@@ -49,24 +49,27 @@ take a snapshot before each upgrade.
 
 ## Boxes
 
-Make a join token per box with its developer as the owner. A box runs
-only its owner's environments unless it's shared on its page. Sharing is
-a trust decision: anyone with Docker on a box can read every
-environment's secrets on it. Environments themselves run unprivileged,
-so code in one can't do that, unless the box allows privileged
-containers (`FOREMAN_POLICY=privileged=allow`, shown with a red alert).
-Don't allow it on a shared box. See [../security.md](../security.md).
+A box is an amd64 Linux machine with KVM; each environment on it runs
+in a VM of its own. Make a join token per box with its developer as the
+owner. A box runs only its owner's environments unless it's shared on
+its page. Code in one environment can't reach another's secrets or
+files, or the box, since each is in its own VM. Sharing is still a
+trust decision: whoever has root on a box can read every environment's
+secrets and disks on it. See [../security.md](../security.md).
 
-Boxes allow placement past capacity by default and show contention. A
-box that's tight on memory can be set to **warn** (ask first) or
-**refuse** on its page.
+Every VM has a size, the environment's or repo's limits or the box's
+default of 4 CPUs and 8 GB. Boxes allow placement past capacity by
+default and show contention. A box that's tight on memory can be set to
+**warn** (ask first) or **refuse** on its page.
 
-A developer's Mac can be their box ([mac.md](mac.md)), and so can a
-Flatcar VM on a Linux machine ([flatcar.md](flatcar.md)), which keeps the
-box's environments, and their secrets, off the machine itself. With the
-Tailscale OAuth client set up, each Flatcar box joins the tailnet as
-`tag:foreman-box`.
+A developer's box can also be a Flatcar VM on a Linux machine or
+Proxmox ([flatcar.md](flatcar.md)), which keeps the box's environments,
+and their secrets, off the machine itself, at the cost of running them
+nested (slower). With the Tailscale OAuth client set up, each Flatcar
+box joins the tailnet as `tag:foreman-box`. Macs can't be boxes until
+[#180](https://github.com/ntodd/foreman/issues/180) ([mac.md](mac.md)).
 
-For shared machines, the plan is one Incus system container per
-developer, each with its own Docker and agent; the control plane sees
-each as a separate box. That isn't built yet.
+On a cloud instance, install with `--block-lan` if environments
+shouldn't reach the instance's network or its metadata endpoint
+([personal.md](personal.md#5-add-the-desktop-as-a-box)). The instance
+needs KVM: bare metal, or an instance type with nested virtualization.

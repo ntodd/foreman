@@ -9,7 +9,6 @@ defmodule ForemanAgent.EnvTimeoutsTest do
   import Mox
 
   alias ForemanAgent.{Config, DockerMock, Env, RunnerMock}
-  alias ForemanAgent.Env.Policy
 
   @moduletag :tmp_dir
   @env_id "6f1c1d1e-9a3b-4c1f-8f5e-2d7a9b0c1e2f"
@@ -30,7 +29,6 @@ defmodule ForemanAgent.EnvTimeoutsTest do
       envs_root: Path.join(tmp, "envs"),
       secrets_root: Path.join(tmp, "run"),
       release_root: Path.join(tmp, "opt"),
-      policy_rules: Policy.default_rules(),
       docker_socket: "/var/run/docker.sock"
     }
 

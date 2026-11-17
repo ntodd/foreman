@@ -12,7 +12,8 @@ defmodule ForemanAgent.Handler do
     Restart,
     Runner,
     Stats,
-    Updater
+    Updater,
+    VM
   }
 
   alias ForemanProtocol.Command
@@ -25,14 +26,31 @@ defmodule ForemanAgent.Handler do
 
   @spec handle(Command.t(), (String.t(), String.t() -> any())) ::
           {:ok, map()} | {:error, String.t()} | {:error, String.t(), map()}
-  def handle(%Command{type: "env." <> _ = type, payload: payload} = cmd, log) do
+  def handle(%Command{type: "env." <> _} = cmd, log) do
     redactor = Redactor.new(cmd)
 
-    case run_env(type, payload, ctx(Redactor.wrap_log(redactor, log)), redactor) do
+    case run_env(cmd, ctx(Redactor.wrap_log(redactor, log)), redactor) do
       {:error, message} -> {:error, Redactor.redact(redactor, message)}
       {:error, message, result} -> {:error, Redactor.redact(redactor, message), result}
       ok -> ok
     end
+  end
+
+  # A prebuild's command carries a token to clone with: redacted like an
+  # environment command's secrets.
+  def handle(%Command{type: "box.prebuild"} = cmd, log) do
+    redactor = Redactor.new(cmd)
+    ctx = ctx(Redactor.wrap_log(redactor, log))
+
+    case host_only(ctx, fn -> VM.Prebuild.build(cmd, ctx.log, ctx) end, redactor) do
+      {:error, message} -> {:error, Redactor.redact(redactor, message)}
+      ok -> ok
+    end
+  end
+
+  def handle(%Command{type: "box.prebuild.delete", payload: p} = cmd, log) do
+    ctx = ctx(log)
+    host_only(ctx, fn -> VM.Prebuild.delete(p.prebuild_id, ctx) end, Redactor.new(cmd))
   end
 
   def handle(%Command{type: "box.inventory"}, _log) do
@@ -42,12 +60,15 @@ defmodule ForemanAgent.Handler do
   end
 
   def handle(%Command{type: "box.stats"}, _log) do
-    with {:ok, stats} <- Stats.collect(ctx(fn _, _ -> :ok end)) do
+    with {:ok, stats} <- stats(ctx(fn _, _ -> :ok end)) do
       {:ok, stringify(stats)}
     end
   end
 
-  def handle(%Command{type: "box.gc"}, log), do: gc(ctx(log))
+  def handle(%Command{type: "box.gc", payload: p}, log) do
+    ctx = ctx(log)
+    if ctx.config.mode == :host, do: VM.Status.gc(ctx, p), else: gc(ctx)
+  end
 
   def handle(%Command{type: "box.restart", payload: %{boot_id: boot_id}}, _log),
     do: Restart.request(Config.get(), boot_id)
@@ -100,8 +121,12 @@ defmodule ForemanAgent.Handler do
 
   # A crash comes back as an error the caller redacts: the exception's
   # message can hold anything the command carried.
-  defp run_env(type, payload, ctx, redactor) do
-    Env.run(type, payload, ctx)
+  # On a box, every environment runs in a VM of its own, and the agent in
+  # it runs the command (ForemanAgent.VM.Env); in a VM, this is that agent.
+  defp run_env(cmd, ctx, redactor) do
+    if ctx.config.mode == :host,
+      do: VM.Env.run(cmd, ctx.log, ctx),
+      else: Env.run(cmd.type, cmd.payload, ctx)
   rescue
     e ->
       Logger.error(Redactor.redact(redactor, Exception.format(:error, e, __STACKTRACE__)))
@@ -112,7 +137,25 @@ defmodule ForemanAgent.Handler do
       {:error, "operation crashed (#{kind})"}
   end
 
+  defp host_only(ctx, fun, redactor) do
+    if ctx.config.mode == :host,
+      do: fun.(),
+      else: {:error, "prebuilds are made on the box, not in an environment's VM"}
+  rescue
+    e ->
+      Logger.error(Redactor.redact(redactor, Exception.format(:error, e, __STACKTRACE__)))
+      {:error, "operation crashed: #{Exception.message(e)}"}
+  end
+
   def inventory do
+    if Config.get().mode == :host, do: VM.Status.inventory(Config.get()), else: docker_inventory()
+  end
+
+  def stats(ctx) do
+    if ctx.config.mode == :host, do: VM.Status.stats(ctx), else: Stats.collect(ctx)
+  end
+
+  defp docker_inventory do
     case Docker.list_containers(["foreman.env_id"]) do
       {:ok, containers} -> {:ok, Inventory.from_containers(containers)}
       {:error, reason} -> {:error, "couldn't list containers: #{inspect(reason)}"}

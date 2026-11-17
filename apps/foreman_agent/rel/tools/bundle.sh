@@ -8,7 +8,9 @@
 #
 # Node is the official build named in node.sha256, checked against the
 # digest there. The CLI comes from devcontainer/package-lock.json, whose
-# integrity hash npm checks.
+# integrity hash npm checks. On x86_64, Cloud Hypervisor (the static
+# build named in cloud-hypervisor.sha256) goes in vm/, for environment
+# VMs.
 set -eu
 
 here=$(cd "$(dirname "$0")" && pwd)
@@ -49,3 +51,18 @@ chmod 0755 "$out/bin/devcontainer" "$out/node/bin/node"
 
 # The CLI has to start on the Node it's paired with.
 "$out/bin/devcontainer" --version >/dev/null
+
+if [ "$arch" = x64 ]; then
+  line=$(grep -v '^#' "$here/cloud-hypervisor.sha256")
+  path=${line##* }
+  curl -fsSL -o "$tmp/cloud-hypervisor-static" \
+    "https://github.com/cloud-hypervisor/cloud-hypervisor/releases/download/$path"
+  (cd "$tmp" && printf '%s  cloud-hypervisor-static\n' "${line%% *}" | sha256sum -c - >/dev/null) || {
+    echo "bundle.sh: $path doesn't match its digest" >&2
+    exit 1
+  }
+  mkdir -p "$out/vm"
+  cp "$tmp/cloud-hypervisor-static" "$out/vm/cloud-hypervisor"
+  chmod 0755 "$out/vm/cloud-hypervisor"
+  "$out/vm/cloud-hypervisor" --version >/dev/null
+fi

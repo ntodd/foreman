@@ -14,7 +14,12 @@ ARG RUNTIME_IMAGE=debian:trixie-20261005-slim
 FROM ${ELIXIR_IMAGE} AS agent
 ARG FOREMAN_AGENT_VERSION=0.1.0
 ARG FOREMAN_RELEASE_PUBLIC_KEY=
-ENV MIX_ENV=prod FOREMAN_AGENT_VERSION=${FOREMAN_AGENT_VERSION} FOREMAN_RELEASE_PUBLIC_KEY=${FOREMAN_RELEASE_PUBLIC_KEY}
+# The guest system image environment VMs boot (guest/build.sh): where the
+# agent downloads it from, and the SHA-256 it checks it against.
+ARG FOREMAN_GUEST_URL=
+ARG FOREMAN_GUEST_SHA256=
+ENV MIX_ENV=prod FOREMAN_AGENT_VERSION=${FOREMAN_AGENT_VERSION} FOREMAN_RELEASE_PUBLIC_KEY=${FOREMAN_RELEASE_PUBLIC_KEY} \
+  FOREMAN_GUEST_URL=${FOREMAN_GUEST_URL} FOREMAN_GUEST_SHA256=${FOREMAN_GUEST_SHA256}
 RUN apt-get update -y && apt-get install -y --no-install-recommends build-essential git ca-certificates curl xz-utils \
   && rm -rf /var/lib/apt/lists/*
 RUN mix local.hex --force && mix local.rebar --force
@@ -47,6 +52,7 @@ FROM ${RUNTIME_IMAGE} AS box
 # script, as on a real box.
 RUN apt-get update -y \
   && apt-get install -y --no-install-recommends systemd systemd-sysv dbus ca-certificates curl gnupg git procps iptables nftables \
+    iproute2 e2fsprogs util-linux \
   && install -m 0755 -d /etc/apt/keyrings \
   && curl -fsSL https://download.docker.com/linux/debian/gpg -o /etc/apt/keyrings/docker.asc \
   && echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/debian trixie stable" > /etc/apt/sources.list.d/docker.list \

@@ -1,0 +1,5 @@
+# Cloud Hypervisor, which runs each environment's VM, from its releases on
+# GitHub (static musl builds). bundle.sh puts it in the agent release on
+# x86_64; environment VMs aren't supported on arm64 yet. To update,
+# replace the line with the new version's.
+f9ffb9646783233d1f0fb09e77db1fca66499d1041e63bc011b90683c0d49933  v54.1/cloud-hypervisor-static

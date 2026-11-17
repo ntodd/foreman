@@ -21,6 +21,17 @@ defmodule E2E do
     IO.puts("ENV=#{env.id} SLUG=#{env.slug}")
   end
 
+  # Like create/0, but prints the refusal instead of raising.
+  def try_create do
+    scope = Scope.for_user(admin())
+    repo = Foreman.Repos.get_repo_by_full_name(System.get_env("E2E_REPO", "acme/hello"))
+
+    case Environments.create_environment(scope, %{"repo_id" => repo.id, "box_id" => box().id}) do
+      {:ok, env} -> IO.puts("ENV=#{env.id} SLUG=#{env.slug}")
+      {:error, message} -> IO.puts("REFUSED #{message}")
+    end
+  end
+
   def status do
     admin()
     box = box()
@@ -43,6 +54,15 @@ defmodule E2E do
     IO.puts(Operations.log(op))
   end
 
+  # The log of the latest operation of one kind (a secrets write can come
+  # after the start you're after).
+  def log(slug, action) do
+    admin()
+    env = Repo.get_by!(Foreman.Environments.Environment, slug: slug)
+    op = env.id |> Operations.list_for_environment(20) |> Enum.find(&(&1.action == action))
+    IO.puts(if op, do: Operations.log(op), else: "no #{action} operation")
+  end
+
   def act(slug, action) do
     scope = Scope.for_user(admin())
     env = live_env(slug)
@@ -50,11 +70,96 @@ defmodule E2E do
     {:ok, _} =
       case action do
         "stop" -> Environments.stop(scope, env)
+        "suspend" -> Environments.suspend(scope, env)
         "start" -> Environments.start(scope, env)
         "destroy" -> Environments.destroy(scope, env)
       end
 
     IO.puts("queued #{action} for #{slug}")
+  end
+
+  # Runs an environment's failed operation again, as the page's Retry
+  # (a create) or Start would.
+  def retry_failed(slug) do
+    scope = Scope.for_user(admin())
+    env = live_env(slug)
+    [op | _] = Operations.list_for_environment(env.id, 1)
+
+    {:ok, _} =
+      case op.action do
+        "create" -> Environments.retry(scope, env)
+        _ -> Environments.start(scope, env)
+      end
+
+    IO.puts("retried #{op.action} for #{slug}")
+  end
+
+  # The latest logs operation's id, before asking for another (through
+  # the environment page, in the running control plane: one queued from
+  # an eval waits for something there to notice it).
+  def last_logs(slug) do
+    admin()
+    IO.puts("LAST=#{latest_logs(slug) |> then(&(&1 && &1.id)) || "none"}")
+  end
+
+  # Waits for a logs operation newer than `previous` to finish, and prints it.
+  def await_logs(slug, previous, seconds \\ 180) do
+    admin()
+    op = latest_logs(slug)
+
+    cond do
+      op && op.id != previous && Foreman.Operations.Operation.finished?(op) ->
+        IO.puts("LOGS #{op.status}")
+        IO.puts(Operations.log(op))
+
+      seconds <= 0 ->
+        IO.puts("LOGS #{(op && op.id != previous && op.status) || "never asked for"}")
+
+      true ->
+        Process.sleep(1000)
+        await_logs(slug, previous, seconds - 1)
+    end
+  end
+
+  defp latest_logs(slug) do
+    env = live_env(slug)
+    env.id |> Operations.list_for_environment(20) |> Enum.find(&(&1.action == "logs"))
+  end
+
+  def repo_id do
+    admin()
+    IO.puts("REPO_ID=#{Foreman.Repos.get_repo_by_full_name(System.get_env("E2E_REPO", "acme/hello")).id}")
+  end
+
+  # The prebuild a click on the repo's page started (the box's connection
+  # is in the running control plane, which an eval can't reach).
+  def latest_prebuild do
+    admin()
+
+    case Repo.one(from p in Foreman.Prebuilds.Prebuild, order_by: [desc: p.inserted_at], limit: 1) do
+      nil -> IO.puts("no prebuild")
+      prebuild -> IO.puts("PREBUILD=#{prebuild.id}")
+    end
+  end
+
+  def prebuild_status(id) do
+    admin()
+    prebuild = Repo.get!(Foreman.Prebuilds.Prebuild, id)
+    IO.puts("PREBUILD #{prebuild.status} size_mb=#{prebuild.size_mb}")
+
+    if prebuild.status == "failed" do
+      IO.puts(prebuild.error)
+      IO.puts(Operations.log(Operations.get(prebuild.op_id)))
+    end
+  end
+
+  # How long an environment's operation of one kind took on the box, from
+  # when the agent took it (not how long it waited in the queue).
+  def took(slug, action) do
+    admin()
+    env = Repo.get_by!(Foreman.Environments.Environment, slug: slug)
+    op = env.id |> Operations.list_for_environment(20) |> Enum.find(&(&1.action == action))
+    IO.puts("TOOK #{DateTime.diff(op.finished_at, op.started_at || op.dispatched_at)}")
   end
 
   def secret(slug, name, value) do
@@ -100,6 +205,16 @@ defmodule E2E do
     IO.puts(
       "REBOOT required=#{box.reboot_required} can_restart=#{box.can_restart} " <>
         "boot=#{box.boot_id} packages=#{Enum.join(box.reboot_packages, ",")}"
+    )
+  end
+
+  # Whether the box can run environment VMs, as its agent last said.
+  def vm_status do
+    admin()
+    vm = box().vm || %{}
+
+    IO.puts(
+      "VM ready=#{vm["ready"]} nested=#{vm["nested"]} reflink=#{vm["reflink"]} reason=#{inspect(vm["reason"])}"
     )
   end
 
