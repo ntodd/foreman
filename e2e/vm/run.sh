@@ -283,21 +283,26 @@ vm_ready() { cp_eval 'E2E.vm_status()' | grep -q "^VM ready=true"; }
 # Whether a VM's Cloud Hypervisor is confined by Landlock, by what it can
 # do rather than how it was started (a resumed VM takes its settings from
 # the snapshot): it can't write a snapshot to its unit's private /var/tmp,
-# which it could without Landlock.
+# which is new and empty with each start of the unit, and which it could
+# write without Landlock. Only a refusal for permission counts; any other
+# failure says nothing. This is the VMM thread: a resumed VM's virtio
+# workers start before Cloud Hypervisor applies Landlock
+# (cloud-hypervisor#9118), which this can't see.
 landlocked() { # env_id
   api=/srv/foreman/vms/$1/api.sock
   sudo curl -fsS -X PUT --unix-socket "$api" http://localhost/api/v1/vm.pause >/dev/null ||
     fail "couldn't pause $1's VM"
-  if probe=$(sudo curl -fsS -X PUT --unix-socket "$api" -H 'Content-Type: application/json' \
-    -d '{"destination_url":"file:///var/tmp"}' http://localhost/api/v1/vm.snapshot 2>&1); then
-    confined=false
-  else
-    confined=true
-    printf '%s\n' "$probe" | sed 's/^/  /'
-  fi
+  probe=$(sudo curl -sS -X PUT --unix-socket "$api" -H 'Content-Type: application/json' \
+    -d '{"destination_url":"file:///var/tmp"}' -w '\nHTTP %{http_code}' \
+    http://localhost/api/v1/vm.snapshot 2>&1) || true
   sudo curl -fsS -X PUT --unix-socket "$api" http://localhost/api/v1/vm.resume >/dev/null ||
     fail "couldn't resume $1's VM"
-  [ "$confined" = true ]
+  printf '%s\n' "$probe" | sed 's/^/  /'
+  case "$probe" in
+    *"HTTP 2"*) return 1 ;;
+    *"Permission denied"* | *"os error 13"*) return 0 ;;
+    *) fail "the snapshot outside $1's directory failed, but not for permission: can't tell whether it's confined" ;;
+  esac
 }
 wait_for "the box reports it can run VMs" 60 vm_ready
 cp_eval 'E2E.vm_status()' | grep "^VM"
@@ -407,7 +412,7 @@ EOF
 fi
 sudo test -e "/srv/foreman/vms/$first/snapshot" && fail "the snapshot outlived the resume"
 landlocked "$first" || fail "the resumed VM wrote a snapshot outside its own directory: it isn't confined by Landlock"
-echo "ok: resumed on the same boot, under Landlock, clock within ${skew}s, snapshot gone"
+echo "ok: resumed on the same boot, its VMM thread under Landlock, clock within ${skew}s, snapshot gone"
 
 say "restarting the agent leaves the VMs running"
 before=$(systemctl show -p MainPID --value "$unit")

@@ -470,7 +470,11 @@ These are accepted for now, or need someone to try them:
     away from another's disks, and out of the agent's files and other
     VMs' through `/proc/<pid>/root`, which the unit's mount namespace
     doesn't stop. A box whose kernel can't apply it runs no VMs; a user
-    per VM isn't built. Nothing here
+    per VM isn't built. A resumed VM is the exception for now: on a
+    restore, Cloud Hypervisor v54.1 starts its virtio workers, the
+    threads a device bug lands in, before it applies Landlock, and they
+    run without it until the VM next boots
+    ([cloud-hypervisor#9118](https://github.com/cloud-hypervisor/cloud-hypervisor/issues/9118)). Nothing here
     has been tested against attacks on the device emulation. The
     defence is upstream's work and keeping Cloud Hypervisor current
     (19).
