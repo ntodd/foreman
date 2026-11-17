@@ -1,0 +1,19 @@
+# Foreman's control plane on an Amp Box, reachable only on the tailnet.
+# Secrets on the deployment: SECRET_KEY_BASE, FOREMAN_ENCRYPTION_KEY and
+# TS_AUTHKEY (needed until the first login), plus the GitHub App and
+# Tailscale OAuth settings from docs/setup/.
+build: bash .amp/box/build.sh
+source: false
+artifacts: [_box]
+services:
+  foreman:
+    command: bash _box/start.sh
+    env:
+      FOREMAN_PORT: "4400"
+      FOREMAN_ADMINS: ntodd
+      FOREMAN_AGENT_RELEASE_PUBLIC_KEY: Sp1kIMWWg5ufDdS6C/rDRSdrCz7sxR6sRuZQaixKjOo=
+      # The in-app updater needs the Docker host's updater; redeploy from a
+      # newer tag instead.
+      FOREMAN_UPDATE_CHECK: "false"
+  public:
+    command: node _box/placeholder.mjs
