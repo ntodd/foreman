@@ -1,9 +1,10 @@
 defmodule ForemanAgent.VM.HelperTest do
   # The agent's side of foreman-vmctl, against a stand-in on a unix socket
-  # that answers each request line from a table.
+  # that answers each request line from a table (Test.FakeVmctl).
   use ExUnit.Case, async: true
 
   alias ForemanAgent.Config
+  alias ForemanAgent.Test.FakeVmctl
   alias ForemanAgent.VM.Helper
 
   @too_old "the VM helper is missing or too old; re-run the install script"
@@ -17,23 +18,7 @@ defmodule ForemanAgent.VM.HelperTest do
     %{socket: Path.join(dir, "vmctl.sock")}
   end
 
-  defp helper(ctx, answers) do
-    {:ok, listen} =
-      :gen_tcp.listen(0, [:binary, {:ifaddr, {:local, ctx.socket}}, packet: :line, active: false])
-
-    pid = spawn_link(fn -> serve(listen, answers) end)
-    :ok = :gen_tcp.controlling_process(listen, pid)
-    %Config{vmctl_socket: ctx.socket}
-  end
-
-  defp serve(listen, answers) do
-    {:ok, client} = :gen_tcp.accept(listen)
-    {:ok, line} = :gen_tcp.recv(client, 0)
-    request = line |> String.trim_trailing() |> String.split() |> hd()
-    :ok = :gen_tcp.send(client, Map.get(answers, request, "error unknown request") <> "\n")
-    :gen_tcp.close(client)
-    serve(listen, answers)
-  end
+  defp helper(ctx, answers), do: FakeVmctl.start(ctx.socket, answers)
 
   describe "ready/1" do
     test "a current helper on a kernel with Landlock is ready", ctx do

@@ -9,7 +9,7 @@ defmodule ForemanAgent.VM.Machine.Cloud do
   @behaviour ForemanAgent.VM.Machine
 
   alias ForemanAgent.VM
-  alias ForemanAgent.VM.Helper
+  alias ForemanAgent.VM.{Helper, SnapshotConfig}
 
   require Logger
 
@@ -89,13 +89,25 @@ defmodule ForemanAgent.VM.Machine.Cloud do
     end
   end
 
+  # The snapshot's config is in the VM's directory, which the VM can
+  # write, and Cloud Hypervisor restores whatever it says, Landlock
+  # included (VM.SnapshotConfig): it has to be the one start gave the VM,
+  # with the guest image and agent disk it booted with.
   @impl true
   def restore(env_id, spec, config) do
     paths = VM.paths(config, env_id)
-    unless running?(env_id, config), do: Enum.each([paths.api, paths.vsock], &File.rm/1)
 
-    case Helper.restore(config, env_id, spec) do
-      {:ok, _} -> :ok
+    want = %{
+      dir: paths.dir,
+      guest: Path.join(config.guest_root, spec.guest),
+      agent_disk: Path.join(config.agent_disks, "#{spec.agent_version}.img")
+    }
+
+    with :ok <- SnapshotConfig.check_file(Path.join(paths.snapshot, "config.json"), want),
+         _ = unless(running?(env_id, config), do: Enum.each([paths.api, paths.vsock], &File.rm/1)),
+         {:ok, _} <- Helper.restore(config, env_id, spec) do
+      :ok
+    else
       {:error, message} -> {:error, "couldn't resume the environment's VM: #{message}"}
     end
   end

@@ -134,6 +134,20 @@ mv "$work/srv/vms/$env2/data.raw.link" "$work/srv/vms/$env2/data.raw"
 expect "refuses a disk that's a symlink" "start $env2 2 1024 $guest 1.2.3" "error missing .*/data.raw"
 rm "$work/srv/vms/$env2/data.raw"
 mv "$work/srv/vms/$env2/data.raw.real" "$work/srv/vms/$env2/data.raw"
+# Cloud Hypervisor opens its log and the serial console's before Landlock
+# confines it, and the VM's directory is the VM's to write: a symlink
+# left there would be followed as the agent's user, unconfined.
+vm2=$work/srv/vms/$env2
+ln -s /etc/passwd "$vm2/ch.log"
+expect "refuses a VM whose log is a symlink" "start $env2 2 1024 $guest 1.2.3" "error .*/ch.log isn't a plain file"
+rm "$vm2/ch.log"
+ln -s "$work/nowhere" "$vm2/serial.log"
+expect "refuses a VM whose console log is a symlink, even to nothing" "start $env2 2 1024 $guest 1.2.3" \
+  "error .*/serial.log isn't a plain file"
+rm "$vm2/serial.log"
+mkfifo "$vm2/serial.log"
+expect "refuses a console log that isn't a file" "start $env2 2 1024 $guest 1.2.3" "error .*/serial.log isn't a plain file"
+rm "$vm2/serial.log"
 check "nothing refused started a VM" test ! -e "$work/last-run"
 
 # -- start -----------------------------------------------------------------
@@ -178,6 +192,32 @@ check "frees its address" test ! -e "$work/state/nets/0"
 mkdir -p "$work/srv/vms/$env2/snapshot"
 : > "$work/srv/vms/$env2/snapshot/config.json"
 sed -i.bak "/foreman-vm-$env2/d" "$work/units"
+: > "$work/last-run"
+# What a restore opens before Landlock confines it: the snapshot, the
+# disks, and the logs.
+ln -s /etc/passwd "$vm2/snapshot/memory-ranges"
+expect "refuses a snapshot with a symlink in it" "restore $env2 1 1024" "error .*/snapshot/memory-ranges isn't a plain file"
+rm "$vm2/snapshot/memory-ranges"
+ln -s /etc/passwd "$vm2/snapshot/.state.json"
+expect "refuses a snapshot with a hidden symlink in it" "restore $env2 1 1024" "error .*/snapshot/.state.json isn't a plain file"
+rm "$vm2/snapshot/.state.json"
+mkdir "$vm2/snapshot/more"
+expect "refuses a snapshot with a directory in it" "restore $env2 1 1024" "error .*/snapshot/more isn't a plain file"
+rmdir "$vm2/snapshot/more"
+mv "$vm2/snapshot" "$vm2/snapshot.real"
+ln -s snapshot.real "$vm2/snapshot"
+expect "refuses a snapshot directory that's a symlink" "restore $env2 1 1024" "error .*/snapshot isn't a plain directory"
+rm "$vm2/snapshot"
+mv "$vm2/snapshot.real" "$vm2/snapshot"
+mv "$vm2/data.raw" "$vm2/data.raw.real"
+ln -s data.raw.real "$vm2/data.raw"
+expect "refuses to restore onto a disk that's a symlink" "restore $env2 1 1024" "error missing .*/data.raw"
+rm "$vm2/data.raw"
+mv "$vm2/data.raw.real" "$vm2/data.raw"
+ln -s /etc/passwd "$vm2/serial.log"
+expect "refuses to restore with a console log that's a symlink" "restore $env2 1 1024" "error .*/serial.log isn't a plain file"
+rm "$vm2/serial.log"
+check "nothing refused restored a VM" test ! -s "$work/last-run"
 expect "restores a VM on the address it had" "restore $env2 1 1024" "ok restored fm-vm1 10.250.0.6"
 check "from its own snapshot" grep -qxF -- \
   "source_url=file://$work/srv/vms/$env2/snapshot,memory_restore_mode=copyonwrite,resume=true" "$work/last-run"

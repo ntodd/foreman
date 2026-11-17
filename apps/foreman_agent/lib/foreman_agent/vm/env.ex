@@ -517,17 +517,28 @@ defmodule ForemanAgent.VM.Env do
   defp restore(env_id, spec, ctx, log) do
     log.("info", "Resuming the environment's VM\n")
     snapshot = VM.paths(ctx.config, env_id).snapshot
-    # On disk before the VM can run from it: whatever happens next, this
-    # snapshot is never restored again (VM.suspended?/2).
-    File.write!(Path.join(snapshot, "consumed"), "")
-    sync_dir(snapshot)
-    sync_path(snapshot, ctx.runner)
 
-    with :ok <- Machine.impl(ctx.config).restore(env_id, spec, ctx.config),
+    # On disk before the VM can run from it: whatever happens next, this
+    # snapshot is never restored again (VM.suspended?/2). Made new, so not
+    # written through anything the VM left in its place.
+    with :ok <- mark_consumed(snapshot, ctx.runner),
+         :ok <- Machine.impl(ctx.config).restore(env_id, spec, ctx.config),
          :ok <- await(env_id, ctx, "didn't come back from its snapshot") do
       discard_snapshot(ctx.config, env_id, ctx.runner)
       log.("info", "VM resumed\n")
       :ok
+    end
+  end
+
+  defp mark_consumed(snapshot, runner) do
+    case File.write(Path.join(snapshot, "consumed"), "", [:exclusive]) do
+      :ok ->
+        sync_dir(snapshot)
+        sync_path(snapshot, runner)
+        :ok
+
+      {:error, reason} ->
+        {:error, "couldn't mark its snapshot used (#{:file.format_error(reason)})"}
     end
   end
 

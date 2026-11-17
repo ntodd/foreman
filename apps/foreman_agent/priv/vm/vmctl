@@ -163,6 +163,21 @@ run_unit() { # env_id cpus memory_mb vm_dir ch args...
 
 plain_file() { [ -f "$1" ] && [ ! -L "$1" ]; }
 
+# Cloud Hypervisor opens its log and the serial console's file, and on a
+# restore the snapshot and the disks, before Landlock confines it, as the
+# agent's user and following symlinks. The VM's directory is the VM's to
+# write, so whatever a VM left there must be a plain file of its own.
+plain_or_absent() {
+  if [ -e "$1" ] || [ -L "$1" ]; then
+    plain_file "$1" || answer "error $1 isn't a plain file"
+  fi
+}
+
+vm_logs_ok() { # vm_dir
+  plain_or_absent "$1/ch.log"
+  plain_or_absent "$1/serial.log"
+}
+
 # Whether the kernel has Landlock as Cloud Hypervisor needs it: ABI 3
 # (Linux 6.2), which it asks for as a hard requirement, so it won't start
 # on less. A kernel that backports it to an older release is refused too.
@@ -196,6 +211,7 @@ cmd_start() { # env_id cpus memory_mb guest_sha256 agent_version
   for f in "$vm/root.raw" "$vm/data.raw" "$guest/vmlinuz" "$agent_disk"; do
     plain_file "$f" || answer "error missing $f"
   done
+  vm_logs_ok "$vm"
   need_landlock
   systemctl is-active --quiet "foreman-vm-$id.service" && answer "ok running"
   ch=$(ch_binary) || answer "error the agent release has no cloud-hypervisor"
@@ -237,12 +253,23 @@ cmd_restore() { # env_id cpus memory_mb
   id=$1
   vm=$SRV/vms/$id
   plain_file "$vm/snapshot/config.json" || answer "error no snapshot"
+  if [ -L "$vm/snapshot" ] || [ ! -d "$vm/snapshot" ]; then
+    answer "error $vm/snapshot isn't a plain directory"
+  fi
+  for f in "$vm/snapshot"/* "$vm/snapshot"/.[!.]* "$vm/snapshot"/..?*; do
+    plain_or_absent "$f"
+  done
+  for f in "$vm/root.raw" "$vm/data.raw"; do
+    plain_file "$f" || answer "error missing $f"
+  done
+  vm_logs_ok "$vm"
   need_landlock
   systemctl is-active --quiet "foreman-vm-$id.service" && answer "ok running"
   ch=$(ch_binary) || answer "error the agent release has no cloud-hypervisor"
   n=$(existing_index "$id") || answer "error the environment has no address to come back to"
   net_up "$n"
-  # The snapshot names everything else, Landlock's rules included.
+  # The snapshot names everything else, Landlock's rules included; the
+  # agent checks its config first (VM.SnapshotConfig).
   run_unit "$id" "$2" "$3" "$vm" "$ch" --api-socket "path=$vm/api.sock" \
     --restore "source_url=file://$vm/snapshot,memory_restore_mode=copyonwrite,resume=true" ||
     answer "error systemd-run failed"

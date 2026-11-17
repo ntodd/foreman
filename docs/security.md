@@ -474,10 +474,18 @@ These are accepted for now, or need someone to try them:
     restore, Cloud Hypervisor v54.1 starts its virtio workers, the
     threads a device bug lands in, before it applies Landlock, and they
     run without it until the VM next boots
-    ([cloud-hypervisor#9118](https://github.com/cloud-hypervisor/cloud-hypervisor/issues/9118)). Nothing here
-    has been tested against attacks on the device emulation. The
-    defence is upstream's work and keeping Cloud Hypervisor current
-    (19).
+    ([cloud-hypervisor#9118](https://github.com/cloud-hypervisor/cloud-hypervisor/issues/9118)).
+    The VM's directory is inside its own rules, and Cloud Hypervisor
+    opens its log, the serial console and, on a resume, the snapshot and
+    the disks before Landlock confines it. So nothing a VM leaves there
+    is trusted: the helper won't start or resume a VM where one of those
+    is a symlink or isn't a plain file, and before a resume the agent
+    checks the snapshot's saved config (Landlock on with start's rules,
+    the VM's own disks, kernel, tap and sockets, no other device). The
+    agent writes its own files there without following symlinks.
+    Nothing here has been tested against attacks on the device
+    emulation. The defence is upstream's work and keeping Cloud
+    Hypervisor current (19).
 18. **A guest can fill its own log.** Cloud Hypervisor writes a guest's
     serial console to `serial.log` in the VM's directory on the box, with
     no size limit and no rotation, and root in the guest can write to its
