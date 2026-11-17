@@ -37,7 +37,7 @@ case $req in
     ;;
 esac
 # Up to 1 TiB.
-if [ "${#req}" -gt 13 ]; then
+if [ "${#req}" -gt 13 ] || [ "$req" -gt 1099511627776 ]; then
   echo "error bad request"
   exit 0
 fi
