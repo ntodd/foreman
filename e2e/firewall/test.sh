@@ -151,6 +151,7 @@ expect shut "opted out, an environment still can't" reach fwtest-env "$peer" 808
 
 # -- environment VMs ------------------------------------------------------
 if [ -n "$guest_forward" ]; then
+  command -v bash >/dev/null || { echo "guest firewall checks require bash" >&2; exit 1; }
   # Back to the full rules, and no table for VMs yet: the holes first.
   nft delete table inet foreman_guests
   nft -f "$rules"
@@ -262,22 +263,26 @@ if [ -n "$guest_forward" ]; then
   "$nc_bin" nc -lk -s 10.250.0.1 -p 8089 -e /bin/cat >/dev/null 2>&1 &
   echo $! > "$work/echo.pid"
   sleep 1
-  held_connection() {
-    nft delete table inet foreman_guests
-    g0 bash -c 'exec 3<>/dev/tcp/10.250.0.1/8089 || exit 2
-      echo one >&3; read -r -t 3 _ <&3 || exit 3
-      sleep 4
-      echo two >&3; read -r -t 3 _ <&3' &
-    held=$!
-    sleep 2
-    nft -f "$work/open-lan.nft"
-    wait "$held"
-    rc=$?
-    # A connection that never worked proves nothing: report it as open.
-    if [ "$rc" -eq 2 ] || [ "$rc" -eq 3 ]; then return 0; fi
-    return "$rc"
-  }
-  expect shut "a guest's connection to the box from while the table was gone is cut when it's back" held_connection
+  nft delete table inet foreman_guests
+  g0 bash -c 'exec 3<>/dev/tcp/10.250.0.1/8089 || exit 2
+    echo one >&3 && read -r -t 3 reply <&3 && [ "$reply" = one ] || exit 3
+    touch "$1/connected" || exit 4
+    while [ ! -f "$1/reloaded" ]; do sleep 0.1; done
+    echo two >&3 && read -r -t 3 reply <&3 && exit 0
+    exit 42' sh "$work" &
+  held=$!
+  i=0
+  while [ ! -f "$work/connected" ] && kill -0 "$held" 2>/dev/null && [ "$i" -lt 100 ]; do
+    i=$((i + 1))
+    sleep 0.1
+  done
+  [ -f "$work/connected" ] || { echo "guest could not establish the control connection" >&2; exit 1; }
+  nft -f "$work/open-lan.nft"
+  touch "$work/reloaded"
+  rc=0
+  wait "$held" || rc=$?
+  check_held="a guest's connection to the box from while the table was gone is cut when it's back"
+  if [ "$rc" -eq 42 ]; then pass "$check_held"; else fail "$check_held (probe status $rc)"; fi
 
   nft -f "$rules"
   check_link_local
