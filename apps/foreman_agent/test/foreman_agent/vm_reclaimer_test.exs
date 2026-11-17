@@ -70,9 +70,9 @@ defmodule ForemanAgent.VMReclaimerTest do
     {state, t} =
       run_for(Reclaimer.new(), 0, 10, %{
         "a" => {0.02, 10},
-        "b" => {0.5, 14},
-        "c" => {0.5, 8},
-        "d" => {0.5, 2.3}
+        "b" => {0.8, 14},
+        "c" => {0.8, 8},
+        "d" => {0.8, 2.3}
       })
 
     {state, t} =
@@ -106,11 +106,21 @@ defmodule ForemanAgent.VMReclaimerTest do
 
   test "a VM busy for one sample in the last ten minutes isn't quiet" do
     {state, t} = run_for(Reclaimer.new(), 0, 20, %{"a" => {0.02, 10}})
-    {state, t} = run_for(state, t + @tick, 0, %{"a" => {0.4, 10}})
+    {state, t} = run_for(state, t + @tick, 0, %{"a" => {0.6, 10}})
     {state, t} = run_for(state, t + @tick, 9, %{"a" => {0.02, 10}})
     assert Reclaimer.plan(state, current(state, 20), t, @settings) == nil
 
     {state, t} = run_for(state, t + @tick, 1, %{"a" => {0.02, 10}})
+    assert asks(Reclaimer.plan(state, current(state, 20), t, @settings)) == ["a"]
+  end
+
+  test "a VM kept at a third of a core by healthchecks is quiet, and asked under pressure" do
+    # #200's compose stack, each container healthchecked every second,
+    # with the box seeing every vCPU wake for each check.
+    {state, t} = run_for(Reclaimer.new(), 0, 9, %{"a" => {0.3, 10}})
+    assert Reclaimer.plan(state, current(state, 20), t, @settings) == nil
+
+    {state, t} = run_for(state, t + @tick, 1, %{"a" => {0.3, 10}})
     assert asks(Reclaimer.plan(state, current(state, 20), t, @settings)) == ["a"]
   end
 
@@ -188,21 +198,21 @@ defmodule ForemanAgent.VMReclaimerTest do
 
   test "the idle timer asks a VM once per quiet stretch, with or without pressure" do
     settings = %{@settings | idle_minutes: 60}
-    {state, t} = run_for(Reclaimer.new(), 0, 59, %{"a" => {0.01, 10}, "b" => {0.5, 10}})
+    {state, t} = run_for(Reclaimer.new(), 0, 59, %{"a" => {0.01, 10}, "b" => {0.8, 10}})
     assert Reclaimer.plan(state, current(state, 60), t, settings) == nil
 
-    {state, t} = run_for(state, t + @tick, 1, %{"a" => {0.01, 10}, "b" => {0.5, 10}})
+    {state, t} = run_for(state, t + @tick, 1, %{"a" => {0.01, 10}, "b" => {0.8, 10}})
 
     assert %{ask: [%{id: "a", reason: :timer}]} =
              Reclaimer.plan(state, current(state, 60), t, settings)
 
     state = Reclaimer.record(state, [done(state, "a", {:ok, reclaimed(4096)}, t)], t)
-    {state, t} = run_for(state, t + @tick, 120, %{"a" => {0.01, 6}, "b" => {0.5, 10}})
+    {state, t} = run_for(state, t + @tick, 120, %{"a" => {0.01, 6}, "b" => {0.8, 10}})
     assert Reclaimer.plan(state, current(state, 60), t, settings) == nil
 
     # Busy, then quiet for another hour.
-    {state, t} = run_for(state, t + @tick, 0, %{"a" => {0.8, 9}, "b" => {0.5, 10}})
-    {state, t} = run_for(state, t + @tick, 60, %{"a" => {0.01, 9}, "b" => {0.5, 10}})
+    {state, t} = run_for(state, t + @tick, 0, %{"a" => {0.8, 9}, "b" => {0.8, 10}})
+    {state, t} = run_for(state, t + @tick, 60, %{"a" => {0.01, 9}, "b" => {0.8, 10}})
 
     assert %{ask: [%{id: "a", reason: :timer}]} =
              Reclaimer.plan(state, current(state, 60), t, settings)

@@ -5,8 +5,13 @@ defmodule ForemanAgent.VM.Reclaimer do
 
   Every 30 seconds it samples the box's `MemAvailable` and each running
   VM's CPU and memory from its cgroup, which the guest can't make
-  smaller. A VM is quiet from the first sample it used no more than 10%
-  of a core since the one before, until a sample it used more.
+  smaller. A VM is quiet from the first sample it used no more than half
+  a core since the one before, until a sample it used more. Healthchecks
+  and file watchers keep an idle VM above a tenth of a core, and the box
+  sees more than the guest does, since every vCPU wakes for each one: an
+  idle VM running #200's compose stack, healthchecked every second,
+  measured 0.13 cores in the guest and 0.25 to 0.30 from the box. A build
+  takes several cores.
 
   When less than `FOREMAN_VM_RECLAIM_BELOW` percent of the box's memory is
   available (20 by default; 0 turns it off), it asks VMs that have been
@@ -44,7 +49,7 @@ defmodule ForemanAgent.VM.Reclaimer do
   require Logger
 
   @every 30_000
-  @quiet_cpu 0.10
+  @quiet_cpu 0.5
   @quiet_for 10 * 60_000
   # Free page reporting's tail, measured at up to a minute.
   @settle 90_000
