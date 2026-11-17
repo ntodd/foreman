@@ -398,16 +398,28 @@ echo "ok: same VM process, environment still running"
 say "an environment from a prebuild"
 box_id=$(cp_eval 'E2E.box_id()' | sed -n 's/^BOX_ID=//p')
 repo_id=$(cp_eval 'E2E.repo_id()' | sed -n 's/^REPO_ID=//p')
-lv_click "/repos/$repo_id" build_prebuild "{\"box\":\"$box_id\"}" | grep -q "Building a prebuild" ||
-  fail "the prebuild didn't start"
-prebuild=$(cp_eval 'E2E.latest_prebuild()' | sed -n 's/^PREBUILD=//p')
+build_prebuild() {
+  lv_click "/repos/$repo_id" build_prebuild "{\"box\":\"$box_id\"}" | grep -q "Building a prebuild" ||
+    fail "the prebuild didn't start"
+  prebuild=$(cp_eval 'E2E.latest_prebuild()' | sed -n 's/^PREBUILD=//p')
+}
+build_prebuild
 prebuild_ready() { cp_eval "E2E.prebuild_status(\"$prebuild\")" | grep -q '^PREBUILD ready'; }
-i=0
+i=0 retries=0
 until prebuild_ready; do
-  cp_eval "E2E.prebuild_status(\"$prebuild\")" | grep -q '^PREBUILD failed' && {
-    cp_eval "E2E.prebuild_status(\"$prebuild\")" | tail -60 >&2
+  if cp_eval "E2E.prebuild_status(\"$prebuild\")" > "$work/prebuild.status" &&
+    grep -q '^PREBUILD failed' "$work/prebuild.status"; then
+    # A registry limiting the runner's pulls, as for environments above.
+    if [ "$retries" -lt 2 ] && grep -qiE "toomanyrequests|too many requests|rate exceeded" "$work/prebuild.status"; then
+      retries=$((retries + 1))
+      echo "a registry limited pulls; building the prebuild again ($retries)" >&2
+      sleep 30
+      build_prebuild
+      continue
+    fi
+    tail -60 "$work/prebuild.status" >&2
     fail "the prebuild failed"
-  }
+  fi
   i=$((i + 5))
   [ $i -lt 900 ] || fail "timed out waiting for the prebuild"
   sleep 5
