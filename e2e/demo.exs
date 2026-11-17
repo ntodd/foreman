@@ -22,6 +22,8 @@ File.rm_rf!(root)
 File.mkdir_p!(root)
 
 Application.load(:foreman)
+Application.put_env(:foreman, :admins, ["mona"])
+Application.put_env(:foreman, :allowed_users, ["mona", "jordan", "sam"])
 
 Application.put_env(
   :foreman,
@@ -57,7 +59,7 @@ user = fn login, name, email ->
     Accounts.sign_in_from_github(
       %{"id" => :erlang.phash2(login), "login" => login, "name" => name, "avatar_url" => nil},
       %{access_token: nil, refresh_token: nil},
-      config: %{admins: ["mona"], allowed_users: ["mona", "jordan", "sam"], allowed_org: nil}
+      []
     )
 
   {:ok, user} =

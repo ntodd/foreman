@@ -16,11 +16,11 @@ defmodule Foreman.Accounts do
 
   # -- users ---------------------------------------------------------------
 
-  def get_user!(id), do: Repo.get!(User, id)
-  def get_user(id), do: Repo.get(User, id)
-  def get_user_by_login(login), do: Repo.get_by(User, login: login)
+  def get_user!(id), do: Repo.get!(User, id) |> effective_user()
+  def get_user(id), do: Repo.get(User, id) |> effective_user()
+  def get_user_by_login(login), do: Repo.get_by(User, login: login) |> effective_user()
 
-  def list_users, do: User |> order_by(:login) |> Repo.all()
+  def list_users, do: User |> order_by(:login) |> Repo.all() |> Enum.map(&effective_user/1)
 
   def login_config do
     %{
@@ -66,7 +66,7 @@ defmodule Foreman.Accounts do
           result =
             (existing || %User{})
             |> User.github_changeset(attrs)
-            |> Ecto.Changeset.change(role: role_for(existing, login, config))
+            |> Ecto.Changeset.change(role_attrs(existing, login, config))
             |> Repo.insert_or_update()
 
           with {:ok, user} <- result do
@@ -74,8 +74,17 @@ defmodule Foreman.Accounts do
             {:ok, user}
           end
         end)
+        |> notify_role_change(existing)
     end
   end
+
+  defp notify_role_change({:ok, user} = result, %User{role: old_role})
+       when old_role != user.role do
+    disconnect_live_views(user)
+    result
+  end
+
+  defp notify_role_change(result, _existing), do: result
 
   # GitHub logins can be renamed and then taken by someone else, so a
   # login only identifies a record that has no GitHub id yet.
@@ -124,7 +133,7 @@ defmodule Foreman.Accounts do
 
   defp ui_admin?(existing, config) do
     config.admins == [] and is_nil(config.allowed_org) and
-      match?(%User{role: "admin"}, existing)
+      match?(%User{role: "admin", admin_via_config: false}, existing)
   end
 
   defp unconfigured?(config),
@@ -170,25 +179,44 @@ defmodule Foreman.Accounts do
     :ok
   end
 
-  defp initial_role(login, config) do
-    cond do
-      listed_in?(login, config.admins) ->
-        "admin"
+  def configured_admin?(login), do: listed_in?(login, login_config().admins)
 
-      unconfigured?(config) and no_users?() ->
-        "admin"
+  defp role_attrs(existing, login, config) do
+    cond do
+      match?(%User{role: "admin", admin_via_config: false}, existing) ->
+        %{role: "admin", admin_via_config: false}
+
+      listed_in?(login, config.admins) ->
+        %{role: "admin", admin_via_config: true}
+
+      is_nil(existing) and unconfigured?(config) and no_users?() ->
+        %{role: "admin", admin_via_config: false}
 
       true ->
-        "member"
+        %{role: "member", admin_via_config: false}
     end
   end
 
-  # Configured admins are always admins; otherwise a user keeps the role
-  # an admin gave them.
-  defp role_for(nil, login, config), do: initial_role(login, config)
+  # A session may be read immediately after a configuration change, before
+  # the periodic access check has updated the stored role.
+  defp effective_user(%User{admin_via_config: true} = user) do
+    if configured_admin?(user.login), do: user, else: %{user | role: "member"}
+  end
 
-  defp role_for(%User{role: role}, login, config),
-    do: if(listed_in?(login, config.admins), do: "admin", else: role)
+  defp effective_user(user), do: user
+
+  @doc "Remove grants whose login is no longer in FOREMAN_ADMINS and refresh open pages."
+  def revoke_removed_config_admins(config) do
+    admins = Enum.map(config.admins, &String.downcase/1)
+
+    query =
+      from u in User,
+        where: u.admin_via_config and fragment("lower(?)", u.login) not in ^admins,
+        select: u.id
+
+    {_, ids} = Repo.update_all(query, set: [role: "member", admin_via_config: false])
+    Enum.each(ids, &disconnect_live_views(%User{id: &1}))
+  end
 
   defp token_attrs(tokens) do
     now = DateTime.utc_now()
@@ -272,7 +300,8 @@ defmodule Foreman.Accounts do
     cond do
       not Scope.admin?(scope) -> {:error, :unauthorized}
       scope.user.id == user.id -> {:error, :self}
-      true -> update_role(scope, user, %{role: role})
+      configured_admin?(user.login) -> {:error, :configured_admin}
+      true -> update_role(scope, Repo.reload!(user), %{role: role, admin_via_config: false})
     end
   end
 
@@ -331,6 +360,7 @@ defmodule Foreman.Accounts do
           select: u
         )
         |> Repo.one()
+        |> effective_user()
 
       :error ->
         nil
