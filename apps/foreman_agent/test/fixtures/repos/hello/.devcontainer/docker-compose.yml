@@ -8,7 +8,7 @@ services:
     ports:
       - "4000"
   sidecar:
-    image: alpine:3.22
+    image: public.ecr.aws/docker/library/alpine:3.22
     command: ["sh", "-c", "echo sidecar token=$$SIDECAR_TOKEN; exec sleep 1000000"]
     stop_grace_period: 1s
     environment:
