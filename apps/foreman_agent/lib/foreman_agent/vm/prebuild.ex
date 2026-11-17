@@ -93,10 +93,9 @@ defmodule ForemanAgent.VM.Prebuild do
   end
 
   @doc "Removes a prebuild from the box."
-  @spec delete(String.t(), map()) :: {:ok, map()}
+  @spec delete(String.t(), map()) :: {:ok, map()} | {:error, String.t()}
   def delete(id, ctx) do
-    File.rm_rf(dir(ctx.config, id))
-    {:ok, %{}}
+    with :ok <- VM.remove_tree(dir(ctx.config, id)), do: {:ok, %{}}
   end
 
   @doc """

@@ -332,6 +332,23 @@ defmodule ForemanAgent.VMEnvTest do
     refute File.exists?(Path.join(ctx.config.secrets_root, @env))
   end
 
+  test "destroy and prebuild deletion identify inaccessible storage and can be retried", ctx do
+    {:ok, _} = run(create(), ctx)
+    blocked = Path.join(ctx.dir, "unavailable-mount")
+    File.write!(blocked, "")
+    config = %{ctx.config | secrets_root: blocked, prebuilds_root: blocked}
+    blocked_ctx = put_in(ctx.ctx.config, config)
+
+    assert {:error, error} = run(command("env.destroy"), blocked_ctx)
+    assert error =~ Path.join(blocked, @env)
+    assert {:error, error} = VM.Prebuild.delete(@prebuild, %{config: config})
+    assert error =~ Path.join(blocked, @prebuild)
+
+    assert {:ok, %{}} = run(command("env.destroy"), ctx)
+    assert {:ok, %{}} = run(command("env.destroy"), ctx)
+    assert {:ok, %{}} = VM.Prebuild.delete(@prebuild, ctx)
+  end
+
   test "commands go through the handler's redaction on a box", ctx do
     {:ok, _} = run(create(), ctx)
     test = self()

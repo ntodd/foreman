@@ -114,9 +114,9 @@ defmodule ForemanAgent.VM.Env do
     log.("info", "Removing the environment's VM\n")
     Links.stop(p.env_id)
 
-    with :ok <- machine.release(p.env_id, ctx.config) do
-      File.rm_rf(VM.paths(ctx.config, p.env_id).dir)
-      File.rm_rf(Path.join(ctx.config.secrets_root, p.env_id))
+    with :ok <- machine.release(p.env_id, ctx.config),
+         :ok <- VM.remove_tree(Path.join(ctx.config.secrets_root, p.env_id)),
+         :ok <- VM.remove_tree(VM.paths(ctx.config, p.env_id).dir) do
       {:ok, %{}}
     end
   end
