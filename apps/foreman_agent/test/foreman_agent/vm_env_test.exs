@@ -585,6 +585,8 @@ defmodule ForemanAgent.VMEnvTest do
       {:ok, _} = run(command("env.suspend"), ctx)
       start = command("env.start")
       assert {:ok, %{"resumed" => true}} = run(start, ctx)
+      op_id = start.op_id
+      assert_received {:machine, {:resume_id_at_restore, ^op_id}, @env}
       assert {:ok, %{"resumed" => true}} = run(start, ctx)
       assert {:ok, result} = run(command("env.start"), ctx)
       refute Map.has_key?(result, "resumed")
