@@ -182,12 +182,17 @@ defmodule ForemanAgent.VM.Status do
 
     # Marked as a prebuild's, not merely missing from the list above: an
     # environment made since that list was taken is no prebuild.
-    for id <- VM.list(config, :all),
-        {:ok, %{"kind" => "prebuild"} = meta} <- [VM.read_meta(config, id)],
-        meta["op_id"] not in in_flight do
-      ctx.log.("info", "Removing the VM of a prebuild nothing is building (#{id})\n")
-      Prebuild.discard(config, id)
-    end
+    cleanup_failures =
+      for id <- VM.list(config, :all),
+          {:ok, %{"kind" => "prebuild"} = meta} <- [VM.read_meta(config, id)],
+          meta["op_id"] not in in_flight do
+        ctx.log.("info", "Removing the VM of a prebuild nothing is building (#{id})\n")
+
+        case Prebuild.discard(config, id) do
+          :ok -> []
+          {:error, reason} -> [{id, reason}]
+        end
+      end
 
     metas =
       for env_id <- VM.list(config, :all),
@@ -206,9 +211,9 @@ defmodule ForemanAgent.VM.Status do
       ctx
     )
 
-    case failures do
+    case failures ++ List.flatten(cleanup_failures) do
       [] -> {:ok, %{}}
-      _ -> {:error, Enum.map_join(failures, "; ", fn {id, m} -> "#{id}: #{m}" end)}
+      errors -> {:error, Enum.map_join(errors, "; ", fn {id, m} -> "#{id}: #{m}" end)}
     end
   end
 

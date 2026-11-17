@@ -184,7 +184,7 @@ defmodule ForemanAgent.Test.FakeMachine do
   @impl true
   def release(env_id, config) do
     report(:release, env_id)
-    kill(env_id, config)
+    opts()[:release] || kill(env_id, config)
   end
 
   @impl true
