@@ -16,7 +16,8 @@ defmodule ForemanAgent.VM.Helper do
   # The helper protocol this agent speaks. A helper older than this was
   # installed by an older install.sh; re-running it installs this one.
   # Version 2 refuses VMs on a kernel without Landlock instead of running
-  # them unconfined.
+  # them unconfined, keeps VMs from its socket, and says which tap a VM
+  # has, which a resume checks its snapshot against.
   @version 2
   @timeout 60_000
 
@@ -47,6 +48,24 @@ defmodule ForemanAgent.VM.Helper do
     else
       {:error, message} -> {:error, message}
       _ -> {:error, "the VM helper gave a version this agent can't read"}
+    end
+  end
+
+  @doc """
+  The tap the helper gave an environment's VM, which a VM restored from
+  its snapshot has to come back on.
+  """
+  @spec tap(Config.t(), String.t()) :: {:ok, String.t()} | {:error, String.t()}
+  def tap(config, env_id) do
+    case request(config, ["tap", env_id]) do
+      {:ok, ["fm-vm" <> _ = tap]} ->
+        {:ok, tap}
+
+      {:ok, other} ->
+        {:error, "the VM helper named a tap this agent can't read: #{inspect(other)}"}
+
+      {:error, message} ->
+        {:error, message}
     end
   end
 
