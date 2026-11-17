@@ -326,7 +326,18 @@ if grep -q '# guest-conntrack-budget$' /etc/foreman-agent/firewall.nft.new; then
   [ "$budget" -le 16384 ] || budget=16384
   sed -i "/# guest-conntrack-budget$/s/ct count over [0-9]*/ct count over $budget/" /etc/foreman-agent/firewall.nft.new
 fi
-"$nft" -c -f /etc/foreman-agent/firewall.nft.new || fail "nftables rejected the firewall rules"
+if ! "$nft" -c -f /etc/foreman-agent/firewall.nft.new; then
+  if [ ! -e /dev/kvm ] && grep -q '# guest-conntrack-budget$' /etc/foreman-agent/firewall.nft.new; then
+    # A management-only box may have a small kernel without nft_connlimit.
+    # Deny new VM flows there while still installing the host firewall.
+    sed -i -e '/add @guest_connections .*ct count over/d' \
+      -e '/# guest-conntrack-budget$/c\		counter drop' /etc/foreman-agent/firewall.nft.new
+    "$nft" -c -f /etc/foreman-agent/firewall.nft.new || fail "nftables rejected the firewall rules"
+    echo "foreman: VM egress disabled on this box without KVM; reinstall with nft_connlimit when enabling KVM" >&2
+  else
+    fail "nftables rejected the firewall rules (VM boxes require nft_connlimit)"
+  fi
+fi
 chmod 0644 /etc/foreman-agent/firewall.nft.new
 mv /etc/foreman-agent/firewall.nft.new /etc/foreman-agent/firewall.nft
 # What the agent reports to the control plane: which rules these came

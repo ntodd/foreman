@@ -217,13 +217,15 @@ jobs:
   # of its own, with its own network namespace, nftables and Docker.
   firewall:
     if: github.event_name != 'schedule'
-    runs-on: crew-s
+    # The production rules require nft_connlimit, which the Crew guest kernel omits.
+    runs-on: ubuntu-24.04
     env:
       RUN: foreman-ci-firewall-${{ github.run_id }}-${{ github.run_attempt }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Test the rules
         run: |
+          sudo modprobe nft_connlimit
           trap 'docker rm -f "$RUN" >/dev/null 2>&1' EXIT
           docker run -d --privileged --name "$RUN" public.ecr.aws/docker/library/docker:29-dind >/dev/null
           docker cp e2e/firewall/test.sh "$RUN":/test.sh
