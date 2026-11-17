@@ -454,6 +454,11 @@ AGENT_ROOT=/opt/foreman-agent
 AGENT_USER=foreman
 POOL=$VM_SUBNET
 STATE=/var/lib/foreman-vmctl
+# An optional root-owned file survives installer reruns. It can name the
+# backing IO_DEVICE explicitly for hosts with layered storage.
+IO_BANDWIDTH=40M
+IO_IOPS=2000
+[ ! -f /etc/foreman-agent/io.conf ] || . /etc/foreman-agent/io.conf
 EOF
 chmod 0644 /etc/foreman-agent/vmctl.conf
 printf '# Written by install.sh: a re-run keeps these unless it is given others.\nBLOCK_LAN=%s\nVM_SUBNET=%s\n' \

@@ -321,6 +321,10 @@ systemctl is-active --quiet "$unit" || fail "$unit isn't running"
 [ "$(systemctl show -p User --value "$unit")" = foreman ] || fail "the VM doesn't run as foreman"
 [ "$(systemctl show -p MemoryMax --value "$unit")" = $(((3072 + 512) * 1024 * 1024)) ] || fail "the VM's memory isn't limited"
 [ "$(systemctl show -p CPUQuotaPerSecUSec --value "$unit")" = 2s ] || fail "the VM's CPU isn't limited"
+io_max="/sys/fs/cgroup$(systemctl show -p ControlGroup --value "$unit")/io.max"
+for limit in rbps=40000000 wbps=40000000 riops=2000 wiops=2000; do
+  grep -qw "$limit" "$io_max" || fail "the VM is missing disk limit $limit"
+done
 pid=$(systemctl show -p MainPID --value "$unit")
 grep -q '^CapEff:\s*0000000000000000$' "/proc/$pid/status" || fail "the VM has capabilities"
 grep -q '^NoNewPrivs:\s*1$' "/proc/$pid/status" || fail "the VM can gain privileges"

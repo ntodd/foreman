@@ -48,6 +48,8 @@ SRV=/srv/foreman
 AGENT_ROOT=/opt/foreman-agent
 AGENT_USER=foreman
 POOL=10.250
+IO_BANDWIDTH=40M
+IO_IOPS=2000
 STATE=/var/lib/foreman-vmctl
 RESOLV=/etc/resolv.conf
 LSM=/sys/kernel/security/lsm
@@ -146,12 +148,16 @@ ch_binary() {
 run_unit() { # env_id cpus memory_mb vm_dir ch args...
   id=$1 cpus=$2 memory=$3 vm=$4 ch=$5
   shift 5
+  io_device=${IO_DEVICE:-$SRV/vms}
   unit=foreman-vm-$id
   systemctl reset-failed "$unit.service" >/dev/null 2>&1 || true
   # Room for Cloud Hypervisor itself on top of the guest's memory.
   systemd-run --unit="$unit" --slice=foreman.slice --collect --quiet \
     --uid="$AGENT_USER" --gid="$AGENT_USER" -p SupplementaryGroups=kvm \
     -p "MemoryMax=$((memory + 512))M" -p MemorySwapMax=0 -p "CPUQuota=$((cpus * 100))%" \
+    -p IOAccounting=yes \
+    -p "IOReadBandwidthMax=$io_device $IO_BANDWIDTH" -p "IOWriteBandwidthMax=$io_device $IO_BANDWIDTH" \
+    -p "IOReadIOPSMax=$io_device $IO_IOPS" -p "IOWriteIOPSMax=$io_device $IO_IOPS" \
     -p TasksMax=1024 -p UMask=0077 -p NoNewPrivileges=yes -p ProtectSystem=strict \
     -p ProtectHome=yes -p PrivateTmp=yes -p ProtectKernelTunables=yes \
     -p ProtectKernelModules=yes -p ProtectKernelLogs=yes -p ProtectControlGroups=yes \

@@ -157,6 +157,11 @@ has() { if printf '%s\n' "$run" | grep -qxF -- "$2"; then pass "$1"; else fail "
 has "in a unit of its own" "--unit=foreman-vm-$env1"
 has "as the agent's user" "--uid=foreman"
 has "limited to its CPUs" "CPUQuota=200%"
+has "accounts for the VM's disk IO" "IOAccounting=yes"
+for op in Read Write; do
+  has "limits disk bandwidth ($op)" "IO${op}BandwidthMax=$work/srv/vms 40M"
+  has "limits disk operations ($op)" "IO${op}IOPSMax=$work/srv/vms 2000"
+done
 has "limited to its memory and some" "MemoryMax=2560M"
 has "on its tap" "tap=fm-vm0,mac=52:54:00:fa:00:00"
 has "confined by Landlock" "--landlock"
