@@ -393,7 +393,7 @@ defmodule ForemanAgent.VM.Env do
         if is_binary(prebuild),
           do: log.("info", "This box no longer has the prebuild; starting from scratch\n")
 
-        with {:ok, fd} <- :file.open(paths.data, [:write, :raw]),
+        with {:ok, fd} <- :file.open(paths.data, [:write, :raw, :exclusive]),
              {:ok, _} <- :file.position(fd, ctx.config.vm_disk_gb * 1024 * 1024 * 1024),
              :ok <- :file.truncate(fd) do
           :file.close(fd)
@@ -432,8 +432,12 @@ defmodule ForemanAgent.VM.Env do
   # A reflink where the filesystem has them (XFS, btrfs), a sparse copy
   # otherwise, put in place once it's whole.
   defp copy_disk(source, dest, ctx) do
-    tmp = dest <> ".tmp"
-    _ = File.rm(tmp)
+    # Stage the copy under the agent-owned parent, outside the writable VM directory.
+    tmp =
+      Path.join(
+        Path.dirname(Path.dirname(dest)),
+        ".disk-" <> Base.url_encode64(:crypto.strong_rand_bytes(16))
+      )
 
     case ctx.runner.run("cp", ["--reflink=auto", "--sparse=always", source, tmp],
            timeout: 600_000
