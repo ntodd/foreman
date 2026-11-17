@@ -183,6 +183,13 @@ if [ -n "$guest_forward" ]; then
   lan_ip=192.168.77.2
   listen lan fwtest-lan "$lan_ip" 8086
 
+  # A synthetic link-local service behind the test LAN peer.
+  link_local=169.254.77.2
+  ip netns exec fwtest-lan ip addr add "$link_local/32" dev lan0
+  ip route add "$link_local/32" via "$lan_ip" dev fwtest-lan0
+  listen linklocal fwtest-lan "$link_local" 8086
+  listen linkdns fwtest-lan "$link_local" 53
+
   # What the box listens on: the tap's gateway, its other address, and
   # guest 1's server.
   box_ip=$(ip -4 route get 1.1.1.1 | sed -n 's/.* src \([0-9.]*\).*/\1/p')
@@ -211,6 +218,15 @@ if [ -n "$guest_forward" ]; then
   expect shut "a guest can't reach the box's tailnet address" g0_reach "$box" 8081
   expect shut "a guest can't use the box's MagicDNS" g0_reach 100.100.100.100 53
   expect open "a guest reaches the box's LAN" g0_reach "$lan_ip" 8086
+  expect open "the link-local test service is listening" "$nc_bin" nc -z -w 3 "$link_local" 8086
+  check_link_local() {
+    expect shut "a guest cannot reach a link-local service" g0_reach "$link_local" 8086
+    expect shut "a guest cannot use an unconfigured link-local DNS server" g0_reach "$link_local" 53
+    nft add element inet foreman_guests guest_dns "{ $link_local }"
+    expect open "a guest can query its link-local resolver" g0_reach "$link_local" 53
+    expect shut "DNS permission leaves other resolver ports blocked" g0_reach "$link_local" 8086
+  }
+  check_link_local
   guest_internet() { g0_reach 1.1.1.1 443 || g0_reach 8.8.8.8 443; }
   expect open "a guest reaches the internet" guest_internet
   spoofed() {
@@ -264,6 +280,7 @@ if [ -n "$guest_forward" ]; then
   expect shut "a guest's connection to the box from while the table was gone is cut when it's back" held_connection
 
   nft -f "$rules"
+  check_link_local
   expect shut "with --block-lan, a guest can't reach the box's LAN" g0_reach "$lan_ip" 8086
   expect open "with --block-lan, a guest still reaches the internet" guest_internet
   listen landns fwtest-lan "$lan_ip" 53

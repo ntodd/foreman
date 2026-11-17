@@ -27,6 +27,7 @@ defmodule Foreman.Boxes.Box do
     field :cpu_threshold, :float, default: 0.9
     field :memory_threshold, :float, default: 0.9
     field :firewall, :string
+    field :firewall_block_lan, :boolean
     field :firewall_default_bridge, :string
     field :reboot_required, :boolean
     field :reboot_packages, {:array, :string}, default: []

@@ -128,12 +128,13 @@ table inet foreman_guests {
 		oifname "fm-vm*" counter drop
 	}
 
-	# install.sh --block-lan keeps guests off the box's LAN (and a cloud
-	# instance's metadata endpoint), apart from DNS to their resolvers.
+	# Cloud metadata lives on the IPv4 link-local network. Only DNS to
+	# configured resolvers is allowed there, including on open-LAN boxes.
 	chain lan {
-		ip daddr @guest_dns udp dport 53 accept # block-lan
-		ip daddr @guest_dns tcp dport 53 accept # block-lan
-		ip daddr { 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 169.254.0.0/16 } counter reject with icmpx type admin-prohibited # block-lan
+		ip daddr @guest_dns udp dport 53 accept
+		ip daddr @guest_dns tcp dport 53 accept
+		ip daddr 169.254.0.0/16 counter reject with icmpx type admin-prohibited
+		ip daddr { 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16 } counter reject with icmpx type admin-prohibited # block-lan
 	}
 
 	chain input {
