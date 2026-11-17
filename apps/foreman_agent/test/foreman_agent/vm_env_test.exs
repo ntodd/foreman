@@ -294,6 +294,17 @@ defmodule ForemanAgent.VMEnvTest do
     assert {:ok, %{"slug" => _}} = VM.read_meta(ctx.config, @env)
   end
 
+  test "the VM's record isn't read through a symlink the VM left in its place", ctx do
+    {:ok, _} = run(create(), ctx)
+    meta = VM.paths(ctx.config, @env).meta
+    elsewhere = Path.join(ctx.dir, "elsewhere.json")
+    File.cp!(meta, elsewhere)
+    File.rm!(meta)
+    File.ln_s!(elsewhere, meta)
+
+    assert VM.read_meta(ctx.config, @env) == {:error, :none}
+  end
+
   test "env.stop runs the environment's stop, then powers the VM off", ctx do
     {:ok, _} = run(create(), ctx)
     assert {:ok, %{"ran" => "env.stop"}} = run(command("env.stop"), ctx)

@@ -481,8 +481,10 @@ These are accepted for now, or need someone to try them:
     is trusted: the helper won't start or resume a VM where one of those
     is a symlink or isn't a plain file, and before a resume the agent
     checks the snapshot's saved config (Landlock on with start's rules,
-    the VM's own disks, kernel, tap and sockets, no other device). The
-    agent writes its own files there without following symlinks.
+    the VM's own raw disks, kernel and sockets, the tap the helper gave
+    it, no other device). The agent writes and reads its own files there
+    without following symlinks, and the VM's unit can't reach the
+    helper's socket, so a VMM can't ask for a resume past the agent.
     Nothing here has been tested against attacks on the device
     emulation. The defence is upstream's work and keeping Cloud
     Hypervisor current (19).

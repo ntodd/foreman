@@ -92,18 +92,20 @@ defmodule ForemanAgent.VM.Machine.Cloud do
   # The snapshot's config is in the VM's directory, which the VM can
   # write, and Cloud Hypervisor restores whatever it says, Landlock
   # included (VM.SnapshotConfig): it has to be the one start gave the VM,
-  # with the guest image and agent disk it booted with.
+  # with the guest image and agent disk it booted with and the tap the
+  # helper gave it.
   @impl true
   def restore(env_id, spec, config) do
     paths = VM.paths(config, env_id)
 
-    want = %{
-      dir: paths.dir,
-      guest: Path.join(config.guest_root, spec.guest),
-      agent_disk: Path.join(config.agent_disks, "#{spec.agent_version}.img")
-    }
-
-    with :ok <- SnapshotConfig.check_file(Path.join(paths.snapshot, "config.json"), want),
+    with {:ok, tap} <- Helper.tap(config, env_id),
+         want = %{
+           dir: paths.dir,
+           guest: Path.join(config.guest_root, spec.guest),
+           agent_disk: Path.join(config.agent_disks, "#{spec.agent_version}.img"),
+           tap: tap
+         },
+         :ok <- SnapshotConfig.check_file(Path.join(paths.snapshot, "config.json"), want),
          _ = unless(running?(env_id, config), do: Enum.each([paths.api, paths.vsock], &File.rm/1)),
          {:ok, _} <- Helper.restore(config, env_id, spec) do
       :ok

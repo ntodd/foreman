@@ -20,6 +20,7 @@ defmodule ForemanAgent.VM.Machine.CloudTest do
 
     config =
       FakeVmctl.start(Path.join(root, "vmctl.sock"), %{
+        "tap" => "ok fm-vm0",
         "restore" => "ok restored fm-vm0 10.250.0.2"
       })
 
@@ -38,6 +39,7 @@ defmodule ForemanAgent.VM.Machine.CloudTest do
   test "asks the helper to restore a VM whose snapshot is the one start gave it", ctx do
     File.write!(ctx.config_json, ctx.saved)
     assert Cloud.restore(@env, @vm, ctx.config) == :ok
+    assert_received {:vmctl, "tap " <> @env}
     assert_received {:vmctl, "restore " <> @env <> " 2 3072"}
   end
 
@@ -51,13 +53,20 @@ defmodule ForemanAgent.VM.Machine.CloudTest do
              {:error,
               "couldn't resume the environment's VM: the snapshot's config turns Landlock off"}
 
-    refute_received {:vmctl, _}
+    refute_received {:vmctl, "restore " <> _}
+  end
+
+  test "won't restore a VM onto a tap the helper didn't give it", ctx do
+    File.write!(ctx.config_json, String.replace(ctx.saved, "fm-vm0", "fm-vm3"))
+    assert {:error, message} = Cloud.restore(@env, @vm, ctx.config)
+    assert message =~ "network"
+    refute_received {:vmctl, "restore " <> _}
   end
 
   test "won't restore a VM from a snapshot of another agent disk", ctx do
     File.write!(ctx.config_json, ctx.saved)
     assert {:error, message} = Cloud.restore(@env, %{@vm | agent_version: "0.6.1"}, ctx.config)
     assert message =~ "the snapshot's config"
-    refute_received {:vmctl, _}
+    refute_received {:vmctl, "restore " <> _}
   end
 end

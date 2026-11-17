@@ -11,7 +11,7 @@ defmodule ForemanAgent.VM.SnapshotConfigTest do
   @dir "/srv/foreman/vms/#{@env}"
   @guest "/srv/foreman/guest/5d41402abc4b2a76b9719d911017c5925d41402abc4b2a76b9719d911017c592"
   @agent_disk "/srv/foreman/agent-disks/0.6.0.img"
-  @want %{dir: @dir, guest: @guest, agent_disk: @agent_disk}
+  @want %{dir: @dir, guest: @guest, agent_disk: @agent_disk, tap: "fm-vm0"}
 
   @fixture Path.expand("../../fixtures/vm/snapshot-config.json", __DIR__)
 
@@ -119,6 +119,20 @@ defmodule ForemanAgent.VM.SnapshotConfigTest do
       refused(%{saved() | "disks" => disks}, "disks")
     end
 
+    # A qcow2 header names its backing file, which Cloud Hypervisor would
+    # open before Landlock; the guest writes the disk's contents.
+    test "read as another format, which could name a backing file" do
+      [first | rest] = saved()["disks"]
+      qcow = Map.merge(first, %{"image_type" => "Qcow2", "backing_files" => true})
+      refused(%{saved() | "disks" => [qcow | rest]}, "disks")
+      refused(%{saved() | "disks" => [Map.put(first, "backing_files", true) | rest]}, "disks")
+    end
+
+    test "with its format left for Cloud Hypervisor to guess" do
+      [first | rest] = saved()["disks"]
+      refused(%{saved() | "disks" => [Map.delete(first, "image_type") | rest]}, "disks")
+    end
+
     test "served over vhost-user" do
       [first | rest] = saved()["disks"]
       disk = Map.merge(first, %{"vhost_user" => true, "vhost_socket" => "/run/foreman/x.sock"})
@@ -144,6 +158,24 @@ defmodule ForemanAgent.VM.SnapshotConfigTest do
     test "a tap that isn't one of the box's VM taps" do
       [net] = saved()["net"]
       refused(%{saved() | "net" => [%{net | "tap" => "eth0"}]}, "network")
+    end
+
+    test "another environment's tap, with rules to match" do
+      [net] = saved()["net"]
+
+      rules =
+        Enum.map(saved()["landlock_rules"], fn
+          %{"path" => "/sys/devices/virtual/net/" <> _} = rule ->
+            %{rule | "path" => "/sys/devices/virtual/net/fm-vm7"}
+
+          rule ->
+            rule
+        end)
+
+      refused(
+        %{saved() | "net" => [%{net | "tap" => "fm-vm7"}], "landlock_rules" => rules},
+        "network"
+      )
     end
 
     test "two taps" do

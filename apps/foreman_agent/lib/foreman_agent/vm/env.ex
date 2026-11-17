@@ -273,7 +273,9 @@ defmodule ForemanAgent.VM.Env do
   end
 
   defp sync_dir(dir) do
-    for name <- File.ls!(dir), path = Path.join(dir, name), File.regular?(path) do
+    for name <- File.ls!(dir),
+        path = Path.join(dir, name),
+        match?({:ok, %{type: :regular}}, File.lstat(path)) do
       {:ok, fd} = :file.open(path, [:read, :raw])
       :ok = :file.sync(fd)
       :file.close(fd)

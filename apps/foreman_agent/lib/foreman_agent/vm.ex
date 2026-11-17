@@ -83,7 +83,11 @@ defmodule ForemanAgent.VM do
   @doc "What the agent recorded about an environment's VM."
   @spec read_meta(Config.t(), String.t()) :: {:ok, map()} | {:error, :none}
   def read_meta(config, env_id) do
-    with {:ok, json} <- File.read(paths(config, env_id).meta),
+    path = paths(config, env_id).meta
+
+    # In the VM's directory: a symlink the VM left there isn't followed.
+    with {:ok, %{type: :regular}} <- File.lstat(path),
+         {:ok, json} <- File.read(path),
          {:ok, %{"slug" => slug} = meta} when is_binary(slug) <- JSON.decode(json) do
       {:ok, meta}
     else

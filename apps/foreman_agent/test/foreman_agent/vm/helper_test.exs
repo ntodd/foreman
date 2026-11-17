@@ -40,4 +40,19 @@ defmodule ForemanAgent.VM.HelperTest do
       assert Helper.ready(%Config{vmctl_socket: ctx.socket}) == {:error, @too_old}
     end
   end
+
+  describe "tap/2" do
+    test "names the tap the helper gave the VM", ctx do
+      config = helper(ctx, %{"tap" => "ok fm-vm3"})
+      assert Helper.tap(config, "6f1c1d1e-9a3b-4c1f-8f5e-2d7a9b0c1e2f") == {:ok, "fm-vm3"}
+      assert_received {:vmctl, "tap 6f1c1d1e-9a3b-4c1f-8f5e-2d7a9b0c1e2f"}
+    end
+
+    test "says so when the VM has none", ctx do
+      config = helper(ctx, %{"tap" => "error the environment has no address"})
+
+      assert Helper.tap(config, "6f1c1d1e-9a3b-4c1f-8f5e-2d7a9b0c1e2f") ==
+               {:error, "the environment has no address"}
+    end
+  end
 end
