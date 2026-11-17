@@ -36,8 +36,8 @@ cleanup() {
   for pid in "$work"/*.pid; do
     [ -e "$pid" ] && kill "$(cat "$pid")" 2>/dev/null
   done
-  docker rm -f fwtest-published fwtest-boxsvc fwtest-custom-svc >/dev/null 2>&1 || true
-  docker network rm fwtest-env fwtest-other fwtest-custom >/dev/null 2>&1 || true
+  docker rm -f fwtest-published fwtest-boxsvc >/dev/null 2>&1 || true
+  docker network rm fwtest-env fwtest-other >/dev/null 2>&1 || true
   nft delete table inet foreman 2>/dev/null || true
   nft delete table inet foreman_guests 2>/dev/null || true
   for n in 0 1; do
@@ -231,14 +231,14 @@ if [ -n "$guest_forward" ]; then
   boxsvc_ip=$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' fwtest-boxsvc)
   expect shut "a guest can't reach a port Docker publishes on the box" g0_reach "$box_ip" 8087
   expect shut "a guest can't reach a container on the box's Docker" g0_reach "$boxsvc_ip" 8080
-  # A Docker network whose bridge has a name of its own: the loader adds
-  # Docker's subnets to a set, which is what stops it.
-  docker network create -o com.docker.network.bridge.name=fwtcustom0 --subnet 172.31.250.0/24 fwtest-custom >/dev/null
-  docker run -d --name fwtest-custom-svc --network fwtest-custom "$image" nc -lk -p 8080 -e /bin/true >/dev/null
-  sleep 1
-  expect open "without its subnet in the set, a guest reaches a custom-named Docker bridge" g0_reach 172.31.250.2 8080
-  nft add element inet foreman_guests docker_nets "{ 172.31.250.0/24 }"
-  expect shut "a guest can't reach a Docker network the loader found" g0_reach 172.31.250.2 8080
+  # Docker's networks, whatever their bridges are named, by subnet: the
+  # loader puts them in a set. Newer Docker drops direct routes to its
+  # containers itself, so the set is checked with the LAN's subnet, which
+  # a guest otherwise reaches.
+  nft add element inet foreman_guests docker_nets "{ 192.168.77.0/24 }"
+  expect shut "a guest can't reach a subnet in the box's Docker networks" g0_reach "$lan_ip" 8086
+  nft -f "$work/open-lan.nft"
+  expect open "a guest reaches it again once it's out of the set" g0_reach "$lan_ip" 8086
 
   # A connection a guest made while the table was gone (another service
   # flushing the ruleset) is cut once it's back: only replies to the box's
