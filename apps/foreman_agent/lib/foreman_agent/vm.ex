@@ -41,10 +41,18 @@ defmodule ForemanAgent.VM do
     }
   end
 
-  @doc "Whether an environment's VM is saved to disk (suspended)."
+  @doc """
+  Whether an environment's VM is saved to disk (suspended): a snapshot no
+  VM was ever started from. One that was (marked `consumed` before the
+  VM could run) is never restored again, whatever became of that VM.
+  """
   @spec suspended?(Config.t(), String.t()) :: boolean()
-  def suspended?(config, env_id),
-    do: File.regular?(Path.join(paths(config, env_id).snapshot, "config.json"))
+  def suspended?(config, env_id) do
+    snapshot = paths(config, env_id).snapshot
+
+    File.regular?(Path.join(snapshot, "config.json")) and
+      not File.exists?(Path.join(snapshot, "consumed"))
+  end
 
   @doc "The environments with a VM on this box."
   @spec list(Config.t()) :: [String.t()]

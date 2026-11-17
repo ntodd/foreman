@@ -1056,8 +1056,9 @@ defmodule Foreman.Environments do
     enqueue(env, "create", %{}, nil)
   end
 
+  # Suspended counts: a stop throws away what was saved.
   defp reconcile(%Environment{desired_state: "stopped"} = env, observed)
-       when observed in ["running", "partial"] do
+       when observed in ["running", "partial", "suspended"] do
     enqueue(env, "stop", %{}, nil)
   end
 

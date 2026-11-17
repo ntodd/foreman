@@ -66,6 +66,18 @@ defmodule Foreman.EnvironmentsSuspendTest do
     refute_receive {:dispatch, %Command{type: "env.stop"}}, 200
   end
 
+  # Wanted stopped, and the box still has it saved (a stop that couldn't
+  # resume it, say): stopped for good, which throws away what was saved.
+  test "an environment that should be stopped but is suspended is stopped", ctx do
+    {:ok, _} = Environments.stop(ctx.scope, ctx.env)
+    assert_receive {:dispatch, %Command{type: "env.stop"} = cmd}
+    report(ctx.box, cmd, %{status: "ok"})
+
+    inventory = [%{env_id: ctx.env.id, slug: ctx.env.slug, state: "suspended", containers: []}]
+    Environments.reconcile_inventory(ctx.box.id, inventory)
+    assert_receive {:dispatch, %Command{type: "env.stop"}}
+  end
+
   # A resumed environment's processes kept the secrets they had.
   test "secrets that changed while it was suspended are still pending after the resume", ctx do
     {:ok, _} = Environments.suspend(ctx.scope, ctx.env)

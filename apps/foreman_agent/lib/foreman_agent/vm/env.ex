@@ -47,9 +47,10 @@ defmodule ForemanAgent.VM.Env do
     with {:ok, meta} <- existing(ctx.config, p.env_id),
          {:ok, spec} <- prepare(Map.put(p, :limits, limits(meta)), ctx, log),
          {:ok, how} <- ensure_running(p.env_id, spec, ctx, log),
+         resumed? = remember_resume(ctx.config, p.env_id, cmd.op_id, how),
          :ok <- push_secrets(p.env_id, log, ctx) do
       case relay(cmd, log, ctx) do
-        {:ok, result} when how == :resumed -> {:ok, Map.put(result, "resumed", true)}
+        {:ok, result} when resumed? -> {:ok, Map.put(result, "resumed", true)}
         other -> other
       end
     end
@@ -73,8 +74,9 @@ defmodule ForemanAgent.VM.Env do
             # On disk before it counts: a power cut after this mustn't
             # leave a torn snapshot that looks whole.
             sync_dir(tmp)
-            File.rm_rf!(paths.snapshot)
+            discard_snapshot(ctx.config, p.env_id, ctx.runner)
             File.rename!(tmp, paths.snapshot)
+            sync_path(paths.dir, ctx.runner)
             {:ok, %{"suspended" => true}}
 
           {:error, message} ->
@@ -93,8 +95,22 @@ defmodule ForemanAgent.VM.Env do
   def run(%Command{type: "env.stop", payload: p} = cmd, log, ctx) do
     machine = Machine.impl(ctx.config)
 
-    # A suspended environment comes back first, so its own stop runs.
-    if VM.suspended?(ctx.config, p.env_id), do: resume(p, log, ctx)
+    # A suspended environment comes back first, so its own stop runs. One
+    # that can't is stopped all the same: what was saved is thrown away.
+    if VM.suspended?(ctx.config, p.env_id) do
+      case resume(p, log, ctx) do
+        :ok ->
+          :ok
+
+        {:error, message} ->
+          log.(
+            "info",
+            "Couldn't resume the environment to stop it (#{message}); discarding what was saved\n"
+          )
+
+          discard_snapshot(ctx.config, p.env_id, ctx.runner)
+      end
+    end
 
     if machine.running?(p.env_id, ctx.config) do
       # A guest that never finishes its part doesn't keep the VM up: it's
@@ -178,17 +194,68 @@ defmodule ForemanAgent.VM.Env do
   def recover(config) do
     machine = Machine.impl(config)
 
+    runner = ForemanAgent.Runner.impl()
+
     for env_id <- VM.list(config) do
       paths = VM.paths(config, env_id)
       File.rm_rf(paths.snapshot <> ".tmp")
+      for leftover <- Path.wildcard(paths.snapshot <> ".discard-*"), do: File.rm_rf(leftover)
 
-      if machine.running?(env_id, config) do
-        File.rm_rf(paths.snapshot)
-        _ = machine.unpause(env_id, config)
+      cond do
+        # Left until the guest answers (ensure_running/4): Cloud Hypervisor
+        # may still be reading it.
+        machine.running?(env_id, config) ->
+          _ = machine.unpause(env_id, config)
+
+        # Handed to a VM that has gone since: never restored.
+        File.dir?(paths.snapshot) and not VM.suspended?(config, env_id) ->
+          discard_snapshot(config, env_id, runner)
+
+        true ->
+          :ok
       end
     end
 
     :ok
+  end
+
+  # Gone in a way an interruption can't undo: renamed aside first (so a
+  # half-deleted snapshot can't look whole), then removed.
+  defp discard_snapshot(config, env_id, runner) do
+    paths = VM.paths(config, env_id)
+
+    if File.exists?(paths.snapshot) do
+      aside = paths.snapshot <> ".discard-#{System.unique_integer([:positive])}"
+      File.rename!(paths.snapshot, aside)
+      sync_path(paths.dir, runner)
+      File.rm_rf(aside)
+    end
+
+    :ok
+  end
+
+  # The directory's entries on disk: Erlang can't fsync a directory.
+  defp sync_path(path, runner) do
+    _ = runner.run("sync", ["-f", path], timeout: 60_000)
+    :ok
+  end
+
+  # Whether this start resumed the VM, now or on an earlier run of the same
+  # operation (the box's agent stopped before it could say so).
+  defp remember_resume(config, env_id, op_id, how) do
+    {:ok, meta} = VM.read_meta(config, env_id)
+
+    case how do
+      :resumed ->
+        VM.write_meta(config, env_id, Map.put(meta, "resumed_by", op_id))
+        true
+
+      :running ->
+        meta["resumed_by"] == op_id
+
+      :booted ->
+        false
+    end
   end
 
   defp sync_dir(dir) do
@@ -284,7 +351,7 @@ defmodule ForemanAgent.VM.Env do
 
   defp drop_snapshot(p, config, log) do
     log.("info", "The box was updated since the environment was suspended; starting it afresh\n")
-    File.rm_rf(VM.paths(config, p.env_id).snapshot)
+    discard_snapshot(config, p.env_id, ForemanAgent.Runner.impl())
     p
   end
 
@@ -350,9 +417,15 @@ defmodule ForemanAgent.VM.Env do
 
     cond do
       machine.running?(env_id, ctx.config) ->
-        # Never restored: the VM has run since it was taken.
-        File.rm_rf(snapshot)
-        with :ok <- machine.unpause(env_id, ctx.config), do: {:ok, :running}
+        with :ok <- machine.unpause(env_id, ctx.config) do
+          # A snapshot beside a running VM is never restored: the VM has
+          # run since. Deleted once the guest answers, by when Cloud
+          # Hypervisor has done reading it.
+          if File.exists?(snapshot) and await(env_id, ctx, "didn't answer") == :ok,
+            do: discard_snapshot(ctx.config, env_id, ctx.runner)
+
+          {:ok, :running}
+        end
 
       VM.suspended?(ctx.config, env_id) ->
         case restore(env_id, spec, ctx, log) do
@@ -363,11 +436,13 @@ defmodule ForemanAgent.VM.Env do
             # The disk is as the VM left it, mid-flight; booting it is like
             # after a power cut, which beats not starting at all.
             log.("info", "Couldn't resume the environment (#{message}); booting it instead\n")
-            File.rm_rf(snapshot)
+            discard_snapshot(ctx.config, env_id, ctx.runner)
             with :ok <- boot(env_id, spec, ctx, log), do: {:ok, :booted}
         end
 
       true ->
+        # A snapshot a VM was started from once, which went down since.
+        discard_snapshot(ctx.config, env_id, ctx.runner)
         with :ok <- boot(env_id, spec, ctx, log), do: {:ok, :booted}
     end
   end
@@ -406,10 +481,16 @@ defmodule ForemanAgent.VM.Env do
   # changed since.
   defp restore(env_id, spec, ctx, log) do
     log.("info", "Resuming the environment's VM\n")
+    snapshot = VM.paths(ctx.config, env_id).snapshot
+    # On disk before the VM can run from it: whatever happens next, this
+    # snapshot is never restored again (VM.suspended?/2).
+    File.write!(Path.join(snapshot, "consumed"), "")
+    sync_dir(snapshot)
+    sync_path(snapshot, ctx.runner)
 
     with :ok <- Machine.impl(ctx.config).restore(env_id, spec, ctx.config),
          :ok <- await(env_id, ctx, "didn't come back from its snapshot") do
-      File.rm_rf(VM.paths(ctx.config, env_id).snapshot)
+      discard_snapshot(ctx.config, env_id, ctx.runner)
       log.("info", "VM resumed\n")
       :ok
     end

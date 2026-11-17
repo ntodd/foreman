@@ -131,6 +131,11 @@ defmodule ForemanAgent.Test.FakeMachine do
         paths = VM.paths(config, env_id)
         guest_socket = Path.join(paths.dir, "g.sock")
 
+        report(
+          {:restore_saw_consumed, File.exists?(Path.join(paths.snapshot, "consumed"))},
+          env_id
+        )
+
         spawn(fn ->
           Process.sleep(30)
 

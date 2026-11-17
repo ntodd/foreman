@@ -62,6 +62,9 @@ defmodule ForemanAgent.VMEnvTest do
         File.cp!(src, dest)
         {:ok, %{status: 0, output: ""}}
 
+      "sync", ["-f", _path], _opts ->
+        {:ok, %{status: 0, output: ""}}
+
       "df", _, _ ->
         {:ok,
          %{
@@ -483,13 +486,66 @@ defmodule ForemanAgent.VMEnvTest do
 
       :ok = VM.Env.recover(ctx.config)
       refute File.exists?(paths.snapshot <> ".tmp")
-      refute File.exists?(paths.snapshot)
       assert_received {:machine, :unpause, @env}
+      # Beside a running VM, a snapshot waits for the guest to answer (its
+      # VM may still be reading it), then goes; it's never restored.
+      assert {:ok, _} = run(command("env.start"), ctx)
+      refute_received {:machine, {:restore, _}, @env}
+      refute File.exists?(paths.snapshot)
 
-      # A suspended VM keeps its snapshot.
+      # A suspended VM keeps its snapshot; one handed to a VM that's gone
+      # since is discarded.
       {:ok, _} = run(command("env.suspend"), ctx)
       :ok = VM.Env.recover(ctx.config)
       assert VM.suspended?(ctx.config, @env)
+      File.write!(Path.join(paths.snapshot, "consumed"), "")
+      :ok = VM.Env.recover(ctx.config)
+      refute File.exists?(paths.snapshot)
+    end
+
+    test "a snapshot is marked used before the VM can run from it", ctx do
+      {:ok, _} = run(command("env.suspend"), ctx)
+      assert {:ok, %{"resumed" => true}} = run(command("env.start"), ctx)
+      assert_received {:machine, {:restore_saw_consumed, true}, @env}
+    end
+
+    # The agent stopped after handing the snapshot over and before the VM
+    # was back, and the VM went down since: what's on disk has moved on.
+    test "a snapshot that was handed over once is never restored again", ctx do
+      {:ok, _} = run(command("env.suspend"), ctx)
+      File.write!(Path.join(VM.paths(ctx.config, @env).snapshot, "consumed"), "")
+      refute VM.suspended?(ctx.config, @env)
+      assert {:ok, [%{env_id: @env, state: "stopped"}]} = Status.inventory(ctx.config)
+      flush()
+
+      assert {:ok, result} = run(command("env.start"), ctx)
+      refute Map.has_key?(result, "resumed")
+      refute_received {:machine, {:restore, _}, @env}
+      assert_received {:machine, {:boot, _}, @env}
+      refute File.exists?(VM.paths(ctx.config, @env).snapshot)
+    end
+
+    test "a stop of a suspended environment that can't come back discards what was saved", ctx do
+      {:ok, _} = run(command("env.suspend"), ctx)
+      # The guest image it needs can't be had.
+      Config.put(%{ctx.config | guest_sha256: String.duplicate("0", 64)})
+      ctx = put_in(ctx.ctx.config, Config.get())
+
+      assert {:ok, _} = run(command("env.stop"), ctx)
+      refute VM.suspended?(ctx.config, @env)
+      refute File.exists?(VM.paths(ctx.config, @env).snapshot)
+      refute FakeMachine.running?(@env, ctx.config)
+    end
+
+    # The box's agent restarted after resuming the VM and before reporting
+    # it, and the control plane sent the start again.
+    test "a start sent again after it resumed the VM still says it resumed", ctx do
+      {:ok, _} = run(command("env.suspend"), ctx)
+      start = command("env.start")
+      assert {:ok, %{"resumed" => true}} = run(start, ctx)
+      assert {:ok, %{"resumed" => true}} = run(start, ctx)
+      assert {:ok, result} = run(command("env.start"), ctx)
+      refute Map.has_key?(result, "resumed")
     end
 
     test "destroy takes the snapshot with the rest", ctx do
