@@ -9,6 +9,7 @@ defmodule Foreman.Accounts.User do
     field :login, :string
     field :name, :string
     field :avatar_url, :string
+    field :admin_via_config, :boolean, default: false
     field :role, :string, default: "member"
     field :access_token, Foreman.Encrypted.Binary, redact: true
     field :access_token_expires_at, :utc_datetime_usec
@@ -49,7 +50,7 @@ defmodule Foreman.Accounts.User do
 
   def role_changeset(user, attrs) do
     user
-    |> cast(attrs, [:role, :disabled_at])
+    |> cast(attrs, [:role, :disabled_at, :admin_via_config])
     |> validate_inclusion(:role, @roles)
   end
 
