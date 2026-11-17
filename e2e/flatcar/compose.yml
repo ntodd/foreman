@@ -8,6 +8,7 @@ services:
   cp:
     image: ${E2E_CP_IMAGE:-foreman-flatcar-cp}
     environment:
+      FOREMAN_ADMINS: e2e
       SECRET_KEY_BASE: ${SECRET_KEY_BASE:-}
       FOREMAN_ENCRYPTION_KEY: ${FOREMAN_ENCRYPTION_KEY:-}
       FOREMAN_AGENT_RELEASE_PUBLIC_KEY: ${FOREMAN_RELEASE_PUBLIC_KEY:-}

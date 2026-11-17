@@ -15,7 +15,7 @@ repo_name = System.get_env("E2E_REPO", "acme/hello")
   Accounts.sign_in_from_github(
     %{"id" => :erlang.phash2(login), "login" => login, "name" => String.capitalize(login), "avatar_url" => nil},
     %{access_token: nil, refresh_token: nil},
-    config: %{admins: [login], allowed_users: [], allowed_org: nil}
+    []
   )
 
 {:ok, admin} =

@@ -241,7 +241,7 @@ say "start the control plane"
 docker rm -f "$cp_name" >/dev/null 2>&1 || true
 docker volume rm -f foreman-e2e-vm-data >/dev/null 2>&1 || true
 docker create --name "$cp_name" --network host \
-  -e SECRET_KEY_BASE="$(openssl rand -base64 48 | tr -d '\n')" \
+  -e FOREMAN_ADMINS=e2e -e SECRET_KEY_BASE="$(openssl rand -base64 48 | tr -d '\n')" \
   -e FOREMAN_ENCRYPTION_KEY="$(openssl rand -base64 32)" \
   -e FOREMAN_AGENT_RELEASE_PUBLIC_KEY="$FOREMAN_RELEASE_PUBLIC_KEY" \
   -e PHX_HOST=127.0.0.1 -e PORT="$port" -e FOREMAN_LISTEN_IP=127.0.0.1 \
