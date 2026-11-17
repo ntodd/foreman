@@ -529,6 +529,8 @@ The UI shows:
 
 ### Box policy
 
+Each box has a CPU threshold and a memory threshold, fractions of its capacity (0.9 by default, up to 16 for CPU and 4 for memory). Past 1 overcommits, and the two carry different risks with VMs. An idle VM's vCPUs cost the box next to nothing and a busy one is capped at its size, so CPU overcommit means busy VMs share cores. Memory overcommit means the VMs' touched memory, page cache included, can pass the box's RAM, and with no swap the kernel then kills a VM. A resource is in contention when its provisioned total passes its threshold, or when what's in use passes its threshold or 90%, whichever is lower. Usage can't pass capacity, so without the 90% a box overcommitted on CPU would never show as busy. Placement checks provisioned totals only.
+
 Set per box:
 
 | Policy | Placing an environment beyond capacity |

@@ -9,14 +9,23 @@ defmodule Foreman.Capacity do
   2. its repo's `hostRequirements`
   3. its observed usage, averaged over about 15 minutes
 
-  A box is in contention when what's provisioned (or what's observed)
-  passes its threshold of capacity. Placement past that is allowed by
-  default; a box can be set to warn or refuse.
+  A box has a threshold for CPU and one for memory, as fractions of its
+  capacity, and either can be past 1 to overcommit. A box is in
+  contention when what's provisioned passes a resource's threshold, or
+  what's in use passes it or 90%, whichever is lower: use can't pass
+  capacity, so a busy box still shows when it's overcommitted. Placement
+  past a threshold is allowed by default; a box can be set to warn or
+  refuse.
   """
 
   alias Foreman.Boxes.Box
   alias Foreman.Capacity.Tracker
   alias Foreman.Environments.Environment
+
+  @busy 0.9
+
+  @doc "The threshold usage is held to: the box's threshold, or 90% if that's lower."
+  def used_threshold(threshold), do: min(threshold, @busy)
 
   @doc "Provisioned CPUs and memory (MB) for an environment, and where the numbers came from."
   def provisioned(%Environment{} = env, repo) do
@@ -73,7 +82,7 @@ defmodule Foreman.Capacity do
 
   @doc """
   A box's capacity, what's provisioned on it, what's in use, and whether
-  either passes its contention threshold. `envs` are its live
+  either passes its contention thresholds. `envs` are its live
   environments (with :repo preloaded).
   """
   def box_summary(%Box{} = box, envs) do
@@ -97,7 +106,7 @@ defmodule Foreman.Capacity do
 
     prov_cpus = Enum.sum_by(provisioned, fn {_, p} -> p.cpus end)
     prov_mem = Enum.sum_by(provisioned, fn {_, p} -> p.memory_mb end)
-    threshold = box.contention_threshold || 0.9
+    %{cpus: cpu_t, memory_mb: mem_t} = thresholds(box)
 
     %{
       cpus: cpus,
@@ -110,12 +119,18 @@ defmodule Foreman.Capacity do
       used_memory_mb: used_mem,
       environments: provisioned,
       contention:
-        cpus > 0 and mem > 0 and
-          (max(prov_cpus, used_cpus) > cpus * threshold or
-             max(prov_mem, used_mem) > mem * threshold),
+        past?(prov_cpus, used_cpus, cpus, cpu_t) or past?(prov_mem, used_mem, mem, mem_t),
       reported_at: latest && latest.at
     }
   end
+
+  defp thresholds(%Box{} = box),
+    do: %{cpus: box.cpu_threshold || 0.9, memory_mb: box.memory_threshold || 0.9}
+
+  defp past?(provisioned, used, capacity, threshold),
+    do:
+      capacity > 0 and
+        (provisioned > capacity * threshold or used > capacity * used_threshold(threshold))
 
   @doc """
   Whether a new environment of `repo` (with optional limits) fits on the
@@ -132,10 +147,9 @@ defmodule Foreman.Capacity do
     }
 
     want = provisioned(env, repo)
-    threshold = box.contention_threshold || 0.9
 
     message =
-      short_of_requirements(box, summary, repo) || over_threshold(box, summary, want, threshold)
+      short_of_requirements(box, summary, repo) || over_threshold(box, summary, want)
 
     case {message, box.capacity_policy} do
       {nil, _} -> :ok
@@ -161,13 +175,20 @@ defmodule Foreman.Capacity do
     end
   end
 
-  defp over_threshold(box, summary, want, threshold) do
-    over =
-      summary.cpus > 0 and
-        (summary.provisioned_cpus + want.cpus > summary.cpus * threshold or
-           summary.provisioned_memory_mb + want.memory_mb > summary.memory_mb * threshold)
+  defp over_threshold(box, summary, want) do
+    t = thresholds(box)
 
-    if over,
-      do: "#{box.name} is past #{round(threshold * 100)}% of its capacity with this environment"
+    over =
+      [
+        {"CPUs", summary.cpus, summary.provisioned_cpus + want.cpus, t.cpus},
+        {"memory", summary.memory_mb, summary.provisioned_memory_mb + want.memory_mb, t.memory_mb}
+      ]
+      |> Enum.filter(fn {_, capacity, total, threshold} ->
+        capacity > 0 and total > capacity * threshold
+      end)
+      |> Enum.map(fn {name, _, _, threshold} -> "#{round(threshold * 100)}% of its #{name}" end)
+
+    if over != [],
+      do: "#{box.name} is past #{Enum.join(over, " and ")} with this environment"
   end
 end

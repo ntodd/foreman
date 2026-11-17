@@ -77,6 +77,8 @@ defmodule Foreman.Fixtures do
             "disk_free_mb" => 500_000
           }),
         capacity_policy: Map.get(attrs, :capacity_policy, "allow"),
+        cpu_threshold: Map.get(attrs, :cpu_threshold, 0.9),
+        memory_threshold: Map.get(attrs, :memory_threshold, 0.9),
         firewall: Map.get(attrs, :firewall),
         firewall_default_bridge: Map.get(attrs, :firewall_default_bridge),
         reboot_required: Map.get(attrs, :reboot_required),

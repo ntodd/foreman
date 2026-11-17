@@ -319,18 +319,20 @@ defmodule ForemanWeb.EnvironmentLive.Index do
           <div class="space-y-2.5">
             <.capacity_bar
               label="CPU"
-              value={max(card.summary.used_cpus, card.summary.provisioned_cpus)}
+              value={card.summary.provisioned_cpus}
+              used={card.summary.used_cpus}
               max={card.summary.cpus}
               unit=" cores"
-              threshold={card.box.contention_threshold}
+              threshold={card.box.cpu_threshold}
             />
             <.capacity_bar
               label="Memory"
-              value={max(card.summary.used_memory_mb, card.summary.provisioned_memory_mb)}
+              value={card.summary.provisioned_memory_mb}
+              used={card.summary.used_memory_mb}
               max={card.summary.memory_mb}
               unit=" GiB"
               format={&gib/1}
-              threshold={card.box.contention_threshold}
+              threshold={card.box.memory_threshold}
             />
           </div>
           <p class="mt-3 text-xs text-ink-3">
