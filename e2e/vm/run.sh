@@ -348,14 +348,14 @@ read -r boot_before _ <<EOF
 $(beat)
 EOF
 [ -n "$boot_before" ] || fail "no heartbeat before the suspend"
-cp_eval 'E2E.act("hello-1", "suspend")' >/dev/null
+lv_click "/environments/$first" action '{"do":"suspend"}' >/dev/null || fail "couldn't suspend hello-1"
 wait_for_env hello-1 suspended 180
 systemctl is-active --quiet "$unit" && fail "the VM is still running after suspend"
 sudo test -f "/srv/foreman/vms/$first/snapshot/config.json" || fail "no snapshot"
 echo "ok: suspended, VM off, snapshot on disk"
 # Long enough that a clock nobody put right would show it.
 sleep 45
-cp_eval 'E2E.act("hello-1", "start")' >/dev/null
+lv_click "/environments/$first" action '{"do":"start"}' >/dev/null || fail "couldn't start hello-1"
 wait_for_env hello-1 running 300
 # A beat or two from after the agent put the clock right.
 sleep 5
@@ -366,7 +366,18 @@ if [ -z "$boot_after" ] || [ "$boot_after" != "$boot_before" ]; then
   fail "the VM booted again ($boot_before, then $boot_after) instead of resuming"
 fi
 skew=$(( $(date +%s) - clock_after ))
-[ "$skew" -lt 20 ] || fail "the guest's clock is ${skew}s behind after the resume"
+if [ "$skew" -ge 20 ]; then
+  # Stalled, or running on a clock nobody put right?
+  sleep 10
+  read -r _ clock_later <<EOF
+$(beat)
+EOF
+  grep 'PROBE beat' "$work/beat.log" | tail -3 >&2
+  if [ "$clock_later" = "$clock_after" ]; then
+    fail "the heartbeat stopped after the resume: its last line is ${skew}s old"
+  fi
+  fail "the guest's clock is ${skew}s behind after the resume, and still moving"
+fi
 sudo test -e "/srv/foreman/vms/$first/snapshot" && fail "the snapshot outlived the resume"
 echo "ok: resumed on the same boot, clock within ${skew}s, snapshot gone"
 
