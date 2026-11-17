@@ -82,6 +82,14 @@ table inet foreman_guests {
 		type ipv4_addr
 	}
 
+	# The box's Docker networks (bridge driver), added when the table
+	# loads: a container on one is the box's, whatever its bridge is named.
+	set docker_nets {
+		type ipv4_addr
+		flags interval
+		auto-merge
+	}
+
 	# A guest sends from its own address only: anything that isn't routed
 	# back through the tap it came in on (a neighbour's address, the
 	# box's, a made-up one) is dropped before routing, so it reaches
@@ -95,9 +103,12 @@ table inet foreman_guests {
 
 	# Nothing from a guest reaches the box itself (sshd, a control plane
 	# on the same machine, anything listening on any of its addresses),
-	# apart from replies to the box's own connections.
+	# apart from replies to the box's own connections. Replies, not
+	# anything established: a connection a guest made while the table was
+	# gone (another service flushing the ruleset) is cut once it's back.
 	chain from_guest_to_box {
-		ct state established,related accept
+		ct state established ct direction reply accept
+		ct state related meta l4proto { icmp, ipv6-icmp } accept
 		counter drop
 	}
 
@@ -109,6 +120,7 @@ table inet foreman_guests {
 		oifname "docker0" counter drop
 		oifname "br-*" counter drop
 		oifname "veth*" counter drop
+		ip daddr @docker_nets counter drop
 		# Not the tailnet at all, MagicDNS included: the table above lets
 		# Docker's networks use it, but a guest has its own resolvers.
 		ip daddr 100.64.0.0/10 counter reject with icmpx type admin-prohibited
@@ -134,8 +146,10 @@ table inet foreman_guests {
 		iifname "fm-vm*" jump from_guest
 		iifname "fm-vm*" jump lan
 		# Nothing starts a connection into a guest from outside the box;
-		# replies to the guest's own get back in.
-		oifname "fm-vm*" ct state established,related accept
+		# replies to the guest's own get back in (and only replies: one
+		# started from outside while the table was gone is cut).
+		oifname "fm-vm*" ct state established ct direction reply accept
+		oifname "fm-vm*" ct state related meta l4proto { icmp, ipv6-icmp } accept
 		oifname "fm-vm*" counter drop
 	}
 

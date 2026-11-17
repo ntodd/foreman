@@ -192,8 +192,14 @@ dest="/opt/foreman-agent/releases/$version"
 # running from $dest, and deleting it under the running agent breaks it.
 new="$dest.new.$$"
 rm -rf "$new"
+# Unpacked first where only root can write: what runs as root (the VM
+# helper, the firewall's rules and script) is installed from this copy,
+# never from the release tree the agent owns.
+staged="$tmp/release"
+mkdir -m 0700 "$staged"
+tar -xzf "$tmp/agent.tar.gz" -C "$staged"
 install -d -o foreman -g foreman "$new"
-tar -xzf "$tmp/agent.tar.gz" -C "$new"
+cp -a "$staged/." "$new/"
 # The release carries the devcontainer CLI and the Node it runs on; this
 # script no longer installs them. One that doesn't (an agent older than
 # this script, served to a box pinned to it) wouldn't run environments.
@@ -244,7 +250,7 @@ umask 022
 # that flushes the whole ruleset (nftables.service's stop or reload, on
 # Debian) takes the table with it, so a timer loads it again within
 # seconds.
-set -- "$dest"/lib/foreman_agent-*/priv/firewall/foreman.nft
+set -- "$staged"/lib/foreman_agent-*/priv/firewall/foreman.nft
 [ -f "$1" ] || fail "the agent release has no firewall rules"
 rules=$1
 # --block-lan keeps the lines marked for it; by default they go.
@@ -322,17 +328,37 @@ printf 'source_sha256=%s\ndefault_bridge=%s\n' "$(sha256sum < "$rules" | cut -d'
   > /etc/foreman-agent/firewall.info
 chmod 0644 /etc/foreman-agent/firewall.info
 
-# Loads the rules with the resolvers guests are given (which --block-lan
-# still lets them reach), in one transaction.
-cat > /etc/foreman-agent/firewall-load <<EOF
-#!/bin/sh
+# Loads the rules with what the guests' table fills in at load time: the
+# resolvers guests are given (which --block-lan still lets them reach;
+# vmctl keeps the list) and the box's Docker bridge networks (which guests
+# never reach, whatever their bridges are named). Both come from files, so
+# putting the rules back never waits on vmctl or Docker; the Docker list
+# is refreshed after the load, and kept as it was when Docker can't say.
+{
+  printf '#!/bin/sh\n# Written by install.sh.\nnft=%s\n' "$nft"
+  cat <<'EOF'
 set -u
-dns=\$(printf 'resolvers\\n' | sh /etc/foreman-agent/vmctl 2>/dev/null | sed -n 's/^ok \\([0-9.,]*\\)\$/\\1/p')
+state=/var/lib/foreman-firewall
+dns=$(cat /var/lib/foreman-vmctl/guest-dns 2>/dev/null || true)
+nets=$(cat "$state/docker-nets" 2>/dev/null || true)
 {
   cat /etc/foreman-agent/firewall.nft
-  if [ -n "\$dns" ]; then printf 'add element inet foreman_guests guest_dns { %s }\\n' "\$dns"; fi
-} | $nft -f -
+  if [ -n "$dns" ]; then printf 'add element inet foreman_guests guest_dns { %s }\n' "$dns"; fi
+  if [ -n "$nets" ]; then printf 'add element inet foreman_guests docker_nets { %s }\n' "$nets"; fi
+} | "$nft" -f - || "$nft" -f /etc/foreman-agent/firewall.nft || exit 1
+command -v docker >/dev/null 2>&1 || exit 0
+ids=$(timeout 5 docker network ls -q --filter driver=bridge 2>/dev/null) || exit 0
+[ -n "$ids" ] || exit 0
+# shellcheck disable=SC2086
+found=$(timeout 5 docker network inspect -f '{{range .IPAM.Config}}{{.Subnet}} {{end}}' $ids 2>/dev/null) || exit 0
+# shellcheck disable=SC2086
+found=$(printf '%s\n' $found | grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+/[0-9]+$' | sort -u | paste -sd, -)
+if [ -z "$found" ] || [ "$found" = "$nets" ]; then exit 0; fi
+mkdir -p "$state"
+printf '%s\n' "$found" > "$state/docker-nets.tmp" && mv "$state/docker-nets.tmp" "$state/docker-nets"
+"$nft" add element inet foreman_guests docker_nets "{ $found }" || true
 EOF
+} > /etc/foreman-agent/firewall-load
 chmod 0755 /etc/foreman-agent/firewall-load
 
 cat > /etc/systemd/system/foreman-firewall.service <<EOF
@@ -418,7 +444,7 @@ printf '# Written by the Foreman install script: environment VMs are routed thro
 # Environment VMs: the root helper and what it reads. Root's own copies,
 # outside anything the agent can write, so the agent can't change what
 # runs as root.
-set -- "$dest"/lib/foreman_agent-*/priv/vm
+set -- "$staged"/lib/foreman_agent-*/priv/vm
 install -m 0755 -o root -g root "$1/vmctl" /etc/foreman-agent/vmctl
 install -m 0755 -o root -g root "$1/guest-forward" /etc/foreman-agent/guest-forward
 cat > /etc/foreman-agent/vmctl.conf <<EOF

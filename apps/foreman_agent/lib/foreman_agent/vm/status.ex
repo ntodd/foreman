@@ -117,7 +117,7 @@ defmodule ForemanAgent.VM.Status do
     elapsed = max(System.monotonic_time(:microsecond) - started, 1)
 
     environments =
-      for {env_id, now} <- later, prior = before[env_id], into: %{} do
+      for {env_id, %{} = now} <- later, %{} = prior <- [before[env_id]], into: %{} do
         cpu = max(now.cpu_usec - prior.cpu_usec, 0) / elapsed * 100
 
         {env_id, %{cpu_percent: Float.round(cpu, 2), memory_mb: div(now.memory_bytes, 1_048_576)}}
