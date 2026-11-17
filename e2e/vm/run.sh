@@ -50,11 +50,12 @@ logs() {
   docker logs --tail 60 "$cp_name" >&2 2>&1 || true
   echo "== agent" >&2
   sudo journalctl --no-pager -n 120 -u foreman-agent >&2 || true
-  for log in /srv/foreman/vms/*/serial.log /srv/foreman/vms/*/ch.log; do
+  # The VMs' directories are the agent's alone.
+  sudo sh -c 'for log in /srv/foreman/vms/*/serial.log /srv/foreman/vms/*/ch.log; do
     [ -e "$log" ] || continue
-    echo "== $log" >&2
-    sudo tail -n 40 "$log" >&2 || true
-  done
+    echo "== $log"
+    tail -n 60 "$log"
+  done' >&2 || true
 }
 
 wait_for() { # description, seconds, command...
@@ -134,7 +135,9 @@ if [ -z "${E2E_CP_IMAGE:-}" ]; then
   docker build -q -f docker/control-plane.Dockerfile -t "$E2E_CP_IMAGE" . >/dev/null
 fi
 
-# What an earlier run on this machine left: its VMs and their taps.
+# What an earlier run on this machine left: its agent (which would start
+# its VMs again), its VMs and their taps.
+sudo systemctl stop foreman-agent 2>/dev/null || true
 for unit in $(systemctl list-units --plain --no-legend 'foreman-vm-*' | awk '{ print $1 }'); do
   sudo systemctl stop "$unit"
 done
