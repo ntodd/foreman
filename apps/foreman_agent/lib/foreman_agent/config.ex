@@ -60,6 +60,13 @@ defmodule ForemanAgent.Config do
             vm_cpus: 4,
             vm_memory_mb: 8192,
             vm_disk_gb: 64,
+            # Page cache reclaim (ForemanAgent.VM.Reclaimer): below this
+            # percent of the box's memory available, quiet VMs are asked
+            # to give back their page cache past vm_reclaim_keep_mb; and,
+            # when set, VMs quiet this many minutes are asked anyway.
+            vm_reclaim_below: 20,
+            vm_reclaim_keep_mb: 2048,
+            vm_reclaim_idle_minutes: nil,
             # How long a booted VM's guest agent gets to answer.
             vm_boot_timeout: 120_000,
             # How long the guest gets for its part of a stop (its

@@ -8,7 +8,7 @@ defmodule ForemanAgent.VMEnvTest do
 
   alias ForemanAgent.{Config, Handler, VM}
   alias ForemanAgent.Test.FakeMachine
-  alias ForemanAgent.VM.{Links, Status}
+  alias ForemanAgent.VM.{Links, Reclaimer, Status}
   alias ForemanProtocol.Command
 
   @env "6f1c1d1e-9a3b-4c1f-8f5e-2d7a9b0c1e2f"
@@ -589,12 +589,52 @@ defmodule ForemanAgent.VMEnvTest do
                @env => [%{"port" => 4000, "process" => "beam.smp"}],
                @other => [%{"port" => 22}]
              }}
+          end,
+          "reclaim" => fn args ->
+            send(test, {:reclaim_asked, args})
+
+            {:ok,
+             %{
+               "requested_mb" => 4096,
+               "file_before_mb" => 6144,
+               "file_after_mb" => 2048,
+               "free_before_mb" => 300,
+               "free_after_mb" => 4396,
+               "reclaim" => "ok",
+               "compact" => "ok",
+               "reclaim_ms" => 700,
+               "compact_ms" => 300
+             }}
           end
         }
       )
 
       {:ok, _} = run(create(), ctx)
       :ok
+    end
+
+    test "page cache reclaim samples the box, and each running VM from outside", ctx do
+      File.write!(
+        Path.join(ctx.config.proc, "meminfo"),
+        "MemTotal:       33554432 kB\nMemFree:          100000 kB\nMemAvailable:    4194304 kB\n"
+      )
+
+      assert {:ok, sample} = Reclaimer.sample(ctx.config)
+      assert sample.total_bytes == 32 * 1_073_741_824
+      assert sample.available_bytes == 4 * 1_073_741_824
+      assert %{@env => %{memory_bytes: 536_870_912, cpu_usec: cpu}} = sample.vms
+      assert is_integer(cpu)
+    end
+
+    test "a box that can't read its memory can't sample", ctx do
+      assert {:error, "couldn't read the box's memory from " <> _} = Reclaimer.sample(ctx.config)
+    end
+
+    test "page cache reclaim reaches the VM's guest agent", ctx do
+      assert {:ok, %{reclaim: "ok", free_after_mb: 4396}} =
+               Reclaimer.reclaim(@env, 2048, ctx.config)
+
+      assert_received {:reclaim_asked, %{"keep_mb" => 2048}}
     end
 
     test "inventory takes only the VM's own environment, under its own slug", ctx do

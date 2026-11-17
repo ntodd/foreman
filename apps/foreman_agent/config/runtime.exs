@@ -57,5 +57,8 @@ if config_env() != :test do
     vm_cpus: int.("FOREMAN_VM_CPUS", 4),
     vm_memory_mb: int.("FOREMAN_VM_MEMORY_MB", 8192),
     vm_disk_gb: int.("FOREMAN_VM_DISK_GB", 64),
+    vm_reclaim_below: int.("FOREMAN_VM_RECLAIM_BELOW", 20),
+    vm_reclaim_keep_mb: int.("FOREMAN_VM_RECLAIM_KEEP_MB", 2048),
+    vm_reclaim_idle_minutes: int.("FOREMAN_VM_RECLAIM_IDLE_MINUTES", nil),
     connect: mode == :host and System.get_env("FOREMAN_URL") not in [nil, ""]
 end

@@ -347,9 +347,14 @@ install script) are documented in
 | `FOREMAN_VM_CPUS` | `4` | A VM's CPUs when neither the environment nor its repo has a CPU limit |
 | `FOREMAN_VM_MEMORY_MB` | `8192` | A VM's memory when neither has a memory limit |
 | `FOREMAN_VM_DISK_GB` | `64` | The size of a new environment's data disk |
+| `FOREMAN_VM_RECLAIM_BELOW` | `20` | When less than this percent of the box's memory is available, quiet VMs are asked to give back their page cache; `0` turns it off |
+| `FOREMAN_VM_RECLAIM_KEEP_MB` | `2048` | The page cache a VM keeps when it's asked |
+| `FOREMAN_VM_RECLAIM_IDLE_MINUTES` | unset | When set, a VM quiet this long is asked once, however much memory the box has free |
 | `FOREMAN_GUEST_URL`, `FOREMAN_GUEST_SHA256` | what the agent was built with | Where the guest image comes from (`https://` or `file://`), and the SHA-256 it has to match; each overrides its own half |
 
-A VM never gets more CPUs or memory than the box has. `FOREMAN_POLICY`
+A VM never gets more CPUs or memory than the box has. A VM holds on to
+the box memory its page cache filled until it's asked to give it back;
+see [architecture.md](../architecture.md) for when. `FOREMAN_POLICY`
 is gone: environments run in VMs, so there's nothing left for it to
 open up (see [repos.md](repos.md#docker-inside-an-environment)).
 
