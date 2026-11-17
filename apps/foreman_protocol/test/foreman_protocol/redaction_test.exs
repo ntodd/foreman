@@ -67,7 +67,17 @@ defmodule ForemanProtocol.RedactionTest do
     r = Redaction.prepare([pem | values])
     line = "#12 [build 3/9] RUN npm ci --no-audit  0.4s\n"
 
-    {us, _} = :timer.tc(fn -> for _ <- 1..5_000, do: Redaction.redact(r, line) end)
-    assert us / 5_000 < 20, "#{Float.round(us / 5_000, 1)} µs per line"
+    # The cheapest of many short batches. A pause long enough to blow a
+    # batch (a busy scheduler, the VM being descheduled) lands in one of
+    # them, so the cheapest is close to the cost of the work itself.
+    best =
+      Enum.min(
+        for _ <- 1..20 do
+          {us, _} = :timer.tc(fn -> for _ <- 1..250, do: Redaction.redact(r, line) end)
+          us / 250
+        end
+      )
+
+    assert best < 20, "#{Float.round(best, 1)} µs per line"
   end
 end
