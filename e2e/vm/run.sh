@@ -188,7 +188,7 @@ cat >> "$work/overlay/.devcontainer/docker-compose.yml" <<EOF
   # The guest's boot and clock, every second: a resume keeps the
   # containers running, so nothing in the lifecycle runs again to say.
   heartbeat:
-    image: alpine:3.22
+    image: public.ecr.aws/docker/library/alpine:3.22
     command: ["sh", "-c", "while :; do echo \"PROBE beat \$\$(cat /proc/sys/kernel/random/boot_id) \$\$(date +%s)\"; sleep 1; done"]
     stop_grace_period: 1s
   dind:
