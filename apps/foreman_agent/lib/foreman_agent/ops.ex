@@ -126,8 +126,11 @@ defmodule ForemanAgent.Ops do
   def handle_info({:DOWN, _ref, :process, pid, reason}, state) do
     case {Map.fetch(state.pids, pid), Map.pop(state.draining, pid)} do
       {{:ok, op_id}, _} ->
+        # The result first: a log handler can be slow, and the control
+        # plane shouldn't wait on it to hear the operation is over.
+        state = finish(state, op_id, pid, {:error, crash_message(reason)})
         Logger.error("operation #{op_id} crashed: #{Exception.format_exit(reason)}")
-        {:noreply, finish(state, op_id, pid, {:error, crash_message(reason)})}
+        {:noreply, state}
 
       {:error, {nil, _}} ->
         {:noreply, state}
