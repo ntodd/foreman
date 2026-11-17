@@ -337,8 +337,10 @@ defmodule ForemanAgent.GuestChannelTest do
     "free_after_mb" => 7812,
     "reclaim" => "partial",
     "compact" => "ok",
+    "drain" => "failed",
     "reclaim_ms" => 950,
-    "compact_ms" => 480
+    "compact_ms" => 480,
+    "drain_ms" => 35
   }
 
   test "a reclaim takes what to keep to the guest, and brings its result back", ctx do
@@ -353,8 +355,14 @@ defmodule ForemanAgent.GuestChannelTest do
     link = start_link(ctx)
     wait_until(fn -> Link.connected?(link) end)
 
-    assert {:ok, %{reclaim: "partial", free_before_mb: 976, free_after_mb: 7812}} =
-             Link.reclaim(link, 2048)
+    assert {:ok,
+            %{
+              reclaim: "partial",
+              drain: "failed",
+              drain_ms: 35,
+              free_before_mb: 976,
+              free_after_mb: 7812
+            }} = Link.reclaim(link, 2048)
 
     assert_received {:reclaim, %{"keep_mb" => 2048}}
   end
@@ -1055,6 +1063,12 @@ defmodule ForemanAgent.GuestChannelTest do
             bad = Map.put(@reclaimed, "free_after_mb", -5)
             [reply(id, %{"ok" => true, "result" => bad})]
 
+          %{"t" => "query", "id" => id, "q" => "reclaim", "args" => %{"keep_mb" => 4}} ->
+            [reply(id, %{"ok" => true, "result" => Map.delete(@reclaimed, "drain")})]
+
+          %{"t" => "query", "id" => id, "q" => "reclaim", "args" => %{"keep_mb" => 5}} ->
+            [reply(id, %{"ok" => true, "result" => %{@reclaimed | "drain" => "partial"}})]
+
           %{"t" => "query", "id" => id, "q" => "reclaim"} ->
             [reply(id, %{"ok" => true, "result" => Map.put(@reclaimed, "extra", 1)})]
 
@@ -1075,6 +1089,8 @@ defmodule ForemanAgent.GuestChannelTest do
       assert Link.reclaim(link, 1) == invalid
       assert Link.reclaim(link, 2) == invalid
       assert Link.reclaim(link, 3) == invalid
+      assert Link.reclaim(link, 4) == invalid
+      assert Link.reclaim(link, 5) == invalid
       assert Link.query(link, "other") == {:error, "no suchquery"}
       assert :sys.get_state(link).guest_version == "0.1.0[31m"
     end

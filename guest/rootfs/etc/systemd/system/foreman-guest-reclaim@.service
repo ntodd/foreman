@@ -2,15 +2,17 @@
 Description=Foreman guest memory reclaim
 
 [Service]
-# Root, because memory.reclaim and compact_memory are root's to write.
-# The rest of the sandbox leaves it those two files and nothing else:
+# Root, because the files it writes are root's: memory.reclaim at the
+# root cgroup, and compact_memory, percpu_pagelist_high_fraction and
+# stat_refresh in /proc/sys/vm. The rest of the sandbox leaves it those:
 # no ProtectKernelTunables or ProtectControlGroups, which would make
 # them read-only.
 ExecStart=/usr/local/lib/foreman-guest/reclaim
 StandardInput=socket
 StandardOutput=socket
 StandardError=journal
-# Shorter than the guest agent waits (ForemanAgent.Guest.Reclaim).
+# Shorter than the guest agent waits (ForemanAgent.Guest.Reclaim). The
+# stop is a TERM, and the helper puts the fraction back on its way out.
 RuntimeMaxSec=45
 CapabilityBoundingSet=
 NoNewPrivileges=yes

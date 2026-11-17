@@ -163,8 +163,10 @@ defmodule ForemanAgent.VM.Link do
     free_after_mb: {:integer, required: true},
     reclaim: {{:enum, ~w(ok partial failed skipped)}, required: true},
     compact: {{:enum, ~w(ok failed skipped)}, required: true},
+    drain: {{:enum, ~w(ok failed skipped)}, required: true},
     reclaim_ms: {:integer, required: true},
-    compact_ms: {:integer, required: true}
+    compact_ms: {:integer, required: true},
+    drain_ms: {:integer, required: true}
   ]
 
   @doc """

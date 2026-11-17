@@ -11,7 +11,17 @@ defmodule ForemanAgent.Guest.Reclaim do
   then compacts its memory: free page reporting only reports free blocks
   of 2 MiB or more. See issue #200 for the measurements.
 
-  Both files need root, and the agent has no capabilities for them, so a
+  Then it drains the per-CPU free lists and compacts again. A big reclaim
+  leaves free pages on them, a few to a 2 MiB block, which keeps those
+  blocks from coalescing, and since kernel 6.7 the lists only shrink from
+  per-CPU work idle CPUs don't do. #203's run on the production box found
+  about 100 MiB of them holding back some 1,400 blocks. The drain sets
+  `vm.percpu_pagelist_high_fraction` high, which lowers every list's high
+  mark, runs that work on every CPU through `stat_refresh` until the lists
+  come down to it, compacts, and puts the fraction back as it was. A drain
+  that fails leaves the reclaim standing.
+
+  The files need root, and the agent has no capabilities for them, so a
   root helper in the guest image does the writes: `foreman-guest-reclaim`,
   socket-activated on `/run/foreman-reclaim.sock` (root and the agent's
   group), one request line (the bytes to reclaim) and one answer line. A
@@ -34,15 +44,16 @@ defmodule ForemanAgent.Guest.Reclaim do
 
   @unsupported "this VM's system image can't reclaim memory"
 
-  @answer ~r/\Aok reclaim=(ok|partial|failed) compact=(ok|failed) reclaim_ms=(\d{1,9}) compact_ms=(\d{1,9})\n?\z/
+  @answer ~r/\Aok reclaim=(ok|partial|failed) compact=(ok|failed) drain=(ok|failed) reclaim_ms=(\d{1,9}) compact_ms=(\d{1,9}) drain_ms=(\d{1,9})\n?\z/
 
   @doc "The error a guest without the helper answers with."
   def unsupported, do: @unsupported
 
   @doc """
-  Reclaims the guest's page cache past `"keep_mb"` MiB and compacts, and
-  reports the page cache and free memory before and after (MiB), what
-  each step did and how long it took (ms).
+  Reclaims the guest's page cache past `"keep_mb"` MiB, compacts, and
+  drains the per-CPU free lists, and reports the page cache and free
+  memory before and after (MiB), what each step did and how long it took
+  (ms).
 
   Options: `:proc` (default `/proc`), `:helper` (the helper's socket) and
   `:timeout` (milliseconds to wait for the helper).
@@ -75,7 +86,8 @@ defmodule ForemanAgent.Guest.Reclaim do
       request = before.file - keep_mb * 1_048_576
 
       if request < @min_request do
-        {:ok, result(before, before, 0, %{reclaim: "skipped", compact: "skipped", ms: {0, 0}})}
+        skipped = %{reclaim: "skipped", compact: "skipped", drain: "skipped", ms: {0, 0, 0}}
+        {:ok, result(before, before, 0, skipped)}
       else
         with {:ok, done} <- ask(request, opts),
              {:ok, later} <- memory(proc) do
@@ -86,7 +98,7 @@ defmodule ForemanAgent.Guest.Reclaim do
   end
 
   defp result(before, later, request, done) do
-    {reclaim_ms, compact_ms} = done.ms
+    {reclaim_ms, compact_ms, drain_ms} = done.ms
 
     %{
       "requested_mb" => mb(request),
@@ -96,8 +108,10 @@ defmodule ForemanAgent.Guest.Reclaim do
       "free_after_mb" => mb(later.free),
       "reclaim" => done.reclaim,
       "compact" => done.compact,
+      "drain" => done.drain,
       "reclaim_ms" => reclaim_ms,
-      "compact_ms" => compact_ms
+      "compact_ms" => compact_ms,
+      "drain_ms" => drain_ms
     }
   end
 
@@ -163,15 +177,18 @@ defmodule ForemanAgent.Guest.Reclaim do
 
   defp answer(line) do
     case Regex.run(@answer, line) do
-      [_, reclaim, compact, reclaim_ms, compact_ms] ->
-        if reclaim != "ok" or compact != "ok",
+      [_, reclaim, compact, drain, reclaim_ms, compact_ms, drain_ms] ->
+        if reclaim != "ok" or compact != "ok" or drain != "ok",
           do: Logger.info("reclaim: #{String.trim_trailing(line)}")
 
         {:ok,
          %{
            reclaim: reclaim,
            compact: compact,
-           ms: {String.to_integer(reclaim_ms), String.to_integer(compact_ms)}
+           drain: drain,
+           ms:
+             {String.to_integer(reclaim_ms), String.to_integer(compact_ms),
+              String.to_integer(drain_ms)}
          }}
 
       nil ->

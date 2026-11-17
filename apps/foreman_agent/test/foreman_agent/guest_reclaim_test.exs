@@ -67,9 +67,11 @@ defmodule ForemanAgent.GuestReclaimTest do
   test "asks for the page cache past what to keep, and reports what changed", ctx do
     meminfo(ctx, 1_000_000, 3_000_000, 6_000_000)
 
-    start_helper(ctx, "ok reclaim=partial compact=ok reclaim_ms=950 compact_ms=480\n", fn ->
-      meminfo(ctx, 8_000_000, 1_500_000, 500_000)
-    end)
+    start_helper(
+      ctx,
+      "ok reclaim=partial compact=ok drain=ok reclaim_ms=950 compact_ms=480 drain_ms=35\n",
+      fn -> meminfo(ctx, 8_000_000, 1_500_000, 500_000) end
+    )
 
     assert {:ok, result} = run(ctx, %{"keep_mb" => 2048})
 
@@ -84,17 +86,37 @@ defmodule ForemanAgent.GuestReclaimTest do
              "free_after_mb" => 7812,
              "reclaim" => "partial",
              "compact" => "ok",
+             "drain" => "ok",
              "reclaim_ms" => 950,
-             "compact_ms" => 480
+             "compact_ms" => 480,
+             "drain_ms" => 35
            }
+  end
+
+  test "a drain that fails is reported, and the reclaim still stands", ctx do
+    meminfo(ctx, 1_000_000, 3_000_000, 6_000_000)
+
+    start_helper(
+      ctx,
+      "ok reclaim=ok compact=ok drain=failed reclaim_ms=900 compact_ms=400 drain_ms=2\n"
+    )
+
+    assert {:ok, %{"reclaim" => "ok", "compact" => "ok", "drain" => "failed", "drain_ms" => 2}} =
+             run(ctx, %{"keep_mb" => 0})
   end
 
   test "leaves a guest with little cache past what to keep alone", ctx do
     meminfo(ctx, 1_000_000, 1_000_000, 1_100_000)
 
     # 2,100,000 kB is 2050 MiB: 2 MiB past what to keep.
-    assert {:ok, %{"reclaim" => "skipped", "compact" => "skipped", "requested_mb" => 0}} =
-             run(ctx, %{"keep_mb" => 2048})
+    assert {:ok,
+            %{
+              "reclaim" => "skipped",
+              "compact" => "skipped",
+              "drain" => "skipped",
+              "drain_ms" => 0,
+              "requested_mb" => 0
+            }} = run(ctx, %{"keep_mb" => 2048})
 
     refute_received {:helper_request, _}
   end
@@ -110,11 +132,18 @@ defmodule ForemanAgent.GuestReclaimTest do
     start_helper(ctx, "error bad request\n")
     assert {:error, "the reclaim helper refused: bad request"} = run(ctx, %{"keep_mb" => 0})
 
-    other = %{ctx | helper: Path.join(ctx.dir, "o.sock")}
-    start_helper(other, "ok reclaim=maybe\n")
+    for {answer, n} <- [
+          {"ok reclaim=maybe\n", 1},
+          # Without the drain, as the helper answered before it drained.
+          {"ok reclaim=ok compact=ok reclaim_ms=1 compact_ms=1\n", 2},
+          {"ok reclaim=ok compact=ok drain=partial reclaim_ms=1 compact_ms=1 drain_ms=1\n", 3}
+        ] do
+      other = %{ctx | helper: Path.join(ctx.dir, "o#{n}.sock")}
+      start_helper(other, answer)
 
-    assert {:error, "the reclaim helper answered something else"} =
-             run(other, %{"keep_mb" => 0})
+      assert {:error, "the reclaim helper answered something else"} =
+               run(other, %{"keep_mb" => 0})
+    end
   end
 
   test "a helper that doesn't answer in time is an error", ctx do
@@ -129,13 +158,17 @@ defmodule ForemanAgent.GuestReclaimTest do
     meminfo(ctx, 1_000_000, 3_000_000, 6_000_000)
     test = self()
 
-    start_helper(ctx, "ok reclaim=ok compact=ok reclaim_ms=1 compact_ms=1\n", fn ->
-      send(test, {:helper_waiting, self()})
+    start_helper(
+      ctx,
+      "ok reclaim=ok compact=ok drain=ok reclaim_ms=1 compact_ms=1 drain_ms=1\n",
+      fn ->
+        send(test, {:helper_waiting, self()})
 
-      receive do
-        :answer -> :ok
+        receive do
+          :answer -> :ok
+        end
       end
-    end)
+    )
 
     first = Task.async(fn -> run(ctx, %{"keep_mb" => 0}) end)
     assert_receive {:helper_waiting, helper}, 5_000
