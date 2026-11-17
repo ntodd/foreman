@@ -95,9 +95,10 @@ Settled on 2026-11-16 for the first implementation, so the build has an answer t
 | Debian or Ubuntu on metal | under the host's KVM | first class | Validated on Ubuntu (kernel 7.0) |
 | Flatcar on metal | under the host's KVM | first class | Not tested, [#179](https://github.com/ntodd/foreman/issues/179) |
 | Flatcar as a VM (`vm.sh`, Proxmox) | nested, under the Flatcar VM's KVM | slower | Validated on Flatcar stable 4757.2.3 under QEMU |
+| Debian or Ubuntu as a VM (Proxmox, other KVM) | nested, under the VM's KVM | slower | Validated on the production box, Debian 13 in a Proxmox-style VM; see [Nested in a Proxmox-style VM](#nested-in-a-proxmox-style-vm-production-box) |
 | Mac | not supported | none | Dropped until [#180](https://github.com/ntodd/foreman/issues/180) |
 
-- **BOX-1 (Validated):** a box needs `/dev/kvm`. A Flatcar VM needs nested virtualization exposed by its hypervisor (`-cpu host` under QEMU, the CPU type `host` on Proxmox).
+- **BOX-1 (Validated):** a box needs `/dev/kvm`. A box that is itself a VM needs nested virtualization exposed by its hypervisor (`-cpu host` under QEMU, the CPU type `host` on Proxmox). Proxmox's default CPU type, `x86-64-v2-AES`, hides SVM and VMX: the VM has no `/dev/kvm` and can't run environments at all.
 - **BOX-2 (Validated):** nested works but costs CPU-bound and I/O-bound work. A clean compile took 37–57 s nested against 34–36 s on bare KVM, and random I/O was about a third. The Flatcar docs must say so.
 - **BOX-3 (Proposed):** the agent reports whether the box has KVM and whether it is nested, and the control plane shows the tier on the box's page.
 - **BOX-4 (Open):** arm64. Cloud Hypervisor supports it, but nothing here was run on arm64. See DEC-11.
@@ -473,6 +474,47 @@ In an earlier pass, random writes to a file the guest had only just created (blo
 | Box to a container port published in a guest | not run | works |
 
 From the first spike, on bare KVM: `docker run --privileged` and docker-in-docker (`docker:28-dind`) both ran in a guest, and vsock carried data in both directions.
+
+### Nested in a Proxmox-style VM (production box)
+
+The production box (Threadripper 9980X, 64 cores with SMT, 125 GB, Debian 13 on bare KVM with `kvm_amd nested=1`) with Foreman inside a VM set up the way Proxmox VE sets one up, without Proxmox itself:
+
+- **The VM:** QEMU 10.0 with machine `q35` and SeaBIOS, 32 vCPUs, 64 GB, and CPU type `host`.
+- **Disk:** virtio-blk with an iothread on a raw file, `cache=none,aio=io_uring,discard=on`.
+- **Rest of the hardware:** virtio-net with vhost (NAT, not a bridge), a balloon with free page reporting, a VGA device.
+- **Software:** the guest OS is Debian 13 genericcloud, running the agent and guest image built from this design's implementation.
+
+The full VM end-to-end run passed inside it: install, isolation probes, stop and start, suspend and resume, an agent restart, prebuilds and destroy.
+
+| | Bare KVM | Nested in the Proxmox-style VM |
+|---|---|---|
+| Guest boot to Docker ready | 0.90–1.21 s | 1.26–1.32 s |
+| Launch to the guest agent's hello | 1.44–1.50 s | 1.96–2.05 s |
+| Cold create (clone, pulls, `devcontainer up`) | 24–30 s | 38.6–40.8 s (about 18 s of it the 950 MB base image pull, as slow in the VM itself) |
+| Start after a power-off | 3.44–3.62 s to running | 4.87–5.02 s |
+| New environment from a prebuild (ext4 copy) | 6.0–6.4 s | 9.44–9.90 s |
+| Resume to the guest agent's hello | 0.10–0.11 s | 0.15–0.21 s |
+| Resume to the environment up | 0.64–0.72 s | 2.38–3.16 s (secrets and the guest's `devcontainer up`, slowed like any fork-heavy work) |
+| 8 GB snapshot | 3.35 s | 2.8–5.5 s |
+| stress-ng `matrixprod`, environment against host | within 1.3% | 4–9% slower |
+| Kernel build at -j16, environment against the VM it runs in | 3% faster | 15% slower (page-fault-heavy work runs at about half speed) |
+| fio 4K random read / write, IOPS in an environment | 542–582k / 589–594k | 262–269k / 173–223k once allocated (the VM's own disk caps at about 560k) |
+| fio 1M sequential write | 9–11 GiB/s | 8.5–9.2 GiB/s |
+| Network, environment to the LAN / LAN to environment | 4.1 / 14 Gbit/s | 2.7 / 11 Gbit/s |
+| 16 environments (2 vCPU / 4 GB) from a prebuild at once | 8.1 s, 32 in 9.5 s | 17.2 s |
+| Memory per idle environment | 928–960 MB | 934–970 MB |
+| Idle CPU per environment, on the host | about 0.5% of a thread | about 3.4% of a thread |
+
+- **NEST-1 (Validated):** nested on this box is the slow tier BOX-2 describes, and usable for a team's interactive environments. Lifecycle operations take 1.4–4× as long, CPU-bound work loses 5–15%, random I/O and fork- or page-fault-heavy work about half, and an idle environment costs the host about seven times the CPU. Memory per environment is the same.
+- **NEST-2 (Validated):** most of the cost is exits. Each I/O in an environment caused about 2.25 exits on the host against 0.06 for the same I/O in the VM, through two virtio layers. The host's TLB flushes ran at about twice the nested switches, which fits the CPU-bound and fault-heavy loss.
+- **NEST-3 (Validated):** what the Proxmox VM needs:
+  - CPU type `host`, and `kvm_amd nested=1` (or `kvm_intel nested=1`) on the Proxmox host.
+  - VirtIO disks with an iothread, `cache=none` and `aio=io_uring`, on raw storage. One iothread is the first I/O cap; a second disk for `/srv/foreman` with its own iothread, or NVMe passthrough, wasn't measured.
+  - Ballooning with free page reporting on: memory a guest freed went back through both levels within about 20 s.
+  - A VGA device (Proxmox's default). Without one, the Debian 13 cloud image looped in GRUB under SeaBIOS; check boots if a VM uses `vga: serial0`.
+  - Host memory for the VM's full size. The VM's page cache, which copying prebuild and root disks fills, keeps host memory that free page reporting can't return: after 16 creates the VM used 18.9 GB and QEMU held 58.6 GB.
+  - Hugepages and NUMA settings aren't needed on this box: host THP already backs the VM with 2 MB pages, and it has one NUMA node.
+- **NEST-4 (Validated):** the kernel that runs Cloud Hypervisor decides core scheduling, the VM's when nested. Neither Debian kernel on this box has it (the box's, or the cloud kernel in the VM), so Cloud Hypervisor warns there's no SMT isolation: with SMT on, two environments' vCPUs can share a core, as on Flatcar.
 
 ## Not validated
 
