@@ -74,11 +74,21 @@ if config_env() != :test do
     raise "FOREMAN_TAILSCALE_DEPLOYMENT_TAG must look like tag:name, got #{inspect(deployment_tag)}"
   end
 
+  admins = list.("FOREMAN_ADMINS")
+  allowed_users = list.("FOREMAN_ALLOWED_USERS")
+  allowed_org = present.("FOREMAN_ALLOWED_ORG")
+
+  if admins == [] and (allowed_users != [] or allowed_org != nil) do
+    IO.warn(
+      "Foreman admits allowlisted users as members. Set FOREMAN_ADMINS to name an administrator."
+    )
+  end
+
   config :foreman,
     slug_style: if(System.get_env("FOREMAN_SLUG_STYLE") == "team", do: :team, else: :personal),
-    admins: list.("FOREMAN_ADMINS"),
-    allowed_users: list.("FOREMAN_ALLOWED_USERS"),
-    allowed_org: present.("FOREMAN_ALLOWED_ORG"),
+    admins: admins,
+    allowed_users: allowed_users,
+    allowed_org: allowed_org,
     git_base_url: System.get_env("FOREMAN_GIT_BASE_URL", "https://github.com"),
     agent_release_public_key: System.get_env("FOREMAN_AGENT_RELEASE_PUBLIC_KEY"),
     agent_release_dir: System.get_env("FOREMAN_AGENT_RELEASE_DIR"),
