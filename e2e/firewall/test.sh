@@ -264,10 +264,12 @@ if [ -n "$guest_forward" ]; then
   echo $! > "$work/echo.pid"
   sleep 1
   nft delete table inet foreman_guests
+  # The child shell expands the probe arguments and reads its own echo.
+  # shellcheck disable=SC2016
   g0 bash -c 'exec 3<>/dev/tcp/10.250.0.1/8089 || exit 2
     echo one >&3 && read -r -t 3 reply <&3 && [ "$reply" = one ] || exit 3
     touch "$1/connected" || exit 4
-    while [ ! -f "$1/reloaded" ]; do sleep 0.1; done
+    while [ ! -f "$1/reloaded" ]; do [ "$SECONDS" -lt 20 ] || exit 4; sleep 0.1; done
     echo two >&3 && read -r -t 3 reply <&3 && exit 0
     exit 42' sh "$work" &
   held=$!
