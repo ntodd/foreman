@@ -8,7 +8,9 @@ services:
     ports:
       - "4000"
   sidecar:
-    image: public.ecr.aws/docker/library/alpine:3.22
+    # The app's image again: one pull, from a registry that doesn't limit
+    # shared CI addresses.
+    image: mcr.microsoft.com/devcontainers/base:debian
     command: ["sh", "-c", "echo sidecar token=$$SIDECAR_TOKEN; exec sleep 1000000"]
     stop_grace_period: 1s
     environment:
