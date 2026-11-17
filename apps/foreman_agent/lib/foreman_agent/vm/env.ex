@@ -458,13 +458,8 @@ defmodule ForemanAgent.VM.Env do
 
     cond do
       machine.running?(env_id, ctx.config) ->
-        with :ok <- machine.unpause(env_id, ctx.config) do
-          # A snapshot beside a running VM is never restored: the VM has
-          # run since. Deleted once the guest answers, by when Cloud
-          # Hypervisor has done reading it.
-          if File.exists?(snapshot) and await(env_id, ctx, "didn't answer") == :ok,
-            do: discard_snapshot(ctx.config, env_id, ctx.runner)
-
+        with :ok <- machine.unpause(env_id, ctx.config),
+             :ok <- finish_pending_restore(env_id, snapshot, ctx) do
           {:ok, :running}
         end
 
@@ -485,6 +480,16 @@ defmodule ForemanAgent.VM.Env do
         # A snapshot a VM was started from once, which went down since.
         discard_snapshot(ctx.config, env_id, ctx.runner)
         with :ok <- boot(env_id, spec, ctx, log), do: {:ok, :booted}
+    end
+  end
+
+  # Cloud Hypervisor may still be reading a snapshot left by an interrupted restore.
+  defp finish_pending_restore(env_id, snapshot, ctx) do
+    if File.exists?(snapshot) do
+      with :ok <- await(env_id, ctx, "didn't answer"),
+           do: discard_snapshot(ctx.config, env_id, ctx.runner)
+    else
+      :ok
     end
   end
 

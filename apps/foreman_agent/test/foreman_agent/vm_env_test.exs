@@ -516,6 +516,21 @@ defmodule ForemanAgent.VMEnvTest do
       refute_received {:machine, {:restore, _}, @env}
     end
 
+    test "an interrupted restore reports a readiness timeout before relaying secrets", ctx do
+      Links.stop(@env)
+      :ok = FakeMachine.kill(@env, ctx.config)
+      FakeMachine.configure(test: self(), boot: :hang)
+      :ok = FakeMachine.boot(@env, %{}, ctx.config)
+      snapshot = VM.paths(ctx.config, @env).snapshot
+      File.mkdir_p!(snapshot)
+      File.write!(Path.join(snapshot, "consumed"), "")
+      flush()
+
+      assert {:error, "the environment's VM didn't answer" <> _} = run(command("env.start"), ctx)
+      refute FakeMachine.running?(@env, ctx.config)
+      refute_received {:guest, "env.secrets.write", _}
+    end
+
     test "a VM left paused is let go before anything is sent to it", ctx do
       assert {:ok, _} = run(command("env.start"), ctx)
       assert_received {:machine, :unpause, @env}
