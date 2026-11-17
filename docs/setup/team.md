@@ -49,9 +49,9 @@ take a snapshot before each upgrade.
 
 ## Boxes
 
-A box is an amd64 Linux machine with KVM; each environment on it runs
-in a VM of its own. Make a join token per box with its developer as the
-owner. A box runs only its owner's environments unless it's shared on
+A box is an amd64 Linux machine (6.2 or later, with Landlock) with
+KVM; each environment on it runs in a VM of its own. Make a join token
+per box with its developer as the owner. A box runs only its owner's environments unless it's shared on
 its page. Code in one environment can't reach another's secrets or
 files, or the box, since each is in its own VM. Sharing is still a
 trust decision: whoever has root on a box can read every environment's

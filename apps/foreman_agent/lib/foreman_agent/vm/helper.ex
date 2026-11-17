@@ -15,10 +15,28 @@ defmodule ForemanAgent.VM.Helper do
 
   # The helper protocol this agent speaks. A helper older than this was
   # installed by an older install.sh; re-running it installs this one.
-  @version 1
+  # Version 2 refuses VMs on a kernel without Landlock instead of running
+  # them unconfined.
+  @version 2
   @timeout 60_000
 
   def version, do: @version
+
+  @doc """
+  Whether the installed helper can run this agent's VMs: new enough, on a
+  kernel that can confine them (Landlock). The reason when it can't.
+  """
+  @spec ready(Config.t()) :: :ok | {:error, String.t()}
+  def ready(config) do
+    case installed_version(config) do
+      {:ok, version} when version >= @version -> landlock(config)
+      _ -> {:error, "the VM helper is missing or too old; re-run the install script"}
+    end
+  end
+
+  defp landlock(config) do
+    with {:ok, _} <- request(config, ["landlock"]), do: :ok
+  end
 
   @doc "The installed helper's version."
   @spec installed_version(Config.t()) :: {:ok, integer()} | {:error, String.t()}
