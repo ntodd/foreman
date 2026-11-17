@@ -397,19 +397,21 @@ defmodule ForemanAgent.VM.Env do
 
   # The guest's clock is stepped to the box's when the link says hello;
   # the secrets go again after (they may have changed while it was
-  # suspended). The snapshot goes as soon as the VM is running from it:
-  # copy-on-write keeps the pages the VM maps, and a snapshot left behind
-  # would be restored over a disk the VM has changed since.
+  # suspended). The snapshot goes once the guest has said hello from it,
+  # not before: the helper's unit starts Cloud Hypervisor and returns, and
+  # Cloud Hypervisor reads the snapshot after. Copy-on-write keeps the
+  # pages the VM maps once it's running. One left behind (the agent
+  # stopped in between) is found beside a running VM and deleted then
+  # (ensure_running/4, recover/1), never restored over a disk the VM has
+  # changed since.
   defp restore(env_id, spec, ctx, log) do
     log.("info", "Resuming the environment's VM\n")
 
-    with :ok <- Machine.impl(ctx.config).restore(env_id, spec, ctx.config) do
+    with :ok <- Machine.impl(ctx.config).restore(env_id, spec, ctx.config),
+         :ok <- await(env_id, ctx, "didn't come back from its snapshot") do
       File.rm_rf(VM.paths(ctx.config, env_id).snapshot)
-
-      with :ok <- await(env_id, ctx, "didn't come back from its snapshot") do
-        log.("info", "VM resumed\n")
-        :ok
-      end
+      log.("info", "VM resumed\n")
+      :ok
     end
   end
 

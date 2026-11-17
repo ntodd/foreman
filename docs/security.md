@@ -451,8 +451,8 @@ These are accepted for now, or need someone to try them:
 16. **Snapshots hold secrets.** Suspending an environment writes the
     VM's whole memory, secrets included, to the box's disk, where
     otherwise secrets only ever touch tmpfs. The snapshot is in the VM's
-    own directory (0700, the agent's user), is deleted as soon as the VM
-    runs from it and on destroy, and is never copied off the box; a
+    own directory (0700, the agent's user), is deleted once the VM is back
+    from it and on destroy, and is never copied off the box; a
     suspend the agent was stopped in the middle of is cleaned up when it
     starts again. Until then it
     is readable by root on the box, and once deleted its blocks stay on

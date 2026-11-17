@@ -357,6 +357,11 @@ echo "ok: suspended, VM off, snapshot on disk"
 sleep 45
 lv_click "/environments/$first" action '{"do":"start"}' >/dev/null || fail "couldn't start hello-1"
 wait_for_env hello-1 running 300
+cp_eval 'E2E.log("hello-1", "start")' > "$work/resume.log"
+if grep -q "Couldn't resume" "$work/resume.log"; then
+  grep -A2 "Couldn't resume" "$work/resume.log" >&2
+  fail "the VM didn't resume, and was booted instead"
+fi
 # A beat or two from after the agent put the clock right.
 sleep 5
 read -r boot_after clock_after <<EOF

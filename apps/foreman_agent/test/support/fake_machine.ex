@@ -124,12 +124,27 @@ defmodule ForemanAgent.Test.FakeMachine do
       {{:error, message}, _} ->
         {:error, message}
 
+      # Like Cloud Hypervisor under the helper's unit: the request returns
+      # at once, and the VM reads its snapshot after; one that's gone by
+      # then never comes back.
       {_, [{_, pids}]} ->
         paths = VM.paths(config, env_id)
         guest_socket = Path.join(paths.dir, "g.sock")
-        {:ok, bridge} = VsockBridge.start_link(path: paths.vsock, target: guest_socket)
-        Process.unlink(bridge)
-        put(env_id, [bridge | pids])
+
+        spawn(fn ->
+          Process.sleep(30)
+
+          if File.regular?(Path.join(paths.snapshot, "config.json")) do
+            {:ok, bridge} = VsockBridge.start_link(path: paths.vsock, target: guest_socket)
+            Process.unlink(bridge)
+            put(env_id, [bridge | pids])
+          else
+            report(:restore_lost_its_snapshot, env_id)
+            Enum.each(pids, &stop/1)
+          end
+        end)
+
+        put(env_id, [])
         :ok
 
       {_, []} ->
