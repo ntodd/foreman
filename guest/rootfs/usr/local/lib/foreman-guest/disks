@@ -43,20 +43,21 @@ base=/var/lib/foreman-data
 mkdir -p "$base"
 mountpoint -q "$base" || mount -o noatime "$data" "$base"
 
-# Whose disk this is. One made for another (a prebuild, which a new
-# environment's disk is a copy of) keeps its clone, images and build
-# cache, but not what ran on it: its containers (some restart on their
-# own when Docker starts, before anything here could stop them), volumes,
-# networks and the guest agent's state go before Docker starts. The box
-# names the environment on the kernel command line.
+# Whose disk this is. One that isn't yet this environment's (a copy of a
+# prebuild's, or a new one) keeps its clone, images and build cache, but
+# not what ran on it: containers (some restart on their own when Docker
+# starts, before anything here could stop them), volumes, networks,
+# plugins, swarm state, containerd's own containers and the guest agent's
+# state all go before Docker starts. The marker is on the disk, so what
+# ran there could have deleted or changed it; a missing or wrong one
+# clears the disk all the same (on a new disk there's nothing to clear).
+# The box names the environment on the kernel command line.
 env_id=$(sed -n 's/.*fm\.env=\([0-9a-f-]*\).*/\1/p' /proc/cmdline)
-if [ -n "$env_id" ]; then
-  owner=$(cat "$base/.env-id" 2>/dev/null || true)
-  if [ -n "$owner" ] && [ "$owner" != "$env_id" ]; then
-    echo "foreman-guest: this disk was $owner's; clearing its containers, volumes and networks"
-    rm -rf "$base/docker/containers" "$base/docker/volumes" "$base/docker/network" "$base/agent"
-  fi
-  [ "$owner" = "$env_id" ] || printf '%s\n' "$env_id" > "$base/.env-id"
+if [ -n "$env_id" ] && [ "$(cat "$base/.env-id" 2>/dev/null || true)" != "$env_id" ]; then
+  echo "foreman-guest: clearing what ran on this disk before it was $env_id's"
+  rm -rf "$base/docker/containers" "$base/docker/volumes" "$base/docker/network" \
+    "$base/docker/plugins" "$base/docker/swarm" "$base/containerd" "$base/agent"
+  printf '%s\n' "$env_id" > "$base/.env-id"
 fi
 
 for dir in docker containerd srv agent; do mkdir -p "$base/$dir"; done

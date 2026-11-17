@@ -179,7 +179,7 @@ defmodule ForemanAgent.Env do
     result =
       with {:ok, %File.Stat{type: :directory}} <- File.lstat(paths.clone),
            {:ok, %File.Stat{type: :directory}} <- File.lstat(git_dir),
-           :ok <- reset_git_dir(git_dir, p),
+           :ok <- new_git_dir(paths.clone, git_dir, helper, p, ctx),
            {:ok, _} <-
              git_in(
                paths.clone,
@@ -205,6 +205,18 @@ defmodule ForemanAgent.Env do
 
         with :ok <- remove_in(ctx, paths.workspace, Path.basename(paths.clone)),
              do: clone(paths, p, ctx)
+    end
+  end
+
+  # A git directory of the environment's own, which the fetch then fills
+  # from the remote: nothing the prebuild's code could have left in the
+  # old one (replacement refs, alternate object stores, grafts, hooks,
+  # config) is used, whatever it was.
+  defp new_git_dir(clone, git_dir, helper, p, ctx) do
+    with {:ok, _} <- File.rm_rf(git_dir),
+         {:ok, _} <- git_in(clone, helper, p, ["init", "--quiet"], ctx),
+         :ok <- File.mkdir_p(git_dir) do
+      reset_git_dir(git_dir, p)
     end
   end
 

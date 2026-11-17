@@ -112,10 +112,10 @@ defmodule Foreman.Environments.Commands do
   # clones and builds from nothing like any other. Without GitHub (a local
   # git server) there's no one to ask.
   defp prebuild_id(env, token) do
-    with id when is_binary(id) <- Prebuilds.ready_id(env.repo, env.box_id, env.branch) do
+    with %{id: id, repos: repos} <- Prebuilds.ready(env.repo, env.box_id, env.branch) do
       cond do
         not GitHub.configured?() -> id
-        is_binary(token) and GitHub.can_read?(token, env.repo) -> id
+        is_binary(token) and GitHub.can_read?(token, env.repo, repos) -> id
         true -> nil
       end
     end

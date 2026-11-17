@@ -46,6 +46,7 @@ defmodule Foreman.PrebuildsTest do
       box_id: box.id,
       branch: "main",
       config_path: repo.devcontainer_path,
+      repos: Enum.uniq([repo.name | repo.extra_repos]),
       status: "ready",
       built_at: DateTime.utc_now()
     }
@@ -80,6 +81,8 @@ defmodule Foreman.PrebuildsTest do
       assert op.box_id == ctx.box.id
       refute inspect(op.args) =~ "ghs_readonly"
       assert Repo.reload!(prebuild).op_id == cmd.op_id
+      # What it was built from, which whoever starts from it has to read.
+      assert Repo.reload!(prebuild).repos == [ctx.repo.name]
     end
 
     test "without a token from GitHub, it builds anyway (a public repo still clones)", ctx do
@@ -260,6 +263,9 @@ defmodule Foreman.PrebuildsTest do
 
     dispatched.(6 * 60)
     assert %Prebuild{status: "failed", error: "no result from the agent"} = Repo.reload!(prebuild)
+    # And the box is told to stop it, so its VM doesn't run on.
+    assert_receive {:dispatch, %Command{type: "op.cancel", payload: %{target_op_id: target}}}
+    assert target == cmd.op_id
   end
 
   test "deleting one takes it off the box", ctx do
@@ -446,6 +452,21 @@ defmodule Foreman.PrebuildsTest do
       p = create(ctx)
       refute Map.has_key?(p, :prebuild_id)
       assert p.files["github-token"] == "ghu_scoped"
+    end
+
+    # The disk holds what it was built from, whatever the repo's settings
+    # say now.
+    test "builds from scratch when the user can't read a repo the prebuild was built with", ctx do
+      ctx.repo |> Ecto.Changeset.change(extra_repos: []) |> Repo.update!()
+      user_token("ghu_scoped")
+      extra = "#{ctx.repo.owner.login}/shared-config"
+
+      stub(ClientMock, :get_repo, fn
+        "ghu_scoped", ^extra -> {:error, :not_found}
+        "ghu_scoped", _ -> {:ok, %{}}
+      end)
+
+      refute Map.has_key?(create(ctx), :prebuild_id)
     end
 
     test "builds from scratch when GitHub can't say", ctx do

@@ -300,16 +300,17 @@ defmodule Foreman.GitHub do
   end
 
   @doc """
-  Whether `token` reads `repo` and each of its extra repos, by asking
-  GitHub for each. Anything but a yes (an error, GitHub not answering) is
-  a no.
+  Whether `token` reads `repo` and each of `names` (repos of the same
+  owner; by default the repo's extra repos), by asking GitHub for each.
+  Anything but a yes (an error, GitHub not answering) is a no.
   """
-  def can_read?(token, %Repos.Repo{} = repo) when is_binary(token) do
+  def can_read?(token, %Repos.Repo{} = repo, names \\ nil) when is_binary(token) do
     repo = Foreman.Repo.preload(repo, :owner)
-    extra = Enum.map(repo.extra_repos, &"#{repo.owner.login}/#{&1}")
+    names = names || repo.extra_repos
+    others = Enum.map(names, &"#{repo.owner.login}/#{&1}")
 
     Enum.all?(
-      Enum.uniq([repo.full_name | extra]),
+      Enum.uniq([repo.full_name | others]),
       &match?({:ok, _}, client().get_repo(token, &1))
     )
   end

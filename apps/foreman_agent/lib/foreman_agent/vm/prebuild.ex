@@ -39,6 +39,8 @@ defmodule ForemanAgent.VM.Prebuild do
           {:ok, map()} | {:error, String.t()}
   def build(%Command{payload: p} = cmd, log, ctx) do
     config = ctx.config
+    # A guest that never finishes the build doesn't keep its VM forever.
+    ctx = Map.put(ctx, :relay_timeout, config.prebuild_timeout)
     id = p.prebuild_id
     paths = VM.paths(config, id)
 

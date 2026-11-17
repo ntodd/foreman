@@ -44,6 +44,7 @@ defmodule ForemanAgent.VMEnvTest do
         allowed_git_hosts: ["github.com"],
         vm_boot_timeout: 2_000,
         vm_relay_stop_timeout: 500,
+        prebuild_timeout: 1_000,
         vm_relay_gc_timeout: 500,
         proc: Path.join(dir, "proc")
     }
@@ -800,6 +801,14 @@ defmodule ForemanAgent.VMEnvTest do
       assert {:error, _} = handle(prebuild_command())
       assert_received {:machine, :release, @prebuild}
       refute File.exists?(VM.paths(ctx.config, @prebuild).dir)
+    end
+
+    test "a build the guest never finishes is given up, and its VM given back", ctx do
+      hangs_on("env.create")
+      assert {:error, message} = handle(prebuild_command())
+      assert message =~ "didn't finish it in time"
+      refute File.exists?(VM.paths(ctx.config, @prebuild).dir)
+      assert_received {:machine, :release, @prebuild}
     end
 
     test "builds in a VM the size of the repo's environments", ctx do

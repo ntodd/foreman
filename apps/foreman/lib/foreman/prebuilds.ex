@@ -79,6 +79,11 @@ defmodule Foreman.Prebuilds do
 
   @doc "The id of the ready prebuild a new environment of `repo` on a box and branch starts from."
   def ready_id(repo, box_id, branch) do
+    with %Prebuild{id: id} <- ready(repo, box_id, branch), do: id
+  end
+
+  @doc "The ready prebuild a new environment of `repo` on a box and branch starts from."
+  def ready(repo, box_id, branch) do
     config_path = config_path(repo)
 
     Repo.one(
@@ -87,8 +92,7 @@ defmodule Foreman.Prebuilds do
           p.repo_id == ^repo.id and p.box_id == ^box_id and p.branch == ^branch and
             p.config_path == ^config_path and p.status == "ready",
         order_by: [desc: p.built_at],
-        limit: 1,
-        select: p.id
+        limit: 1
     )
   end
 
@@ -105,7 +109,8 @@ defmodule Foreman.Prebuilds do
       repo_id: repo.id,
       box_id: box.id,
       branch: repo.default_branch,
-      config_path: config_path(repo)
+      config_path: config_path(repo),
+      repos: Enum.uniq([repo.name | repo.extra_repos])
     }
 
     # The command is made before anything is recorded, and the prebuild and

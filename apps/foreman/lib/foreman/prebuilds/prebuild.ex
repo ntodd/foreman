@@ -13,6 +13,7 @@ defmodule Foreman.Prebuilds.Prebuild do
     belongs_to :box, Foreman.Boxes.Box
     field :branch, :string
     field :config_path, :string
+    field :repos, {:array, :string}, default: []
     field :status, :string, default: "building"
     field :error, :string
     field :size_mb, :integer

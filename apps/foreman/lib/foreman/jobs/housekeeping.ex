@@ -113,9 +113,13 @@ defmodule Foreman.Jobs.Housekeeping do
                (o.action == "box.prebuild" and o.dispatched_at < ^prebuild_cutoff))
     )
     |> Enum.each(fn op ->
-      with {:ok, _op, recorded} <-
-             Operations.timed_out(op, "no result from the agent", &Prebuilds.record_result/1),
-           do: Prebuilds.after_result(recorded)
+      with {:ok, failed, recorded} <-
+             Operations.timed_out(op, "no result from the agent", &Prebuilds.record_result/1) do
+        Prebuilds.after_result(recorded)
+        # A build still running on the box stops there too, so its VM
+        # doesn't run on (the box's agent gives its VM back).
+        if failed.action == "box.prebuild", do: Agents.cancel_operation(op, nil)
+      end
     end)
   end
 

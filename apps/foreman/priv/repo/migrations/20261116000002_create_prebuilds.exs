@@ -9,6 +9,9 @@ defmodule Foreman.Repo.Migrations.CreatePrebuilds do
       add :box_id, references(:boxes, on_delete: :delete_all), null: false
       add :branch, :string, null: false
       add :config_path, :string, null: false
+      # The repos it was built able to read (the repo and its extra repos
+      # then): whoever starts from it has to be able to read them all.
+      add :repos, {:array, :string}, null: false, default: []
       add :status, :string, null: false, default: "building"
       add :error, :text
       add :size_mb, :integer

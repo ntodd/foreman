@@ -180,8 +180,10 @@ defmodule ForemanAgent.VM.Status do
 
     in_flight = in_flight()
 
-    for id <- VM.list(config, :all) -- envs,
-        {:ok, meta} <- [VM.read_meta(config, id)],
+    # Marked as a prebuild's, not merely missing from the list above: an
+    # environment made since that list was taken is no prebuild.
+    for id <- VM.list(config, :all),
+        {:ok, %{"kind" => "prebuild"} = meta} <- [VM.read_meta(config, id)],
         meta["op_id"] not in in_flight do
       ctx.log.("info", "Removing the VM of a prebuild nothing is building (#{id})\n")
       Prebuild.discard(config, id)

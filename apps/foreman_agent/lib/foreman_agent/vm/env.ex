@@ -94,56 +94,11 @@ defmodule ForemanAgent.VM.Env do
 
   def run(%Command{type: "env.stop", payload: p} = cmd, log, ctx) do
     machine = Machine.impl(ctx.config)
+    if VM.suspended?(ctx.config, p.env_id), do: resume_to_stop(p, log, ctx)
 
-    # A suspended environment comes back first, so its own stop runs. One
-    # that can't is stopped all the same: what was saved is thrown away.
-    if VM.suspended?(ctx.config, p.env_id) do
-      case resume(p, log, ctx) do
-        :ok ->
-          :ok
-
-        {:error, message} ->
-          log.(
-            "info",
-            "Couldn't resume the environment to stop it (#{message}); discarding what was saved\n"
-          )
-
-          discard_snapshot(ctx.config, p.env_id, ctx.runner)
-      end
-    end
-
-    if machine.running?(p.env_id, ctx.config) do
-      # A guest that never finishes its part doesn't keep the VM up: it's
-      # shut down either way, which stops the environment as surely.
-      result =
-        case relay(cmd, log, ctx, timeout: ctx.config.vm_relay_stop_timeout) do
-          {:ok, _} = ok ->
-            ok
-
-          error ->
-            log.("info", "The environment's own stop didn't finish (#{error_text(error)})\n")
-            {:ok, %{}}
-        end
-
-      log.("info", "Shutting the environment's VM down\n")
-
-      case machine.power_off(p.env_id, @power_off_timeout, ctx.config) do
-        :ok ->
-          Links.stop(p.env_id)
-          result
-
-        # It didn't shut down in time and was stopped: said so, for a
-        # prebuild, whose disk isn't kept from a guest stopped mid-write.
-        :killed ->
-          Links.stop(p.env_id)
-          with {:ok, map} <- result, do: {:ok, Map.put(map, "forced_off", true)}
-
-        {:error, message} ->
-          {:error, message}
-      end
-    else
-      {:ok, %{}}
-    end
+    if machine.running?(p.env_id, ctx.config),
+      do: stop_running(cmd, machine, log, ctx),
+      else: {:ok, %{}}
   end
 
   def run(%Command{type: "env.secrets.write", payload: p} = cmd, log, ctx) do
@@ -181,6 +136,54 @@ defmodule ForemanAgent.VM.Env do
     end
   end
 
+  # A suspended environment comes back first, so its own stop runs. One
+  # that can't is stopped all the same: what was saved is thrown away.
+  defp resume_to_stop(p, log, ctx) do
+    case resume(p, log, ctx) do
+      :ok ->
+        :ok
+
+      {:error, message} ->
+        log.(
+          "info",
+          "Couldn't resume the environment to stop it (#{message}); discarding what was saved\n"
+        )
+
+        discard_snapshot(ctx.config, p.env_id, ctx.runner)
+    end
+  end
+
+  # A guest that never finishes its part doesn't keep the VM up: it's shut
+  # down either way, which stops the environment as surely.
+  defp stop_running(%Command{payload: p} = cmd, machine, log, ctx) do
+    result =
+      case relay(cmd, log, ctx, timeout: ctx.config.vm_relay_stop_timeout) do
+        {:ok, _} = ok ->
+          ok
+
+        error ->
+          log.("info", "The environment's own stop didn't finish (#{error_text(error)})\n")
+          {:ok, %{}}
+      end
+
+    log.("info", "Shutting the environment's VM down\n")
+
+    case machine.power_off(p.env_id, @power_off_timeout, ctx.config) do
+      :ok ->
+        Links.stop(p.env_id)
+        result
+
+      # It didn't shut down in time and was stopped: said so, for a
+      # prebuild, whose disk isn't kept from a guest stopped mid-write.
+      :killed ->
+        Links.stop(p.env_id)
+        with {:ok, map} <- result, do: {:ok, Map.put(map, "forced_off", true)}
+
+      {:error, message} ->
+        {:error, message}
+    end
+  end
+
   defp resume(p, log, ctx) do
     with {:ok, meta} <- existing(ctx.config, p.env_id),
          {:ok, spec} <-
@@ -201,7 +204,9 @@ defmodule ForemanAgent.VM.Env do
     machine = Machine.impl(config)
 
     # A prebuild being built when the agent stopped: nothing will finish it.
-    for id <- VM.list(config, :all) -- VM.list(config), do: Prebuild.discard(config, id)
+    for id <- VM.list(config, :all),
+        match?({:ok, %{"kind" => "prebuild"}}, VM.read_meta(config, id)),
+        do: Prebuild.discard(config, id)
 
     runner = ForemanAgent.Runner.impl()
 
@@ -277,8 +282,12 @@ defmodule ForemanAgent.VM.Env do
     :ok
   end
 
-  defp relay(cmd, log, ctx, opts \\ []),
-    do: Link.run(Links.get(cmd.payload.env_id, ctx.config), cmd, log, opts)
+  # A prebuild's build gives a deadline for everything it relays
+  # (`:relay_timeout` in its ctx).
+  defp relay(cmd, log, ctx, opts \\ []) do
+    opts = Keyword.put_new(opts, :timeout, Map.get(ctx, :relay_timeout, :infinity))
+    Link.run(Links.get(cmd.payload.env_id, ctx.config), cmd, log, opts)
+  end
 
   defp error_text({:error, message}) when is_binary(message), do: message
   defp error_text({:error, message, _}) when is_binary(message), do: message

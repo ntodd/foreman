@@ -67,6 +67,9 @@ defmodule ForemanAgent.Config do
             # Docker prune (each prune in the guest has half an hour).
             vm_relay_stop_timeout: 300_000,
             vm_relay_gc_timeout: 2_400_000,
+            # A prebuild's build, past which the box gives it up and gives
+            # its VM back (the control plane gives up at five hours).
+            prebuild_timeout: 16_200_000,
             machine: ForemanAgent.VM.Machine.Cloud,
             tailscale_join_wait: :timer.seconds(30)
 

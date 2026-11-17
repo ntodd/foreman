@@ -905,6 +905,16 @@ defmodule ForemanAgent.EnvTest do
       """)
 
       File.write!(Path.join(from.clone, ".git/hooks/post-checkout"), "#!/bin/sh\nevil\n")
+      # Git objects of its own choosing, standing in for the branch's.
+      File.mkdir_p!(Path.join(from.clone, ".git/refs/replace"))
+
+      File.write!(
+        Path.join(from.clone, ".git/refs/replace/" <> String.duplicate("a", 40)),
+        String.duplicate("b", 40)
+      )
+
+      File.mkdir_p!(Path.join(from.clone, ".git/objects/info"))
+      File.write!(Path.join(from.clone, ".git/objects/info/alternates"), "/tmp/evil/objects\n")
       File.mkdir_p!(from.meta)
 
       File.write!(
@@ -940,6 +950,12 @@ defmodule ForemanAgent.EnvTest do
       refute git_config =~ "evil"
       assert git_config =~ "url = https://github.com/acme/storefront.git"
       assert File.ls!(Path.join(to.clone, ".git/hooks")) == []
+      # A git directory of its own, fetched from the remote: nothing the
+      # prebuild's code put in the old one is used.
+      refute File.exists?(Path.join(to.clone, ".git/refs/replace"))
+      refute File.exists?(Path.join(to.clone, ".git/objects/info/alternates"))
+      assert_received {:git_run, init}
+      assert "init" in init
 
       helper = Path.join(to.meta, "git-credential")
       assert File.read!(helper) =~ Path.join(to.secrets, "github-token")
