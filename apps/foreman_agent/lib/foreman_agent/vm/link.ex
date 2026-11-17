@@ -96,6 +96,12 @@ defmodule ForemanAgent.VM.Link do
   # spend on frame decoding, which isn't charged to the VM's cgroup.
   @read_burst 8 * 1_048_576
   @read_rate 2 * 1_048_576
+  # The least a frame costs the bucket, whatever its length: spawning,
+  # monitoring and decoding one has a fixed cost, so a flood of tiny
+  # frames would otherwise stay under a byte-only rate while keeping a
+  # host scheduler busy. At the default rate this caps frames near
+  # 4,000/second.
+  @frame_charge 512
 
   @lost "lost the connection to the environment's VM"
   @restarted "the environment's VM restarted while running it"
@@ -287,8 +293,10 @@ defmodule ForemanAgent.VM.Link do
     case connect(state) do
       {:ok, socket} ->
         Process.send_after(self(), {:hello_timeout, socket}, @hello_timeout)
-        # A fresh connection gets a fresh burst.
-        {:noreply, %{state | socket: socket, armed: true, tokens: state.read_burst, rate_at: now()}}
+        # The read bucket carries across reconnects, so a guest can't drop
+        # the connection to earn a fresh burst; after a genuine idle gap it
+        # has refilled on its own.
+        {:noreply, %{state | socket: socket, armed: true}}
 
       {:error, reason} ->
         if state.alive?.() do
@@ -307,9 +315,9 @@ defmodule ForemanAgent.VM.Link do
   def handle_info(:connect, state), do: {:noreply, state}
 
   def handle_info({:tcp, socket, data}, %{socket: socket} = state) do
-    # Charge the frame's bytes to the read bucket before decoding it: the
-    # cost of decoding tracks the bytes read, and the guest is hostile.
-    state = charge(%{state | armed: false}, byte_size(data))
+    # Charge the frame to the read bucket before decoding it: its bytes,
+    # or the fixed per-frame cost if that's more. The guest is hostile.
+    state = charge(%{state | armed: false}, max(byte_size(data), @frame_charge))
 
     state =
       case Channel.decode(data) do

@@ -630,33 +630,60 @@ defmodule ForemanAgent.GuestChannelTest do
       assert :counters.get(counter, 1) >= 2
     end
 
-    test "a frame over the guest cap but under a megabyte still drops the connection", ctx do
-      counter = :counters.new(1, [])
+    test "a flood of tiny frames is paced by the per-frame cost, not just bytes", ctx do
+      # Frames far smaller than @frame_charge: without the per-frame
+      # minimum they'd all fit the burst in bytes and be read at once,
+      # keeping a host scheduler busy decoding them.
+      test = self()
+      total = 16
 
-      start_fake_vm(
-        ctx,
-        reactive(fn
-          %{"t" => "hello"} ->
-            :counters.add(counter, 1, 1)
+      frame = fn n ->
+        Channel.encode(%{"t" => "event", "seq" => n, "event" => %{"type" => "noop"}})
+      end
 
-            # Between the 512 KiB guest cap and the old 1 MiB one.
-            if :counters.get(counter, 1) == 1,
-              do: [:binary.copy("x", 700_000)],
-              else: [hello()]
+      start_fake_vm(ctx, fn socket ->
+        {:ok, _hello} = :gen_tcp.recv(socket, 0, 5_000)
+        :ok = :gen_tcp.send(socket, hello())
+        Enum.each(1..total, fn n -> :gen_tcp.send(socket, frame.(n)) end)
 
-          %{"t" => "cmd", "cmd" => %{"op_id" => op_id}} ->
-            [event("op.result", %{op_id: op_id, status: "ok", result: %{"after" => true}}, 1)]
+        count = fn count ->
+          case :gen_tcp.recv(socket, 0, 5_000) do
+            {:ok, data} ->
+              {:ok, %{"t" => "ack"}} = Channel.decode(data)
+              send(test, :acked)
+              count.(count)
 
-          _ ->
-            []
+            {:error, _} ->
+              :ok
+          end
+        end
+
+        count.(count)
+      end)
+
+      # Burst and rate in bytes, but the ~40-byte frames each cost the
+      # 512-byte minimum: a ~4-frame burst, then a handful per second.
+      start_link(ctx, read_burst: 2_048, read_rate: 5_000)
+      assert_receive :vm_connected, 5_000
+
+      Process.sleep(250)
+      early = count_received(:acked)
+      assert early < total, "read all #{total} tiny frames at once (#{early}); only bytes were charged"
+      assert early <= 8
+
+      got =
+        Enum.reduce_while(1..60, early, fn _, acc ->
+          acc = acc + count_received(:acked)
+
+          if acc >= total do
+            {:halt, acc}
+          else
+            Process.sleep(100)
+            {:cont, acc}
+          end
         end)
-      )
 
-      link = start_link(ctx)
-      run_async(link, command())
-
-      assert_receive {:result, {:ok, %{"after" => true}}}, 3_000
-      assert :counters.get(counter, 1) >= 2
+      assert got == total
     end
 
     test "the link reads the guest no faster than its rate allows", ctx do

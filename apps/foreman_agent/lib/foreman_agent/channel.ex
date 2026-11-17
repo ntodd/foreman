@@ -9,9 +9,7 @@ defmodule ForemanAgent.Channel do
   guest. In the guest, `socat` joins vsock port 1024 to the guest agent's
   unix socket. Each frame is a JSON object with a four-byte length and a
   type in `"t"`: at most 4 MiB from the host (a command can carry
-  secrets files) and 512 KiB from the guest, which is more than any
-  legitimate event, reply or hello (an inventory of the box's
-  environments, an operation's log chunk, a query result) needs.
+  secrets files) and 1 MiB from the guest.
 
   Host to guest:
 
@@ -39,13 +37,13 @@ defmodule ForemanAgent.Channel do
 
   @port 1024
   @max_to_guest 4 * 1024 * 1024
-  @max_to_host 512 * 1024
+  @max_to_host 1024 * 1024
   # What decoding one guest frame may cost. The guest is hostile and the
   # decode runs in the host agent's BEAM, not the VM's cgroup, so this is
-  # held to what a legitimate frame needs. A big integer or a deep tree is
-  # killed by the heap in a few milliseconds; the largest honest frames (a
-  # 512 KiB string, a full inventory) decode in about 3 ms, well under the
-  # heap and the timeout.
+  # held to what a legitimate frame needs. A big integer, a deep tree or a
+  # map of many keys is killed by the heap in a few milliseconds; the
+  # largest honest frames (a 1 MiB string, an environment's inventory or
+  # ports) decode in a few ms, well under the heap and the timeout.
   @decode_heap 2 * 1024 * 1024
   @decode_timeout 200
 

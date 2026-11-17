@@ -153,7 +153,7 @@ the box.
   passthrough.
 - The channel to the guest agent is Cloud Hypervisor's hybrid vsock, and
   only the box connects: nothing on the box listens for a guest. The
-  box caps a guest's frames at 512 KiB and closes the connection on a
+  box caps a guest's frames at 1 MiB and closes the connection on a
   larger one; decoding a frame is bounded in memory and time, and the
   box reads a guest no faster than a per-link byte-rate limit, so a
   guest that streams costly frames can't spend the box's CPU outside its
