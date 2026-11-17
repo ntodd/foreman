@@ -264,14 +264,14 @@ defmodule ForemanWeb.BoxLive.Index do
               value={card.summary.used_cpus}
               max={card.summary.cpus}
               unit=" cores"
-              threshold={card.box.contention_threshold}
+              threshold={Capacity.used_threshold(card.box.cpu_threshold)}
             />
             <.capacity_bar
               label="CPU provisioned"
               value={card.summary.provisioned_cpus}
               max={card.summary.cpus}
               unit=" cores"
-              threshold={card.box.contention_threshold}
+              threshold={card.box.cpu_threshold}
             />
             <.capacity_bar
               :if={is_nil(card.latest)}
@@ -280,7 +280,7 @@ defmodule ForemanWeb.BoxLive.Index do
               max={card.summary.memory_mb}
               unit=" GiB"
               format={&gib/1}
-              threshold={card.box.contention_threshold}
+              threshold={Capacity.used_threshold(card.box.memory_threshold)}
             />
             <.capacity_bar
               label="Memory provisioned"
@@ -288,7 +288,7 @@ defmodule ForemanWeb.BoxLive.Index do
               max={card.summary.memory_mb}
               unit=" GiB"
               format={&gib/1}
-              threshold={card.box.contention_threshold}
+              threshold={card.box.memory_threshold}
             />
           </div>
           <p class="mt-4 text-xs text-ink-3">
