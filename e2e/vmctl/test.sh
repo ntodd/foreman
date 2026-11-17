@@ -195,7 +195,7 @@ has "sees no other VM's disks" "TemporaryFileSystem=$work/srv:ro"
 has "sees its own directory" "BindPaths=$work/srv/vms/$env1"
 has "sees the guest images and agent disks read-only" "BindReadOnlyPaths=$work/srv/guest $work/srv/agent-disks"
 has "can't see the box's secrets, identity or settings, or reach this helper" \
-  "InaccessiblePaths=-/run/foreman -/var/lib/foreman-agent -/etc/foreman-agent -$work/state -/run/foreman-vmctl.sock -/sys/fs/cgroup -/run/systemd -/run/dbus"
+  "InaccessiblePaths=-/run/foreman -/var/lib/foreman-agent -/etc/foreman-agent -$work/state -/run/foreman-vmctl.sock -/sys/fs/cgroup/foreman.slice -/run/systemd/private -/run/dbus/system_bus_socket"
 check "gives the box's end its address" grep -q "ip addr replace 10.250.0.1/30 dev fm-vm0" "$work/calls"
 check "keeps the guests' resolvers for the firewall's loader" grep -qx "192.168.1.1" "$work/state/guest-dns"
 expect "says which tap a VM has" "tap $env1" "ok fm-vm0"
