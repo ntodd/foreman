@@ -565,9 +565,8 @@ defmodule ForemanAgent.VM.Env do
   # are on its own tmpfs, so a boot (or a reboot the guest did itself)
   # leaves it with none.
   defp push_secrets(env_id, log, ctx) do
-    files = read_cached_secrets(ctx.config, env_id)
-
-    with {:ok, cmd} <- Command.new("env.secrets.write", %{env_id: env_id, files: files}),
+    with {:ok, files} <- read_cached_secrets(ctx.config, env_id),
+         {:ok, cmd} <- Command.new("env.secrets.write", %{env_id: env_id, files: files}),
          {:ok, _} <- relay(cmd, log, ctx) do
       :ok
     else
@@ -584,9 +583,17 @@ defmodule ForemanAgent.VM.Env do
   defp read_cached_secrets(config, env_id) do
     dir = Path.join(config.secrets_root, env_id)
 
-    for name <- Schema.secret_files(),
-        {:ok, content} <- [File.read(Path.join(dir, name))],
-        into: %{},
-        do: {name, content}
+    Enum.reduce_while(Schema.secret_files(), {:ok, %{}}, fn name, {:ok, files} ->
+      case File.read(Path.join(dir, name)) do
+        {:ok, content} ->
+          {:cont, {:ok, Map.put(files, name, content)}}
+
+        {:error, :enoent} ->
+          {:cont, {:ok, files}}
+
+        {:error, reason} ->
+          {:halt, {:error, "couldn't read cached #{name}: #{:file.format_error(reason)}"}}
+      end
+    end)
   end
 end
