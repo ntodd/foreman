@@ -77,10 +77,22 @@ cp_eval() {
 }
 
 env_observed() { cp_eval 'E2E.status()' | grep "^ENV $1 " | sed 's/.*observed=\([a-z]*\).*/\1/'; }
+# A registry that limits this machine's pulls (CI runners share addresses)
+# fails a create or start; it's tried again, as a user would, twice at most.
+rate_limited() { cp_eval "E2E.log(\"$1\")" | grep -qiE "toomanyrequests|too many requests|rate exceeded"; }
 wait_for_env() { # slug, state, seconds
-  i=0
+  i=0 retries=0
   until [ "$(env_observed "$1")" = "$2" ]; do
     if [ "$(env_observed "$1")" = error ]; then
+      if [ "$retries" -lt 2 ] && rate_limited "$1"; then
+        retries=$((retries + 1))
+        echo "a registry limited pulls; trying $1 again ($retries)" >&2
+        sleep 30
+        cp_eval "E2E.retry_failed(\"$1\")" >/dev/null
+        j=0
+        while [ "$(env_observed "$1")" = error ] && [ $j -lt 300 ]; do sleep 5; j=$((j + 5)); done
+        continue
+      fi
       cp_eval 'E2E.status()' >&2
       cp_eval "E2E.log(\"$1\")" | tail -60 >&2
       fail "$1 errored waiting for $2"

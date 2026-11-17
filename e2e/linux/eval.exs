@@ -77,6 +77,22 @@ defmodule E2E do
     IO.puts("queued #{action} for #{slug}")
   end
 
+  # Runs an environment's failed operation again, as the page's Retry
+  # (a create) or Start would.
+  def retry_failed(slug) do
+    scope = Scope.for_user(admin())
+    env = live_env(slug)
+    [op | _] = Operations.list_for_environment(env.id, 1)
+
+    {:ok, _} =
+      case op.action do
+        "create" -> Environments.retry(scope, env)
+        _ -> Environments.start(scope, env)
+      end
+
+    IO.puts("retried #{op.action} for #{slug}")
+  end
+
   def secret(slug, name, value) do
     scope = Scope.for_user(admin())
     env = live_env(slug)
