@@ -26,12 +26,15 @@ defmodule ForemanAgent.VM.Reclaimer do
   asked once per quiet stretch, whatever the box has free.
 
   A guest that can't reclaim (its system image or agent is older) isn't
-  asked again until its VM starts again; one that fails is asked again
-  ten minutes later. The reclaims of a round run in a process of their
+  asked again until its VM starts again; one that fails, its writes in
+  the guest included, is asked again ten minutes later. The reclaims of a round run in a process of their
   own, one VM at a time, while the samples go on.
 
-  The policy is pure (`observe/3`, `plan/4`, `run_round/4`, `record/3`);
-  the server feeds it.
+  The policy is pure (`observe/3`, `plan/4`, `still?/2`, `run_round/4`,
+  `record/3`); the server feeds it. Each VM is checked against the latest
+  sample just before it's asked, so one that got busy while an earlier
+  guest took its time isn't, and each outcome is taken in as it comes,
+  for the run of the VM that was asked.
   """
   use GenServer
 
@@ -99,6 +102,8 @@ defmodule ForemanAgent.VM.Reclaimer do
 
   defp observe_vm(_vm, line, now) do
     %{
+      # Which run of the VM this is: an outcome for an earlier one is dropped.
+      incarnation: System.unique_integer([:positive, :monotonic]),
       cpu_usec: line.cpu_usec,
       memory_bytes: line.memory_bytes,
       seen_at: now,
@@ -111,17 +116,17 @@ defmodule ForemanAgent.VM.Reclaimer do
   end
 
   @doc """
-  Which VMs to ask now, in order, each `{env_id, :pressure | :timer,
-  memory_bytes}`, and the bytes the box is short of (0 without pressure).
-  `nil` for none.
+  Which VMs to ask now, in order, each `%{id, reason, memory, incarnation,
+  quiet_since}` (`reason` is `:pressure` or `:timer`), and the bytes the
+  box is short of (0 without pressure). `nil` for none.
   """
   def plan(state, sample, now, settings) do
     if state.settle_until != nil and now < state.settle_until do
       nil
     else
       {pressure, deficit} = pressure(state, sample, now, settings)
-      asked = MapSet.new(pressure, &elem(&1, 0))
-      timer = Enum.reject(timer(state, now, settings), &MapSet.member?(asked, elem(&1, 0)))
+      asked = MapSet.new(pressure, & &1.id)
+      timer = Enum.reject(timer(state, now, settings), &MapSet.member?(asked, &1.id))
 
       case pressure ++ timer do
         [] -> nil
@@ -140,7 +145,7 @@ defmodule ForemanAgent.VM.Reclaimer do
         state.vms
         |> Enum.filter(fn {_id, vm} -> askable?(vm, now, settings) and pressure?(vm, now) end)
         |> Enum.sort_by(fn {_id, vm} -> {vm.quiet_since, -vm.memory_bytes} end)
-        |> Enum.map(fn {id, vm} -> {id, :pressure, vm.memory_bytes} end)
+        |> Enum.map(fn {id, vm} -> item(id, vm, :pressure) end)
 
       {ask, deficit}
     else
@@ -155,7 +160,28 @@ defmodule ForemanAgent.VM.Reclaimer do
         askable?(vm, now, settings),
         quiet_for?(vm, now, settings.idle_minutes * 60_000),
         vm.reclaimed_at == nil or vm.reclaimed_at < vm.quiet_since,
-        do: {id, :timer, vm.memory_bytes}
+        do: item(id, vm, :timer)
+  end
+
+  defp item(id, vm, reason) do
+    %{
+      id: id,
+      reason: reason,
+      memory: vm.memory_bytes,
+      incarnation: vm.incarnation,
+      quiet_since: vm.quiet_since
+    }
+  end
+
+  @doc """
+  Whether a VM planned for may still be asked: the same run of it, quiet
+  since the same sample as when the plan was made, and able to reclaim.
+  """
+  def still?(state, %{id: id, incarnation: incarnation, quiet_since: quiet_since}) do
+    match?(
+      %{incarnation: ^incarnation, quiet_since: ^quiet_since, unsupported: false},
+      state.vms[id]
+    )
   end
 
   defp askable?(vm, now, settings) do
@@ -174,16 +200,27 @@ defmodule ForemanAgent.VM.Reclaimer do
   @doc """
   Asks each VM in the plan in turn (`reclaim.(env_id, keep_mb)`), until
   what the guests say they freed covers the plan's deficit; `:timer` ones
-  are asked anyway. A guest's word counts for no more than its VM holds.
-  Returns `{env_id, result, at}` for each VM asked.
+  are asked anyway. A guest's word counts for no more than its VM holds,
+  and for nothing when its writes failed. Returns `{item, result, at}`
+  for each VM asked.
+
+  Options: `:allowed?` (`fn item -> boolean end`, asked just before each
+  VM: the server checks the VM is still quiet), `:report` (`fn outcome ->
+  any end`, called with each outcome as it comes) and `:clock`.
   """
-  def run_round(%{ask: ask, deficit: deficit}, keep_mb, reclaim, clock \\ &now/0) do
+  def run_round(%{ask: ask, deficit: deficit}, keep_mb, reclaim, opts \\ []) do
+    allowed? = Keyword.get(opts, :allowed?, fn _item -> true end)
+    report = Keyword.get(opts, :report, fn _outcome -> :ok end)
+    clock = Keyword.get(opts, :clock, &now/0)
+
     {outcomes, _freed} =
-      Enum.reduce(ask, {[], 0}, fn {id, reason, memory}, {outcomes, freed} ->
-        if reason == :timer or freed < deficit do
-          result = reclaim.(id, keep_mb)
-          log(id, result)
-          {[{id, result, clock.()} | outcomes], freed + counted(result, memory)}
+      Enum.reduce(ask, {[], 0}, fn item, {outcomes, freed} ->
+        if (item.reason == :timer or freed < deficit) and allowed?.(item) do
+          result = reclaim.(item.id, keep_mb)
+          log(item.id, result)
+          outcome = {item, result, clock.()}
+          report.(outcome)
+          {[outcome | outcomes], freed + counted(result, item.memory)}
         else
           {outcomes, freed}
         end
@@ -192,10 +229,21 @@ defmodule ForemanAgent.VM.Reclaimer do
     Enum.reverse(outcomes)
   end
 
-  defp counted({:ok, %{free_before_mb: before, free_after_mb: later}}, memory),
-    do: min(max(later - before, 0) * @mib, memory)
+  defp counted({:ok, %{reclaim: r} = result}, memory) when r in ["ok", "partial"],
+    do: min(max(result.free_after_mb - result.free_before_mb, 0) * @mib, memory)
 
   defp counted(_result, _memory), do: 0
+
+  defp log(id, {:ok, %{reclaim: "failed"} = r}) do
+    Logger.warning(
+      "couldn't reclaim #{id}'s page cache: the guest's writes failed " <>
+        "(reclaim failed, compact #{r.compact})"
+    )
+  end
+
+  defp log(id, {:ok, %{reclaim: "skipped"} = r}) do
+    Logger.info("#{id} has #{r.file_before_mb} MiB of page cache, about what it keeps")
+  end
 
   defp log(id, {:ok, r}) do
     Logger.info(
@@ -218,31 +266,37 @@ defmodule ForemanAgent.VM.Reclaimer do
     do: Logger.warning("couldn't reclaim #{id}'s page cache: #{inspect(reason)}")
 
   @doc """
-  Takes a round's outcomes in at `now`: a VM that reclaimed settles, one
-  that can't isn't asked again while it runs, and one that failed waits.
-  After a round that reclaimed anything, nothing more is asked until the
-  memory has had time to come back.
+  Takes outcomes in at `now`. A VM that reclaimed settles, and nothing
+  more is asked until the memory has had time to come back. One with
+  little cache to give isn't asked again until it grows, one that can't
+  isn't asked again while it runs, and one that failed (its writes in
+  the guest included) waits. An outcome for an earlier run of the VM is
+  dropped.
   """
   def record(state, outcomes, now) do
-    vms =
-      Enum.reduce(outcomes, state.vms, fn {id, result, at}, vms ->
-        case vms do
-          %{^id => vm} -> Map.put(vms, id, outcome(vm, result, at))
-          _ -> vms
-        end
-      end)
+    Enum.reduce(outcomes, state, fn {%{id: id, incarnation: incarnation}, result, at}, state ->
+      case state.vms do
+        %{^id => %{incarnation: ^incarnation} = vm} ->
+          state = %{state | vms: Map.put(state.vms, id, outcome(vm, result, at))}
+          if reclaimed?(result), do: %{state | settle_until: now + @settle}, else: state
 
-    settle_until =
-      if Enum.any?(outcomes, &match?({_, {:ok, _}, _}, &1)),
-        do: now + @settle,
-        else: state.settle_until
-
-    %{state | vms: vms, settle_until: settle_until}
+        _ ->
+          state
+      end
+    end)
   end
 
-  defp outcome(vm, {:ok, _}, at), do: %{vm | reclaimed_at: at, settled_bytes: nil, retry_at: nil}
+  defp reclaimed?({:ok, %{reclaim: r}}), do: r in ["ok", "partial"]
+  defp reclaimed?(_result), do: false
+
+  defp outcome(vm, {:ok, %{reclaim: r}}, at) when r in ["ok", "partial"],
+    do: %{vm | reclaimed_at: at, settled_bytes: nil, retry_at: nil}
+
+  defp outcome(vm, {:ok, %{reclaim: "skipped"}}, at),
+    do: %{vm | reclaimed_at: at, settled_bytes: vm.memory_bytes, retry_at: nil}
+
   defp outcome(vm, {:error, :unsupported}, _at), do: %{vm | unsupported: true}
-  defp outcome(vm, {:error, _}, at), do: %{vm | retry_at: at + @retry}
+  defp outcome(vm, _failed, at), do: %{vm | retry_at: at + @retry}
 
   @doc "This box's sample: `MemAvailable`, `MemTotal`, and each running VM's cgroup."
   @spec sample(Config.t()) :: {:ok, sample()} | {:error, String.t()}
@@ -314,9 +368,12 @@ defmodule ForemanAgent.VM.Reclaimer do
     end
   end
 
-  def handle_info({:round_done, ref, outcomes}, %{round: {_pid, ref}} = state) do
+  def handle_info({:outcome, ref, outcome}, %{round: {_pid, ref}} = state),
+    do: {:noreply, %{state | policy: record(state.policy, [outcome], state.now.())}}
+
+  def handle_info({:round_done, ref}, %{round: {_pid, ref}} = state) do
     Process.demonitor(ref, [:flush])
-    {:noreply, %{state | round: nil, policy: record(state.policy, outcomes, state.now.())}}
+    {:noreply, %{state | round: nil}}
   end
 
   def handle_info({:DOWN, ref, :process, _pid, reason}, %{round: {_pid2, ref}} = state) do
@@ -325,6 +382,12 @@ defmodule ForemanAgent.VM.Reclaimer do
   end
 
   def handle_info(_other, state), do: {:noreply, state}
+
+  @impl true
+  def handle_call({:still?, ref, item}, _from, %{round: {_pid, ref}} = state),
+    do: {:reply, still?(state.policy, item), state}
+
+  def handle_call({:still?, _ref, _item}, _from, state), do: {:reply, false, state}
 
   defp maybe_start_round(%{round: nil} = state, sample, now) do
     case plan(state.policy, sample, now, state.settings) do
@@ -342,7 +405,13 @@ defmodule ForemanAgent.VM.Reclaimer do
                 {:go, ref} -> ref
               end
 
-            send(server, {:round_done, ref, run_round(plan, keep_mb, reclaim, clock)})
+            run_round(plan, keep_mb, reclaim,
+              clock: clock,
+              allowed?: &GenServer.call(server, {:still?, ref, &1}, 30_000),
+              report: &send(server, {:outcome, ref, &1})
+            )
+
+            send(server, {:round_done, ref})
           end)
 
         send(pid, {:go, ref})
