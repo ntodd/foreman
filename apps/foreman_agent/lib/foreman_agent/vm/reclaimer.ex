@@ -237,7 +237,7 @@ defmodule ForemanAgent.VM.Reclaimer do
   defp log(id, {:ok, %{reclaim: "failed"} = r}) do
     Logger.warning(
       "couldn't reclaim #{id}'s page cache: the guest's writes failed " <>
-        "(reclaim failed, compact #{r.compact})"
+        "(reclaim failed, compact #{r.compact}, drain #{r.drain})"
     )
   end
 
@@ -245,12 +245,24 @@ defmodule ForemanAgent.VM.Reclaimer do
     Logger.info("#{id} has #{r.file_before_mb} MiB of page cache, about what it keeps")
   end
 
+  # A drain that failed leaves the reclaim standing, but less of it may
+  # come back to the box.
   defp log(id, {:ok, r}) do
-    Logger.info(
+    message =
       "reclaimed #{id}'s page cache: #{r.file_before_mb} to #{r.file_after_mb} MiB, " <>
         "#{max(r.free_after_mb - r.free_before_mb, 0)} MiB freed in the guest " <>
-        "(reclaim #{r.reclaim} in #{r.reclaim_ms} ms, compact #{r.compact} in #{r.compact_ms} ms)"
-    )
+        "(reclaim #{r.reclaim} in #{r.reclaim_ms} ms, compact #{r.compact} in #{r.compact_ms} ms, " <>
+        "drain #{r.drain} in #{r.drain_ms} ms)"
+
+    if r.drain == "failed" do
+      Logger.warning(
+        message <>
+          "; the guest couldn't drain its per-CPU free lists, so less may come back " <>
+          "(its journal says why)"
+      )
+    else
+      Logger.info(message)
+    end
   end
 
   defp log(id, {:error, :unsupported}),

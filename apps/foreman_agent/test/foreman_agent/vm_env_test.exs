@@ -602,8 +602,10 @@ defmodule ForemanAgent.VMEnvTest do
                "free_after_mb" => 4396,
                "reclaim" => "ok",
                "compact" => "ok",
+               "drain" => "ok",
                "reclaim_ms" => 700,
-               "compact_ms" => 300
+               "compact_ms" => 300,
+               "drain_ms" => 40
              }}
           end
         }
@@ -631,7 +633,7 @@ defmodule ForemanAgent.VMEnvTest do
     end
 
     test "page cache reclaim reaches the VM's guest agent", ctx do
-      assert {:ok, %{reclaim: "ok", free_after_mb: 4396}} =
+      assert {:ok, %{reclaim: "ok", drain: "ok", free_after_mb: 4396}} =
                Reclaimer.reclaim(@env, 2048, ctx.config)
 
       assert_received {:reclaim_asked, %{"keep_mb" => 2048}}

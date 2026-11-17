@@ -125,6 +125,18 @@ defmodule ForemanAgent.VMReclaimerTest do
     assert asks(Reclaimer.plan(state, current(state, 20), t3, @settings)) == ["b"]
   end
 
+  test "a reclaim whose drain failed is still a reclaim, and is waited on" do
+    {state, t} = run_for(Reclaimer.new(), 0, 15, %{"a" => {0.01, 10}, "b" => {0.01, 9}})
+    drain_failed = %{reclaimed(4096) | drain: "failed"}
+    state = Reclaimer.record(state, [done(state, "a", {:ok, drain_failed}, t)], t)
+
+    {state, t2} = run_for(state, t + @tick, 0, %{"a" => {0.01, 10}, "b" => {0.01, 9}})
+    assert Reclaimer.plan(state, current(state, 20), t2, @settings) == nil
+
+    {state, t3} = run_for(state, t2 + @tick, 1, %{"a" => {0.01, 6}, "b" => {0.01, 9}})
+    assert asks(Reclaimer.plan(state, current(state, 20), t3, @settings)) == ["b"]
+  end
+
   test "a VM is asked again once it grows a GiB past where it settled, or after an hour" do
     {state, t} = run_for(Reclaimer.new(), 0, 15, %{"a" => {0.01, 10}})
     state = Reclaimer.record(state, [done(state, "a", {:ok, reclaimed(4096)}, t)], t)
@@ -345,7 +357,7 @@ defmodule ForemanAgent.VMReclaimerTest do
 
     test "a guest whose writes failed counts for nothing, and is warned about" do
       plan = %{ask: [item("a", :pressure, 10), item("b", :pressure, 10)], deficit: 6 * @gib}
-      failed = %{reclaimed(8192) | reclaim: "failed", compact: "failed"}
+      failed = %{reclaimed(8192) | reclaim: "failed", compact: "failed", drain: "failed"}
 
       reclaim = fn
         "a", _ -> {:ok, failed}
@@ -355,7 +367,47 @@ defmodule ForemanAgent.VMReclaimerTest do
       log = capture_log(fn -> assert [_, _] = Reclaimer.run_round(plan, 2048, reclaim) end)
 
       assert log =~
-               "couldn't reclaim a's page cache: the guest's writes failed (reclaim failed, compact failed)"
+               "couldn't reclaim a's page cache: the guest's writes failed " <>
+                 "(reclaim failed, compact failed, drain failed)"
+    end
+
+    test "a guest whose drain failed still counts, and is warned about" do
+      plan = %{ask: [item("a", :pressure, 10), item("b", :pressure, 10)], deficit: 6 * @gib}
+      drain_failed = %{reclaimed(8192) | drain: "failed", drain_ms: 3}
+
+      reclaim = fn
+        "a", _ -> {:ok, drain_failed}
+        "b", _ -> {:ok, reclaimed(8192)}
+      end
+
+      # The test logger drops info, so only a warning is captured.
+      log =
+        capture_log(fn ->
+          assert [{%{id: "a"}, {:ok, _}, _}] = Reclaimer.run_round(plan, 2048, reclaim)
+        end)
+
+      assert log =~ "reclaimed a's page cache: 10240 to 2048 MiB, 8192 MiB freed in the guest"
+      assert log =~ "drain failed in 3 ms"
+      assert log =~ "the guest couldn't drain its per-CPU free lists"
+    end
+
+    test "a reclaim that drained says so, and isn't a warning" do
+      plan = %{ask: [item("a", :pressure, 10)], deficit: 6 * @gib}
+      reclaim = fn "a", _ -> {:ok, reclaimed(8192)} end
+
+      assert capture_log(fn -> Reclaimer.run_round(plan, 2048, reclaim) end) == ""
+
+      # Only this module's tests log from the Reclaimer, one at a time.
+      log =
+        try do
+          Logger.put_module_level(Reclaimer, :info)
+          capture_log([level: :info], fn -> Reclaimer.run_round(plan, 2048, reclaim) end)
+        after
+          Logger.delete_module_level(Reclaimer)
+        end
+
+      assert log =~ "[info] reclaimed a's page cache"
+      assert log =~ "(reclaim ok in 900 ms, compact ok in 400 ms, drain ok in 30 ms)"
     end
 
     test "only VMs still allowed are asked, and each outcome is reported as it comes" do
@@ -508,8 +560,10 @@ defmodule ForemanAgent.VMReclaimerTest do
       free_after_mb: 500 + freed_mb,
       reclaim: "ok",
       compact: "ok",
+      drain: "ok",
       reclaim_ms: 900,
-      compact_ms: 400
+      compact_ms: 400,
+      drain_ms: 30
     }
   end
 end
