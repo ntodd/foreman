@@ -1,0 +1,59 @@
+#!/bin/sh
+# Gives the box back memory the guest's page cache holds, when the guest
+# agent asks (ForemanAgent.Guest.Reclaim). foreman-guest-reclaim@.service
+# runs it as root for each connection on /run/foreman-reclaim.sock, which
+# only root and the agent's group can open: the agent has no capabilities
+# for either file it writes.
+#
+# The request is one line, the bytes of page cache to reclaim. The answer
+# is one line:
+#
+#   ok reclaim=ok|partial|failed compact=ok|failed reclaim_ms=N compact_ms=N
+#   error <why>
+#
+# memory.reclaim at the root cgroup evicts the coldest pages first, and
+# fails with EAGAIN when it gets less than it was asked for (partial).
+# Then compaction: free page reporting only gives the box free blocks of
+# 2 MiB or more.
+set -u
+export LC_ALL=C
+
+# A short line at most, read to the end of the request.
+req=$(head -c 32 | head -n 1)
+case $req in
+  "" | *[!0-9]*)
+    echo "error bad request"
+    exit 0
+    ;;
+esac
+# Up to 1 TiB.
+if [ "${#req}" -gt 13 ]; then
+  echo "error bad request"
+  exit 0
+fi
+
+ms() { date +%s%3N; }
+
+# Writes $1 to the file $2. Returns 2 for EAGAIN, 1 for any other failure,
+# which goes to the journal.
+write() {
+  if err=$(/usr/bin/printf '%s\n' "$1" 2>&1 > "$2"); then return 0; fi
+  echo "writing $2: $err" >&2
+  case $err in
+    *"Resource temporarily unavailable"*) return 2 ;;
+    *) return 1 ;;
+  esac
+}
+
+t0=$(ms)
+write "$req" /sys/fs/cgroup/memory.reclaim
+case $? in
+  0) reclaim=ok ;;
+  2) reclaim=partial ;;
+  *) reclaim=failed ;;
+esac
+t1=$(ms)
+if write 1 /proc/sys/vm/compact_memory; then compact=ok; else compact=failed; fi
+t2=$(ms)
+
+echo "ok reclaim=$reclaim compact=$compact reclaim_ms=$((t1 - t0)) compact_ms=$((t2 - t1))"

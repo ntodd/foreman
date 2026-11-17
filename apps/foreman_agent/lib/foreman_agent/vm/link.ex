@@ -60,7 +60,8 @@ defmodule ForemanAgent.VM.Link do
   use GenServer
 
   alias ForemanAgent.{Channel, Text}
-  alias ForemanProtocol.{Command, Event}
+  alias ForemanAgent.Guest.Reclaim
+  alias ForemanProtocol.{Command, Event, Schema}
 
   require Logger
 
@@ -146,10 +147,51 @@ defmodule ForemanAgent.VM.Link do
 
   @doc "Asks the guest a query (`inventory`, `ports`)."
   @spec query(GenServer.server(), String.t(), timeout()) :: {:ok, term()} | {:error, term()}
-  def query(link, q, timeout \\ 5_000) do
-    GenServer.call(link, {:query, q, timeout}, timeout + 1_000)
+  def query(link, q, timeout \\ 5_000), do: query(link, q, %{}, timeout)
+
+  defp query(link, q, args, timeout) do
+    GenServer.call(link, {:query, q, args, timeout}, timeout + 1_000)
   catch
     :exit, _ -> {:error, :timeout}
+  end
+
+  @reclaim_result [
+    requested_mb: {:integer, required: true},
+    file_before_mb: {:integer, required: true},
+    file_after_mb: {:integer, required: true},
+    free_before_mb: {:integer, required: true},
+    free_after_mb: {:integer, required: true},
+    reclaim: {{:enum, ~w(ok partial failed skipped)}, required: true},
+    compact: {{:enum, ~w(ok failed skipped)}, required: true},
+    reclaim_ms: {:integer, required: true},
+    compact_ms: {:integer, required: true}
+  ]
+
+  @doc """
+  Asks the guest to give back its page cache past `keep_mb` MiB (see
+  `ForemanAgent.Guest.Reclaim`) and returns what it says it did. The
+  numbers are the guest's own, so nothing should count on them.
+  `{:error, :unsupported}` is a guest that can't: its agent or its system
+  image is older than reclaim.
+  """
+  @spec reclaim(GenServer.server(), non_neg_integer(), timeout()) ::
+          {:ok, map()} | {:error, :unsupported | term()}
+  def reclaim(link, keep_mb, timeout \\ 60_000) when is_integer(keep_mb) and keep_mb >= 0 do
+    unsupported = Reclaim.unsupported()
+
+    case query(link, "reclaim", %{"keep_mb" => keep_mb}, timeout) do
+      {:ok, result} ->
+        case Schema.cast(result, @reclaim_result) do
+          {:ok, result} -> {:ok, result}
+          {:error, _} -> {:error, @invalid_reply}
+        end
+
+      {:error, message} when message in ["unknown query", unsupported] ->
+        {:error, :unsupported}
+
+      error ->
+        error
+    end
   end
 
   @doc "Whether the link is connected to the guest agent."
@@ -228,14 +270,16 @@ defmodule ForemanAgent.VM.Link do
     {:reply, :ok, state}
   end
 
-  def handle_call({:query, _q, _timeout}, _from, %{ready: false} = state),
+  def handle_call({:query, _q, _args, _timeout}, _from, %{ready: false} = state),
     do: {:reply, {:error, :not_connected}, state}
 
-  def handle_call({:query, q, timeout}, from, state) do
+  def handle_call({:query, q, args, timeout}, from, state) do
     id = state.next_query
     timer = Process.send_after(self(), {:query_timeout, id}, timeout)
+    frame = %{"t" => "query", "id" => id, "q" => q}
+    frame = if args == %{}, do: frame, else: Map.put(frame, "args", args)
     # One that fails is answered when the connection closes.
-    {_, state} = send_frame(state, %{"t" => "query", "id" => id, "q" => q})
+    {_, state} = send_frame(state, frame)
 
     {:noreply,
      %{state | next_query: id + 1, queries: Map.put(state.queries, id, {from, q, timer})}}
@@ -551,6 +595,7 @@ defmodule ForemanAgent.VM.Link do
   # the rest.
   defp reply?("inventory", envs), do: is_list(envs) and Enum.all?(envs, &is_map/1)
   defp reply?("ports", ports), do: is_map(ports)
+  defp reply?("reclaim", result), do: is_map(result)
   defp reply?(_q, _result), do: false
 
   # Text from the guest: at most `max` bytes, valid UTF-8, and no control

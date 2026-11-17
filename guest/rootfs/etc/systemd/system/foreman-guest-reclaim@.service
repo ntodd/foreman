@@ -1,0 +1,26 @@
+[Unit]
+Description=Foreman guest memory reclaim
+
+[Service]
+# Root, because memory.reclaim and compact_memory are root's to write.
+# The rest of the sandbox leaves it those two files and nothing else:
+# no ProtectKernelTunables or ProtectControlGroups, which would make
+# them read-only.
+ExecStart=/usr/local/lib/foreman-guest/reclaim
+StandardInput=socket
+StandardOutput=socket
+StandardError=journal
+# Shorter than the guest agent waits (ForemanAgent.Guest.Reclaim).
+RuntimeMaxSec=45
+CapabilityBoundingSet=
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+PrivateNetwork=yes
+RestrictAddressFamilies=AF_UNIX
+RestrictNamespaces=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native

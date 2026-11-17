@@ -2,9 +2,10 @@
 # Boots the guest system image under Cloud Hypervisor, with the agent
 # release on its agent disk, and checks the agent on the box can drive
 # the agent in the VM over hybrid vsock: hello, queries, a command run in
-# the guest, a host-only command refused. Then powers the VM off, boots
-# it again on the same data disk (which mustn't be formatted twice), and
-# checks no unit failed.
+# the guest, a host-only command refused, and a page cache reclaim
+# through the guest's root helper. Then powers the VM off, boots it again
+# on the same data disk (which mustn't be formatted twice), and checks no
+# unit failed.
 #
 #   e2e/guest/run.sh GUEST_TAR AGENT_TARBALL
 #
@@ -78,6 +79,13 @@ if version != ForemanAgent.Identity.version(), do: fail.("guest agent #{inspect(
 {:error, "box.restart isn't run in an environment's VM"} = Link.run(link, cmd, fn _, _ -> :ok end)
 {:ok, cmd} = ForemanProtocol.Command.new("box.gc", %{})
 {:ok, _} = Link.run(link, cmd, fn _, data -> IO.write(data) end)
+# All of the page cache: the root helper reclaims it and compacts.
+case Link.reclaim(link, 0) do
+  {:ok, %{reclaim: r, compact: "ok"} = done} when r in ["ok", "partial"] ->
+    IO.puts("e2e/guest: reclaimed #{done.file_before_mb - done.file_after_mb} MiB of page cache " <>
+      "(#{r}, #{done.reclaim_ms} ms), compacted (#{done.compact_ms} ms)")
+  other -> fail.("reclaim: #{inspect(other)}")
+end
 IO.puts("e2e/guest: the guest agent (#{version}) answers")
 EXS
   "$dir/rel/bin/foreman_agent" eval "$(cat "$dir/check.exs")"

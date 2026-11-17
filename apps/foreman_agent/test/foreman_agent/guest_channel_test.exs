@@ -6,7 +6,7 @@ defmodule ForemanAgent.GuestChannelTest do
   import ExUnit.CaptureLog
 
   alias ForemanAgent.{Channel, Ops, Outbox}
-  alias ForemanAgent.Guest.Server
+  alias ForemanAgent.Guest.{Reclaim, Server}
   alias ForemanAgent.Test.VsockBridge
   alias ForemanAgent.VM.Link
   alias ForemanProtocol.{Command, Schema}
@@ -327,6 +327,61 @@ defmodule ForemanAgent.GuestChannelTest do
 
     assert {:ok, [%{"env_id" => @env}]} = Link.query(link, "inventory")
     assert {:error, "unknown query"} = Link.query(link, "secrets")
+  end
+
+  @reclaimed %{
+    "requested_mb" => 6741,
+    "file_before_mb" => 8789,
+    "file_after_mb" => 1953,
+    "free_before_mb" => 976,
+    "free_after_mb" => 7812,
+    "reclaim" => "partial",
+    "compact" => "ok",
+    "reclaim_ms" => 950,
+    "compact_ms" => 480
+  }
+
+  test "a reclaim takes what to keep to the guest, and brings its result back", ctx do
+    test = self()
+
+    reclaim = fn args ->
+      send(test, {:reclaim, args})
+      {:ok, @reclaimed}
+    end
+
+    start_guest(ctx, queries: %{"reclaim" => reclaim})
+    link = start_link(ctx)
+    wait_until(fn -> Link.connected?(link) end)
+
+    assert {:ok, %{reclaim: "partial", free_before_mb: 976, free_after_mb: 7812}} =
+             Link.reclaim(link, 2048)
+
+    assert_received {:reclaim, %{"keep_mb" => 2048}}
+  end
+
+  test "a guest whose system image can't reclaim says so", ctx do
+    no_helper = fn _args -> {:error, Reclaim.unsupported()} end
+    start_guest(ctx, queries: %{"reclaim" => no_helper})
+    link = start_link(ctx)
+    wait_until(fn -> Link.connected?(link) end)
+    assert {:error, :unsupported} = Link.reclaim(link, 2048)
+  end
+
+  test "a guest agent from before reclaim can't", ctx do
+    start_guest(ctx)
+    link = start_link(ctx)
+    wait_until(fn -> Link.connected?(link) end)
+    assert {:error, :unsupported} = Link.reclaim(link, 2048)
+  end
+
+  test "a reclaim that fails in the guest says why", ctx do
+    start_guest(ctx,
+      queries: %{"reclaim" => fn _ -> {:error, "a reclaim is already running"} end}
+    )
+
+    link = start_link(ctx)
+    wait_until(fn -> Link.connected?(link) end)
+    assert {:error, "a reclaim is already running"} = Link.reclaim(link, 2048)
   end
 
   test "a VM that stops fails the commands waiting on it", ctx do
@@ -993,6 +1048,16 @@ defmodule ForemanAgent.GuestChannelTest do
           %{"t" => "query", "id" => id, "q" => "ports"} ->
             [reply(id, %{"ok" => true, "result" => %{"x" => String.duplicate("a", 300_000)}})]
 
+          %{"t" => "query", "id" => id, "q" => "reclaim", "args" => %{"keep_mb" => 1}} ->
+            [reply(id, %{"ok" => true, "result" => %{"reclaim" => "ok"}})]
+
+          %{"t" => "query", "id" => id, "q" => "reclaim", "args" => %{"keep_mb" => 2}} ->
+            bad = Map.put(@reclaimed, "free_after_mb", -5)
+            [reply(id, %{"ok" => true, "result" => bad})]
+
+          %{"t" => "query", "id" => id, "q" => "reclaim"} ->
+            [reply(id, %{"ok" => true, "result" => Map.put(@reclaimed, "extra", 1)})]
+
           %{"t" => "query", "id" => id} ->
             [reply(id, %{"ok" => false, "error" => "no\e such\nquery"})]
 
@@ -1007,6 +1072,9 @@ defmodule ForemanAgent.GuestChannelTest do
       invalid = {:error, "the environment's VM sent an invalid reply"}
       assert Link.query(link, "inventory") == invalid
       assert Link.query(link, "ports") == invalid
+      assert Link.reclaim(link, 1) == invalid
+      assert Link.reclaim(link, 2) == invalid
+      assert Link.reclaim(link, 3) == invalid
       assert Link.query(link, "other") == {:error, "no suchquery"}
       assert :sys.get_state(link).guest_version == "0.1.0[31m"
     end
