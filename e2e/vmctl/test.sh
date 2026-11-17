@@ -32,7 +32,7 @@ cat > "$work/bin/uname" <<STUB
 cat "$work/release"
 STUB
 chmod +x "$work/bin/uname"
-for tool in ip sysctl systemctl systemd-run; do
+for tool in ip tc sysctl systemctl systemd-run; do
   cat > "$work/bin/$tool" <<STUB
 #!/bin/sh
 echo "$tool \$*" >> "$work/calls"
@@ -191,6 +191,8 @@ has "sees its own directory" "BindPaths=$work/srv/vms/$env1"
 has "sees the guest images and agent disks read-only" "BindReadOnlyPaths=$work/srv/guest $work/srv/agent-disks"
 has "can't see the box's secrets, identity or settings, or reach this helper" \
   "InaccessiblePaths=-/run/foreman -/var/lib/foreman-agent -/etc/foreman-agent -$work/state -/run/foreman-vmctl.sock"
+check "shapes traffic to the guest" grep -q 'tc qdisc replace dev fm-vm0 root tbf rate 50mbit' "$work/calls"
+check "polices traffic from the guest" grep -q 'tc filter replace dev fm-vm0 ingress .* rate 50mbit' "$work/calls"
 check "gives the box's end its address" grep -q "ip addr replace 10.250.0.1/30 dev fm-vm0" "$work/calls"
 check "keeps the guests' resolvers for the firewall's loader" grep -qx "192.168.1.1" "$work/state/guest-dns"
 expect "says which tap a VM has" "tap $env1" "ok fm-vm0"

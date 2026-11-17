@@ -81,6 +81,7 @@ fi
 command -v systemctl >/dev/null 2>&1 || fail "systemd is required"
 command -v systemd-run >/dev/null 2>&1 || fail "systemd-run is required"
 command -v ip >/dev/null 2>&1 || fail "iproute2 is required (apt install iproute2)"
+command -v tc >/dev/null 2>&1 || fail "tc is required (apt install iproute2)"
 command -v mkfs.ext4 >/dev/null 2>&1 || fail "e2fsprogs is required (apt install e2fsprogs)"
 command -v flock >/dev/null 2>&1 || fail "flock is required (apt install util-linux)"
 nft=$(command -v nft 2>/dev/null || true)
@@ -314,6 +315,17 @@ table inet foreman_vm {
 EOF
   fi
 fi
+# Reserve at least half of conntrack for other box traffic. Reading the
+# sysctl requires the module on a host which has not yet loaded NAT rules.
+if grep -q '# guest-conntrack-budget$' /etc/foreman-agent/firewall.nft.new; then
+  if [ ! -r /proc/sys/net/netfilter/nf_conntrack_max ]; then modprobe nf_conntrack; fi
+  max_flows=$(cat /proc/sys/net/netfilter/nf_conntrack_max)
+  case "$max_flows" in ''|*[!0-9]*) fail "could not determine the box's conntrack capacity" ;; esac
+  budget=$((max_flows / 2))
+  [ "$budget" -gt 0 ] || fail "the box has no conntrack capacity for guests"
+  [ "$budget" -le 16384 ] || budget=16384
+  sed -i "/# guest-conntrack-budget$/s/ct count over [0-9]*/ct count over $budget/" /etc/foreman-agent/firewall.nft.new
+fi
 "$nft" -c -f /etc/foreman-agent/firewall.nft.new || fail "nftables rejected the firewall rules"
 chmod 0644 /etc/foreman-agent/firewall.nft.new
 mv /etc/foreman-agent/firewall.nft.new /etc/foreman-agent/firewall.nft
@@ -454,6 +466,8 @@ AGENT_ROOT=/opt/foreman-agent
 AGENT_USER=foreman
 POOL=$VM_SUBNET
 STATE=/var/lib/foreman-vmctl
+# Root can set TAP_RATE below the usable uplink rate here.
+[ ! -f /etc/foreman-agent/network.conf ] || . /etc/foreman-agent/network.conf
 EOF
 chmod 0644 /etc/foreman-agent/vmctl.conf
 printf '# Written by install.sh: a re-run keeps these unless it is given others.\nBLOCK_LAN=%s\nVM_SUBNET=%s\n' \

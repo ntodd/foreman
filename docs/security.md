@@ -181,6 +181,14 @@ the box.
 - Each VM has its own copy of the guest's root disk and its own data
   disk. The agent disk (the box's agent release) is shared and
   read-only.
+- Each VM tap admits up to 2,048 concurrent outbound tracked flows and
+  limits new traffic to 128 packets per second with a burst of 256.
+  At install, the box sets an aggregate guest flow ceiling of half its
+  conntrack capacity, up to 16,384. Reloading the rules recreates these
+  counters. Each tap also limits traffic to 50 Mbit/s in each direction.
+  On a slower uplink, root can set `TAP_RATE` in
+  `/etc/foreman-agent/network.conf` below the available uplink rate.
+  The helper applies that setting when it prepares a tap for boot or restore.
 - A guest reaches the internet and, unless the box was installed with
   `--block-lan`, the box's LAN, and nothing else: not the box, not
   another guest, not the tailnet as the box. See

@@ -76,6 +76,28 @@ table inet foreman_guests
 delete table inet foreman_guests
 
 table inet foreman_guests {
+	# Per-tap state cannot be multiplied by choosing more source addresses.
+	set guest_connections {
+		type ifname
+		flags dynamic
+		size 16384
+	}
+	set guest_new_rate {
+		type ifname
+		flags dynamic,timeout
+		timeout 1m
+		size 16384
+	}
+	chain guest_admission {
+		update @guest_new_rate { iifname limit rate over 128/second burst 256 packets } counter drop
+		add @guest_connections { iifname ct count over 2048 } counter drop
+		ct count over 16384 counter drop # guest-conntrack-budget
+	}
+	chain tracked_prerouting {
+		type filter hook prerouting priority mangle; policy accept;
+		iifname "fm-vm*" ct state new ct direction original jump guest_admission
+	}
+
 	# The resolvers guests are given (foreman-vmctl's), which --block-lan
 	# still lets them reach; added when the table loads.
 	set guest_dns {

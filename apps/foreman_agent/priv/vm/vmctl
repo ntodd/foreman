@@ -48,6 +48,7 @@ SRV=/srv/foreman
 AGENT_ROOT=/opt/foreman-agent
 AGENT_USER=foreman
 POOL=10.250
+TAP_RATE=50mbit
 STATE=/var/lib/foreman-vmctl
 RESOLV=/etc/resolv.conf
 LSM=/sys/kernel/security/lsm
@@ -118,6 +119,11 @@ net_up() {
   fi
   sysctl -qw "net.ipv6.conf.$tap.disable_ipv6=1" 2>/dev/null || true
   ip addr replace "$host_ip/30" dev "$tap" || answer "error couldn't address $tap"
+  tc qdisc replace dev "$tap" root tbf rate "$TAP_RATE" burst 128kb latency 50ms ||
+    answer "error couldn't shape traffic to $tap"
+  tc qdisc replace dev "$tap" clsact || answer "error couldn't police $tap"
+  tc filter replace dev "$tap" ingress protocol all pref 1 matchall action police \
+    rate "$TAP_RATE" burst 128kb conform-exceed drop/ok || answer "error couldn't limit traffic from $tap"
   ip link set "$tap" up || answer "error couldn't bring $tap up"
 }
 
