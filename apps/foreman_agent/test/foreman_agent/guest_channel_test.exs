@@ -384,6 +384,14 @@ defmodule ForemanAgent.GuestChannelTest do
       big = String.duplicate("a", Channel.max_frame(:to_guest) - 100)
       assert {:ok, %{"data" => ^big}} = Channel.decode(~s({"t":"cmd","data":"#{big}"}))
     end
+
+    test "a number that costs more heap than a legitimate frame needs is malformed" do
+      # Decodes under a loose heap, not under the default: an honest frame
+      # never carries a 400,000-digit number.
+      frame = ~s({"t":"event","x":) <> String.duplicate("1", 400_000) <> "}"
+      assert {:ok, _} = Channel.decode(frame, max_heap: 8 * 1024 * 1024)
+      assert {:error, :malformed} = Channel.decode(frame)
+    end
   end
 
   describe "a hostile guest" do
@@ -620,6 +628,96 @@ defmodule ForemanAgent.GuestChannelTest do
 
       assert_receive {:result, {:ok, %{"after" => true}}}, 3_000
       assert :counters.get(counter, 1) >= 2
+    end
+
+    test "a frame over the guest cap but under a megabyte still drops the connection", ctx do
+      counter = :counters.new(1, [])
+
+      start_fake_vm(
+        ctx,
+        reactive(fn
+          %{"t" => "hello"} ->
+            :counters.add(counter, 1, 1)
+
+            # Between the 512 KiB guest cap and the old 1 MiB one.
+            if :counters.get(counter, 1) == 1,
+              do: [:binary.copy("x", 700_000)],
+              else: [hello()]
+
+          %{"t" => "cmd", "cmd" => %{"op_id" => op_id}} ->
+            [event("op.result", %{op_id: op_id, status: "ok", result: %{"after" => true}}, 1)]
+
+          _ ->
+            []
+        end)
+      )
+
+      link = start_link(ctx)
+      run_async(link, command())
+
+      assert_receive {:result, {:ok, %{"after" => true}}}, 3_000
+      assert :counters.get(counter, 1) >= 2
+    end
+
+    test "the link reads the guest no faster than its rate allows", ctx do
+      test = self()
+      total = 16
+
+      frame = fn n ->
+        Channel.encode(%{
+          "t" => "event",
+          "seq" => n,
+          "event" => %{"type" => "noop"},
+          "pad" => String.duplicate("a", 4_000)
+        })
+      end
+
+      start_fake_vm(ctx, fn socket ->
+        {:ok, _hello} = :gen_tcp.recv(socket, 0, 5_000)
+        :ok = :gen_tcp.send(socket, hello())
+        # More frames at once than the burst covers.
+        Enum.each(1..total, fn n -> :gen_tcp.send(socket, frame.(n)) end)
+
+        # The link acks each event as it reads it, so the acks meter how
+        # fast it's reading.
+        count = fn count ->
+          case :gen_tcp.recv(socket, 0, 5_000) do
+            {:ok, data} ->
+              {:ok, %{"t" => "ack"}} = Channel.decode(data)
+              send(test, :acked)
+              count.(count)
+
+            {:error, _} ->
+              :ok
+          end
+        end
+
+        count.(count)
+      end)
+
+      # ~4 KB frames: a 2-frame burst, then ~10 frames/second.
+      start_link(ctx, read_burst: 8_200, read_rate: 41_000)
+      assert_receive :vm_connected, 5_000
+
+      Process.sleep(250)
+      early = count_received(:acked)
+      assert early < total, "read all #{total} frames at once (#{early}); the rate limit didn't bite"
+      assert early <= 6
+
+      # The rest arrive as the bucket refills.
+      got =
+        Enum.reduce_while(1..60, early, fn _, acc ->
+          acc = acc + count_received(:acked)
+
+          if acc >= total do
+            {:halt, acc}
+          else
+            Process.sleep(100)
+            {:cont, acc}
+          end
+        end)
+
+      assert got == total
     end
 
     test "a frame too large to decode doesn't take the link down", ctx do

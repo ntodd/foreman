@@ -152,8 +152,12 @@ the box.
   serial console): there's no shared filesystem and no device
   passthrough.
 - The channel to the guest agent is Cloud Hypervisor's hybrid vsock, and
-  only the box connects: nothing on the box listens for a guest. Frames
-  over 4 MiB close the connection. Anything that isn't a valid hello,
+  only the box connects: nothing on the box listens for a guest. The
+  box caps a guest's frames at 512 KiB and closes the connection on a
+  larger one; decoding a frame is bounded in memory and time, and the
+  box reads a guest no faster than a per-link byte-rate limit, so a
+  guest that streams costly frames can't spend the box's CPU outside its
+  VM's cgroup. Anything that isn't a valid hello,
   event or reply is dropped, an event only reaches the operation it
   names, and inventory and ports replies only count for the VM's own
   environment, under the slug the box knows it by. The box's agent

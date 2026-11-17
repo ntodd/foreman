@@ -28,6 +28,13 @@ defmodule ForemanAgent.VM.Link do
 
     * Frames past `ForemanAgent.Channel.max_frame(:to_host)` close the
       connection, and decoding one has a limit on memory and time.
+    * The link reads the guest no faster than a byte-rate token bucket
+      allows: a burst, then a steady rate. Decoding runs in the host
+      agent's BEAM rather than the VM's cgroup, so without this a guest
+      that streams costly frames could spend host CPU that its `CPUQuota`
+      never bounds. Over the rate the link stops reading until the bucket
+      refills; it never drops a frame for this, so honest traffic is only
+      slowed, never lost.
     * Anything that isn't a valid event, reply or hello is dropped, and
       so is a hello after the first on a connection.
     * An event only reaches the caller whose command it names. A result
@@ -56,6 +63,10 @@ defmodule ForemanAgent.VM.Link do
     * `:send_timeout` - milliseconds a send to the guest may take before
       the link gives up on the connection (default 5 seconds)
     * `:log_budget` - bytes of log passed on per command (default 64 MiB)
+    * `:read_burst` - bytes the link will read from the guest before the
+      rate limit bites (default 8 MiB)
+    * `:read_rate` - bytes per second the link reads from the guest once
+      the burst is spent (default 2 MiB/s)
   """
   use GenServer
 
@@ -80,6 +91,11 @@ defmodule ForemanAgent.VM.Link do
   @warn_every 60_000
   # Cancels kept for the guest until it has a result for them.
   @max_cancels 256
+  # How fast the link reads the guest: a burst of bytes, refilled at a
+  # steady rate (bytes/second). Bounds the host CPU a hostile guest can
+  # spend on frame decoding, which isn't charged to the VM's cgroup.
+  @read_burst 8 * 1_048_576
+  @read_rate 2 * 1_048_576
 
   @lost "lost the connection to the environment's VM"
   @restarted "the environment's VM restarted while running it"
@@ -174,6 +190,14 @@ defmodule ForemanAgent.VM.Link do
        max_retry: Keyword.get(opts, :max_retry, 10_000),
        send_timeout: Keyword.get(opts, :send_timeout, 5_000),
        log_budget: Keyword.get(opts, :log_budget, 64 * 1_048_576),
+       read_burst: Keyword.get(opts, :read_burst, @read_burst),
+       read_rate: Keyword.get(opts, :read_rate, @read_rate),
+       # Bytes the link may still read before the rate limit bites, and
+       # when the bucket was last refilled. A pending :rate_arm timer, if
+       # the bucket ran dry while there was more to read.
+       tokens: Keyword.get(opts, :read_burst, @read_burst),
+       rate_at: now(),
+       rate_timer: nil,
        # The wait before the next connection attempt.
        backoff: retry,
        socket: nil,
@@ -263,7 +287,8 @@ defmodule ForemanAgent.VM.Link do
     case connect(state) do
       {:ok, socket} ->
         Process.send_after(self(), {:hello_timeout, socket}, @hello_timeout)
-        {:noreply, %{state | socket: socket, armed: true}}
+        # A fresh connection gets a fresh burst.
+        {:noreply, %{state | socket: socket, armed: true, tokens: state.read_burst, rate_at: now()}}
 
       {:error, reason} ->
         if state.alive?.() do
@@ -282,7 +307,9 @@ defmodule ForemanAgent.VM.Link do
   def handle_info(:connect, state), do: {:noreply, state}
 
   def handle_info({:tcp, socket, data}, %{socket: socket} = state) do
-    state = %{state | armed: false}
+    # Charge the frame's bytes to the read bucket before decoding it: the
+    # cost of decoding tracks the bytes read, and the guest is hostile.
+    state = charge(%{state | armed: false}, byte_size(data))
 
     state =
       case Channel.decode(data) do
@@ -309,6 +336,10 @@ defmodule ForemanAgent.VM.Link do
     do: {:noreply, disconnected(state)}
 
   def handle_info({:hello_timeout, _socket}, state), do: {:noreply, state}
+
+  # The read bucket has refilled; read the guest's next frame if nothing
+  # else holds it.
+  def handle_info(:rate_arm, state), do: {:noreply, arm(%{state | rate_timer: nil})}
 
   def handle_info({:query_timeout, id}, state) do
     case Map.pop(state.queries, id) do
@@ -387,6 +418,7 @@ defmodule ForemanAgent.VM.Link do
 
   defp disconnected(state) do
     :gen_tcp.close(state.socket)
+    if state.rate_timer, do: Process.cancel_timer(state.rate_timer)
 
     Enum.each(state.queries, fn {_id, {from, _q, timer}} ->
       Process.cancel_timer(timer)
@@ -403,6 +435,7 @@ defmodule ForemanAgent.VM.Link do
         armed: false,
         ready: false,
         ready_at: nil,
+        rate_timer: nil,
         queries: %{},
         backoff: backoff
     })
@@ -413,7 +446,8 @@ defmodule ForemanAgent.VM.Link do
     %{state | backoff: min(state.backoff * 2, state.max_retry)}
   end
 
-  # Passes the guest's next frame on, unless a caller is behind on its log.
+  # Passes the guest's next frame on, unless a caller is behind on its log
+  # or the read bucket is empty.
   defp arm(%{socket: nil} = state), do: state
   defp arm(%{armed: true} = state), do: state
 
@@ -421,15 +455,41 @@ defmodule ForemanAgent.VM.Link do
     if Enum.any?(state.pending, fn {_, e} -> e.untaken > @log_window end) do
       state
     else
-      case :inet.setopts(state.socket, active: :once) do
-        :ok ->
-          %{state | armed: true}
-
-        {:error, reason} ->
-          send(self(), {:socket_failed, state.socket, reason})
-          state
-      end
+      state = refill(state)
+      if state.tokens > 0, do: do_arm(state), else: pause_read(state)
     end
+  end
+
+  defp do_arm(state) do
+    case :inet.setopts(state.socket, active: :once) do
+      :ok ->
+        %{state | armed: true}
+
+      {:error, reason} ->
+        send(self(), {:socket_failed, state.socket, reason})
+        state
+    end
+  end
+
+  # The bucket is empty: wait for it to refill, then arm again. One timer
+  # at a time; a caller catching up on its log doesn't jump the rate.
+  defp pause_read(%{rate_timer: timer} = state) when timer != nil, do: state
+
+  defp pause_read(state) do
+    delay = max(10, trunc((1 - state.tokens) * 1_000 / state.read_rate) + 1)
+    %{state | rate_timer: Process.send_after(self(), :rate_arm, delay)}
+  end
+
+  # Adds the tokens earned since the last refill, capped at the burst.
+  defp refill(state) do
+    now = now()
+    earned = (now - state.rate_at) * state.read_rate / 1_000
+    %{state | tokens: min(state.read_burst, state.tokens + earned), rate_at: now}
+  end
+
+  defp charge(state, bytes) do
+    state = refill(state)
+    %{state | tokens: state.tokens - bytes}
   end
 
   defp handle_frame(%{"t" => "event", "event" => wire} = frame, state) do
