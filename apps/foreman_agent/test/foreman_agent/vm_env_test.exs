@@ -561,6 +561,32 @@ defmodule ForemanAgent.VMEnvTest do
       refute File.exists?(paths.snapshot)
     end
 
+    test "a failed marker sync prevents restore and cold boot", ctx do
+      {:ok, _} = run(command("env.suspend"), ctx)
+      flush()
+      expect(ForemanAgent.RunnerMock, :run, fn "sync", ["-f", _], _ -> {:error, :eio} end)
+      assert {:error, "couldn't sync " <> _} = run(command("env.start"), ctx)
+      refute_received {:machine, {:restore, _}, @env}
+      refute_received {:machine, {:boot, _}, @env}
+    end
+
+    test "a retried suspend must confirm the snapshot directory entry", ctx do
+      paths = VM.paths(ctx.config, @env)
+      expect(ForemanAgent.RunnerMock, :run, fn "sync", ["-f", _], _ -> {:ok, %{status: 0}} end)
+
+      expect(ForemanAgent.RunnerMock, :run, 2, fn "sync", ["-f", path], _ ->
+        assert path == paths.dir
+        {:ok, %{status: 1}}
+      end)
+
+      for _ <- 1..2 do
+        assert {:error, "couldn't sync " <> _} = run(command("env.suspend"), ctx)
+      end
+
+      expect(ForemanAgent.RunnerMock, :run, fn "sync", ["-f", _], _ -> {:ok, %{status: 0}} end)
+      assert {:ok, %{"suspended" => true}} = run(command("env.suspend"), ctx)
+    end
+
     test "a snapshot is marked used before the VM can run from it", ctx do
       {:ok, _} = run(command("env.suspend"), ctx)
       assert {:ok, %{"resumed" => true}} = run(command("env.start"), ctx)

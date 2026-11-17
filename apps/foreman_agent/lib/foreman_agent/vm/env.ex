@@ -25,13 +25,23 @@ defmodule ForemanAgent.VM.Env do
   alias ForemanAgent.VM.{Image, Link, Links, Machine, Prebuild}
   alias ForemanProtocol.{Command, Schema}
 
+  defmodule SnapshotSyncError do
+    defexception [:message]
+  end
+
   # How long a guest gets to shut down before the VM is stopped.
   @power_off_timeout 60_000
 
   @spec run(Command.t(), (String.t(), String.t() -> any()), map()) ::
           {:ok, map()} | {:error, String.t()} | {:error, String.t(), map()}
-  def run(%Command{type: type, payload: p} = cmd, log, ctx)
-      when type in ["env.create", "env.rebuild"] do
+  def run(cmd, log, ctx) do
+    execute(cmd, log, ctx)
+  rescue
+    e in SnapshotSyncError -> {:error, Exception.message(e)}
+  end
+
+  defp execute(%Command{type: type, payload: p} = cmd, log, ctx)
+       when type in ["env.create", "env.rebuild"] do
     with :ok <- Env.check_clone_url(p.clone_url, ctx.config),
          {:ok, _} <- cache_secrets(ctx, p.env_id, p.files),
          {:ok, spec} <- prepare(p, ctx, log),
@@ -43,7 +53,7 @@ defmodule ForemanAgent.VM.Env do
 
   # A start that resumed the VM says so: the environment's processes kept
   # the secrets they had when it was suspended.
-  def run(%Command{type: "env.start", payload: p} = cmd, log, ctx) do
+  defp execute(%Command{type: "env.start", payload: p} = cmd, log, ctx) do
     with {:ok, meta} <- existing(ctx.config, p.env_id),
          {:ok, spec} <- prepare(Map.put(p, :limits, limits(meta)), ctx, log),
          {:ok, how} <- ensure_running(p.env_id, spec, ctx, log),
@@ -56,7 +66,7 @@ defmodule ForemanAgent.VM.Env do
     end
   end
 
-  def run(%Command{type: "env.suspend", payload: p}, log, ctx) do
+  defp execute(%Command{type: "env.suspend", payload: p}, log, ctx) do
     machine = Machine.impl(ctx.config)
     paths = VM.paths(ctx.config, p.env_id)
 
@@ -73,10 +83,10 @@ defmodule ForemanAgent.VM.Env do
             Links.stop(p.env_id)
             # On disk before it counts: a power cut after this mustn't
             # leave a torn snapshot that looks whole.
-            sync_dir(tmp)
+            sync_path!(tmp, ctx.runner)
             discard_snapshot(ctx.config, p.env_id, ctx.runner)
             File.rename!(tmp, paths.snapshot)
-            sync_path(paths.dir, ctx.runner)
+            sync_path!(paths.dir, ctx.runner)
             {:ok, %{"suspended" => true}}
 
           {:error, message} ->
@@ -85,6 +95,7 @@ defmodule ForemanAgent.VM.Env do
         end
 
       VM.suspended?(ctx.config, p.env_id) ->
+        sync_path!(paths.dir, ctx.runner)
         {:ok, %{"suspended" => true}}
 
       true ->
@@ -92,7 +103,7 @@ defmodule ForemanAgent.VM.Env do
     end
   end
 
-  def run(%Command{type: "env.stop", payload: p} = cmd, log, ctx) do
+  defp execute(%Command{type: "env.stop", payload: p} = cmd, log, ctx) do
     machine = Machine.impl(ctx.config)
     if VM.suspended?(ctx.config, p.env_id), do: resume_to_stop(p, log, ctx)
 
@@ -101,7 +112,7 @@ defmodule ForemanAgent.VM.Env do
       else: {:ok, %{}}
   end
 
-  def run(%Command{type: "env.secrets.write", payload: p} = cmd, log, ctx) do
+  defp execute(%Command{type: "env.secrets.write", payload: p} = cmd, log, ctx) do
     with {:ok, result} <- cache_secrets(ctx, p.env_id, p.files, Map.get(p, :keep, [])) do
       if Machine.impl(ctx.config).running?(p.env_id, ctx.config),
         do: relay(cmd, log, ctx),
@@ -109,7 +120,7 @@ defmodule ForemanAgent.VM.Env do
     end
   end
 
-  def run(%Command{type: "env.destroy", payload: p}, log, ctx) do
+  defp execute(%Command{type: "env.destroy", payload: p}, log, ctx) do
     machine = Machine.impl(ctx.config)
     log.("info", "Removing the environment's VM\n")
     Links.stop(p.env_id)
@@ -123,7 +134,7 @@ defmodule ForemanAgent.VM.Env do
 
   # restart, logs, git_status and connect need the environment running.
   # A restart brings the containers up again, so the secrets go first.
-  def run(%Command{type: type, payload: p} = cmd, log, ctx) do
+  defp execute(%Command{type: type, payload: p} = cmd, log, ctx) do
     cond do
       not Machine.impl(ctx.config).running?(p.env_id, ctx.config) ->
         {:error, "the environment isn't running"}
@@ -213,7 +224,7 @@ defmodule ForemanAgent.VM.Env do
     for env_id <- VM.list(config) do
       paths = VM.paths(config, env_id)
       File.rm_rf(paths.snapshot <> ".tmp")
-      for leftover <- Path.wildcard(paths.snapshot <> ".discard-*"), do: File.rm_rf(leftover)
+      remove_discarded(paths, runner)
 
       cond do
         # Left until the guest answers (ensure_running/4): Cloud Hypervisor
@@ -241,17 +252,34 @@ defmodule ForemanAgent.VM.Env do
     if File.exists?(paths.snapshot) do
       aside = paths.snapshot <> ".discard-#{System.unique_integer([:positive])}"
       File.rename!(paths.snapshot, aside)
-      sync_path(paths.dir, runner)
-      File.rm_rf(aside)
     end
 
-    :ok
+    remove_discarded(paths, runner)
+  end
+
+  defp remove_discarded(paths, runner) do
+    case Path.wildcard(paths.snapshot <> ".discard-*") do
+      [] ->
+        :ok
+
+      leftovers ->
+        sync_path!(paths.dir, runner)
+        Enum.each(leftovers, &File.rm_rf!/1)
+    end
   end
 
   # The directory's entries on disk: Erlang can't fsync a directory.
-  defp sync_path(path, runner) do
-    _ = runner.run("sync", ["-f", path], timeout: 60_000)
-    :ok
+  defp sync_path!(path, runner) do
+    case runner.run("sync", ["-f", path], timeout: 60_000) do
+      {:ok, %{status: 0}} ->
+        :ok
+
+      {:ok, %{status: status}} ->
+        raise SnapshotSyncError, "couldn't sync #{path} (status #{status})"
+
+      {:error, reason} ->
+        raise SnapshotSyncError, "couldn't sync #{path} (#{inspect(reason)})"
+    end
   end
 
   # Whether this start resumed the VM, now or on an earlier run of the same
@@ -270,18 +298,6 @@ defmodule ForemanAgent.VM.Env do
       :booted ->
         false
     end
-  end
-
-  defp sync_dir(dir) do
-    for name <- File.ls!(dir),
-        path = Path.join(dir, name),
-        match?({:ok, %{type: :regular}}, File.lstat(path)) do
-      {:ok, fd} = :file.open(path, [:read, :raw])
-      :ok = :file.sync(fd)
-      :file.close(fd)
-    end
-
-    :ok
   end
 
   # A prebuild's build gives a deadline for everything it relays
@@ -544,9 +560,7 @@ defmodule ForemanAgent.VM.Env do
   defp mark_consumed(snapshot, runner) do
     case File.write(Path.join(snapshot, "consumed"), "", [:exclusive]) do
       :ok ->
-        sync_dir(snapshot)
-        sync_path(snapshot, runner)
-        :ok
+        sync_path!(snapshot, runner)
 
       {:error, reason} ->
         {:error, "couldn't mark its snapshot used (#{:file.format_error(reason)})"}
