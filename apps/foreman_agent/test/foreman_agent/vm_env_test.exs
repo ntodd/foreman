@@ -282,6 +282,29 @@ defmodule ForemanAgent.VMEnvTest do
     refute File.exists?(stale)
   end
 
+  test "the VM's record isn't written through a symlink the VM left beside it", ctx do
+    {:ok, _} = run(create(), ctx)
+    {:ok, _} = run(command("env.stop"), ctx)
+    outside = Path.join(ctx.dir, "outside")
+    File.write!(outside, "the agent's")
+    File.ln_s!(outside, VM.paths(ctx.config, @env).meta <> ".tmp")
+
+    assert {:ok, _} = run(command("env.start"), ctx)
+    assert File.read!(outside) == "the agent's"
+    assert {:ok, %{"slug" => _}} = VM.read_meta(ctx.config, @env)
+  end
+
+  test "the VM's record isn't read through a symlink the VM left in its place", ctx do
+    {:ok, _} = run(create(), ctx)
+    meta = VM.paths(ctx.config, @env).meta
+    elsewhere = Path.join(ctx.dir, "elsewhere.json")
+    File.cp!(meta, elsewhere)
+    File.rm!(meta)
+    File.ln_s!(elsewhere, meta)
+
+    assert VM.read_meta(ctx.config, @env) == {:error, :none}
+  end
+
   test "env.stop runs the environment's stop, then powers the VM off", ctx do
     {:ok, _} = run(create(), ctx)
     assert {:ok, %{"ran" => "env.stop"}} = run(command("env.stop"), ctx)
@@ -510,6 +533,22 @@ defmodule ForemanAgent.VMEnvTest do
       {:ok, _} = run(command("env.suspend"), ctx)
       assert {:ok, %{"resumed" => true}} = run(command("env.start"), ctx)
       assert_received {:machine, {:restore_saw_consumed, true}, @env}
+    end
+
+    # The snapshot is in the VM's directory, which the VM can write: a
+    # symlink it left as the marker could have the agent write anywhere
+    # the agent can.
+    test "a marker the VM left as a symlink isn't written through, and the VM boots", ctx do
+      {:ok, _} = run(command("env.suspend"), ctx)
+      outside = Path.join(ctx.dir, "outside")
+      File.ln_s!(outside, Path.join(VM.paths(ctx.config, @env).snapshot, "consumed"))
+      flush()
+
+      assert {:ok, result} = run(command("env.start"), ctx)
+      refute File.exists?(outside)
+      refute Map.has_key?(result, "resumed")
+      refute_received {:machine, {:restore, _}, @env}
+      assert_received {:machine, {:boot, _}, @env}
     end
 
     # The agent stopped after handing the snapshot over and before the VM

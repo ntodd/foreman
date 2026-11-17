@@ -20,7 +20,7 @@ defmodule ForemanAgent.VM do
   so it outlives the agent's restarts and updates.
   """
 
-  alias ForemanAgent.Config
+  alias ForemanAgent.{Config, SafeFS}
   alias ForemanProtocol.Schema
 
   @uuid ~r/\A[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\z/
@@ -46,13 +46,18 @@ defmodule ForemanAgent.VM do
   Whether an environment's VM is saved to disk (suspended): a snapshot no
   VM was ever started from. One that was (marked `consumed` before the
   VM could run) is never restored again, whatever became of that VM.
+
+  The VM's directory is the VM's to write, so nothing here follows a
+  symlink: a snapshot directory, config or marker that's one isn't a
+  snapshot to restore.
   """
   @spec suspended?(Config.t(), String.t()) :: boolean()
   def suspended?(config, env_id) do
     snapshot = paths(config, env_id).snapshot
 
-    File.regular?(Path.join(snapshot, "config.json")) and
-      not File.exists?(Path.join(snapshot, "consumed"))
+    match?({:ok, %{type: :directory}}, File.lstat(snapshot)) and
+      match?({:ok, %{type: :regular}}, File.lstat(Path.join(snapshot, "config.json"))) and
+      File.lstat(Path.join(snapshot, "consumed")) == {:error, :enoent}
   end
 
   @doc """
@@ -78,7 +83,11 @@ defmodule ForemanAgent.VM do
   @doc "What the agent recorded about an environment's VM."
   @spec read_meta(Config.t(), String.t()) :: {:ok, map()} | {:error, :none}
   def read_meta(config, env_id) do
-    with {:ok, json} <- File.read(paths(config, env_id).meta),
+    path = paths(config, env_id).meta
+
+    # In the VM's directory: a symlink the VM left there isn't followed.
+    with {:ok, %{type: :regular}} <- File.lstat(path),
+         {:ok, json} <- File.read(path),
          {:ok, %{"slug" => slug} = meta} when is_binary(slug) <- JSON.decode(json) do
       {:ok, meta}
     else
@@ -86,12 +95,11 @@ defmodule ForemanAgent.VM do
     end
   end
 
+  # In the VM's directory, which the VM can write: replaced, never written
+  # through a symlink the VM left.
   @spec write_meta(Config.t(), String.t(), map()) :: :ok
   def write_meta(config, env_id, meta) do
-    path = paths(config, env_id).meta
-    tmp = path <> ".tmp"
-    File.write!(tmp, JSON.encode!(meta))
-    File.rename!(tmp, path)
+    :ok = SafeFS.write_atomic(paths(config, env_id).meta, JSON.encode!(meta), 0o600)
   end
 
   @doc """

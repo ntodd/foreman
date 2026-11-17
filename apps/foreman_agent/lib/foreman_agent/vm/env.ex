@@ -273,7 +273,9 @@ defmodule ForemanAgent.VM.Env do
   end
 
   defp sync_dir(dir) do
-    for name <- File.ls!(dir), path = Path.join(dir, name), File.regular?(path) do
+    for name <- File.ls!(dir),
+        path = Path.join(dir, name),
+        match?({:ok, %{type: :regular}}, File.lstat(path)) do
       {:ok, fd} = :file.open(path, [:read, :raw])
       :ok = :file.sync(fd)
       :file.close(fd)
@@ -391,7 +393,7 @@ defmodule ForemanAgent.VM.Env do
         if is_binary(prebuild),
           do: log.("info", "This box no longer has the prebuild; starting from scratch\n")
 
-        with {:ok, fd} <- :file.open(paths.data, [:write, :raw]),
+        with {:ok, fd} <- :file.open(paths.data, [:write, :raw, :exclusive]),
              {:ok, _} <- :file.position(fd, ctx.config.vm_disk_gb * 1024 * 1024 * 1024),
              :ok <- :file.truncate(fd) do
           :file.close(fd)
@@ -430,8 +432,12 @@ defmodule ForemanAgent.VM.Env do
   # A reflink where the filesystem has them (XFS, btrfs), a sparse copy
   # otherwise, put in place once it's whole.
   defp copy_disk(source, dest, ctx) do
-    tmp = dest <> ".tmp"
-    _ = File.rm(tmp)
+    # Stage the copy under the agent-owned parent, outside the writable VM directory.
+    tmp =
+      Path.join(
+        Path.dirname(Path.dirname(dest)),
+        ".disk-" <> Base.url_encode64(:crypto.strong_rand_bytes(16))
+      )
 
     case ctx.runner.run("cp", ["--reflink=auto", "--sparse=always", source, tmp],
            timeout: 600_000
@@ -517,17 +523,28 @@ defmodule ForemanAgent.VM.Env do
   defp restore(env_id, spec, ctx, log) do
     log.("info", "Resuming the environment's VM\n")
     snapshot = VM.paths(ctx.config, env_id).snapshot
-    # On disk before the VM can run from it: whatever happens next, this
-    # snapshot is never restored again (VM.suspended?/2).
-    File.write!(Path.join(snapshot, "consumed"), "")
-    sync_dir(snapshot)
-    sync_path(snapshot, ctx.runner)
 
-    with :ok <- Machine.impl(ctx.config).restore(env_id, spec, ctx.config),
+    # On disk before the VM can run from it: whatever happens next, this
+    # snapshot is never restored again (VM.suspended?/2). Made new, so not
+    # written through anything the VM left in its place.
+    with :ok <- mark_consumed(snapshot, ctx.runner),
+         :ok <- Machine.impl(ctx.config).restore(env_id, spec, ctx.config),
          :ok <- await(env_id, ctx, "didn't come back from its snapshot") do
       discard_snapshot(ctx.config, env_id, ctx.runner)
       log.("info", "VM resumed\n")
       :ok
+    end
+  end
+
+  defp mark_consumed(snapshot, runner) do
+    case File.write(Path.join(snapshot, "consumed"), "", [:exclusive]) do
+      :ok ->
+        sync_dir(snapshot)
+        sync_path(snapshot, runner)
+        :ok
+
+      {:error, reason} ->
+        {:error, "couldn't mark its snapshot used (#{:file.format_error(reason)})"}
     end
   end
 
