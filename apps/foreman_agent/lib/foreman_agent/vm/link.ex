@@ -14,10 +14,15 @@ defmodule ForemanAgent.VM.Link do
   answers with the result it has. That holds while it's the same guest
   agent. Each hello carries the agent's instance id, and when that
   changes (the agent or the VM restarted, and forgot what it ran), the
-  commands it was sent fail rather than run again. A caller that goes
-  away (an operation cancelled on the box), or runs out of time, has its
-  command cancelled in the guest too: straight away, or after the next
-  hello when the connection is down.
+  commands it was sent fail rather than run again.
+
+  A caller that goes away (an operation cancelled on the box), or runs
+  out of time, has its command cancelled in the guest too. The socket
+  taking a cancel doesn't mean the guest got it, so the link keeps each
+  one and sends it again on every hello, until a result for the command
+  it cancels arrives (the guest answers a cancel for a command that
+  finished with that command's result again). It keeps the latest
+  `@max_cancels`.
 
   Everything the guest sends is hostile:
 
@@ -28,9 +33,11 @@ defmodule ForemanAgent.VM.Link do
     * An event only reaches the caller whose command it names. A result
       nobody is waiting for is dropped: if the command is sent again, the
       guest has it.
-    * A command's log is passed on up to `:log_budget` bytes. The link
-      reads nothing more from the guest while a caller has more than
-      `@log_window` bytes of log it hasn't taken yet.
+    * A command's log is passed on up to `:log_budget` bytes, each chunk
+      counting `@log_overhead` bytes more than its data, and empty ones
+      dropped. The link reads nothing more from the guest while a caller
+      has more than `@log_window` bytes of log it hasn't taken yet,
+      counted the same way.
     * Sends time out, so a guest that stops reading can't hold the link
       up. Reconnects back off, and connection warnings are rate-limited.
     * Query replies are checked for size and type, and text from the
@@ -63,11 +70,16 @@ defmodule ForemanAgent.VM.Link do
   @hello_timeout 5_000
   # Log bytes a caller hasn't taken yet: past this, the guest waits.
   @log_window 1_048_576
+  # What each log chunk counts for on top of its data, against the budget
+  # and the window: a chunk is a message to the caller however small.
+  @log_overhead 64
   @log_dropped "the VM sent more log than the box keeps; the rest is dropped\n"
   # The largest query result passed on (its external term size).
   @max_reply 262_144
   # At most one connection warning this often (milliseconds).
   @warn_every 60_000
+  # Cancels kept for the guest until it has a result for them.
+  @max_cancels 256
 
   @lost "lost the connection to the environment's VM"
   @restarted "the environment's VM restarted while running it"
@@ -121,7 +133,7 @@ defmodule ForemanAgent.VM.Link do
     receive do
       {:link_log, ^ref, stream, data} ->
         log.(stream, data)
-        GenServer.cast(link, {:log_taken, op_id, ref, byte_size(data)})
+        GenServer.cast(link, {:log_taken, op_id, ref, log_cost(data)})
         await(link, op_id, ref, monitor, log)
 
       {:link_result, ^ref, result} ->
@@ -175,8 +187,9 @@ defmodule ForemanAgent.VM.Link do
        guest_version: nil,
        # op_id => %{cmd, caller, ref, monitor, timer, sent_to, logged, over, untaken}
        pending: %{},
-       # Op ids to cancel once the guest says hello.
-       cancels: MapSet.new(),
+       # Op ids cancelled, oldest first, sent again on every hello until
+       # the guest has a result for them.
+       cancels: :queue.new(),
        # query id => {from, q, timer}
        queries: %{},
        next_query: 1,
@@ -208,11 +221,7 @@ defmodule ForemanAgent.VM.Link do
       untaken: 0
     }
 
-    state = %{
-      state
-      | pending: Map.put(state.pending, op_id, entry),
-        cancels: MapSet.delete(state.cancels, op_id)
-    }
+    state = drop_cancel(%{state | pending: Map.put(state.pending, op_id, entry)}, op_id)
 
     # Not ready yet: it goes with the rest once the guest says hello.
     state = if state.ready, do: send_cmd(state, op_id), else: state
@@ -445,7 +454,7 @@ defmodule ForemanAgent.VM.Link do
   end
 
   # The guest agent is there: everything waiting goes now (again, after a
-  # reconnect to the same agent: it runs each op id once).
+  # reconnect to the same agent: it runs each op id once), cancels first.
   defp handle_frame(
          %{"t" => "hello", "agent_version" => version, "instance" => instance},
          %{ready: false} = state
@@ -462,7 +471,7 @@ defmodule ForemanAgent.VM.Link do
           guest_version: printable(version, 64)
       }
 
-      state = Enum.reduce(state.cancels, %{state | cancels: MapSet.new()}, &cancel(&2, &1))
+      state = Enum.reduce(:queue.to_list(state.cancels), state, &send_cancel(&2, &1))
       Enum.reduce(Map.keys(state.pending), state, &send_cmd(&2, &1))
     else
       state
@@ -475,12 +484,14 @@ defmodule ForemanAgent.VM.Link do
 
   # A new guest agent hasn't heard of the commands the old one was sent,
   # and sending them again could run them twice. Ones it was never sent
-  # (queued while the connection was down) go to the new one.
+  # (queued while the connection was down) go to the new one. So do the
+  # cancels kept: it answers each with a result, which settles it.
   defp restarted(state) do
     sent = for {op_id, %{sent_to: sent_to}} <- state.pending, sent_to != nil, do: op_id
-    state = Enum.reduce(sent, state, &finish(&2, &1, {:error, @restarted}))
-    %{state | cancels: MapSet.new()}
+    Enum.reduce(sent, state, &finish(&2, &1, {:error, @restarted}))
   end
+
+  defp dispatch(%Event{type: "op.log", payload: %{data: ""}}, state), do: state
 
   defp dispatch(%Event{type: "op.log", payload: p}, state) do
     case state.pending[p.op_id] do
@@ -491,7 +502,7 @@ defmodule ForemanAgent.VM.Link do
         state
 
       entry ->
-        logged = entry.logged + byte_size(p.data)
+        logged = entry.logged + log_cost(p.data)
 
         if logged > state.log_budget,
           do: pass_log(state, p.op_id, %{entry | over: true}, "info", @log_dropped),
@@ -499,17 +510,20 @@ defmodule ForemanAgent.VM.Link do
     end
   end
 
-  # Nobody waiting: dropped.
+  # Nobody waiting: dropped. Any result for a command settles a cancel
+  # kept for it (a cancel's own result has an op id of its own).
   defp dispatch(%Event{type: "op.result", payload: p}, state),
-    do: finish(state, p.op_id, result(p))
+    do: state |> drop_cancel(p.op_id) |> finish(p.op_id, result(p))
 
   defp dispatch(%Event{type: "op.accepted"}, state), do: state
 
   defp pass_log(state, op_id, entry, stream, data) do
     send(entry.caller, {:link_log, entry.ref, stream, data})
-    entry = %{entry | untaken: entry.untaken + byte_size(data)}
+    entry = %{entry | untaken: entry.untaken + log_cost(data)}
     %{state | pending: Map.put(state.pending, op_id, entry)}
   end
+
+  defp log_cost(data), do: byte_size(data) + @log_overhead
 
   defp result(%{status: "ok"} = p), do: {:ok, Map.get(p, :result, %{})}
 
@@ -566,15 +580,40 @@ defmodule ForemanAgent.VM.Link do
     end
   end
 
-  # Cancels a command in the guest: now, or once the guest says hello.
-  defp cancel(%{ready: true} = state, op_id) do
-    case send_frame(state, %{"t" => "cancel", "op_id" => op_id}) do
-      {:ok, state} -> state
-      {_, state} -> cancel(state, op_id)
+  # Cancels a command in the guest: now if it's there, and again on every
+  # hello until a result for the command arrives.
+  defp cancel(state, op_id) do
+    state = keep_cancel(state, op_id)
+    if state.ready, do: send_cancel(state, op_id), else: state
+  end
+
+  # One that fails goes with the next hello.
+  defp send_cancel(state, op_id) do
+    {_, state} = send_frame(state, %{"t" => "cancel", "op_id" => op_id})
+    state
+  end
+
+  defp keep_cancel(state, op_id) do
+    cond do
+      :queue.member(op_id, state.cancels) ->
+        state
+
+      :queue.len(state.cancels) < @max_cancels ->
+        %{state | cancels: :queue.in(op_id, state.cancels)}
+
+      true ->
+        {{:value, oldest}, cancels} = :queue.out(state.cancels)
+
+        Logger.warning(
+          "the VM at #{state.path} has #{@max_cancels} cancels it hasn't answered; " <>
+            "giving up on the oldest (#{oldest})"
+        )
+
+        %{state | cancels: :queue.in(op_id, cancels)}
     end
   end
 
-  defp cancel(state, op_id), do: %{state | cancels: MapSet.put(state.cancels, op_id)}
+  defp drop_cancel(state, op_id), do: %{state | cancels: :queue.delete(op_id, state.cancels)}
 
   # A send that fails leaves the link not ready straight away (so what
   # comes next waits for the next hello), and closes the connection once

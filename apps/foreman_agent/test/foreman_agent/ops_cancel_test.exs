@@ -65,6 +65,24 @@ defmodule ForemanAgent.OpsCancelTest do
     refute alive?(grandchild)
   end
 
+  test "Ops stopping stops the processes its operations started", %{tmp_dir: tmp} do
+    pidfile = Path.join(tmp, "grandchild.pid")
+    script = "sh -c 'echo $$ > #{pidfile}; exec sleep 300'; echo parent-done"
+
+    handler = fn _cmd, log ->
+      Runner.Local.run("sh", ["-c", script], on_output: &log.("stdout", &1))
+    end
+
+    ops = start_supervised!({Ops, name: nil, handler: handler, sink: fn _ -> :ok end})
+    :accepted = Ops.submit(ops, command("env.stop", %{env_id: @env, slug: "x"}))
+
+    grandchild = wait_for_file(pidfile)
+    on_exit(fn -> System.cmd("kill", ["-9", grandchild], stderr_to_stdout: true) end)
+
+    :ok = stop_supervised(Ops)
+    refute alive?(grandchild)
+  end
+
   test "a crash is reported without the crash's data" do
     test_pid = self()
     handler = fn _cmd, _log -> raise "can't use ghp_SECRETSECRETSECRET" end

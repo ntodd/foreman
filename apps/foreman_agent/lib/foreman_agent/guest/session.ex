@@ -7,9 +7,11 @@ defmodule ForemanAgent.Guest.Session do
   the result the guest already has, or waits for the one still running.
   Their events come back through `ForemanAgent.Outbox`, which this session
   attaches to once the host says hello: results the host hasn't
-  acknowledged are delivered again on every connection. The session's
-  hello carries the Ops server's instance id, so the host can tell when a
-  restart has made it forget what it ran.
+  acknowledged are delivered again on every connection. An Outbox that
+  restarts has no session attached, so the session closes the connection
+  when it goes: the host reconnects, and its hello attaches the new one.
+  The session's hello carries the Ops server's instance id, so the host
+  can tell when a restart has made it forget what it ran.
 
   The host drops the connection on a frame past
   `ForemanAgent.Channel.max_frame(:to_host)`, and a result is delivered
@@ -18,7 +20,8 @@ defmodule ForemanAgent.Guest.Session do
 
   Options (all have defaults that use the application's processes):
 
-    * `:ops`, `:outbox` - the servers commands and events go through
+    * `:ops`, `:outbox` - the servers commands and events go through (a
+      pid or a locally registered name)
     * `:queries` - `%{"inventory" => fun, "ports" => fun}`, each returning
       `{:ok, term}` or `{:error, message}`
     * `:clock` - `fn host_now_ms -> any end`, called with the host's time
@@ -47,7 +50,9 @@ defmodule ForemanAgent.Guest.Session do
        outbox: Keyword.get(opts, :outbox, Outbox),
        queries: Keyword.get_lazy(opts, :queries, &ForemanAgent.Guest.queries/0),
        clock: Keyword.get(opts, :clock, &ForemanAgent.Guest.sync_clock/1),
-       configure: Keyword.get(opts, :configure, &ForemanAgent.Guest.configure/1)
+       configure: Keyword.get(opts, :configure, &ForemanAgent.Guest.configure/1),
+       # The monitor on the Outbox this session attached to.
+       attached: nil
      }}
   end
 
@@ -58,13 +63,24 @@ defmodule ForemanAgent.Guest.Session do
   end
 
   def handle_info({:tcp, socket, data}, %{socket: socket} = state) do
-    case Channel.decode(data) do
-      {:ok, frame} -> handle_frame(frame, state)
-      {:error, :malformed} -> Logger.warning("ignoring a malformed frame from the host")
-    end
+    state =
+      case Channel.decode(data) do
+        {:ok, frame} ->
+          handle_frame(frame, state)
+
+        {:error, :malformed} ->
+          Logger.warning("ignoring a malformed frame from the host")
+          state
+      end
 
     :ok = :inet.setopts(socket, active: :once)
     {:noreply, state}
+  end
+
+  # Its supervisor logs why it stopped.
+  def handle_info({:DOWN, ref, :process, _pid, _reason}, %{attached: ref} = state) do
+    Logger.info("the outbox stopped; closing the host connection so it attaches again")
+    {:stop, :normal, state}
   end
 
   def handle_info({:tcp_closed, socket}, %{socket: socket} = state),
@@ -110,7 +126,7 @@ defmodule ForemanAgent.Guest.Session do
       "instance" => Ops.instance(state.ops)
     })
 
-    Outbox.attach(state.outbox, self())
+    attach(state)
   end
 
   defp handle_frame(%{"t" => "cmd", "cmd" => wire} = frame, state) do
@@ -120,6 +136,8 @@ defmodule ForemanAgent.Guest.Session do
       {:ok, cmd} -> Ops.submit(state.ops, cmd)
       {:error, errors} -> reject(wire, errors, state)
     end
+
+    state
   end
 
   defp handle_frame(%{"t" => "cancel", "op_id" => op_id}, state) when is_binary(op_id) do
@@ -127,10 +145,14 @@ defmodule ForemanAgent.Guest.Session do
       {:ok, cmd} -> Ops.submit(state.ops, cmd)
       {:error, _} -> :ok
     end
+
+    state
   end
 
-  defp handle_frame(%{"t" => "ack", "seq" => seq}, state) when is_integer(seq),
-    do: Outbox.ack(state.outbox, seq)
+  defp handle_frame(%{"t" => "ack", "seq" => seq}, state) when is_integer(seq) do
+    Outbox.ack(state.outbox, seq)
+    state
+  end
 
   defp handle_frame(%{"t" => "query", "id" => id, "q" => q}, state) when is_integer(id) do
     session = self()
@@ -142,10 +164,23 @@ defmodule ForemanAgent.Guest.Session do
       :error ->
         send(session, {:reply, id, {:error, "unknown query"}})
     end
+
+    state
   end
 
-  defp handle_frame(%{"t" => type}, _state),
-    do: Logger.warning("ignoring a #{inspect(type)} frame from the host")
+  defp handle_frame(%{"t" => type}, state) do
+    Logger.warning("ignoring a #{inspect(type)} frame from the host")
+    state
+  end
+
+  # Monitored before it attaches, so an Outbox that restarts from here on
+  # closes the session (see the moduledoc).
+  defp attach(state) do
+    if state.attached, do: Process.demonitor(state.attached, [:flush])
+    attached = Process.monitor(state.outbox)
+    :ok = Outbox.attach(state.outbox, self())
+    %{state | attached: attached}
+  end
 
   defp run_query(fun) do
     fun.()

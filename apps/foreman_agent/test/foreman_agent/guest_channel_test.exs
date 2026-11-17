@@ -41,7 +41,10 @@ defmodule ForemanAgent.GuestChannelTest do
       end
     end
 
-    outbox = start_supervised!({Outbox, name: nil}, id: :outbox)
+    # Named, so the Outbox a supervisor starts again is the one Ops and
+    # the session use.
+    outbox = :"outbox-#{System.unique_integer([:positive])}"
+    start_supervised!({Outbox, name: outbox}, id: :outbox)
 
     ops =
       start_supervised!(
@@ -190,6 +193,26 @@ defmodule ForemanAgent.GuestChannelTest do
     :sys.resume(link)
 
     assert_receive {:DOWN, ^ref, :process, ^pid, _}, 5_000
+  end
+
+  test "an Outbox that restarts closes the connection, and the next attaches to the new one",
+       ctx do
+    %{outbox: outbox} = start_guest(ctx)
+    link = start_link(ctx)
+    cmd = command()
+    op_id = cmd.op_id
+    run_async(link, cmd)
+    assert_receive {:started, ^op_id, pid}, 5_000
+    assert_receive {:log, "stdout", "running env.stop\n"}, 5_000
+
+    old = GenServer.whereis(outbox)
+    Process.exit(old, :kill)
+    wait_until(fn -> GenServer.whereis(outbox) not in [nil, old] end)
+
+    # The result goes to the new Outbox, which the session has to be
+    # attached to for it to reach the box.
+    send(pid, {:finish, {:ok, %{"after" => true}}})
+    assert_receive {:result, {:ok, %{"after" => true}}}, 5_000
   end
 
   test "a command that runs past its timeout fails, and is cancelled in the guest", ctx do
@@ -386,7 +409,8 @@ defmodule ForemanAgent.GuestChannelTest do
       end
     end
 
-    # Answers each frame the link sends with the script's replies.
+    # Answers each frame the link sends with the script's replies. A reply
+    # of `:close` hangs up.
     defp reactive(script) do
       test = self()
       fn socket -> react(socket, test, script) end
@@ -397,7 +421,12 @@ defmodule ForemanAgent.GuestChannelTest do
         {:ok, data} ->
           {:ok, frame} = Channel.decode(data)
           send(test, {:host_sent, frame})
-          for reply <- script.(frame), do: :gen_tcp.send(socket, reply)
+
+          Enum.each(script.(frame), fn
+            :close -> :gen_tcp.close(socket)
+            reply -> :gen_tcp.send(socket, reply)
+          end)
+
           react(socket, test, script)
 
         {:error, _} ->
@@ -431,6 +460,18 @@ defmodule ForemanAgent.GuestChannelTest do
 
     defp ports(pid),
       do: Enum.count(Port.list(), &(Port.info(&1, :connected) == {:connected, pid}))
+
+    # How many messages `pid` has waiting, once that stops growing.
+    defp settled_queue(pid, last \\ -1, tries \\ 100) do
+      Process.sleep(200)
+      {:message_queue_len, queued} = Process.info(pid, :message_queue_len)
+
+      cond do
+        queued > 0 and queued == last -> queued
+        tries == 0 -> flunk("the queue kept growing")
+        true -> settled_queue(pid, queued, tries - 1)
+      end
+    end
 
     test "only the result for the command reaches the caller", ctx do
       other = ForemanProtocol.uuid()
@@ -659,7 +700,8 @@ defmodule ForemanAgent.GuestChannelTest do
         end)
       )
 
-      link = start_link(ctx, log_budget: 100)
+      # Each 40-byte chunk counts for 104: two fit.
+      link = start_link(ctx, log_budget: 250)
       run_async(link, command())
 
       assert_receive {:result, {:ok, %{}}}, 5_000
@@ -670,6 +712,185 @@ defmodule ForemanAgent.GuestChannelTest do
                        "the VM sent more log than the box keeps; the rest is dropped\n"}
 
       refute_received {:log, _, _}
+    end
+
+    test "empty log chunks are dropped", ctx do
+      start_fake_vm(
+        ctx,
+        reactive(fn
+          %{"t" => "hello"} ->
+            [hello()]
+
+          %{"t" => "cmd", "cmd" => %{"op_id" => op_id}} ->
+            empty = event("op.log", %{op_id: op_id, stream: "stdout", data: ""})
+
+            List.duplicate(empty, 1_000) ++
+              [
+                event("op.log", %{op_id: op_id, stream: "stdout", data: "mine\n"}),
+                event("op.result", %{op_id: op_id, status: "ok", result: %{}}, 1)
+              ]
+
+          _ ->
+            []
+        end)
+      )
+
+      link = start_link(ctx)
+      run_async(link, command())
+
+      assert_receive {:result, {:ok, %{}}}, 5_000
+      assert_received {:log, "stdout", "mine\n"}
+      refute_received {:log, _, ""}
+    end
+
+    test "a log chunk counts for more than its bytes against the budget", ctx do
+      start_fake_vm(
+        ctx,
+        reactive(fn
+          %{"t" => "hello"} ->
+            [hello()]
+
+          %{"t" => "cmd", "cmd" => %{"op_id" => op_id}} ->
+            log = event("op.log", %{op_id: op_id, stream: "stdout", data: "x"})
+            List.duplicate(log, 100) ++ [event("op.result", %{op_id: op_id, status: "ok"}, 1)]
+
+          _ ->
+            []
+        end)
+      )
+
+      link = start_link(ctx, log_budget: 1_000)
+      run_async(link, command())
+
+      assert_receive {:result, {:ok, %{}}}, 5_000
+      assert count_received({:log, "stdout", "x"}) <= 1_000 / 64
+
+      assert_received {:log, "info",
+                       "the VM sent more log than the box keeps; the rest is dropped\n"}
+    end
+
+    test "small log chunks count for more than their bytes against the window", ctx do
+      start_fake_vm(
+        ctx,
+        reactive(fn
+          %{"t" => "hello"} ->
+            [hello()]
+
+          %{"t" => "cmd", "cmd" => %{"op_id" => op_id}} ->
+            log = event("op.log", %{op_id: op_id, stream: "stdout", data: "x"})
+            List.duplicate(log, 30_000) ++ [event("op.result", %{op_id: op_id, status: "ok"}, 1)]
+
+          _ ->
+            []
+        end)
+      )
+
+      link = start_link(ctx)
+      test = self()
+
+      caller =
+        spawn(fn ->
+          log = fn _stream, _data ->
+            if Process.get(:held, true) do
+              receive do
+                :go -> Process.put(:held, false)
+              end
+            end
+          end
+
+          send(test, {:result, Link.run(link, command(), log)})
+        end)
+
+      # The caller takes nothing; the link reads until the window is full.
+      queued = settled_queue(caller)
+      assert queued <= div(1_048_576, 64) + 100
+
+      send(caller, :go)
+      assert_receive {:result, {:ok, %{}}}, 20_000
+    end
+
+    test "a cancel goes on every hello until the guest has a result for the command", ctx do
+      hellos = :counters.new(1, [])
+
+      start_fake_vm(
+        ctx,
+        reactive(fn
+          %{"t" => "hello"} ->
+            :counters.add(hellos, 1, 1)
+            [hello()]
+
+          %{"t" => "cancel", "op_id" => target} ->
+            case :counters.get(hellos, 1) do
+              # Only the result of the cancel itself (an op id of its
+              # own), and the connection drops before the guest acts on it.
+              1 -> [event("op.result", %{op_id: ForemanProtocol.uuid(), status: "ok"}, 1), :close]
+              # The command finished first: its result settles the cancel.
+              2 -> [event("op.result", %{op_id: target, status: "ok"}, 2), :close]
+              _ -> []
+            end
+
+          _ ->
+            []
+        end)
+      )
+
+      link = start_link(ctx, retry: 20, max_retry: 50)
+      cmd = command()
+      op_id = cmd.op_id
+      caller = spawn(fn -> Link.run(link, cmd, fn _, _ -> :ok end) end)
+      assert_receive {:host_sent, %{"t" => "cmd", "cmd" => %{"op_id" => ^op_id}}}, 5_000
+      Process.exit(caller, :kill)
+
+      assert_receive {:host_sent, %{"t" => "cancel", "op_id" => ^op_id}}, 5_000
+      assert_receive {:host_sent, %{"t" => "cancel", "op_id" => ^op_id}}, 5_000
+
+      wait_until(fn -> :counters.get(hellos, 1) >= 3 end)
+      refute_receive {:host_sent, %{"t" => "cancel"}}, 500
+    end
+
+    test "the cancels kept for the guest are bounded, oldest dropped first", ctx do
+      # Nothing listens yet, so every command waits and every cancel is kept.
+      link = start_link(ctx, retry: 20, max_retry: 50)
+
+      run = fn cmds ->
+        for cmd <- cmds, do: spawn(fn -> Link.run(link, cmd, fn _, _ -> :ok end) end)
+      end
+
+      oldest = for _ <- 1..44, do: command()
+      newest = for _ <- 1..256, do: command()
+      oldest_callers = run.(oldest)
+      newest_callers = run.(newest)
+      wait_until(fn -> map_size(:sys.get_state(link).pending) == 300 end)
+
+      Enum.each(oldest_callers, &Process.exit(&1, :kill))
+      wait_until(fn -> map_size(:sys.get_state(link).pending) == 256 end)
+
+      log =
+        capture_log(fn ->
+          Enum.each(newest_callers, &Process.exit(&1, :kill))
+          wait_until(fn -> :sys.get_state(link).pending == %{} end)
+        end)
+
+      assert log =~ "cancel"
+
+      start_fake_vm(
+        ctx,
+        reactive(fn
+          %{"t" => "hello"} -> [hello()]
+          _ -> []
+        end)
+      )
+
+      assert_receive {:host_sent, %{"t" => "hello"}}, 5_000
+
+      sent =
+        for _ <- 1..256 do
+          assert_receive {:host_sent, %{"t" => "cancel", "op_id" => op_id}}, 5_000
+          op_id
+        end
+
+      refute_receive {:host_sent, %{"t" => "cancel"}}, 300
+      assert Enum.sort(sent) == Enum.sort(Enum.map(newest, & &1.op_id))
     end
 
     test "a guest that stops reading doesn't hold the link up", ctx do
