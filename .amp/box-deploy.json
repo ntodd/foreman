@@ -1,0 +1,9 @@
+{
+  "targets": {
+    "default": {
+      "on": "ntodd/foreman-box",
+      "name": "foreman",
+      "branch": "amp-box"
+    }
+  }
+}
