@@ -221,9 +221,10 @@ the box's shared Docker ([architecture.md](../architecture.md#environment-vms)).
 That changes what a box needs, and existing environments don't move
 across, so this upgrade takes more than following the release:
 
-- **Boxes** need amd64 Linux with KVM (`/dev/kvm`; a box that is itself
-  a VM needs nested virtualization), systemd, nftables, iproute2,
-  e2fsprogs and util-linux. They no longer need Docker or git. An arm64
+- **Boxes** need amd64 Linux 6.2 or later with KVM (`/dev/kvm`; a box
+  that is itself a VM needs nested virtualization) and Landlock
+  (`landlock` in `/sys/kernel/security/lsm`, which confines each VM),
+  systemd, nftables, iproute2, e2fsprogs and util-linux. They no longer need Docker or git. An arm64
   box still enrolls but can't run environments yet.
 - **Mac boxes** are gone until
   [#180](https://github.com/ntodd/foreman/issues/180) ([mac.md](mac.md)).

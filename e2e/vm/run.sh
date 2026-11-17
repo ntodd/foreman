@@ -2,10 +2,11 @@
 # End-to-end run of environment VMs on a real Linux host: the control
 # plane release image in Docker, the agent installed on this machine with
 # the served install script, and environments in Cloud Hypervisor VMs.
-# Covers enrollment and the box's VM report, a VM's unit and sandbox, what
-# an environment can reach (the box, another environment, the box's LAN,
-# the internet), secrets across a stop and start, an agent restart that
-# leaves VMs running, and destroy.
+# Covers enrollment and the box's VM report, a VM's unit and sandbox
+# (Landlock included, across a suspend), what an environment can reach
+# (the box, another environment, the box's LAN, the internet), secrets
+# across a stop and start, an agent restart that leaves VMs running,
+# destroy, and a box whose kernel has no Landlock.
 #
 #   E2E_VM_THROWAWAY=1 e2e/vm/run.sh
 #
@@ -283,6 +284,30 @@ sudo nft list table inet foreman_guests >/dev/null || fail "the VM firewall tabl
 echo "ok: the VM firewall table is loaded"
 
 vm_ready() { cp_eval 'E2E.vm_status()' | grep -q "^VM ready=true"; }
+# Whether a VM's Cloud Hypervisor is confined by Landlock, by what it can
+# do rather than how it was started (a resumed VM takes its settings from
+# the snapshot): it can't write a snapshot to its unit's private /var/tmp,
+# which is new and empty with each start of the unit, and which it could
+# write without Landlock. Only a refusal for permission counts; any other
+# failure says nothing. This is the VMM thread: a resumed VM's virtio
+# workers start before Cloud Hypervisor applies Landlock
+# (cloud-hypervisor#9118), which this can't see.
+landlocked() { # env_id
+  api=/srv/foreman/vms/$1/api.sock
+  sudo curl -fsS -X PUT --unix-socket "$api" http://localhost/api/v1/vm.pause >/dev/null ||
+    fail "couldn't pause $1's VM"
+  probe=$(sudo curl -sS -X PUT --unix-socket "$api" -H 'Content-Type: application/json' \
+    -d '{"destination_url":"file:///var/tmp"}' -w '\nHTTP %{http_code}' \
+    http://localhost/api/v1/vm.snapshot 2>&1) || true
+  sudo curl -fsS -X PUT --unix-socket "$api" http://localhost/api/v1/vm.resume >/dev/null ||
+    fail "couldn't resume $1's VM"
+  printf '%s\n' "$probe" | sed 's/^/  /'
+  case "$probe" in
+    *"HTTP 2"*) return 1 ;;
+    *"Permission denied"* | *"os error 13"*) return 0 ;;
+    *) fail "the snapshot outside $1's directory failed, but not for permission: can't tell whether it's confined" ;;
+  esac
+}
 wait_for "the box reports it can run VMs" 60 vm_ready
 cp_eval 'E2E.vm_status()' | grep "^VM"
 
@@ -300,7 +325,9 @@ pid=$(systemctl show -p MainPID --value "$unit")
 grep -q '^CapEff:\s*0000000000000000$' "/proc/$pid/status" || fail "the VM has capabilities"
 grep -q '^NoNewPrivs:\s*1$' "/proc/$pid/status" || fail "the VM can gain privileges"
 grep -q '^Seccomp:\s*2$' "/proc/$pid/status" || fail "the VM has no seccomp filter"
-echo "ok: the VM runs as foreman in $unit, limited, without capabilities, under seccomp"
+tr '\0' '\n' < "/proc/$pid/cmdline" | grep -qx -- --landlock || fail "the VM was started without Landlock"
+landlocked "$first" || fail "the VM wrote a snapshot outside its own directory: it isn't confined by Landlock"
+echo "ok: the VM runs as foreman in $unit, limited, without capabilities, under seccomp and Landlock"
 cp_eval 'E2E.log("hello-1", "create")' > "$work/create.log"
 grep "^PROBE" "$work/create.log" || fail "the probe didn't run"
 probe() { grep -q "^PROBE $1 $2\$" "$work/$3.log" || fail "probe $1: wanted $2, got $(grep "^PROBE $1 " "$work/$3.log")"; }
@@ -388,7 +415,8 @@ EOF
   fail "the guest's clock is ${skew}s behind after the resume, and still moving"
 fi
 sudo test -e "/srv/foreman/vms/$first/snapshot" && fail "the snapshot outlived the resume"
-echo "ok: resumed on the same boot, clock within ${skew}s, snapshot gone"
+landlocked "$first" || fail "the resumed VM wrote a snapshot outside its own directory: it isn't confined by Landlock"
+echo "ok: resumed on the same boot, its VMM thread under Landlock, clock within ${skew}s, snapshot gone"
 
 say "restarting the agent leaves the VMs running"
 before=$(systemctl show -p MainPID --value "$unit")
@@ -462,5 +490,23 @@ wait_for_env hello-3 destroyed 180
 wait_for "the prebuild's disk is deleted" 30 sh -c "[ -z \"\$(sudo ls -A /srv/foreman/prebuilds)\" ]"
 ip -br link | grep -q '^fm-vm' && fail "taps left behind"
 echo "ok: nothing left on the box"
+
+say "a box whose kernel has no Landlock runs no VMs"
+# As if the kernel had none: the helper reads its LSM list from here.
+sudo mount --bind /dev/null /sys/kernel/security/lsm
+vmctl() { # request
+  sudo -u foreman python3 -c 'import socket, sys
+s = socket.socket(socket.AF_UNIX)
+s.connect("/run/foreman-vmctl.sock")
+s.sendall(sys.argv[1].encode() + b"\n")
+print(s.makefile().readline().strip())' "$1"
+}
+vmctl landlock | grep -q "^error this box's kernel has no Landlock" ||
+  fail "the VM helper didn't say the kernel has no Landlock: $(vmctl landlock)"
+sudo systemctl restart foreman-agent
+vm_no_landlock() { cp_eval 'E2E.vm_status()' | grep -q '^VM ready=false .*no Landlock'; }
+wait_for "the box reports it can't run VMs, and why" 90 vm_no_landlock
+cp_eval 'E2E.vm_status()' | grep "^VM"
+sudo umount /sys/kernel/security/lsm
 
 say "PASSED"
