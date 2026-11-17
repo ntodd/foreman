@@ -53,6 +53,7 @@ defmodule ForemanAgent.VM.Reclaimer do
   # Less than this past what it would keep isn't worth asking for.
   @worth 512 * 1_048_576
   @reclaim_timeout 60_000
+  @connect_timeout 10_000
   @mib 1_048_576
 
   @type sample :: %{
@@ -264,9 +265,16 @@ defmodule ForemanAgent.VM.Reclaimer do
     end
   end
 
-  @doc "Asks an environment's VM to reclaim its page cache past `keep_mb` (see `Link.reclaim/3`)."
-  def reclaim(env_id, keep_mb, config),
-    do: Link.reclaim(Links.get(env_id, config), keep_mb, @reclaim_timeout)
+  @doc """
+  Asks an environment's VM to reclaim its page cache past `keep_mb` (see
+  `Link.reclaim/3`), once its guest agent answers.
+  """
+  def reclaim(env_id, keep_mb, config) do
+    case Links.await(env_id, config, @connect_timeout) do
+      :ok -> Link.reclaim(Links.get(env_id, config), keep_mb, @reclaim_timeout)
+      :timeout -> {:error, "the environment's VM isn't answering"}
+    end
+  end
 
   @impl true
   def init(opts) do
