@@ -24,6 +24,14 @@ check() { # description, command...
 
 # -- stand-ins -------------------------------------------------------------
 mkdir -p "$work/bin" "$work/srv/vms" "$work/srv/guest" "$work/srv/agent-disks" "$work/state"
+# The box's kernel: its release, and its LSM list.
+printf '6.12.117-flatcar\n' > "$work/release"
+printf 'lockdown,capability,landlock,yama,apparmor' > "$work/lsm"
+cat > "$work/bin/uname" <<STUB
+#!/bin/sh
+cat "$work/release"
+STUB
+chmod +x "$work/bin/uname"
 for tool in ip sysctl systemctl systemd-run; do
   cat > "$work/bin/$tool" <<STUB
 #!/bin/sh
@@ -55,6 +63,7 @@ AGENT_USER=foreman
 POOL=10.250
 STATE=$work/state
 RESOLV=$work/resolv.conf
+LSM=$work/lsm
 CONF
 
 # A box whose resolv.conf Tailscale wrote: MagicDNS first.
@@ -81,7 +90,7 @@ expect() { # description, request, answer pattern (grep -E)
 }
 
 # -- refusals --------------------------------------------------------------
-expect "says its version" "version" "ok 1"
+expect "says its version" "version" "ok 2"
 expect "says the box's resolvers, not MagicDNS" "resolvers" "ok 192.168.1.1"
 expect "refuses an unknown request" "reboot" "error unknown request"
 expect "refuses characters outside its vocabulary" "start ../../etc/shadow 1 2" "error unexpected characters"
@@ -95,6 +104,28 @@ expect "refuses a guest image that isn't a SHA-256" "start $env1 2 1024 abc 1.2.
 expect "refuses an agent version that isn't one" "start $env1 2 1024 $guest 1.2" "error bad agent version"
 expect "refuses a VM whose disks aren't there" "start $env1 2 1024 $guest 9.9.9" "error missing .*/agent-disks/9.9.9.img"
 expect "refuses a restore without a snapshot" "restore $env1 2 1024" "error no snapshot"
+expect "says the box's kernel has Landlock" "landlock" "ok"
+no_landlock="error this box's kernel has no Landlock: environment VMs need Linux 6.2 or later with landlock in its LSM list"
+printf 'lockdown,capability,yama,apparmor' > "$work/lsm"
+expect "says when the kernel has no Landlock" "landlock" "$no_landlock"
+expect "refuses to start a VM without Landlock" "start $env1 2 1024 $guest 1.2.3" "$no_landlock"
+mkdir -p "$work/srv/vms/$env1/snapshot"
+: > "$work/srv/vms/$env1/snapshot/config.json"
+expect "refuses to restore a VM without Landlock" "restore $env1 2 1024" "$no_landlock"
+rm -r "$work/srv/vms/$env1/snapshot"
+rm "$work/lsm"
+expect "says when the kernel has no LSM list" "landlock" "$no_landlock"
+printf 'lockdown,capability,landlock,yama,apparmor' > "$work/lsm"
+printf '6.1.0-28-amd64\n' > "$work/release"
+expect "says when the kernel's Landlock is too old for Cloud Hypervisor" "landlock" "$no_landlock"
+printf '7.0.14-generic\n' > "$work/release"
+expect "takes a kernel past 6" "landlock" "ok"
+printf '6.2\n' > "$work/release"
+expect "takes 6.2 itself" "landlock" "ok"
+printf 'x.y\n' > "$work/release"
+expect "refuses a kernel release it can't read" "landlock" "$no_landlock"
+printf '6.12.117-flatcar\n' > "$work/release"
+check "nothing refused for Landlock made a tap" sh -c "! grep -q 'tuntap' '$work/calls' 2>/dev/null"
 long=$(printf 'stop %0201d' 0)
 expect "refuses a long request" "$long" "error request too long"
 ln -s /etc/passwd "$work/srv/vms/$env2/data.raw.link"
@@ -114,6 +145,12 @@ has "as the agent's user" "--uid=foreman"
 has "limited to its CPUs" "CPUQuota=200%"
 has "limited to its memory and some" "MemoryMax=2560M"
 has "on its tap" "tap=fm-vm0,mac=52:54:00:fa:00:00"
+has "confined by Landlock" "--landlock"
+has "to its own directory" "path=$work/srv/vms/$env1,access=rw"
+has "and its guest image, read-only" "path=$work/srv/guest/$guest,access=r"
+has "and its agent disk, read-only" "path=$work/srv/agent-disks/1.2.3.img,access=r"
+has "and the tun device" "path=/dev/net/tun,access=rw"
+has "and its tap's flags" "path=/sys/devices/virtual/net/fm-vm0,access=r"
 check "with its address and the box's resolvers, not MagicDNS, on the kernel command line" grep -qx \
   "console=ttyS0 root=/dev/vda rw quiet net.ifnames=0 fm.mac=52:54:00:fa:00:00 fm.ip=10.250.0.2/30 fm.gw=10.250.0.1 fm.dns=192.168.1.1 fm.env=$env1" "$work/last-run"
 has "booting the release's agent disk read-only" "path=$work/srv/agent-disks/1.2.3.img,image_type=raw,readonly=on,serial=fm-agent"

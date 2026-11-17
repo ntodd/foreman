@@ -11,6 +11,7 @@
 #
 #   version
 #   resolvers                 (the box's upstream resolvers, for its firewall)
+#   landlock                  (whether the box's kernel can confine its VMs)
 #   start ENV_ID CPUS MEMORY_MB GUEST_SHA256 AGENT_VERSION
 #   restore ENV_ID CPUS MEMORY_MB
 #   stop ENV_ID
@@ -21,11 +22,14 @@
 # directories, and it builds Cloud Hypervisor's command line itself. The
 # VM runs as the agent's user, in a unit of its own (foreman-vm-ENV_ID,
 # in foreman.slice) with CPU, memory and task limits and systemd's
-# sandboxing, so it outlives the agent. Nothing in the VM's directory,
-# which is the agent's, is opened as root: Cloud Hypervisor writes its own
-# log there, as the agent's user, and the unit's output goes to the
-# journal. The unit sees only its own VM's directory under SRV, with the
-# guest images and agent disks read-only, and none of the box's secrets,
+# sandboxing, so it outlives the agent. Cloud Hypervisor confines it with
+# Landlock too, and a box whose kernel can't do that runs no VMs: every
+# VM runs as the same user, and Landlock is what keeps one VMM out of the
+# others' files and processes. Nothing in the VM's directory, which is
+# the agent's, is opened as root: Cloud Hypervisor writes its own log
+# there, as the agent's user, and the unit's output goes to the journal.
+# The unit sees only its own VM's directory under SRV, with the guest
+# images and agent disks read-only, and none of the box's secrets,
 # identity or settings.
 #
 # Each VM gets a /30 from POOL (the first two octets of a /16): index n
@@ -36,7 +40,7 @@ set -u
 # Byte ranges in the request's patterns, whatever the locale.
 export LC_ALL=C
 
-VERSION=1
+VERSION=2
 
 SRV=/srv/foreman
 AGENT_ROOT=/opt/foreman-agent
@@ -44,9 +48,10 @@ AGENT_USER=foreman
 POOL=10.250
 STATE=/var/lib/foreman-vmctl
 RESOLV=/etc/resolv.conf
+LSM=/sys/kernel/security/lsm
 CONF=${FOREMAN_VMCTL_CONF:-/etc/foreman-agent/vmctl.conf}
 # Root's, written by install.sh: SRV, AGENT_ROOT, AGENT_USER, POOL, STATE
-# (and RESOLV, for tests).
+# (and RESOLV and LSM, for tests).
 # shellcheck disable=SC1090
 [ -r "$CONF" ] && . "$CONF"
 
@@ -158,6 +163,25 @@ run_unit() { # env_id cpus memory_mb vm_dir ch args...
 
 plain_file() { [ -f "$1" ] && [ ! -L "$1" ]; }
 
+# Whether the kernel has Landlock as Cloud Hypervisor needs it: ABI 3
+# (Linux 6.2), which it asks for as a hard requirement, so it won't start
+# on less. A kernel that backports it to an older release is refused too.
+landlock_ok() {
+  grep -qw landlock "$LSM" 2>/dev/null || return 1
+  release=$(uname -r)
+  major=${release%%.*}
+  minor=${release#*.}
+  minor=${minor%%[!0-9]*}
+  int_between "$major" 0 999 || return 1
+  int_between "$minor" 0 999 || return 1
+  [ "$major" -gt 6 ] || { [ "$major" -eq 6 ] && [ "$minor" -ge 2 ]; }
+}
+
+need_landlock() {
+  landlock_ok ||
+    answer "error this box's kernel has no Landlock: environment VMs need Linux 6.2 or later with landlock in its LSM list"
+}
+
 cmd_start() { # env_id cpus memory_mb guest_sha256 agent_version
   [ "$#" -eq 5 ] || answer "error start takes ENV_ID CPUS MEMORY_MB GUEST_SHA256 AGENT_VERSION"
   uuid_ok "$1" || answer "error bad environment id"
@@ -172,6 +196,7 @@ cmd_start() { # env_id cpus memory_mb guest_sha256 agent_version
   for f in "$vm/root.raw" "$vm/data.raw" "$guest/vmlinuz" "$agent_disk"; do
     plain_file "$f" || answer "error missing $f"
   done
+  need_landlock
   systemctl is-active --quiet "foreman-vm-$id.service" && answer "ok running"
   ch=$(ch_binary) || answer "error the agent release has no cloud-hypervisor"
   n=$(net_index "$id") || answer "error no addresses left"
@@ -183,6 +208,9 @@ cmd_start() { # env_id cpus memory_mb guest_sha256 agent_version
   # loader, and added now for a VM that starts before the next load.
   printf '%s\n' "$dns" > "$STATE/guest-dns"
   nft add element inet foreman_guests guest_dns "{ $dns }" >/dev/null 2>&1 || true
+  # Landlock: the VM's own files, and the tap (Cloud Hypervisor opens
+  # /dev/net/tun and reads the tap's flags from sysfs). It adds the disks
+  # and the kernel itself.
   set -- --kernel "$guest/vmlinuz" \
     --cmdline "console=ttyS0 root=/dev/vda rw quiet net.ifnames=0 fm.mac=$mac fm.ip=$guest_ip/30 fm.gw=$host_ip fm.dns=$dns fm.env=$id" \
     --disk "path=$vm/root.raw,image_type=raw,direct=on,num_queues=$queues,serial=fm-root" \
@@ -193,15 +221,10 @@ cmd_start() { # env_id cpus memory_mb guest_sha256 agent_version
     --net "tap=$tap,mac=$mac" \
     --vsock "cid=3,socket=$vm/vsock.sock" \
     --serial "file=$vm/serial.log" --console off \
-    --api-socket "path=$vm/api.sock"
-  # Landlock: the VM's own files, and the tap (Cloud Hypervisor opens
-  # /dev/net/tun and reads the tap's flags from sysfs). It adds the disks
-  # and the kernel itself.
-  if grep -qw landlock /sys/kernel/security/lsm 2>/dev/null; then
-    set -- "$@" --landlock --landlock-rules "path=$vm,access=rw" "path=$guest,access=r" \
-      "path=$agent_disk,access=r" "path=/dev/net/tun,access=rw" \
-      "path=/sys/devices/virtual/net/$tap,access=r"
-  fi
+    --api-socket "path=$vm/api.sock" \
+    --landlock --landlock-rules "path=$vm,access=rw" "path=$guest,access=r" \
+    "path=$agent_disk,access=r" "path=/dev/net/tun,access=rw" \
+    "path=/sys/devices/virtual/net/$tap,access=r"
   run_unit "$id" "$cpus" "$memory" "$vm" "$ch" "$@" || answer "error systemd-run failed"
   answer "ok started $tap $guest_ip"
 }
@@ -214,6 +237,7 @@ cmd_restore() { # env_id cpus memory_mb
   id=$1
   vm=$SRV/vms/$id
   plain_file "$vm/snapshot/config.json" || answer "error no snapshot"
+  need_landlock
   systemctl is-active --quiet "foreman-vm-$id.service" && answer "ok running"
   ch=$(ch_binary) || answer "error the agent release has no cloud-hypervisor"
   n=$(existing_index "$id") || answer "error the environment has no address to come back to"
@@ -262,6 +286,7 @@ shift
 case "$request" in
   version) answer "ok $VERSION" ;;
   resolvers) answer "ok $(resolvers)" ;;
+  landlock) need_landlock && answer "ok" ;;
   start) cmd_start "$@" ;;
   restore) cmd_restore "$@" ;;
   stop) cmd_stop "$@" ;;

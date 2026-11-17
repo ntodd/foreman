@@ -146,8 +146,10 @@ the box.
   directory, `/dev/kvm` and `/dev/net/tun` as its only devices, and
   limits on CPU, memory (the guest's plus 512 MB, no swap) and tasks.
   Cloud Hypervisor puts a seccomp filter on every thread, and Landlock
-  (where the kernel has it) keeps it to the VM's directory, the guest
-  image, the agent disk and its tap. A guest reaches the box only through
+  keeps it to the VM's directory, the guest image, the agent disk and
+  its tap. A box whose kernel can't apply Landlock (Linux 6.2 or later,
+  with `landlock` in its LSM list) runs no VMs: the helper refuses them
+  and the box reports why. A guest reaches the box only through
   the devices Cloud Hypervisor emulates (disks, network, vsock, balloon,
   serial console): there's no shared filesystem and no device
   passthrough.
@@ -465,7 +467,10 @@ These are accepted for now, or need someone to try them:
     agent's user, still inside its VM's unit: no capabilities, a seccomp
     filter, Landlock rules to its own files, and its cgroup. Every VM
     runs as that one user, so Landlock is what keeps one VM's process
-    away from another's disks; a user per VM isn't built. Nothing here
+    away from another's disks, and out of the agent's files and other
+    VMs' through `/proc/<pid>/root`, which the unit's mount namespace
+    doesn't stop. A box whose kernel can't apply it runs no VMs; a user
+    per VM isn't built. Nothing here
     has been tested against attacks on the device emulation. The
     defence is upstream's work and keeping Cloud Hypervisor current
     (19).
