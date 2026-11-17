@@ -45,6 +45,7 @@ defmodule ForemanProtocol.Event do
     # fields of the same names).
     "box.firewall" => [
       firewall: {{:enum, ~w(active outdated missing)}, required: true},
+      firewall_block_lan: {:boolean, []},
       firewall_default_bridge: {{:enum, ~w(filtered reaches_tailnet)}, []}
     ],
     # Whether the box needs a reboot (its /run/reboot-required), the

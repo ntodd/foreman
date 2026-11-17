@@ -65,7 +65,12 @@ defmodule ForemanWeb.AgentChannelTest do
 
     test "records the box firewall the agent reports", %{box: box} do
       {:ok, socket} = connect(AgentSocket, %{}, connect_info: signed_connect_info(box))
-      firewall = %{"firewall" => "missing", "firewall_default_bridge" => "reaches_tailnet"}
+
+      firewall = %{
+        "firewall" => "missing",
+        "firewall_default_bridge" => "reaches_tailnet",
+        "firewall_block_lan" => true
+      }
 
       assert {:ok, _, _} =
                subscribe_and_join(socket, "agent:#{box.id}", join_payload(firewall))
@@ -73,6 +78,7 @@ defmodule ForemanWeb.AgentChannelTest do
       box = Repo.reload!(box)
       assert box.firewall == "missing"
       assert box.firewall_default_bridge == "reaches_tailnet"
+      assert box.firewall_block_lan == true
     end
 
     test "an agent that doesn't report the firewall leaves it unknown", %{box: box} do
@@ -204,13 +210,18 @@ defmodule ForemanWeb.AgentChannelTest do
 
     test "records the box firewall when it changes between joins", %{socket: socket, box: box} do
       {:ok, firewall} =
-        Event.new("box.firewall", %{firewall: "missing", firewall_default_bridge: "filtered"})
+        Event.new("box.firewall", %{
+          firewall: "missing",
+          firewall_default_bridge: "filtered",
+          firewall_block_lan: false
+        })
 
       ref = push(socket, "event", Event.to_wire(firewall))
       assert_reply ref, :ok
       box = Repo.reload!(box)
       assert box.firewall == "missing"
       assert box.firewall_default_bridge == "filtered"
+      assert box.firewall_block_lan == false
     end
 
     test "records whether the box needs a reboot", %{socket: socket, box: box} do

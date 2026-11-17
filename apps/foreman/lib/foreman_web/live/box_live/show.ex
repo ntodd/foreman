@@ -221,6 +221,11 @@ defmodule ForemanWeb.BoxLive.Show do
 
       <.box_vm_alert box={@box} />
       <.box_firewall_alert box={@box} />
+      <p :if={is_boolean(@box.firewall_block_lan)} class="text-sm text-ink-2">
+        Guest LAN policy: {if @box.firewall_block_lan,
+          do: "Block private networks",
+          else: "Allow private networks"}
+      </p>
       <.box_reboot_alert box={@box} can_reboot={Scope.admin?(@current_scope) and @online} />
 
       <.callout

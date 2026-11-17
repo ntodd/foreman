@@ -148,9 +148,9 @@ masquerades what they send out through the box, and:
 - a VM sends only from its own address, and only IPv4
 - nothing outside the box starts a connection into a VM
 
-VMs reach the box's LAN by default; install with `--block-lan` (and
-pass it again on a re-run) to keep them off RFC 1918 and link-local
-addresses, DNS aside. The other table (`inet foreman`) also rejects
+VMs reach the box's private LAN by default. Link-local traffic is blocked
+except for DNS to configured resolvers. Install with `--block-lan` to
+apply that restriction to RFC 1918 addresses as well. The other table (`inet foreman`) also rejects
 anything arriving on an `fm-` interface bound for the tailnet, the box's
 own tailnet addresses or `tailscale0` (subnet routes the box accepts).
 Environments reach the tailnet through their own node, as before.

@@ -323,7 +323,8 @@ mv /etc/foreman-agent/firewall.nft.new /etc/foreman-agent/firewall.nft
 # while the rules are loaded.
 rm -f /etc/foreman-agent/firewall.nft.src
 if [ -n "$DEFAULT_BRIDGE_FILTER" ] || [ -n "$no_docker" ]; then bridge_mode=filtered; else bridge_mode=reaches_tailnet; fi
-printf 'source_sha256=%s\ndefault_bridge=%s\n' "$(sha256sum < "$rules" | cut -d' ' -f1)" "$bridge_mode" \
+if [ -n "$BLOCK_LAN" ]; then block_lan_setting=1; else block_lan_setting=0; fi
+printf 'source_sha256=%s\ndefault_bridge=%s\nblock_lan=%s\n' "$(sha256sum < "$rules" | cut -d' ' -f1)" "$bridge_mode" "$block_lan_setting" \
   > /etc/foreman-agent/firewall.info
 chmod 0644 /etc/foreman-agent/firewall.info
 
@@ -455,7 +456,6 @@ POOL=$VM_SUBNET
 STATE=/var/lib/foreman-vmctl
 EOF
 chmod 0644 /etc/foreman-agent/vmctl.conf
-if [ -n "$BLOCK_LAN" ]; then block_lan_setting=1; else block_lan_setting=0; fi
 printf '# Written by install.sh: a re-run keeps these unless it is given others.\nBLOCK_LAN=%s\nVM_SUBNET=%s\n' \
   "$block_lan_setting" "$VM_SUBNET" > "$SETTINGS"
 chmod 0644 "$SETTINGS"

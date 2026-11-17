@@ -80,6 +80,7 @@ box joins the tailnet as `tag:foreman-box`. Macs can't be boxes until
 [#180](https://github.com/ntodd/foreman/issues/180) ([mac.md](mac.md)).
 
 On a cloud instance, install with `--block-lan` if environments
-shouldn't reach the instance's network or its metadata endpoint
-([personal.md](personal.md#5-add-the-desktop-as-a-box)). The instance
+shouldn't reach the instance's private network. Both LAN modes block access to
+link-local metadata. On existing boxes, rerun the install script after updating
+the agent to load the new rules ([box setup](personal.md#5-add-the-desktop-as-a-box)). The instance
 needs KVM: bare metal, or an instance type with nested virtualization.

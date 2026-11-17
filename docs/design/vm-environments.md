@@ -337,7 +337,7 @@ See [Suspend and resume](#suspend-and-resume). Same environment, same disk, same
 
 - A compromised control plane can still run repo code on every box (gap 5), now inside VMs.
 - Tokens in an environment are usable by anything in it (gap 12).
-- An environment has unfiltered internet access. On a cloud instance the metadata endpoint is still reachable unless the LAN option (NET-14) or a specific rule blocks it.
+- An environment has unfiltered internet access. The host firewall blocks link-local metadata independently of the LAN setting.
 - Tailscale's userspace mode still hands tailnet connections to localhost listeners in the environment.
 
 ### New things to defend

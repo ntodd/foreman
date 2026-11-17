@@ -52,6 +52,7 @@ defmodule ForemanProtocol do
     # as the box, is loaded and the one this agent ships with; and whether
     # it leaves Docker's default bridge, where image builds run, out.
     firewall: {{:enum, ~w(active outdated missing)}, []},
+    firewall_block_lan: {:boolean, []},
     firewall_default_bridge: {{:enum, ~w(filtered reaches_tailnet)}, []},
     # Protocol 6. Whether the box can run environment VMs, and why not when
     # it can't; whether they run nested (the box is a VM itself); whether

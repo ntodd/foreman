@@ -244,6 +244,7 @@ defmodule Foreman.Boxes do
         os: join.os,
         arch: join.arch,
         firewall: Map.get(join, :firewall),
+        firewall_block_lan: Map.get(join, :firewall_block_lan),
         firewall_default_bridge: Map.get(join, :firewall_default_bridge),
         vm: vm_report(Map.get(join, :vm)),
         last_seen_at: DateTime.utc_now()
@@ -313,6 +314,7 @@ defmodule Foreman.Boxes do
         box
         |> Ecto.Changeset.change(
           firewall: firewall.firewall,
+          firewall_block_lan: Map.get(firewall, :firewall_block_lan),
           firewall_default_bridge: Map.get(firewall, :firewall_default_bridge)
         )
         |> Repo.update!()

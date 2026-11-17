@@ -345,8 +345,9 @@ table for guests, `inet foreman_guests`, that works on each VM's tap
 - a guest sends only from its own address: anything that wouldn't be
   routed back through its tap is dropped, and IPv6 is dropped
 - nothing outside the box starts a connection into a guest
-- with `install.sh --block-lan`, nothing goes to RFC 1918 or link-local
-  addresses (the LAN, a cloud instance's metadata endpoint), DNS aside
+- the firewall blocks IPv4 link-local destinations, including HTTP to cloud
+  instance metadata. It permits TCP and UDP port 53 to configured resolvers
+- `install.sh --block-lan` extends that policy to RFC 1918 addresses
 
 What's left goes out through the box's NAT. The box's other table,
 `inet foreman`, also rejects anything arriving on an `fm-` interface,
@@ -441,9 +442,8 @@ These are accepted for now, or need someone to try them:
     VM; 17 covers what's between a VM and the box.) Treat code in an
     environment (including coding agents) as able to reach anything on
     the internet and, unless the box was installed with `--block-lan`,
-    on the box's LAN: there's no egress filtering, and on a cloud
-    instance the metadata endpoint is reachable unless the LAN is
-    blocked. Most devcontainer images give their user passwordless sudo,
+    on the box's LAN. The firewall always blocks HTTP to link-local
+    instance metadata. Most devcontainer images give their user passwordless sudo,
     and privileged containers are allowed, so assume root in the VM. The
     box itself, other environments and the tailnet as the box are kept
     out by the firewall, and something that flushes the box's whole

@@ -88,6 +88,15 @@ defmodule ForemanAgent.FirewallTest do
              ForemanProtocol.cast_join(join)
   end
 
+  test "reports both configured LAN modes, including when the firewall is down", %{config: config} do
+    File.mkdir_p!(Path.dirname(config.firewall_info))
+
+    for {setting, expected} <- [{"0", false}, {"1", true}] do
+      File.write!(config.firewall_info, "block_lan=#{setting}\n")
+      assert %{firewall: "missing", firewall_block_lan: ^expected} = Firewall.report(config)
+    end
+  end
+
   test "the rules it ships with are the ones in priv" do
     assert File.read!(Config.load().firewall_rules) =~ "table inet foreman"
   end

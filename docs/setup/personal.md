@@ -221,7 +221,7 @@ since the firewall would cut environments off from the internet there.
 | Option | |
 |---|---|
 | `--token fj_...` | the join token, for a box that isn't enrolled yet |
-| `--block-lan` | keeps environments off this box's LAN (RFC 1918 and link-local addresses, a cloud instance's metadata endpoint among them), DNS aside. By default they reach it. |
+| `--block-lan` | blocks guest access to RFC 1918 networks. Both settings block IPv4 link-local services, including cloud metadata, with a DNS exception for configured resolvers. The box page shows the reported LAN policy. |
 | `--vm-subnet A.B` | gives VMs their addresses from `A.B.0.0/16` instead of `10.250.0.0/16`, for a LAN that already uses it. It has to be a private range. |
 | `--default-bridge-reaches-tailnet` | on a box with Docker, leaves Docker's default bridge out of the firewall ([tailscale.md](tailscale.md#boxes-on-the-tailnet)) |
 | `--reenroll` | enrolls the box again with a new `--token` (after revoking it, say); the old identity is moved aside |

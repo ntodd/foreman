@@ -29,12 +29,18 @@ defmodule ForemanAgent.Firewall do
         _ -> "outdated"
       end
 
+    report =
+      case info["block_lan"] do
+        value when value in ["0", "1"] -> %{firewall: state, firewall_block_lan: value == "1"}
+        _ -> %{firewall: state}
+      end
+
     case info["default_bridge"] do
       bridge when bridge in ["filtered", "reaches_tailnet"] ->
-        %{firewall: state, firewall_default_bridge: bridge}
+        Map.put(report, :firewall_default_bridge, bridge)
 
       _ ->
-        %{firewall: state}
+        report
     end
   end
 
