@@ -22,7 +22,10 @@ defmodule Foreman.Boxes.Box do
     field :arch, :string
     field :capacity, :map
     field :capacity_policy, :string, default: "allow"
-    field :contention_threshold, :float, default: 0.9
+    # Contention past these fractions of capacity. CPU overcommit costs
+    # little with VMs, memory overcommit can get a VM killed.
+    field :cpu_threshold, :float, default: 0.9
+    field :memory_threshold, :float, default: 0.9
     field :firewall, :string
     field :firewall_default_bridge, :string
     field :reboot_required, :boolean
@@ -45,7 +48,8 @@ defmodule Foreman.Boxes.Box do
     |> cast(attrs, [
       :name,
       :capacity_policy,
-      :contention_threshold,
+      :cpu_threshold,
+      :memory_threshold,
       :desired_agent_version,
       :owner_user_id,
       :shared_user_ids
@@ -53,7 +57,9 @@ defmodule Foreman.Boxes.Box do
     |> validate_required([:name])
     |> validate_name()
     |> validate_inclusion(:capacity_policy, @policies)
-    |> validate_number(:contention_threshold, greater_than: 0, less_than_or_equal_to: 4)
+    |> validate_required([:cpu_threshold, :memory_threshold])
+    |> validate_number(:cpu_threshold, greater_than: 0, less_than_or_equal_to: 16)
+    |> validate_number(:memory_threshold, greater_than: 0, less_than_or_equal_to: 4)
     |> validate_format(:desired_agent_version, ~r/\A\d+\.\d+\.\d+(-[0-9A-Za-z.]+)?\z/)
     |> unique_constraint(:name)
   end

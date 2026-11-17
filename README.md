@@ -90,8 +90,9 @@ See [docs/setup/connect-hooks.md](docs/setup/connect-hooks.md).
 
 Each VM has a size: the environment's or the repo's limits, or the box's
 default of 4 CPUs and 8 GB. Boxes report used and provisioned CPU and
-memory and warn about contention. They allow overcommit by default and
-can be set to warn or refuse instead. A box joins with a one-time token.
+memory and warn about contention, with a threshold for each, so a box
+can overcommit CPU a lot and memory a little. They allow placement past
+it by default and can be set to warn or refuse instead. A box joins with a one-time token.
 After a reboot the control plane puts its secrets back and restarts its
 environments. Boxes
 update their agents from signed releases, and a release is a single tag:

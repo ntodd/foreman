@@ -11,7 +11,7 @@ defmodule ForemanWeb.BoxSettingsTest do
       {:ok, view, _html} = live(conn, ~p"/boxes/#{box.id}")
 
       html =
-        view |> form("#box-settings", box: %{contention_threshold: "9"}) |> render_submit()
+        view |> form("#box-settings", box: %{memory_threshold: "9"}) |> render_submit()
 
       assert html =~ "less than or equal to 4"
 
@@ -23,6 +23,22 @@ defmodule ForemanWeb.BoxSettingsTest do
       assert render(view) =~ "less than or equal to 4"
     end
 
+    test "CPU and memory have their own thresholds", %{conn: conn, user: user} do
+      box = box_fixture(owner_user_id: user.id)
+      {:ok, view, _html} = live(conn, ~p"/boxes/#{box.id}")
+
+      html = view |> form("#box-settings", box: %{cpu_threshold: "17"}) |> render_submit()
+      assert html =~ "less than or equal to 16"
+
+      view
+      |> form("#box-settings", box: %{cpu_threshold: "4", memory_threshold: "1.2"})
+      |> render_submit()
+
+      box = Boxes.get_box!(box.id)
+      assert box.cpu_threshold == 4.0
+      assert box.memory_threshold == 1.2
+    end
+
     test "someone else's save still shows", %{conn: conn, user: user} do
       box = box_fixture(owner_user_id: user.id)
       {:ok, view, _html} = live(conn, ~p"/boxes/#{box.id}")
@@ -30,10 +46,14 @@ defmodule ForemanWeb.BoxSettingsTest do
       {:ok, _} =
         Boxes.update_box(Scope.for_user(user), Boxes.get_box!(box.id), %{
           "name" => box.name,
-          "contention_threshold" => "0.5"
+          "cpu_threshold" => "4",
+          "memory_threshold" => "0.5"
         })
 
-      assert view |> element("#box-settings input[name='box[contention_threshold]']") |> render() =~
+      assert view |> element("#box-settings input[name='box[cpu_threshold]']") |> render() =~
+               ~s(value="4.0")
+
+      assert view |> element("#box-settings input[name='box[memory_threshold]']") |> render() =~
                ~s(value="0.5")
     end
   end

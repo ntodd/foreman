@@ -98,7 +98,8 @@ defmodule ForemanWeb.BoxLive.Show do
   defp form_params(box) do
     %{
       "capacity_policy" => box.capacity_policy,
-      "contention_threshold" => box.contention_threshold,
+      "cpu_threshold" => box.cpu_threshold,
+      "memory_threshold" => box.memory_threshold,
       "owner_user_id" => box.owner_user_id,
       "shared_user_ids" => box.shared_user_ids,
       "desired_agent_version" => box.desired_agent_version
@@ -270,14 +271,14 @@ defmodule ForemanWeb.BoxLive.Show do
                 value={@summary.used_cpus}
                 max={@summary.cpus}
                 unit=" cores"
-                threshold={@box.contention_threshold}
+                threshold={Capacity.used_threshold(@box.cpu_threshold)}
               />
               <.capacity_bar
                 label="CPU provisioned"
                 value={@summary.provisioned_cpus}
                 max={@summary.cpus}
                 unit=" cores"
-                threshold={@box.contention_threshold}
+                threshold={@box.cpu_threshold}
               />
               <.capacity_bar
                 label="Memory used"
@@ -285,7 +286,7 @@ defmodule ForemanWeb.BoxLive.Show do
                 max={@summary.memory_mb}
                 unit=" GiB"
                 format={&gib/1}
-                threshold={@box.contention_threshold}
+                threshold={Capacity.used_threshold(@box.memory_threshold)}
               />
               <.capacity_bar
                 label="Memory provisioned"
@@ -293,7 +294,7 @@ defmodule ForemanWeb.BoxLive.Show do
                 max={@summary.memory_mb}
                 unit=" GiB"
                 format={&gib/1}
-                threshold={@box.contention_threshold}
+                threshold={@box.memory_threshold}
               />
               <.capacity_bar
                 :if={@summary.disk_mb}
@@ -403,13 +404,29 @@ defmodule ForemanWeb.BoxLive.Show do
                     {"Refuse", "refuse"}
                   ]}
                 />
-                <.input
-                  field={@form[:contention_threshold]}
-                  type="number"
-                  step="0.05"
-                  min="0.1"
-                  label="Contention threshold (fraction of capacity)"
-                />
+                <div>
+                  <div class="grid grid-cols-2 gap-3">
+                    <.input
+                      field={@form[:cpu_threshold]}
+                      type="number"
+                      step="0.05"
+                      min="0.1"
+                      max="16"
+                      label="CPU threshold"
+                    />
+                    <.input
+                      field={@form[:memory_threshold]}
+                      type="number"
+                      step="0.05"
+                      min="0.1"
+                      max="4"
+                      label="Memory threshold"
+                    />
+                  </div>
+                  <p class="mt-1.5 text-xs text-ink-3">
+                    Fractions of capacity; past 1 overcommits. Idle VMs cost little CPU, but a box out of memory kills a VM.
+                  </p>
+                </div>
                 <.input
                   field={@form[:owner_user_id]}
                   type="select"
@@ -458,7 +475,8 @@ defmodule ForemanWeb.BoxLive.Show do
             <% else %>
               <dl class="space-y-2.5">
                 <.fact term="Past capacity">{@box.capacity_policy}</.fact>
-                <.fact term="Threshold">{round(@box.contention_threshold * 100)}%</.fact>
+                <.fact term="CPU threshold">{round(@box.cpu_threshold * 100)}%</.fact>
+                <.fact term="Memory threshold">{round(@box.memory_threshold * 100)}%</.fact>
               </dl>
             <% end %>
           </.panel>
