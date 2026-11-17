@@ -324,7 +324,8 @@ systemctl is-active --quiet "$unit" || fail "$unit isn't running"
 group=$(systemctl show -p Group --value "$unit")
 case "$group" in foreman-tap[0-9]*) ;; *) fail "the VM has no dedicated tap group" ;; esac
 gid=$(getent group "$group" | cut -d: -f3)
-[ -n "$gid" ] && [ "$(cat "/sys/class/net/fm-vm${group#foreman-tap}/group")" = "$gid" ] ||
+[ -n "$gid" ] || fail "the VM tap group does not exist"
+[ "$(cat "/sys/class/net/fm-vm${group#foreman-tap}/group")" = "$gid" ] ||
   fail "the tap does not require the VM's group"
 [ "$(systemctl show -p ProtectProc --value "$unit")" = ptraceable ] ||
   fail "the VM can enumerate other processes"
