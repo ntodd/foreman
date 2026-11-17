@@ -64,7 +64,7 @@ defmodule Foreman.Accounts do
           release_login(login, profile["id"])
 
           result =
-            (existing || %User{role: initial_role(login, config)})
+            (existing || %User{})
             |> User.github_changeset(attrs)
             |> Ecto.Changeset.change(role: role_for(existing, login, config))
             |> Repo.insert_or_update()
@@ -175,7 +175,7 @@ defmodule Foreman.Accounts do
       listed_in?(login, config.admins) ->
         "admin"
 
-      config.admins == [] and not Repo.exists?(from u in User, where: u.role == "admin") ->
+      unconfigured?(config) and no_users?() ->
         "admin"
 
       true ->

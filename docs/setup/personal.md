@@ -336,7 +336,9 @@ plane from starting, so a typo can't quietly turn one off.
 
 With none of `FOREMAN_ADMINS`, `FOREMAN_ALLOWED_USERS` and
 `FOREMAN_ALLOWED_ORG` set, the first person to sign in becomes the admin
-and nobody else can sign in.
+and nobody else can sign in. With a user or organization allowlist, new users
+join as members. Set `FOREMAN_ADMINS` to the GitHub login of the intended
+administrator. On existing installations, review previously assigned admin roles.
 
 Agent settings (in `/etc/foreman-agent/agent.env`, written by the
 install script) are documented in
