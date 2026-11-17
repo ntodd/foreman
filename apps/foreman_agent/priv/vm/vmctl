@@ -114,9 +114,19 @@ net_up() {
   host_ip=$POOL.$third.$((base + 1))
   guest_ip=$POOL.$third.$((base + 2))
   mac=$(printf '52:54:00:fa:%02x:%02x' $((n / 256)) $((n % 256)))
-  if ! ip link show "$tap" >/dev/null 2>&1; then
-    ip tuntap add dev "$tap" mode tap user "$AGENT_USER" || answer "error couldn't create $tap"
+  # One group per address slot, retained for reuse. The VM keeps the agent
+  # uid for its disks, but only this VM gets the group its tap requires.
+  vm_group=foreman-tap$n
+  printf 'g %s -\n' "$vm_group" | systemd-sysusers - >/dev/null ||
+    answer "error couldn't allocate the group for $tap"
+  if ip link show "$tap" >/dev/null 2>&1; then
+    # Upgrade a stopped VM's old uid-only tap, keeping its name/address.
+    # tuntap del requires attachment to this single-queue tap and fails
+    # if a live VMM is still using it.
+    ip tuntap del dev "$tap" mode tap || answer "error couldn't replace $tap"
   fi
+  ip tuntap add dev "$tap" mode tap user "$AGENT_USER" group "$vm_group" ||
+    answer "error couldn't create $tap"
   sysctl -qw "net.ipv6.conf.$tap.disable_ipv6=1" 2>/dev/null || true
   ip addr replace "$host_ip/30" dev "$tap" || answer "error couldn't address $tap"
   ip link set "$tap" up || answer "error couldn't bring $tap up"
@@ -151,7 +161,7 @@ run_unit() { # env_id cpus memory_mb vm_dir ch args...
   systemctl reset-failed "$unit.service" >/dev/null 2>&1 || true
   # Room for Cloud Hypervisor itself on top of the guest's memory.
   systemd-run --unit="$unit" --slice=foreman.slice --collect --quiet \
-    --uid="$AGENT_USER" --gid="$AGENT_USER" -p SupplementaryGroups=kvm \
+    --uid="$AGENT_USER" --gid="$vm_group" -p SupplementaryGroups=kvm -p ProtectProc=ptraceable -p RestrictNamespaces=yes \
     -p "MemoryMax=$((memory + 512))M" -p MemorySwapMax=0 -p "CPUQuota=$((cpus * 100))%" \
     -p TasksMax=1024 -p UMask=0077 -p NoNewPrivileges=yes -p ProtectSystem=strict \
     -p ProtectHome=yes -p PrivateTmp=yes -p ProtectKernelTunables=yes \
