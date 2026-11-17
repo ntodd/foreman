@@ -308,25 +308,29 @@ esac
 [ "${#line}" -le 200 ] || answer "error request too long"
 
 # One request at a time: allocating an address reads, then writes.
-mkdir -p "$STATE"
-exec 9>"$STATE/lock"
-flock 9
+mkdir -p "$STATE" || answer "error cannot open VM helper state"
 
-set -f
-# shellcheck disable=SC2086
-set -- $line
-set +f
-[ "$#" -ge 1 ] || answer "error no request"
-request=$1
-shift
-case "$request" in
-  version) answer "ok $VERSION" ;;
-  resolvers) answer "ok $(resolvers)" ;;
-  landlock) need_landlock && answer "ok" ;;
-  tap) cmd_tap "$@" ;;
-  start) cmd_start "$@" ;;
-  restore) cmd_restore "$@" ;;
-  stop) cmd_stop "$@" ;;
-  release) cmd_release "$@" ;;
-  *) answer "error unknown request" ;;
-esac
+dispatch() {
+  flock 9 || answer "error cannot acquire VM helper lock"
+
+  set -f
+  # shellcheck disable=SC2086
+  set -- $line
+  set +f
+  [ "$#" -ge 1 ] || answer "error no request"
+  request=$1
+  shift
+  case "$request" in
+    version) answer "ok $VERSION" ;;
+    resolvers) answer "ok $(resolvers)" ;;
+    landlock) need_landlock && answer "ok" ;;
+    tap) cmd_tap "$@" ;;
+    start) cmd_start "$@" ;;
+    restore) cmd_restore "$@" ;;
+    stop) cmd_stop "$@" ;;
+    release) cmd_release "$@" ;;
+    *) answer "error unknown request" ;;
+  esac
+}
+
+dispatch 9>"$STATE/lock" || answer "error cannot open VM helper lock"
