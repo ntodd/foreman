@@ -158,6 +158,13 @@ defmodule ForemanWeb.EnvironmentLive.Index do
 
   defp state_order, do: @state_order
 
+  # The box cards draw the larger of used and provisioned, so the bar
+  # takes the threshold of whichever it's showing.
+  defp bar_threshold(used, provisioned, threshold) when used > provisioned,
+    do: Capacity.used_threshold(threshold)
+
+  defp bar_threshold(_used, _provisioned, threshold), do: threshold
+
   attr :env, :map, required: true
   attr :class, :any, default: nil
 
@@ -322,7 +329,13 @@ defmodule ForemanWeb.EnvironmentLive.Index do
               value={max(card.summary.used_cpus, card.summary.provisioned_cpus)}
               max={card.summary.cpus}
               unit=" cores"
-              threshold={card.box.contention_threshold}
+              threshold={
+                bar_threshold(
+                  card.summary.used_cpus,
+                  card.summary.provisioned_cpus,
+                  card.box.cpu_threshold
+                )
+              }
             />
             <.capacity_bar
               label="Memory"
@@ -330,7 +343,13 @@ defmodule ForemanWeb.EnvironmentLive.Index do
               max={card.summary.memory_mb}
               unit=" GiB"
               format={&gib/1}
-              threshold={card.box.contention_threshold}
+              threshold={
+                bar_threshold(
+                  card.summary.used_memory_mb,
+                  card.summary.provisioned_memory_mb,
+                  card.box.memory_threshold
+                )
+              }
             />
           </div>
           <p class="mt-3 text-xs text-ink-3">

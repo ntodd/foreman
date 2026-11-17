@@ -62,6 +62,16 @@ default of 4 CPUs and 8 GB. Boxes allow placement past capacity by
 default and show contention. A box that's tight on memory can be set to
 **warn** (ask first) or **refuse** on its page.
 
+Contention starts past a box's CPU threshold and its memory threshold,
+both fractions of what the box has (0.9 to start). Past 1 overcommits.
+CPU overcommit is cheap: an idle VM's vCPUs cost the box next to
+nothing, and busy VMs share cores and run slower. Memory overcommit
+isn't: a VM holds the memory its guest has touched, page cache included,
+and a box that runs out kills a VM, losing everything running in it. A
+box for a few big, mostly idle environments might use 4 for CPU and 1.2
+for memory. Whatever the thresholds, a box whose CPU or memory is more
+than 90% in use shows contention.
+
 A developer's box can also be a Flatcar VM on a Linux machine or
 Proxmox ([flatcar.md](flatcar.md)), which keeps the box's environments,
 and their secrets, off the machine itself, at the cost of running them

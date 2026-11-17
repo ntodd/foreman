@@ -250,11 +250,16 @@ defmodule ForemanWeb.ForemanComponents do
     """
   end
 
-  defp bar_class(ratio, threshold) when ratio > 1,
-    do: if(threshold < 1, do: "bar-danger", else: "bar-warning")
-
-  defp bar_class(ratio, threshold) when ratio > threshold, do: "bar-warning"
-  defp bar_class(_, _), do: nil
+  # Amber past the threshold or 100%, whichever comes first, and red past
+  # both: a box set to overcommit is amber while it does and red past
+  # what it allows.
+  defp bar_class(ratio, threshold) do
+    cond do
+      ratio > max(threshold, 1) -> "bar-danger"
+      ratio > min(threshold, 1) -> "bar-warning"
+      true -> nil
+    end
+  end
 
   defp fmt(nil, _), do: "0"
   defp fmt(value, fun) when is_function(fun, 1), do: fun.(value)
