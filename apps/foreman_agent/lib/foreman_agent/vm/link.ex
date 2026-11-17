@@ -296,7 +296,7 @@ defmodule ForemanAgent.VM.Link do
         # The read bucket carries across reconnects, so a guest can't drop
         # the connection to earn a fresh burst; after a genuine idle gap it
         # has refilled on its own.
-        {:noreply, %{state | socket: socket, armed: true}}
+        {:noreply, arm(%{state | socket: socket, armed: false})}
 
       {:error, reason} ->
         if state.alive?.() do
@@ -413,9 +413,8 @@ defmodule ForemanAgent.VM.Link do
   defp open(socket, state) do
     with :ok <- :gen_tcp.send(socket, "CONNECT #{Channel.port()}\n"),
          {:ok, "OK" <> _} <- :gen_tcp.recv(socket, 0, @connect_timeout),
-         :ok <- :inet.setopts(socket, Channel.frame_opts(:host)),
-         :ok <- Channel.send_frame(socket, hello(state), Channel.max_frame(:to_guest)) do
-      :inet.setopts(socket, active: :once)
+         :ok <- :inet.setopts(socket, Channel.frame_opts(:host)) do
+      Channel.send_frame(socket, hello(state), Channel.max_frame(:to_guest))
     else
       {:ok, line} -> {:error, {:handshake, line}}
       {:error, _} = error -> error
@@ -460,7 +459,7 @@ defmodule ForemanAgent.VM.Link do
   defp arm(%{armed: true} = state), do: state
 
   defp arm(state) do
-    if Enum.any?(state.pending, fn {_, e} -> e.untaken > @log_window end) do
+    if state.ready and Enum.any?(state.pending, fn {_, e} -> e.untaken > @log_window end) do
       state
     else
       state = refill(state)
