@@ -89,6 +89,18 @@ expect() { # description, request, answer pattern (grep -E)
   if printf '%s' "$got" | grep -Eqx "$3"; then pass "$1"; else fail "$1 (got: $got)"; fi
 }
 
+# The helper must refuse before allocating a tap or launching a unit.
+mkdir "$work/state/lock"
+expect "refuses an inaccessible lock file" "start $env1 2 1024 $guest 1.2.3" "error cannot open VM helper lock"
+rmdir "$work/state/lock"
+printf '#!/bin/sh\nexit 1\n' > "$work/bin/flock"
+chmod +x "$work/bin/flock"
+expect "refuses a failed state lock" "start $env1 2 1024 $guest 1.2.3" "error cannot acquire VM helper lock"
+rm "$work/bin/flock"
+check "failed locks leave addresses untouched" test ! -e "$work/state/nets"
+check "failed locks never touch networking or units" test ! -e "$work/calls"
+check "failed locks never launch a unit" test ! -e "$work/last-run"
+
 # -- refusals --------------------------------------------------------------
 expect "says its version" "version" "ok 2"
 expect "says the box's resolvers, not MagicDNS" "resolvers" "ok 192.168.1.1"
