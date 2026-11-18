@@ -109,9 +109,9 @@ wait_for_env() { # slug, state, seconds
       cp_eval "E2E.log(\"$1\")" | tail -60 >&2
       fail "$1 errored waiting for $2"
     fi
-    i=$((i + 5))
+    i=$((i + 2))
     [ $i -lt "$3" ] || { cp_eval "E2E.log(\"$1\")" | tail -60 >&2; fail "timed out waiting for $1 $2"; }
-    sleep 5
+    sleep 2
   done
   echo "ok: $1 $2"
 }
@@ -313,8 +313,23 @@ wait_for "the box reports it can run VMs" 60 vm_ready
 cp_eval 'E2E.vm_status()' | grep "^VM"
 
 # -- an environment --------------------------------------------------------------
+# Creating, stopping and starting go through the environment's pages, as a
+# user's clicks do, so the running control plane sends them at once. Work
+# queued from an eval (a VM of its own) waits for the dispatch sweep, up
+# to a minute each time.
+cookie=$(cp_eval 'E2E.session_cookie()' | sed -n 's/^COOKIE=//p')
+[ -n "$cookie" ] || fail "no session cookie"
+box_id=$(cp_eval 'E2E.box_id()' | sed -n 's/^BOX_ID=//p')
+repo_id=$(cp_eval 'E2E.repo_id()' | sed -n 's/^REPO_ID=//p')
+create_env() { # slug it gets; prints its id
+  lv_click /environments/new submit:create \
+    "{\"environment\":{\"repo_id\":\"$repo_id\",\"box_id\":\"$box_id\"}}" >/dev/null ||
+    fail "couldn't create $1"
+  cp_eval "E2E.env_id(\"$1\")" | sed -n 's/^ENV=//p'
+}
+
 say "create an environment"
-first=$(cp_eval 'E2E.create()' | sed -n 's/^ENV=\([^ ]*\) .*/\1/p')
+first=$(create_env hello-1)
 [ -n "$first" ] || fail "no environment"
 wait_for_env hello-1 running 900
 unit=foreman-vm-$first.service
@@ -351,7 +366,7 @@ probe dind 0 create
 echo "ok: the environment reaches the internet and the LAN, not the box, and runs docker-in-docker"
 
 say "a second environment can't reach the first"
-cp_eval 'E2E.create()' >/dev/null
+[ -n "$(create_env hello-2)" ] || fail "no second environment"
 wait_for_env hello-2 running 600
 cp_eval 'E2E.log("hello-2", "create")' > "$work/create2.log"
 probe first-guest 124 create2
@@ -361,11 +376,11 @@ echo "ok: environments don't reach each other"
 say "secrets survive a stop and start"
 cp_eval 'E2E.secret("hello-1", "SIDECAR_TOKEN", "vm-secret-1")' >/dev/null
 sleep 5
-cp_eval 'E2E.act("hello-1", "stop")' >/dev/null
+lv_click "/environments/$first" action '{"do":"stop"}' >/dev/null || fail "couldn't stop hello-1"
 wait_for_env hello-1 stopped 180
 systemctl is-active --quiet "$unit" && fail "the VM is still running after stop"
 echo "ok: stopped, VM off"
-cp_eval 'E2E.act("hello-1", "start")' >/dev/null
+lv_click "/environments/$first" action '{"do":"start"}' >/dev/null || fail "couldn't start hello-1"
 wait_for_env hello-1 running 300
 systemctl is-active --quiet "$unit" || fail "the VM didn't boot again"
 cp_eval 'E2E.log("hello-1", "start")' > "$work/start.log"
@@ -376,7 +391,6 @@ echo "ok: the secret reached the environment after a boot"
 say "suspend and resume"
 # The heartbeat's latest line: "<boot id> <guest clock>", from the
 # environment page's Container logs.
-cookie=$(cp_eval 'E2E.session_cookie()' | sed -n 's/^COOKIE=//p')
 beat() {
   previous=$(cp_eval 'E2E.last_logs("hello-1")' | sed -n 's/^LAST=//p')
   lv_click "/environments/$first" action '{"do":"logs"}' >/dev/null || fail "couldn't ask for the logs"
@@ -437,8 +451,6 @@ sleep 20
 echo "ok: same VM process, environment still running"
 
 say "an environment from a prebuild"
-box_id=$(cp_eval 'E2E.box_id()' | sed -n 's/^BOX_ID=//p')
-repo_id=$(cp_eval 'E2E.repo_id()' | sed -n 's/^REPO_ID=//p')
 build_prebuild() {
   lv_click "/repos/$repo_id" build_prebuild "{\"box\":\"$box_id\"}" | grep -q "Building a prebuild" ||
     fail "the prebuild didn't start"
@@ -471,7 +483,7 @@ sudo test -e "/srv/foreman/vms/$prebuild" && fail "the prebuild's VM outlived th
 ip -br link | grep -c '^fm-vm' | grep -qx 2 || fail "the prebuild's tap outlived the build"
 echo "ok: built, its VM gone, its disk kept"
 
-cp_eval 'E2E.create()' >/dev/null
+[ -n "$(create_env hello-3)" ] || fail "no environment from the prebuild"
 wait_for_env hello-3 running 600
 cp_eval 'E2E.log("hello-3", "create")' > "$work/create3.log"
 grep -q "Starting from a prebuild" "$work/create3.log" || fail "the box didn't start hello-3's disk from the prebuild"

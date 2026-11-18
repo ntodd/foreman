@@ -59,8 +59,9 @@ gh secret set FOREMAN_RELEASE_PRIVATE_KEY      # paste the private key
 gh variable set FOREMAN_RELEASE_PUBLIC_KEY --body '<public key>'
 ```
 
-Then push a tag. The `Release` workflow runs CI on it first, and
-publishes nothing from a commit that fails:
+Then push a tag. The `Release` workflow first waits for CI on main to
+pass on that commit, or runs CI itself on a commit main hasn't tested,
+and publishes nothing from a commit that fails:
 
 ```sh
 git tag v0.3.0 && git push origin v0.3.0
