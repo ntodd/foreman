@@ -44,6 +44,25 @@ printf '%s\n' "$env_id" > "$dir/seed/.env-id"
 mkfs.ext4 -q -F -L fm-data -d "$dir/seed" "$dir/run/data.raw" 8G
 uuid=$(blkid -p -s UUID -o value "$dir/run/data.raw")
 
+# Boot the offline initializer with an independent copy and inspect its
+# filesystem before using the normal guest boot path.
+mkdir -p "$dir/fixture/docker/volumes/test" "$dir/fixture/srv"
+echo old-volume > "$dir/fixture/docker/volumes/test/canary"
+echo keep > "$dir/fixture/srv/clone"
+mkfs.ext4 -q -F -d "$dir/fixture" "$dir/run/adopt.raw" 64M
+timeout 90 "$ch" --kernel "$dir/guest/vmlinuz" \
+  --cmdline "console=ttyS0 root=/dev/vda ro quiet panic=1 init=/usr/local/lib/foreman-guest/adopt fm.env=$env_id" \
+  --disk "path=$dir/run/root.raw,image_type=raw,readonly=on,serial=fm-root" \
+  --disk "path=$dir/run/adopt.raw,image_type=raw,serial=fm-data" \
+  --cpus boot=1 --memory size=256M --serial "file=$dir/run/adopt.log" --console off \
+  --landlock --landlock-rules "path=$dir/run,access=rw" "path=$dir/guest,access=r" ||
+  { cat "$dir/run/adopt.log"; fail "offline initialization did not exit"; }
+grep -aq "^foreman-adopted $env_id" "$dir/run/adopt.log" ||
+  { cat "$dir/run/adopt.log"; fail "offline initialization did not finish"; }
+[ "$(debugfs -R 'cat /.env-id' "$dir/run/adopt.raw" 2>/dev/null)" = "$env_id" ] || fail "incorrect owner"
+[ "$(debugfs -R 'cat /srv/clone' "$dir/run/adopt.raw" 2>/dev/null)" = keep ] || fail "clone lost"
+[ -z "$(debugfs -R 'cat /docker/volumes/test/canary' "$dir/run/adopt.raw" 2>/dev/null)" ] || fail "inherited volume"
+
 boot() {
   rm -f "$dir/run/api.sock" "$dir/run/vsock.sock"
   "$ch" --kernel "$dir/guest/vmlinuz" --cmdline "console=ttyS0 root=/dev/vda rw net.ifnames=0 fm.env=$env_id" \
