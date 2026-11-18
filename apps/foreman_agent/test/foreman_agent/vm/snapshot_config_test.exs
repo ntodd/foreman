@@ -11,7 +11,14 @@ defmodule ForemanAgent.VM.SnapshotConfigTest do
   @dir "/srv/foreman/vms/#{@env}"
   @guest "/srv/foreman/guest/5d41402abc4b2a76b9719d911017c5925d41402abc4b2a76b9719d911017c592"
   @agent_disk "/srv/foreman/agent-disks/0.6.0.img"
-  @want %{dir: @dir, guest: @guest, agent_disk: @agent_disk, tap: "fm-vm0"}
+  @want %{
+    dir: @dir,
+    guest: @guest,
+    agent_disk: @agent_disk,
+    tap: "fm-vm0",
+    cpus: 2,
+    memory_mb: 3072
+  }
 
   @fixture Path.expand("../../fixtures/vm/snapshot-config.json", __DIR__)
 
@@ -225,6 +232,12 @@ defmodule ForemanAgent.VM.SnapshotConfigTest do
 
     test "the vsock socket somewhere else" do
       refused(put_in(saved(), ["vsock", "socket"], "/run/foreman-vmctl.sock"), "vsock")
+    end
+
+    test "a snapshot must match the recorded CPU and memory allocation" do
+      refused(put_in(saved(), ["cpus", "boot_vcpus"], 1), "CPU allocation")
+      refused(put_in(saved(), ["cpus", "max_vcpus"], 3), "CPU allocation")
+      refused(put_in(saved(), ["memory", "size"], 1024), "memory allocation")
     end
 
     test "memory from a file" do

@@ -19,7 +19,14 @@ defmodule ForemanAgent.VM.SnapshotConfig do
   it (sizes, queues, PCI ids, the balloon) opens nothing.
   """
 
-  @type want :: %{dir: Path.t(), guest: Path.t(), agent_disk: Path.t(), tap: String.t()}
+  @type want :: %{
+          dir: Path.t(),
+          guest: Path.t(),
+          agent_disk: Path.t(),
+          tap: String.t(),
+          cpus: pos_integer(),
+          memory_mb: pos_integer()
+        }
 
   # The config's settings that start gives a VM. Any other one must be
   # empty: those are devices, and devices open files and sockets.
@@ -61,6 +68,14 @@ defmodule ForemanAgent.VM.SnapshotConfig do
     tap = own_tap(config["net"], want.tap)
 
     checks = [
+      {fn ->
+         get(config, ["cpus", "boot_vcpus"]) == want.cpus and
+           get(config, ["cpus", "max_vcpus"]) == want.cpus
+       end, "has a different CPU allocation"},
+      {fn ->
+         get(config, ["memory", "size"]) == want.memory_mb * 1_048_576 and
+           blank?(get(config, ["memory", "hotplug_size"]))
+       end, "has a different memory allocation"},
       {fn -> config["landlock_enable"] == true end, "turns Landlock off"},
       {fn -> tap != nil end, "has a network other than the VM's own tap"},
       {fn -> rules?(config["landlock_rules"], want, tap) end,

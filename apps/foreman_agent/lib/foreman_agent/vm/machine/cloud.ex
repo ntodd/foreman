@@ -106,7 +106,9 @@ defmodule ForemanAgent.VM.Machine.Cloud do
            dir: paths.dir,
            guest: Path.join(config.guest_root, spec.guest),
            agent_disk: Path.join(config.agent_disks, "#{spec.agent_version}.img"),
-           tap: tap
+           tap: tap,
+           cpus: spec.cpus,
+           memory_mb: spec.memory_mb
          },
          :ok <- SnapshotConfig.check_file(Path.join(paths.snapshot, "config.json"), want),
          _ = unless(running?(env_id, config), do: Enum.each([paths.api, paths.vsock], &File.rm/1)),

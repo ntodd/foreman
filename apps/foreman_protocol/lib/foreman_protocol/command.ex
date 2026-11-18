@@ -65,6 +65,8 @@ defmodule ForemanProtocol.Command do
     registry_auth: @registry_auth
   ]
 
+  @start_limits {{:object, cpus: {:positive_number, []}, memory_mb: {:integer, []}}, []}
+
   @specs %{
     # Protocol 6: `prebuild_id`, a prebuild on this box to start from;
     # `prebuild`, set by a box for the agent in a VM it's building a
@@ -75,8 +77,14 @@ defmodule ForemanProtocol.Command do
     "env.rebuild" => @up_spec ++ [pull: {:boolean, []}],
     # `registry_auth`: devcontainer up resolves the repo's features again.
     # Protocol 4, and absent unless set.
-    "env.start" => @env ++ [compose_env: {:env_map, default: %{}}, registry_auth: @registry_auth],
-    "env.stop" => @env,
+    "env.start" =>
+      @env ++
+        [
+          limits: @start_limits,
+          compose_env: {:env_map, default: %{}},
+          registry_auth: @registry_auth
+        ],
+    "env.stop" => @env ++ [limits: @start_limits],
     # Protocol 6. Saves the environment's VM's memory to disk and stops
     # it; the next env.start resumes it.
     "env.suspend" => @env,

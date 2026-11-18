@@ -65,7 +65,8 @@ defmodule ForemanAgent.VM.Env do
   # the secrets they had when it was suspended.
   defp execute(%Command{type: "env.start", payload: p} = cmd, log, ctx) do
     with {:ok, meta} <- existing(ctx.config, p.env_id),
-         {:ok, spec} <- prepare(Map.put(p, :limits, limits(meta)), ctx, log),
+         {:ok, p} <- start_payload(p, meta),
+         {:ok, spec} <- prepare(p, ctx, log),
          {:ok, how} <- ensure_running(p.env_id, spec, ctx, log, cmd.op_id),
          {:ok, meta} <- VM.read_meta(ctx.config, p.env_id),
          resumed? = how == :resumed or (how == :running and meta["resumed_by"] == cmd.op_id),
@@ -116,11 +117,15 @@ defmodule ForemanAgent.VM.Env do
 
   defp execute(%Command{type: "env.stop", payload: p} = cmd, log, ctx) do
     machine = Machine.impl(ctx.config)
-    if VM.suspended?(ctx.config, p.env_id), do: resume_to_stop(p, log, ctx)
 
-    if machine.running?(p.env_id, ctx.config),
-      do: stop_running(cmd, machine, log, ctx),
-      else: {:ok, %{}}
+    resume_result =
+      if VM.suspended?(ctx.config, p.env_id), do: resume_to_stop(p, log, ctx), else: :ok
+
+    with :ok <- resume_result do
+      if machine.running?(p.env_id, ctx.config),
+        do: stop_running(cmd, machine, log, ctx),
+        else: {:ok, %{}}
+    end
   end
 
   defp execute(%Command{type: "env.secrets.write", payload: p} = cmd, log, ctx) do
@@ -138,7 +143,8 @@ defmodule ForemanAgent.VM.Env do
 
     with :ok <- machine.release(p.env_id, ctx.config),
          :ok <- VM.remove_tree(Path.join(ctx.config.secrets_root, p.env_id)),
-         :ok <- VM.remove_tree(VM.paths(ctx.config, p.env_id).dir) do
+         :ok <- VM.remove_tree(VM.paths(ctx.config, p.env_id).dir),
+         :ok <- VM.remove_tree(VM.paths(ctx.config, p.env_id).meta) do
       {:ok, %{}}
     end
   end
@@ -161,6 +167,13 @@ defmodule ForemanAgent.VM.Env do
   # A suspended environment comes back first, so its own stop runs. One
   # that can't is stopped all the same: what was saved is thrown away.
   defp resume_to_stop(p, log, ctx) do
+    with {:ok, meta} <- existing(ctx.config, p.env_id),
+         {:ok, p} <- start_payload(p, meta) do
+      resume_or_discard(p, log, ctx)
+    end
+  end
+
+  defp resume_or_discard(p, log, ctx) do
     case resume(p, log, ctx) do
       :ok ->
         :ok
@@ -207,11 +220,9 @@ defmodule ForemanAgent.VM.Env do
   end
 
   defp resume(p, log, ctx) do
-    with {:ok, meta} <- existing(ctx.config, p.env_id),
-         {:ok, spec} <-
-           prepare(Map.merge(p, %{slug: meta["slug"], limits: limits(meta)}), ctx, log) do
-      with {:ok, _how} <- ensure_running(p.env_id, spec, ctx, log), do: :ok
-    end
+    with {:ok, spec} <- prepare(p, ctx, log),
+         {:ok, _how} <- ensure_running(p.env_id, spec, ctx, log),
+         do: :ok
   end
 
   @doc """
@@ -309,6 +320,12 @@ defmodule ForemanAgent.VM.Env do
   # (`:relay_timeout` in its ctx).
   defp relay(cmd, log, ctx, opts \\ []) do
     opts = Keyword.put_new(opts, :timeout, Map.get(ctx, :relay_timeout, :infinity))
+    # Resource limits are for the host. A running guest can still speak protocol 6.
+    cmd =
+      if cmd.type in ["env.start", "env.stop"],
+        do: %{cmd | payload: Map.delete(cmd.payload, :limits)},
+        else: cmd
+
     Link.run(Links.get(cmd.payload.env_id, ctx.config), cmd, log, opts)
   end
 
@@ -326,6 +343,13 @@ defmodule ForemanAgent.VM.Env do
          "this environment has no VM on this box (it was made before environment VMs, or its disks are gone); destroy it and create a new one"}
     end
   end
+
+  defp start_payload(%{limits: _} = p, _), do: {:ok, p}
+
+  defp start_payload(_, %{"legacy" => true}),
+    do: {:error, "update the control plane to supply limits for this legacy VM"}
+
+  defp start_payload(p, meta), do: {:ok, Map.put(p, :limits, limits(meta))}
 
   defp limits(%{"cpus" => cpus, "memory_mb" => memory}), do: %{cpus: cpus, memory_mb: memory}
   defp limits(_meta), do: %{}
@@ -352,7 +376,7 @@ defmodule ForemanAgent.VM.Env do
           "agent" => agent.version
         })
 
-      VM.write_meta(config, p.env_id, meta)
+      VM.write_meta(config, p.env_id, Map.delete(meta, "legacy"))
 
       {:ok,
        %{
@@ -378,7 +402,13 @@ defmodule ForemanAgent.VM.Env do
          false <- Machine.impl(config).running?(p.env_id, config),
          {:ok, %{"booted" => booted}} <- VM.read_meta(config, p.env_id) do
       if booted["agent"] == agent.version and booted["guest"] == guest.digest do
-        Map.put(p, :limits, %{cpus: booted["cpus"], memory_mb: booted["memory_mb"]})
+        case booted do
+          %{"cpus" => cpus, "memory_mb" => mb} ->
+            Map.put(p, :limits, %{cpus: cpus, memory_mb: mb})
+
+          _ ->
+            p
+        end
       else
         drop_snapshot(p, config, log)
       end

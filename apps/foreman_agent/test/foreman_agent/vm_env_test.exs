@@ -296,6 +296,24 @@ defmodule ForemanAgent.VMEnvTest do
     refute File.exists?(stale)
   end
 
+  test "a legacy VM gets its allocation from the start command", ctx do
+    {:ok, _} = run(create(), ctx)
+    {:ok, _} = run(command("env.stop"), ctx)
+    paths = VM.paths(ctx.config, @env)
+    File.rename!(paths.meta, paths.legacy_meta)
+    {:ok, legacy} = VM.read_meta(ctx.config, @env)
+    assert legacy["legacy"]
+    refute Map.has_key?(legacy, "cpus")
+
+    assert {:error, "update the control plane" <> _} = run(command("env.start"), ctx)
+    flush()
+    assert {:ok, _} = run(command("env.start", %{limits: %{cpus: 1, memory_mb: 1024}}), ctx)
+    assert_received {:machine, {:boot, %{cpus: 1, memory_mb: 1024}}, @env}
+    assert {:ok, %{"memory_mb" => 1024} = record} = VM.read_meta(ctx.config, @env)
+    refute record["legacy"]
+    assert Path.dirname(paths.meta) != paths.dir
+  end
+
   test "the VM's record isn't written through a symlink the VM left beside it", ctx do
     {:ok, _} = run(create(), ctx)
     {:ok, _} = run(command("env.stop"), ctx)
