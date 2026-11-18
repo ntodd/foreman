@@ -213,6 +213,7 @@ say "a shared-Docker install without a VM helper can recover to the fleet agent"
 box rm /etc/foreman-agent/vmctl
 install_agent | tee "$work/migrate.log"
 grep -q "migrating the box" "$work/migrate.log" || fail "legacy migration was skipped"
+grep -qx "foreman: installing agent 0.1.1" "$work/migrate.log" || fail "migration did not fetch the fleet release"
 box test -x /etc/foreman-agent/vmctl || fail "legacy migration did not install the VM helper"
 
 say "self-update to 0.1.1"

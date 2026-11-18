@@ -207,6 +207,7 @@ valid_version "$version" || fail "invalid downloaded release"
 [ "$release" = latest ] || [ "$release" = "$version" ] || fail "downloaded a different release"
 printf '%s  %s\n' "$sha" "$tmp/agent.tar.gz" | sha256sum -c - >/dev/null || fail "the download doesn't match its digest"
 
+echo "foreman: installing agent $version"
 dest="/opt/foreman-agent/releases/$version"
 # Unpack beside the release and swap it in: on a re-run the agent may be
 # running from $dest, and deleting it under the running agent breaks it.
