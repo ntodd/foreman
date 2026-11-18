@@ -98,6 +98,31 @@ defmodule Foreman.EnvironmentsTest do
       assert Map.keys(env.applied_secret_hashes) == ["API_KEY"]
     end
 
+    test "sends the dotfiles and where to put them", %{scope: scope, repo: repo, box: box} do
+      connect_agent(box)
+
+      {:ok, user} =
+        Foreman.Accounts.update_preferences(scope, %{
+          "dotfiles_repository" => "https://github.com/mona/dotfiles.git",
+          "dotfiles_install_command" => "script/devcontainer",
+          "dotfiles_target_path" => "~/.dotfiles"
+        })
+
+      {:ok, _} =
+        Environments.create_environment(Scope.for_user(user), %{
+          "repo_id" => repo.id,
+          "box_id" => box.id
+        })
+
+      assert_receive {:dispatch, %Command{type: "env.create"} = cmd}
+
+      assert cmd.payload.dotfiles == %{
+               repository: "https://github.com/mona/dotfiles.git",
+               install_command: "script/devcontainer",
+               target_path: "~/.dotfiles"
+             }
+    end
+
     test "numbers copies and reuses numbers freed by destroyed ones", %{
       scope: scope,
       repo: repo,

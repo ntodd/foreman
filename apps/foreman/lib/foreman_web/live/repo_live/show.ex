@@ -71,13 +71,20 @@ defmodule ForemanWeb.RepoLive.Show do
       "git_name" => "",
       "git_email" => "",
       "dotfiles_repository" => "",
-      "dotfiles_install_command" => ""
+      "dotfiles_install_command" => "",
+      "dotfiles_target_path" => ""
     }
 
   defp override_params(s),
     do:
       Map.new(
-        [:git_name, :git_email, :dotfiles_repository, :dotfiles_install_command],
+        [
+          :git_name,
+          :git_email,
+          :dotfiles_repository,
+          :dotfiles_install_command,
+          :dotfiles_target_path
+        ],
         &{Atom.to_string(&1), Map.get(s, &1)}
       )
 
@@ -119,7 +126,7 @@ defmodule ForemanWeb.RepoLive.Show do
          |> assign(:override_form, to_form(override_params(setting), as: :override))
          |> put_flash(
            :info,
-           "Saved. Git identity applies right away; dotfiles on the next rebuild."
+           "Saved. Git identity applies now. Dotfiles changes apply the next time dotfiles are installed."
          )}
 
       {:error, changeset} ->
@@ -253,6 +260,11 @@ defmodule ForemanWeb.RepoLive.Show do
               field={@override_form[:dotfiles_install_command]}
               label="Dotfiles install command"
               placeholder="./install.sh"
+            />
+            <.input
+              field={@override_form[:dotfiles_target_path]}
+              label="Clone dotfiles to"
+              placeholder={@current_scope.user.dotfiles_target_path || "~/dotfiles"}
             />
             <.button type="submit" size="sm">Save</.button>
           </.form>

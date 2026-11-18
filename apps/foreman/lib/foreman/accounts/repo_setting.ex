@@ -13,6 +13,7 @@ defmodule Foreman.Accounts.RepoSetting do
     field :git_email, :string
     field :dotfiles_repository, :string
     field :dotfiles_install_command, :string
+    field :dotfiles_target_path, :string
     # By ref without a version, so a new version stays off.
     field :disabled_features, {:array, :string}, default: []
     timestamps()
@@ -25,6 +26,7 @@ defmodule Foreman.Accounts.RepoSetting do
       :git_email,
       :dotfiles_repository,
       :dotfiles_install_command,
+      :dotfiles_target_path,
       :disabled_features
     ])
     |> Foreman.Validations.validate_git_identity()

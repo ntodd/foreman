@@ -62,7 +62,7 @@ defmodule ForemanWeb.SettingsLive do
          |> assign(:form, to_form(Accounts.change_preferences(user)))
          |> put_flash(
            :info,
-           "Saved. Git identity applies to running environments now; dotfiles on their next rebuild."
+           "Saved. Git identity applies now. Dotfiles changes apply the next time dotfiles are installed."
          )}
 
       {:error, changeset} ->
@@ -133,6 +133,11 @@ defmodule ForemanWeb.SettingsLive do
               field={@form[:dotfiles_install_command]}
               label="Install command"
               placeholder="Defaults to install.sh, bootstrap.sh or setup.sh"
+            />
+            <.input
+              field={@form[:dotfiles_target_path]}
+              label="Clone to"
+              placeholder="~/dotfiles"
             />
           </div>
         </.panel>
