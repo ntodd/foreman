@@ -427,8 +427,7 @@ defmodule ForemanAgent.VM.Env do
   end
 
   # A new environment's disk: a copy of its prebuild's when the box has
-  # it, otherwise empty and sparse (the guest formats it on first boot,
-  # and it takes space as the environment fills it).
+  # it, otherwise a fresh sparse ext4 filesystem.
   defp ensure_data_disk(paths, p, ctx, log, type) do
     case File.lstat(paths.data) do
       {:ok, %{type: :regular}} ->
@@ -464,11 +463,40 @@ defmodule ForemanAgent.VM.Env do
       if is_binary(prebuild),
         do: log.("info", "This box no longer has the prebuild; starting from scratch\n")
 
-      with {:ok, fd} <- :file.open(paths.data, [:write, :raw, :exclusive]),
-           {:ok, _} <- :file.position(fd, ctx.config.vm_disk_gb * 1024 * 1024 * 1024),
-           :ok <- :file.truncate(fd) do
-        :file.close(fd)
+      format_new_disk(paths.data, ctx)
+    end
+  end
+
+  defp format_new_disk(dest, ctx) do
+    # mkfs only sees a new file in the agent-owned parent. Link it into
+    # place once complete, failing if another disk appeared meanwhile.
+    tmp =
+      Path.join(ctx.config.vm_root, ".disk-" <> Base.url_encode64(:crypto.strong_rand_bytes(16)))
+
+    args = [
+      "-q",
+      "-F",
+      "-L",
+      "fm-data",
+      "-E",
+      "nodiscard,lazy_itable_init=1,lazy_journal_init=1",
+      tmp,
+      "#{ctx.config.vm_disk_gb}G"
+    ]
+
+    try do
+      case ctx.runner.run("mkfs.ext4", args, timeout: 120_000) do
+        {:ok, %{status: 0}} ->
+          File.ln(tmp, dest)
+
+        {:ok, %{output: output}} ->
+          {:error, "couldn't format the new data disk: #{String.slice(output, -500, 500)}"}
+
+        {:error, reason} ->
+          {:error, "couldn't format the new data disk: #{inspect(reason)}"}
       end
+    after
+      File.rm(tmp)
     end
   end
 

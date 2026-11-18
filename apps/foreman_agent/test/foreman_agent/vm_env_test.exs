@@ -61,6 +61,16 @@ defmodule ForemanAgent.VMEnvTest do
 
     # cp --reflink=auto --sparse=always SRC DEST, as the box's cp would.
     stub(ForemanAgent.RunnerMock, :run, fn
+      "mkfs.ext4", ["-q", "-F", "-L", "fm-data", "-E", _, path, size], _opts ->
+        {gb, "G"} = Integer.parse(size)
+
+        File.open!(path, [:write, :exclusive], fn fd ->
+          {:ok, _} = :file.position(fd, gb * 1024 * 1024 * 1024)
+          :ok = :file.truncate(fd)
+        end)
+
+        {:ok, %{status: 0, output: ""}}
+
       "cp", [_, _, src, dest], _opts ->
         File.cp!(src, dest)
         {:ok, %{status: 0, output: ""}}

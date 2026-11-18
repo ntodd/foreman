@@ -16,7 +16,7 @@ FROM ${UBUNTU_IMAGE} AS rootfs
 ARG DEBIAN_FRONTEND=noninteractive
 # systemd and udev to boot; Docker, Compose and buildx for the
 # environment; git for the clone; socat joins vsock to the guest agent;
-# e2fsprogs formats the data disk. The kernel is the virtual flavour,
+# e2fsprogs supplies ext4 tools. The kernel is the virtual flavour,
 # booted directly without an initrd.
 RUN apt-get update \
   && apt-get install -y --no-install-recommends \
