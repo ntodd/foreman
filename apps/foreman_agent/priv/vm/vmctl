@@ -304,18 +304,31 @@ cmd_tap() {
   answer "ok fm-vm$n"
 }
 
+stop_unit() {
+  unit="foreman-vm-$1.service"
+  systemctl stop "$unit" >/dev/null 2>&1 && return 0
+  # A transient unit is collected after exit. A failed query is inconclusive.
+  units=$(systemctl list-units --all --plain --no-legend "$unit") || answer "error could not query $unit"
+  [ -z "$units" ] || answer "error could not confirm $unit stopped"
+}
+
 cmd_stop() {
   if [ "$#" -ne 1 ] || ! uuid_ok "$1"; then answer "error stop takes ENV_ID"; fi
-  systemctl stop "foreman-vm-$1.service" >/dev/null 2>&1 || true
+  stop_unit "$1"
   answer "ok"
 }
 
 cmd_release() {
   if [ "$#" -ne 1 ] || ! uuid_ok "$1"; then answer "error release takes ENV_ID"; fi
-  systemctl stop "foreman-vm-$1.service" >/dev/null 2>&1 || true
+  stop_unit "$1"
   if n=$(existing_index "$1"); then
-    ip link del "fm-vm$n" 2>/dev/null || true
-    rm -f "$STATE/nets/$n"
+    if ! ip link del "fm-vm$n" 2>/dev/null; then
+      links=$(ip -o link show) || answer "error could not list network interfaces"
+      if printf '%s\n' "$links" | awk -v name="fm-vm$n" '$2 == name ":" || index($2, name "@") == 1 { found=1 } END { exit !found }'; then
+        answer "error could not remove fm-vm$n"
+      fi
+    fi
+    rm -f "$STATE/nets/$n" || answer "error could not release address"
   fi
   answer "ok"
 }

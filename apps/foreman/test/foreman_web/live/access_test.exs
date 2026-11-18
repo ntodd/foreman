@@ -5,6 +5,21 @@ defmodule ForemanWeb.AccessTest do
 
   alias Foreman.{Accounts, Operations, Repo, Scope, Secrets}
 
+  test "the People page identifies admins managed by configuration" do
+    admin = user_fixture(role: "admin")
+    target = user_fixture(role: "admin")
+    previous = Application.get_env(:foreman, :admins, [])
+    Application.put_env(:foreman, :admins, [String.upcase(target.login)])
+    on_exit(fn -> Application.put_env(:foreman, :admins, previous) end)
+
+    {:ok, view, _} = live(log_in(build_conn(), admin), ~p"/admin/users")
+    assert has_element?(view, "#user-#{target.id}", "FOREMAN_ADMINS")
+    refute has_element?(view, "#user-#{target.id} button[phx-click=role]")
+
+    assert {:error, :configured_admin} =
+             Accounts.set_role(Scope.for_user(admin), target, "member")
+  end
+
   describe "an open page" do
     test "reloads when its user is disabled, and can't act as them" do
       admin = user_fixture(role: "admin")

@@ -25,6 +25,23 @@ defmodule ForemanAgent.VM do
 
   @uuid ~r/\A[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\z/
 
+  @doc "Remove VM storage, reporting the path that needs operator attention on failure."
+  def remove_tree(path) do
+    with {:ok, _} <- File.rm_rf(path),
+         {:error, :enoent} <- File.lstat(path) do
+      :ok
+    else
+      {:error, reason, file} ->
+        {:error, "couldn't remove #{file}: #{:file.format_error(reason)}"}
+
+      {:error, reason} ->
+        {:error, "couldn't verify removal of #{path}: #{:file.format_error(reason)}"}
+
+      {:ok, _stat} ->
+        {:error, "#{path} still exists after removal"}
+    end
+  end
+
   @doc "The files of an environment's VM."
   @spec paths(Config.t(), String.t()) :: map()
   def paths(config, env_id) do

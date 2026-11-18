@@ -240,6 +240,16 @@ defmodule ForemanAgent.VMEnvTest do
       assert_receive {:guest, "env.start", _}
     end
 
+    test "an unreadable cached file prevents the entire guest secrets write", ctx do
+      File.mkdir!(Path.join([ctx.config.secrets_root, @env, "notices"]))
+      assert {:error, message} = run(command("env.start"), ctx)
+      assert message =~ "couldn't read cached notices"
+      assert message =~ to_string(:file.format_error(:eisdir))
+      refute message =~ "TOKEN=1"
+      refute_received {:guest, "env.secrets.write", _}
+      refute_received {:guest, "env.start", _}
+    end
+
     test "can't run what needs it running", ctx do
       assert {:error, "the environment isn't running"} = run(command("env.logs"), ctx)
       assert {:error, "the environment isn't running"} = run(command("env.git_status"), ctx)
@@ -324,12 +334,38 @@ defmodule ForemanAgent.VMEnvTest do
              run(command("env.start"), ctx)
   end
 
+  test "failed release preserves the VM disks and cached files for a retry", ctx do
+    {:ok, _} = run(create(), ctx)
+    FakeMachine.configure(test: self(), release: {:error, "unit still active"})
+    assert {:error, "unit still active"} = run(command("env.destroy"), ctx)
+    assert {:error, "unit still active"} = VM.Prebuild.discard(ctx.config, @env)
+    assert File.regular?(VM.paths(ctx.config, @env).data)
+    assert File.regular?(Path.join([ctx.config.secrets_root, @env, "secrets.env"]))
+  end
+
   test "env.destroy gives back the VM and removes its disks and secrets", ctx do
     {:ok, _} = run(create(), ctx)
     assert {:ok, %{}} = run(command("env.destroy"), ctx)
     assert_received {:machine, :release, @env}
     refute File.exists?(VM.paths(ctx.config, @env).dir)
     refute File.exists?(Path.join(ctx.config.secrets_root, @env))
+  end
+
+  test "destroy and prebuild deletion identify inaccessible storage and can be retried", ctx do
+    {:ok, _} = run(create(), ctx)
+    blocked = Path.join(ctx.dir, "unavailable-mount")
+    File.write!(blocked, "")
+    config = %{ctx.config | secrets_root: blocked, prebuilds_root: blocked}
+    blocked_ctx = put_in(ctx.ctx.config, config)
+
+    assert {:error, error} = run(command("env.destroy"), blocked_ctx)
+    assert error =~ Path.join(blocked, @env)
+    assert {:error, error} = VM.Prebuild.delete(@prebuild, %{config: config})
+    assert error =~ Path.join(blocked, @prebuild)
+
+    assert {:ok, %{}} = run(command("env.destroy"), ctx)
+    assert {:ok, %{}} = run(command("env.destroy"), ctx)
+    assert {:ok, %{}} = VM.Prebuild.delete(@prebuild, ctx)
   end
 
   test "commands go through the handler's redaction on a box", ctx do
@@ -499,6 +535,21 @@ defmodule ForemanAgent.VMEnvTest do
       refute_received {:machine, {:restore, _}, @env}
     end
 
+    test "an interrupted restore reports a readiness timeout before relaying secrets", ctx do
+      Links.stop(@env)
+      :ok = FakeMachine.kill(@env, ctx.config)
+      FakeMachine.configure(test: self(), boot: :hang)
+      :ok = FakeMachine.boot(@env, %{}, ctx.config)
+      snapshot = VM.paths(ctx.config, @env).snapshot
+      File.mkdir_p!(snapshot)
+      File.write!(Path.join(snapshot, "consumed"), "")
+      flush()
+
+      assert {:error, "the environment's VM didn't answer" <> _} = run(command("env.start"), ctx)
+      refute FakeMachine.running?(@env, ctx.config)
+      refute_received {:guest, "env.secrets.write", _}
+    end
+
     test "a VM left paused is let go before anything is sent to it", ctx do
       assert {:ok, _} = run(command("env.start"), ctx)
       assert_received {:machine, :unpause, @env}
@@ -540,6 +591,32 @@ defmodule ForemanAgent.VMEnvTest do
       end
 
       refute_received {:machine, {:restore, _}, @env}
+    end
+
+    test "a failed marker sync prevents restore and cold boot", ctx do
+      {:ok, _} = run(command("env.suspend"), ctx)
+      flush()
+      expect(ForemanAgent.RunnerMock, :run, fn "sync", ["-f", _], _ -> {:error, :eio} end)
+      assert {:error, "couldn't sync " <> _} = run(command("env.start"), ctx)
+      refute_received {:machine, {:restore, _}, @env}
+      refute_received {:machine, {:boot, _}, @env}
+    end
+
+    test "a retried suspend must confirm the snapshot directory entry", ctx do
+      paths = VM.paths(ctx.config, @env)
+      expect(ForemanAgent.RunnerMock, :run, fn "sync", ["-f", _], _ -> {:ok, %{status: 0}} end)
+
+      expect(ForemanAgent.RunnerMock, :run, 2, fn "sync", ["-f", path], _ ->
+        assert path == paths.dir
+        {:ok, %{status: 1}}
+      end)
+
+      for _ <- 1..2 do
+        assert {:error, "couldn't sync " <> _} = run(command("env.suspend"), ctx)
+      end
+
+      expect(ForemanAgent.RunnerMock, :run, fn "sync", ["-f", _], _ -> {:ok, %{status: 0}} end)
+      assert {:ok, %{"suspended" => true}} = run(command("env.suspend"), ctx)
     end
 
     test "a snapshot is marked used before the VM can run from it", ctx do
@@ -598,6 +675,8 @@ defmodule ForemanAgent.VMEnvTest do
       {:ok, _} = run(command("env.suspend"), ctx)
       start = command("env.start")
       assert {:ok, %{"resumed" => true}} = run(start, ctx)
+      op_id = start.op_id
+      assert_received {:machine, {:resume_id_at_restore, ^op_id}, @env}
       assert {:ok, %{"resumed" => true}} = run(start, ctx)
       assert {:ok, result} = run(command("env.start"), ctx)
       refute Map.has_key?(result, "resumed")
