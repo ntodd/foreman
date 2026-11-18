@@ -34,6 +34,7 @@ jobs:
       issues: write
       actions: write
     with:
+      runs-on: crew-4x2
       agent-workflow: agent-ready.yml
       working-directory: apps/foreman_protocol
       shards: ${{ github.event_name == 'pull_request' && 2 || 4 }}
@@ -48,6 +49,7 @@ jobs:
       issues: write
       actions: write
     with:
+      runs-on: crew-4x2
       agent-workflow: agent-ready.yml
       working-directory: apps/foreman_agent
       shards: ${{ github.event_name == 'pull_request' && 2 || 4 }}
@@ -62,6 +64,7 @@ jobs:
       issues: write
       actions: write
     with:
+      runs-on: crew-4x2
       agent-workflow: agent-ready.yml
       working-directory: apps/foreman
       shards: ${{ github.event_name == 'pull_request' && 2 || 4 }}
