@@ -190,8 +190,8 @@ curl -fsSL https://desktop.tail1234.ts.net/agent/install.sh | sudo sh
 
 Upgrade the control plane before agents, which following does for you:
 the control plane usually accepts agents on its protocol and the one
-before, but an older control plane refuses newer agents. Protocol 6 is
-the exception; see [Moving to environment VMs](#moving-to-environment-vms).
+before, but an older control plane refuses newer agents. 0.6.0 is the
+exception; see [Moving to environment VMs](#moving-to-environment-vms).
 
 ### Coming from `docker run`
 
@@ -215,7 +215,7 @@ they all follow the new control plane's agent from then on.
 
 ## Moving to environment VMs
 
-The first release on protocol 6 runs every environment in a Cloud
+0.6.0 runs every environment in a Cloud
 Hypervisor VM of its own, with its own kernel and Docker, instead of on
 the box's shared Docker ([architecture.md](../architecture.md#environment-vms)).
 That changes what a box needs, and existing environments don't move
@@ -237,8 +237,8 @@ across, so this upgrade takes more than following the release:
   containers and docker-in-docker work
   ([repos.md](repos.md#what-an-environment-can-do)), and `--policy`
   does nothing any more.
-- **No way back:** once boxes run protocol 6 agents, the control plane
-  can't be rolled back past this release.
+- **No way back:** once boxes run 0.6.0 agents, the control plane
+  can't be rolled back past 0.6.0.
 
 The steps:
 
@@ -330,9 +330,11 @@ Protocol 5 (rebooting a box from its page) came in with 0.5.0. A 0.5.0
 control plane refuses agents on protocol 3 (older than 0.4.10) the same
 way, so update those boxes to 0.4.10 or later before upgrading past
 0.4.13. A box that was refused anyway comes back when you run the
-install command on it again. Protocol 6 (environment VMs) refuses every
-older agent, protocol 5 included, and a control plane from before it
-refuses protocol 6 agents, so neither side can go back past it; see
+install command on it again. Protocols 6 (environment VMs) and 7 (VM
+sizes on start and stop) came in together with 0.6.0; no release spoke
+6 alone. A 0.6.0 control plane refuses every agent older than protocol
+6, protocol 5 included, and a control plane from before it refuses 0.6.0
+agents, so neither side can go back past it; see
 [Moving to environment VMs](#moving-to-environment-vms).
 
 Following starts with 0.3.0, and 0.3.0 is the first release with
