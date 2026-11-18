@@ -65,6 +65,10 @@ defmodule ForemanAgent.VMEnvTest do
         File.cp!(src, dest)
         {:ok, %{status: 0, output: ""}}
 
+      "node", [script, path, limit], _opts ->
+        {output, status} = System.cmd("node", [script, path, limit], stderr_to_stdout: true)
+        {:ok, %{status: status, output: output}}
+
       "sync", ["-f", _path], _opts ->
         {:ok, %{status: 0, output: ""}}
 
