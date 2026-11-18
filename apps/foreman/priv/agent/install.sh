@@ -187,7 +187,7 @@ if [ -L "$current" ] || [ -e "$current" ]; then
   link=$(readlink "$current") || fail "current release is not a symlink"
   release=${link#releases/}
   case "$release" in *[!A-Za-z0-9.-]*) fail "invalid installed release" ;; esac
-  [ "$link" = "releases/$release" ] && valid_version "$release" || fail "invalid installed release"
+  if [ "$link" != "releases/$release" ] || ! valid_version "$release"; then fail "invalid installed release"; fi
   # Shared-Docker agents cannot join the VM-era control plane to update
   # themselves. The root-owned helper was introduced with VM installs.
   if [ ! -f /etc/foreman-agent/vmctl ]; then
