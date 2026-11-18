@@ -178,7 +178,7 @@ say "re-running the install script keeps the enrollment and restarts the agent"
 box sh -c 'printf "%s\n" "# local git fixture" FOREMAN_ALLOWED_GIT_HOSTS=git FOREMAN_INSECURE_GIT_HOSTS=git >> /etc/foreman-agent/agent.env'
 # Mark the agent-owned copy of the privileged helper. A normal rerun
 # must keep the userland tree as-is and install root's helper from fleet.
-box sh -c 'echo "# pinned userland fixture" >> /opt/foreman-agent/current/lib/foreman_agent-*/priv/vm/vmctl'
+box sh -c 'set -- /opt/foreman-agent/current/lib/foreman_agent-*/priv/vm/vmctl; echo "# pinned userland fixture" >> "$1"'
 local_settings=$(box sha256sum /etc/foreman-agent/agent.env)
 cp_eval 'E2E.desire_version("0.1.0")'
 publish 0.1.1
