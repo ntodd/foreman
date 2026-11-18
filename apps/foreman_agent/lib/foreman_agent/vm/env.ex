@@ -245,8 +245,11 @@ defmodule ForemanAgent.VM.Env do
         Regex.match?(~r/\A\.disk-[A-Za-z0-9_-]{22}==\z/, Path.basename(path)),
         match?({:ok, %{type: :regular}}, File.lstat(path)) do
       case File.rm(path) do
-        :ok -> :ok
-        {:error, reason} -> Logger.warning("could not remove disk staging file #{path}: #{reason}")
+        :ok ->
+          :ok
+
+        {:error, reason} ->
+          Logger.warning("could not remove disk staging file #{path}: #{reason}")
       end
     end
 
