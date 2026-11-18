@@ -61,9 +61,23 @@ defmodule ForemanAgent.VMEnvTest do
 
     # cp --reflink=auto --sparse=always SRC DEST, as the box's cp would.
     stub(ForemanAgent.RunnerMock, :run, fn
+      "mkfs.ext4", ["-q", "-F", "-L", "fm-data", "-E", _, path, size], _opts ->
+        {gb, "G"} = Integer.parse(size)
+
+        File.open!(path, [:write, :exclusive], fn fd ->
+          {:ok, _} = :file.position(fd, gb * 1024 * 1024 * 1024)
+          :ok = :file.truncate(fd)
+        end)
+
+        {:ok, %{status: 0, output: ""}}
+
       "cp", [_, _, src, dest], _opts ->
         File.cp!(src, dest)
         {:ok, %{status: 0, output: ""}}
+
+      "cp", ["--no-dereference" | _] = args, _opts ->
+        {output, status} = System.cmd("cp", args, stderr_to_stdout: true)
+        {:ok, %{status: status, output: output}}
 
       "node", [script, path, limit], _opts ->
         {output, status} = System.cmd("node", [script, path, limit], stderr_to_stdout: true)
@@ -174,6 +188,24 @@ defmodule ForemanAgent.VMEnvTest do
       secret = Path.join([ctx.config.secrets_root, @env, "secrets.env"])
       assert File.read!(secret) == "TOKEN=1\n"
       assert File.stat!(secret).mode |> Bitwise.band(0o777) == 0o600
+    end
+
+    test "a missing data disk on an established VM blocks start, rebuild and create retries",
+         ctx do
+      assert {:ok, _} = run(create(), ctx)
+      assert {:ok, _} = run(command("env.suspend"), ctx)
+      paths = VM.paths(ctx.config, @env)
+      File.rename!(paths.data, paths.data <> ".saved")
+      flush()
+
+      for cmd <- [command("env.start"), %{create() | type: "env.rebuild"}, create()] do
+        assert {:error, message} = run(cmd, ctx)
+        assert message =~ "data disk is missing"
+        refute File.exists?(paths.data)
+        assert VM.suspended?(ctx.config, @env)
+        refute_received {:machine, {:restore, _}, @env}
+        refute_received {:machine, {:boot, _}, @env}
+      end
     end
 
     test "sizes the VM from the environment's limits", ctx do
@@ -916,6 +948,24 @@ defmodule ForemanAgent.VMEnvTest do
       assert_received {:machine, :release, @prebuild}
       refute File.exists?(VM.paths(ctx.config, @prebuild).dir)
       refute File.exists?(Path.join(ctx.config.secrets_root, @prebuild))
+    end
+
+    unless :os.type() == {:unix, :linux}, do: @tag(skip: "requires a Linux tmpfs")
+
+    test "publishes the complete prebuild on a separate filesystem", ctx do
+      root = Path.join("/dev/shm", "foreman-prebuild-#{System.unique_integer([:positive])}")
+      File.mkdir!(root)
+      on_exit(fn -> File.rm_rf!(root) end)
+      refute File.stat!(root).major_device == File.stat!(ctx.dir).major_device
+      config = %{ctx.config | prebuilds_root: root}
+      Config.put(config)
+
+      assert {:ok, _} = handle(prebuild_command())
+
+      assert File.stat!(VM.Prebuild.disk(config, @prebuild)).size ==
+               config.vm_disk_gb * 1024 * 1024 * 1024
+
+      assert File.ls!(root) == [@prebuild]
     end
 
     test "a build that fails keeps nothing, and says why without the token", ctx do

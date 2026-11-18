@@ -1,6 +1,5 @@
 #!/bin/sh
-# Mounts the environment's disks. The data disk (formatted on its first
-# boot) holds everything the environment keeps: Docker's images,
+# Mounts the environment's disks. The data disk holds everything the environment keeps: Docker's images,
 # containers and volumes, the clone, and the guest agent's state. The
 # agent disk is the box's agent release, read-only.
 set -eu
@@ -22,26 +21,14 @@ udevadm settle --timeout=10 || true
 data=$(disk fm-data /dev/vdb)
 agent=$(disk fm-agent /dev/vdc)
 
-# blkid -p probes the disk itself: 0 is a filesystem, 2 is nothing on it
-# (a new disk). Anything else (a disk it can't read, signatures that
-# disagree) stops here rather than format over the environment's data.
-probe=0
-blkid -p "$data" >/dev/null || probe=$?
-case $probe in
-  0) ;;
-  2)
-    echo "foreman-guest: formatting $data"
-    mkfs.ext4 -q -L fm-data -E nodiscard,lazy_itable_init=1,lazy_journal_init=1 "$data"
-    ;;
-  *)
-    echo "foreman-guest: can't tell what's on $data (blkid -p exited $probe); not formatting it" >&2
-    exit 1
-    ;;
-esac
-
+# Only the provisioning agent knows a disk is new. A missing filesystem
+# signature on a disk attached here can mean recoverable damage.
 base=/var/lib/foreman-data
 mkdir -p "$base"
-mountpoint -q "$base" || mount -o noatime "$data" "$base"
+if ! mountpoint -q "$base" && ! mount -t ext4 -o noatime "$data" "$base"; then
+  echo "foreman-guest: could not mount data disk $data; check the filesystem before retrying" >&2
+  exit 1
+fi
 
 # Whose disk this is. One that isn't yet this environment's (a copy of a
 # prebuild's, or a new one) keeps its clone, images and build cache, but

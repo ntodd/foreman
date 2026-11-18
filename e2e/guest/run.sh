@@ -38,7 +38,8 @@ ch=$1
 [ -x "$ch" ] || fail "the agent release has no Cloud Hypervisor"
 size=$(( $(du -sm "$dir/rel" | cut -f1) * 13 / 10 + 64 ))
 mkfs.ext4 -q -F -L fm-agent -d "$dir/rel" "$dir/run/agent.img" "${size}M"
-truncate -s 8G "$dir/run/data.raw"
+mkfs.ext4 -q -F -L fm-data "$dir/run/data.raw" 8G
+uuid=$(blkid -p -s UUID -o value "$dir/run/data.raw")
 
 boot() {
   rm -f "$dir/run/api.sock" "$dir/run/vsock.sock"
@@ -105,6 +106,19 @@ for n in 1 2; do
   fi
 done
 
-formatted=$(cat "$dir"/run/serial-*.log | grep -a -c "foreman-guest: formatting" || true)
-[ "$formatted" -eq 1 ] || fail "the data disk was formatted $formatted times"
+[ "$(blkid -p -s UUID -o value "$dir/run/data.raw")" = "$uuid" ] || fail "data filesystem changed"
+
+# An unrecognizable data disk must survive a boot attempt byte-for-byte.
+printf 'recoverable contents\n' > "$dir/run/data.raw"
+truncate -s 16M "$dir/run/data.raw"
+before=$(sha256sum "$dir/run/data.raw")
+boot damaged
+i=0
+until grep -aq 'foreman-guest: could not mount data disk' "$dir/run/serial-damaged.log" 2>/dev/null; do
+  i=$((i + 1))
+  [ "$i" -lt 120 ] || fail "guest did not report the unreadable data disk"
+  sleep 0.5
+done
+power_off
+[ "$(sha256sum "$dir/run/data.raw")" = "$before" ] || fail "guest modified an unreadable data disk"
 echo "e2e/guest: ok"

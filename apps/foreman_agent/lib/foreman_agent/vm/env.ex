@@ -54,7 +54,7 @@ defmodule ForemanAgent.VM.Env do
        when type in ["env.create", "env.rebuild"] do
     with :ok <- Env.check_clone_url(p.clone_url, ctx.config),
          {:ok, _} <- cache_secrets(ctx, p.env_id, p.files),
-         {:ok, spec} <- prepare(p, ctx, log),
+         {:ok, spec} <- prepare(p, ctx, log, type),
          {:ok, _how} <- ensure_running(p.env_id, spec, ctx, log),
          :ok <- push_secrets(p.env_id, log, ctx) do
       relay(cmd, log, ctx)
@@ -66,7 +66,7 @@ defmodule ForemanAgent.VM.Env do
   defp execute(%Command{type: "env.start", payload: p} = cmd, log, ctx) do
     with {:ok, meta} <- existing(ctx.config, p.env_id),
          {:ok, p} <- start_payload(p, meta),
-         {:ok, spec} <- prepare(p, ctx, log),
+         {:ok, spec} <- prepare(p, ctx, log, "env.start"),
          {:ok, how} <- ensure_running(p.env_id, spec, ctx, log, cmd.op_id),
          {:ok, meta} <- VM.read_meta(ctx.config, p.env_id),
          resumed? = how == :resumed or (how == :running and meta["resumed_by"] == cmd.op_id),
@@ -220,7 +220,7 @@ defmodule ForemanAgent.VM.Env do
   end
 
   defp resume(p, log, ctx) do
-    with {:ok, spec} <- prepare(p, ctx, log),
+    with {:ok, spec} <- prepare(p, ctx, log, "env.start"),
          {:ok, _how} <- ensure_running(p.env_id, spec, ctx, log),
          do: :ok
   end
@@ -356,7 +356,7 @@ defmodule ForemanAgent.VM.Env do
 
   # The VM's directory, disks and record. The root disk is made again
   # whenever the guest image changes: the environment keeps nothing there.
-  defp prepare(p, ctx, log) do
+  defp prepare(p, ctx, log, type) do
     config = ctx.config
     paths = VM.paths(config, p.env_id)
 
@@ -364,7 +364,7 @@ defmodule ForemanAgent.VM.Env do
          {:ok, agent} <- Image.ensure_agent_disk(config, ctx.runner, log),
          :ok <- File.mkdir_p(paths.dir),
          :ok <- File.chmod(paths.dir, 0o700),
-         :ok <- ensure_data_disk(paths, p, ctx, log),
+         :ok <- ensure_data_disk(paths, p, ctx, log, type),
          p = keep_snapshot_compatible(p, guest, agent, ctx, log),
          {:ok, meta} <- ensure_root_disk(p, paths, guest, ctx, log) do
       size = VM.size(Map.get(p, :limits, %{}), config, VM.box_size(config.proc))
@@ -427,28 +427,76 @@ defmodule ForemanAgent.VM.Env do
   end
 
   # A new environment's disk: a copy of its prebuild's when the box has
-  # it, otherwise empty and sparse (the guest formats it on first boot,
-  # and it takes space as the environment fills it).
-  defp ensure_data_disk(paths, p, ctx, log) do
-    prebuild = Map.get(p, :prebuild_id)
-
-    cond do
-      File.exists?(paths.data) ->
+  # it, otherwise a fresh sparse ext4 filesystem.
+  defp ensure_data_disk(paths, p, ctx, log, type) do
+    case File.lstat(paths.data) do
+      {:ok, %{type: :regular}} ->
         :ok
 
-      is_binary(prebuild) and Prebuild.exists?(ctx.config, prebuild) ->
-        log.("info", "Starting from a prebuild\n")
-        copy_disk(Prebuild.disk(ctx.config, prebuild), paths.data, ctx)
+      {:error, :enoent} ->
+        if type == "env.create" and new_disk?(paths, p, ctx.config),
+          do: create_data_disk(paths, p, ctx, log),
+          else: {:error, "the existing VM's data disk is missing; restore it before starting"}
 
-      true ->
-        if is_binary(prebuild),
-          do: log.("info", "This box no longer has the prebuild; starting from scratch\n")
+      _ ->
+        {:error, "the VM's data disk is inaccessible or is not a regular file"}
+    end
+  end
 
-        with {:ok, fd} <- :file.open(paths.data, [:write, :raw, :exclusive]),
-             {:ok, _} <- :file.position(fd, ctx.config.vm_disk_gb * 1024 * 1024 * 1024),
-             :ok <- :file.truncate(fd) do
-          :file.close(fd)
-        end
+  defp new_disk?(paths, p, config) do
+    # Prebuild.build records its operation before creating the temporary VM.
+    # A prepared VM also has a root disk or a legacy record.
+    File.lstat(paths.root) == {:error, :enoent} and
+      File.lstat(paths.legacy_meta) == {:error, :enoent} and
+      (File.lstat(paths.meta) == {:error, :enoent} or
+         (p[:prebuild] == true and
+            match?({:ok, %{"kind" => "prebuild"}}, VM.read_meta(config, p.env_id))))
+  end
+
+  defp create_data_disk(paths, p, ctx, log) do
+    prebuild = Map.get(p, :prebuild_id)
+
+    if is_binary(prebuild) and Prebuild.exists?(ctx.config, prebuild) do
+      log.("info", "Starting from a prebuild\n")
+      copy_disk(Prebuild.disk(ctx.config, prebuild), paths.data, ctx)
+    else
+      if is_binary(prebuild),
+        do: log.("info", "This box no longer has the prebuild; starting from scratch\n")
+
+      format_new_disk(paths.data, ctx)
+    end
+  end
+
+  defp format_new_disk(dest, ctx) do
+    # mkfs only sees a new file in the agent-owned parent. Link it into
+    # place once complete, failing if another disk appeared meanwhile.
+    tmp =
+      Path.join(ctx.config.vm_root, ".disk-" <> Base.url_encode64(:crypto.strong_rand_bytes(16)))
+
+    args = [
+      "-q",
+      "-F",
+      "-L",
+      "fm-data",
+      "-E",
+      "nodiscard,lazy_itable_init=1,lazy_journal_init=1",
+      tmp,
+      "#{ctx.config.vm_disk_gb}G"
+    ]
+
+    try do
+      case ctx.runner.run("mkfs.ext4", args, timeout: 120_000) do
+        {:ok, %{status: 0}} ->
+          File.ln(tmp, dest)
+
+        {:ok, %{output: output}} ->
+          {:error, "couldn't format the new data disk: #{String.slice(output, -500, 500)}"}
+
+        {:error, reason} ->
+          {:error, "couldn't format the new data disk: #{inspect(reason)}"}
+      end
+    after
+      File.rm(tmp)
     end
   end
 
