@@ -30,27 +30,27 @@ defmodule ForemanAgent.Runner.Tree do
   @doc """
   Sends SIGTERM to every descendant of `roots`, waits up to `grace`
   milliseconds for them to exit, then SIGKILLs the rest. The roots
-  themselves (MuonTrap) exit once their child has.
+  themselves (MuonTrap) exit once their child has. Returns whether any
+  descendant was signalled.
   """
-  @spec terminate([non_neg_integer()], non_neg_integer()) :: :ok
-  def terminate([], _grace), do: :ok
+  @spec terminate([non_neg_integer()], non_neg_integer()) :: :empty | :signalled
+  def terminate([], _grace), do: :empty
 
   def terminate(roots, grace) do
-    table = processes()
+    pids = descendants(roots, processes())
 
-    case descendants(roots, table) do
-      [] ->
-        :ok
-
-      pids ->
-        signal(pids, "TERM")
-        survivors = wait(roots, pids, grace)
-        kill(roots, survivors, 20)
+    if pids != [] and signal(pids, "TERM") do
+      deadline = System.monotonic_time(:millisecond) + grace
+      survivors = wait(roots, pids, deadline)
+      kill(roots, survivors, 20)
+      :signalled
+    else
+      :empty
     end
   end
 
   # Waits for the tree to exit; returns what's still alive when time is up.
-  defp wait(roots, known, remaining) do
+  defp wait(roots, known, deadline) do
     table = processes()
     alive = alive(roots, known, table)
 
@@ -58,12 +58,12 @@ defmodule ForemanAgent.Runner.Tree do
       alive == [] ->
         []
 
-      remaining <= 0 ->
+      System.monotonic_time(:millisecond) >= deadline ->
         alive
 
       true ->
         Process.sleep(@poll)
-        wait(roots, Enum.uniq(known ++ alive), remaining - @poll)
+        wait(roots, Enum.uniq(known ++ alive), deadline)
     end
   end
 
@@ -103,8 +103,16 @@ defmodule ForemanAgent.Runner.Tree do
   defp signal(pids, sig) do
     args = Enum.map(pids, &Integer.to_string/1)
     # The shell's kill builtin: there may be no kill binary on the box.
-    System.cmd("sh", ["-c", "kill -s #{sig} \"$@\" 2>/dev/null; true", "kill" | args])
-    :ok
+    script = ~S"""
+    result=1
+    for pid do
+      if kill -s "$0" "$pid" 2>/dev/null; then result=0; fi
+    done
+    exit "$result"
+    """
+
+    {_, status} = System.cmd("sh", ["-c", script, sig | args])
+    status == 0
   end
 
   @doc false

@@ -1,24 +1,13 @@
 defmodule ForemanAgent.Runner.LocalTest do
   use ExUnit.Case, async: true
 
-  alias ForemanAgent.Runner.{Collector, Local}
+  alias ForemanAgent.Runner.{Collector, Local, TimedCommand}
 
   @moduletag :tmp_dir
 
   defp alive?(pid) do
     {_, status} = System.cmd("kill", ["-0", pid], stderr_to_stdout: true)
     status == 0
-  end
-
-  defp wait_for_file(path, tries \\ 100) do
-    case File.read(path) do
-      {:ok, pid} when pid != "" ->
-        String.trim(pid)
-
-      _ when tries > 0 ->
-        Process.sleep(20)
-        wait_for_file(path, tries - 1)
-    end
   end
 
   defp eventually(fun, tries \\ 50) do
@@ -40,19 +29,38 @@ defmodule ForemanAgent.Runner.LocalTest do
       pidfile = Path.join(tmp, "grandchild.pid")
       # The child forks a grandchild and waits for it, like the devcontainer
       # CLI waiting on `docker compose up`.
-      script = "sh -c 'echo $$ > #{pidfile}; exec sleep 300'; echo parent-done"
+      script = ~S(sh -c 'echo $$ > "$1"; echo ready; exec sleep 300' sh "$1"; echo parent-done)
+      port = TimedCommand.open("sh", ["-c", script, "sh", pidfile], [])
 
-      task = Task.async(fn -> Local.run("sh", ["-c", script], timeout: 500) end)
-      grandchild = wait_for_file(pidfile)
+      # Expire the deadline only after the grandchild exists. The ready
+      # message follows the pidfile write, so there is no startup race.
+      assert_receive {^port, {:data, ready}}, 30_000
+      MuonTrap.Port.report_bytes_handled(port, byte_size(ready))
+      grandchild = File.read!(pidfile) |> String.trim()
       on_exit(fn -> System.cmd("kill", ["-9", grandchild], stderr_to_stdout: true) end)
 
-      assert {:ok, %{status: :timeout}} = Task.await(task, 15_000)
+      assert {_, :timeout} = TimedCommand.await(port, "", 0)
       assert eventually(fn -> not alive?(grandchild) end), "grandchild #{grandchild} survived"
+    end
+
+    test "a deadline during startup still stops the command" do
+      assert {:ok, %{status: :timeout}} = Local.run("sleep", ["300"], timeout: 0)
     end
 
     test "a command that finishes in time keeps its exit status" do
       assert {:ok, %{status: 3, output: "hi\n"}} =
-               Local.run("sh", ["-c", "echo hi; exit 3"], timeout: 5_000)
+               Local.run("sh", ["-c", "echo hi; exit 3"], timeout: 60_000)
+    end
+
+    test "a deadline with the exit status already queued preserves that status" do
+      port = TimedCommand.open("sh", ["-c", "echo hi; exit 3"], [])
+      monitor = Port.monitor(port)
+      assert_receive {^port, {:data, "hi\n"}}, 30_000
+      MuonTrap.Port.report_bytes_handled(port, 3)
+      assert_receive {:DOWN, ^monitor, :port, ^port, _}, 30_000
+
+      # The deadline expires with the real exit status already queued.
+      assert {"", 3} = TimedCommand.await(port, "", 0)
     end
   end
 

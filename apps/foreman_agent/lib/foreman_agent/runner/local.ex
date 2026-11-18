@@ -7,11 +7,9 @@ defmodule ForemanAgent.Runner.Local do
   """
   @behaviour ForemanAgent.Runner
 
-  alias ForemanAgent.Runner.{Collector, Tree}
+  alias ForemanAgent.Runner.{Collector, TimedCommand}
 
   @default_keep 65_536
-  # How long a timed-out command gets to exit after SIGTERM.
-  @grace 5_000
   # muontrap leaves the command its own stdin, which carries the acks that
   # let it forward more output. A command that reads stdin (the devcontainer
   # CLI does, during lifecycle commands) swallows them; muontrap then stops
@@ -28,65 +26,27 @@ defmodule ForemanAgent.Runner.Local do
         keep = Keyword.get(opts, :keep, @default_keep)
         on_output = Keyword.get(opts, :on_output, fn _ -> :ok end)
 
+        collector = %Collector{keep: keep, on_output: on_output}
+
         cmd_opts =
           [
             env: child_env(Keyword.get(opts, :env, %{})),
-            stderr_to_stdout: true,
-            into: %Collector{keep: keep, on_output: on_output}
+            stderr_to_stdout: true
           ] ++ Keyword.take(opts, [:cd])
 
+        args = ["-c", @empty_stdin, path | args]
+
         {collector, status} =
-          with_timeout(opts[:timeout], fn ->
-            MuonTrap.cmd("/bin/sh", ["-c", @empty_stdin, path | args], cmd_opts)
-          end)
+          case opts[:timeout] do
+            timeout when timeout in [nil, :infinity] ->
+              MuonTrap.cmd("/bin/sh", args, [{:into, collector} | cmd_opts])
+
+            timeout ->
+              port = TimedCommand.open("/bin/sh", args, cmd_opts)
+              TimedCommand.await(port, collector, timeout)
+          end
 
         {:ok, %{status: status, output: Collector.output(collector)}}
-    end
-  end
-
-  # MuonTrap's own timeout only kills the direct child, so a watchdog
-  # takes the tree down instead; the command then returns on its own.
-  defp with_timeout(nil, fun), do: fun.()
-
-  defp with_timeout(timeout, fun) do
-    caller = self()
-    ref = make_ref()
-
-    {watchdog, monitor} =
-      spawn_monitor(fn ->
-        caller_monitor = Process.monitor(caller)
-
-        receive do
-          ^ref -> :ok
-          {:DOWN, ^caller_monitor, _, _, _} -> :ok
-        after
-          timeout ->
-            send(caller, {ref, :timed_out})
-            Tree.terminate(Tree.os_pids(caller), @grace)
-        end
-      end)
-
-    {collector, status} =
-      try do
-        fun.()
-      after
-        send(watchdog, ref)
-      end
-
-    receive do
-      {^ref, :timed_out} ->
-        # Let the watchdog finish off the rest of the tree first.
-        receive do
-          {:DOWN, ^monitor, _, _, _} -> :ok
-        after
-          @grace * 3 -> :ok
-        end
-
-        {collector, :timeout}
-    after
-      0 ->
-        Process.demonitor(monitor, [:flush])
-        {collector, status}
     end
   end
 
