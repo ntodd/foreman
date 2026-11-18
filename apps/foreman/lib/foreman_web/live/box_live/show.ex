@@ -54,8 +54,22 @@ defmodule ForemanWeb.BoxLive.Show do
       else: socket
   end
 
+  # Runs on every box event and every 30 seconds of stats, so it checks
+  # access again (a box can be unshared under an open page) and leaves the
+  # settings form alone unless the saved settings changed.
   defp load(socket) do
     box = Boxes.get_box!(socket.assigns.box.id)
+    scope = socket.assigns.current_scope
+
+    if Scope.admin?(scope) or Foreman.Boxes.Box.usable_by?(box, scope.user),
+      do: load(socket, box),
+      else:
+        socket
+        |> put_flash(:error, "You don't have access to #{box.name} any more.")
+        |> push_navigate(to: ~p"/boxes")
+  end
+
+  defp load(socket, box) do
     envs = Environments.live_for_box(box.id)
 
     socket
@@ -68,15 +82,24 @@ defmodule ForemanWeb.BoxLive.Show do
       Operations.list_for_box(box.id, 10) |> Enum.filter(&is_nil(&1.environment_id))
     )
     |> assign(:orphans, Environments.orphans(box.id))
-    |> assign(:form, to_form(form_params(box), as: :box))
+    |> sync_form(box)
     |> assign(:target_version, Releases.target_version(box))
     |> assign(:fleet_version, box.arch && Releases.fleet_version(box.arch))
+  end
+
+  defp sync_form(socket, box) do
+    saved = form_params(box)
+
+    if saved == socket.assigns[:form_saved],
+      do: socket,
+      else: assign(socket, form: to_form(saved, as: :box), form_saved: saved)
   end
 
   defp form_params(box) do
     %{
       "capacity_policy" => box.capacity_policy,
-      "contention_threshold" => box.contention_threshold,
+      "cpu_threshold" => box.cpu_threshold,
+      "memory_threshold" => box.memory_threshold,
       "owner_user_id" => box.owner_user_id,
       "shared_user_ids" => box.shared_user_ids,
       "desired_agent_version" => box.desired_agent_version
@@ -93,7 +116,7 @@ defmodule ForemanWeb.BoxLive.Show do
            Map.put(params, "name", socket.assigns.box.name)
          ) do
       {:ok, _box} ->
-        {:noreply, socket |> put_flash(:info, "Saved.") |> load()}
+        {:noreply, socket |> put_flash(:info, "Saved.") |> assign(:form_saved, nil) |> load()}
 
       {:error, %Ecto.Changeset{} = cs} ->
         {:noreply, assign(socket, :form, to_form(%{cs | action: :update}, as: :box))}
@@ -104,10 +127,26 @@ defmodule ForemanWeb.BoxLive.Show do
   end
 
   def handle_event("run", %{"type" => type}, socket)
-      when type in ["box.inventory", "box.stats", "box.gc"] do
-    case Agents.run_box_command(socket.assigns.current_scope, socket.assigns.box, type) do
+      when type in ["box.inventory", "box.stats", "box.gc", "box.restart"] do
+    box = socket.assigns.box
+
+    case Agents.run_box_command(socket.assigns.current_scope, box, type) do
+      {:ok, _op} when type == "box.restart" ->
+        {:noreply,
+         socket
+         |> put_flash(:info, "Rebooting #{box.name}. It'll be back once its agent rejoins.")
+         |> load()}
+
       {:ok, _op} ->
-        {:noreply, socket |> put_flash(:info, "Sent to #{socket.assigns.box.name}.") |> load()}
+        {:noreply, socket |> put_flash(:info, "Sent to #{box.name}.") |> load()}
+
+      {:error, :cannot_restart} ->
+        {:noreply,
+         put_flash(
+           socket,
+           :error,
+           "#{box.name}'s agent can't reboot it; run its install command again."
+         )}
 
       {:error, _} ->
         {:noreply, put_flash(socket, :error, "Only admins can do that.")}
@@ -170,7 +209,9 @@ defmodule ForemanWeb.BoxLive.Show do
         <:subtitle>
           {@box.hostname || "Never connected"}<span :if={@box.arch}> · {@box.arch}</span><span :if={
             @box.agent_version
-          }> · {agent_label(@box, @target_version)}</span>
+          }> · {agent_label(@box, @target_version)}</span><span :if={vm_label(@box.vm)}> · {vm_label(
+            @box.vm
+          )}</span>
         </:subtitle>
         <:actions>
           <.badge :if={@summary.contention} color="amber">Contention</.badge>
@@ -178,8 +219,14 @@ defmodule ForemanWeb.BoxLive.Show do
         </:actions>
       </.header>
 
-      <.box_policy_alert box={@box} />
+      <.box_vm_alert box={@box} />
       <.box_firewall_alert box={@box} />
+      <p :if={is_boolean(@box.firewall_block_lan)} class="text-sm text-ink-2">
+        Guest LAN policy: {if @box.firewall_block_lan,
+          do: "Block private networks",
+          else: "Allow private networks"}
+      </p>
+      <.box_reboot_alert box={@box} can_reboot={Scope.admin?(@current_scope) and @online} />
 
       <.callout
         :if={@box.failed_agent_version && @box.failed_agent_version == @target_version}
@@ -229,14 +276,14 @@ defmodule ForemanWeb.BoxLive.Show do
                 value={@summary.used_cpus}
                 max={@summary.cpus}
                 unit=" cores"
-                threshold={@box.contention_threshold}
+                threshold={Capacity.used_threshold(@box.cpu_threshold)}
               />
               <.capacity_bar
                 label="CPU provisioned"
                 value={@summary.provisioned_cpus}
                 max={@summary.cpus}
                 unit=" cores"
-                threshold={@box.contention_threshold}
+                threshold={@box.cpu_threshold}
               />
               <.capacity_bar
                 label="Memory used"
@@ -244,7 +291,7 @@ defmodule ForemanWeb.BoxLive.Show do
                 max={@summary.memory_mb}
                 unit=" GiB"
                 format={&gib/1}
-                threshold={@box.contention_threshold}
+                threshold={Capacity.used_threshold(@box.memory_threshold)}
               />
               <.capacity_bar
                 label="Memory provisioned"
@@ -252,7 +299,7 @@ defmodule ForemanWeb.BoxLive.Show do
                 max={@summary.memory_mb}
                 unit=" GiB"
                 format={&gib/1}
-                threshold={@box.contention_threshold}
+                threshold={@box.memory_threshold}
               />
               <.capacity_bar
                 :if={@summary.disk_mb}
@@ -308,7 +355,7 @@ defmodule ForemanWeb.BoxLive.Show do
             This box has environments Foreman has no record of: {Enum.join(@orphans, ", ")}. They keep running; remove them on the box with docker compose down if they're not wanted.
           </.callout>
 
-          <.panel :if={Scope.admin?(@current_scope)} title="Box operations">
+          <.panel :if={Scope.admin?(@current_scope)} title="Box operations" id="box-operations">
             <:actions>
               <.button
                 size="sm"
@@ -325,6 +372,15 @@ defmodule ForemanWeb.BoxLive.Show do
                 disabled={not @online}
                 data-confirm="Prune dangling images, old build cache and unused anonymous volumes on this box?"
               >Prune</.button>
+              <.button
+                :if={@box.can_restart}
+                size="sm"
+                variant="ghost"
+                phx-click="run"
+                phx-value-type="box.restart"
+                disabled={not @online}
+                data-confirm={"Reboot #{@box.name}? Its environments stop, and come back up once it rejoins."}
+              >Reboot</.button>
             </:actions>
             <ul :if={@ops != []} class="-m-5 divide-y divide-line">
               <li :for={op <- @ops} class="flex items-center justify-between gap-3 px-5 py-2.5">
@@ -353,13 +409,29 @@ defmodule ForemanWeb.BoxLive.Show do
                     {"Refuse", "refuse"}
                   ]}
                 />
-                <.input
-                  field={@form[:contention_threshold]}
-                  type="number"
-                  step="0.05"
-                  min="0.1"
-                  label="Contention threshold (fraction of capacity)"
-                />
+                <div>
+                  <div class="grid grid-cols-2 gap-3">
+                    <.input
+                      field={@form[:cpu_threshold]}
+                      type="number"
+                      step="0.05"
+                      min="0.1"
+                      max="16"
+                      label="CPU threshold"
+                    />
+                    <.input
+                      field={@form[:memory_threshold]}
+                      type="number"
+                      step="0.05"
+                      min="0.1"
+                      max="4"
+                      label="Memory threshold"
+                    />
+                  </div>
+                  <p class="mt-1.5 text-xs text-ink-3">
+                    Fractions of capacity; past 1 overcommits. Idle VMs cost little CPU, but a box out of memory kills a VM.
+                  </p>
+                </div>
                 <.input
                   field={@form[:owner_user_id]}
                   type="select"
@@ -408,7 +480,8 @@ defmodule ForemanWeb.BoxLive.Show do
             <% else %>
               <dl class="space-y-2.5">
                 <.fact term="Past capacity">{@box.capacity_policy}</.fact>
-                <.fact term="Threshold">{round(@box.contention_threshold * 100)}%</.fact>
+                <.fact term="CPU threshold">{round(@box.cpu_threshold * 100)}%</.fact>
+                <.fact term="Memory threshold">{round(@box.memory_threshold * 100)}%</.fact>
               </dl>
             <% end %>
           </.panel>
@@ -441,4 +514,13 @@ defmodule ForemanWeb.BoxLive.Show do
       do: "agent #{box.agent_version}",
       else: "agent #{box.agent_version}, updating to #{target}"
   end
+
+  # How the box runs environment VMs: under its own KVM, or nested (it's a
+  # VM itself), and whether new disks are reflinks or full copies.
+  defp vm_label(%{"ready" => true} = vm) do
+    where = if vm["nested"], do: "VMs nested", else: "VMs on KVM"
+    if vm["reflink"], do: where, else: where <> ", full-copy disks"
+  end
+
+  defp vm_label(_vm), do: nil
 end

@@ -11,7 +11,8 @@ defmodule ForemanProtocol.Event do
 
   @type t :: %__MODULE__{type: String.t(), payload: map()}
 
-  @env_states ["running", "stopped", "partial", "missing"]
+  # suspended: protocol 6, an environment whose VM is saved to disk.
+  @env_states ["running", "stopped", "suspended", "partial", "missing"]
 
   @specs %{
     "op.accepted" => [op_id: {:uuid, required: true}],
@@ -44,7 +45,20 @@ defmodule ForemanProtocol.Event do
     # fields of the same names).
     "box.firewall" => [
       firewall: {{:enum, ~w(active outdated missing)}, required: true},
+      firewall_block_lan: {:boolean, []},
       firewall_default_bridge: {{:enum, ~w(filtered reaches_tailnet)}, []}
+    ],
+    # Whether the box needs a reboot (its /run/reboot-required), the
+    # packages that asked for it, and whether a livepatch is applied to
+    # the running kernel. After every join and when it changes. Protocol
+    # 5: whether the agent can reboot the box (box.restart), and the boot
+    # it's on (the kernel's boot_id).
+    "box.reboot" => [
+      required: {:boolean, required: true},
+      packages: {{:list, :string}, default: []},
+      livepatch: {:boolean, default: false},
+      can_restart: {:boolean, default: false},
+      boot_id: {:uuid, []}
     ],
     "box.stats" => [
       capacity:
@@ -57,6 +71,17 @@ defmodule ForemanProtocol.Event do
         {{:map_of, :uuid,
           {:object, cpu_percent: {:number, default: 0}, memory_mb: {:number, default: 0}}},
          default: %{}}
+    ],
+    # The TCP ports listening in each running environment's devcontainer
+    # that its tailnet address reaches, when they change and after every
+    # join. `process` is the listener's name (its comm) when the agent
+    # could find it. An empty list means nothing is listening; an
+    # environment that isn't running is left out.
+    "box.ports" => [
+      environments:
+        {{:map_of, :uuid,
+          {:list, {:object, port: {:port, required: true}, process: {:process, []}}}},
+         required: true}
     ],
     # Host-wide usage, sampled every few seconds. `at` is the agent's
     # Unix time in seconds; cpu_percent is of the whole box (0-100).

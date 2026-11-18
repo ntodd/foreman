@@ -96,6 +96,60 @@ defmodule ForemanAgent.UpdaterTest do
     assert message =~ "release key"
   end
 
+  describe "download origin" do
+    setup %{body: body} do
+      test = self()
+
+      Req.Test.stub(Updater, fn conn ->
+        send(
+          test,
+          {:fetched, conn.scheme, conn.host, conn.port, conn.request_path, conn.query_string}
+        )
+
+        Plug.Conn.send_resp(conn, 200, body)
+      end)
+
+      :ok
+    end
+
+    defp with_query(payload), do: %{payload | url: payload.url <> "?sig=abc"}
+
+    test "comes from the agent's FOREMAN_URL, keeping the path and query", %{
+      config: config,
+      private: private,
+      sha: sha
+    } do
+      config = %{config | url: "http://127.0.0.1:4000"}
+      assert {:ok, _} = run(with_query(payload("0.2.0", sha, private)), config)
+
+      path = "/agent/releases/0.2.0/#{Updater.target()}"
+      assert_received {:fetched, :http, "127.0.0.1", 4000, ^path, "sig=abc"}
+    end
+
+    test "is unchanged when FOREMAN_URL has the payload's origin", %{
+      config: config,
+      private: private,
+      sha: sha
+    } do
+      config = %{config | url: "https://foreman.example"}
+      assert {:ok, _} = run(with_query(payload("0.2.0", sha, private)), config)
+
+      path = "/agent/releases/0.2.0/#{Updater.target()}"
+      assert_received {:fetched, :https, "foreman.example", 443, ^path, "sig=abc"}
+    end
+
+    test "is the payload's when there's no FOREMAN_URL", %{
+      config: config,
+      private: private,
+      sha: sha
+    } do
+      assert {:ok, _} = run(payload("0.2.0", sha, private), %{config | url: nil})
+
+      path = "/agent/releases/0.2.0/#{Updater.target()}"
+      assert_received {:fetched, :https, "foreman.example", 443, ^path, ""}
+    end
+  end
+
   test "refuses tarballs with paths that escape the release directory", %{
     config: config,
     private: private,

@@ -33,7 +33,15 @@ defmodule ForemanProtocol.Schema do
                    DOCKER_CERT_PATH DOCKER_TLS_VERIFY COMPOSE_PROJECT_NAME COMPOSE_FILE
                    COMPOSE_PROFILES COMPOSE_ENV_FILES GIT_DIR GIT_WORK_TREE GIT_CONFIG_GLOBAL
                    GIT_CONFIG_SYSTEM GIT_ASKPASS GIT_SSH GIT_SSH_COMMAND NODE_OPTIONS
-                   LD_PRELOAD LD_LIBRARY_PATH BASH_ENV ENV TMPDIR)
+                   LD_PRELOAD LD_LIBRARY_PATH BASH_ENV ENV TMPDIR
+                   GCONV_PATH NODE_PATH SHELLOPTS BASHOPTS PS4 IFS
+                   GIT_CONFIG_PARAMETERS GIT_CONFIG_COUNT GIT_EXEC_PATH GIT_TEMPLATE_DIR
+                   GIT_PROXY_COMMAND GIT_EXTERNAL_DIFF GIT_PAGER GIT_EDITOR GIT_SEQUENCE_EDITOR)
+
+  # Whole families: every dynamic loader variable (LD_AUDIT loads code as
+  # surely as LD_PRELOAD), git config given in the environment, which can
+  # set core.sshCommand or core.fsmonitor, and git's trace files.
+  @reserved_prefixes ~w(FOREMAN_ LD_ GIT_CONFIG_KEY_ GIT_CONFIG_VALUE_ GIT_TRACE)
 
   @max_text 1_048_576
 
@@ -41,6 +49,10 @@ defmodule ForemanProtocol.Schema do
   def secret_files, do: ~w(secrets.env github-token ts-authkey gitconfig notices)
 
   def reserved_env, do: @reserved_env
+
+  @doc "Whether a payload may not set `name` in the environment of what the agent runs."
+  def reserved_env?(name) when is_binary(name),
+    do: name in @reserved_env or String.starts_with?(name, @reserved_prefixes)
 
   @spec cast(term(), spec()) :: {:ok, map()} | {:error, [error()]}
   def cast(input, spec) when is_map(input) do
@@ -201,6 +213,21 @@ defmodule ForemanProtocol.Schema do
   defp cast_value(v, :integer, _p) when is_integer(v) and v >= 0, do: {:ok, v}
   defp cast_value(_v, :integer, p), do: err(p, "must be a non-negative integer")
 
+  defp cast_value(v, :port, _p) when is_integer(v) and v in 1..65_535, do: {:ok, v}
+  defp cast_value(_v, :port, p), do: err(p, "must be a port number")
+
+  # A process name the agent read inside an environment, which the
+  # environment controls: short, and nothing that draws on a terminal.
+  defp cast_value(v, :process, p) when is_binary(v) do
+    cond do
+      v == "" -> err(p, "can't be blank")
+      byte_size(v) > 64 -> err(p, "is too long")
+      not String.valid?(v) -> err(p, "must be UTF-8")
+      String.match?(v, ~r/[[:cntrl:]]/u) -> err(p, "must not contain control characters")
+      true -> {:ok, v}
+    end
+  end
+
   defp cast_value(v, :positive_number, _p) when is_number(v) and v > 0, do: {:ok, v}
   defp cast_value(_v, :positive_number, p), do: err(p, "must be a positive number")
 
@@ -225,6 +252,12 @@ defmodule ForemanProtocol.Schema do
 
   defp cast_value(v, :option_name, p),
     do: match(v, @option_name, p, "must be a feature option name")
+
+  defp cast_value(v, :connect_name, p) do
+    if ForemanProtocol.Connect.name?(v),
+      do: {:ok, v},
+      else: err(p, "must be a short lowercase name")
+  end
 
   defp cast_value(v, :feature_ref, p) do
     if ForemanProtocol.Feature.valid_ref?(v),
@@ -284,7 +317,7 @@ defmodule ForemanProtocol.Schema do
         not Regex.match?(@env_name, name) ->
           {:halt, err(p, "contains an invalid variable name: #{name}")}
 
-        name in @reserved_env or String.starts_with?(name, "FOREMAN_") ->
+        reserved_env?(name) ->
           {:halt, err(p, "contains a reserved variable name: #{name}")}
 
         not is_binary(value) or not String.valid?(value) or String.contains?(value, <<0>>) ->

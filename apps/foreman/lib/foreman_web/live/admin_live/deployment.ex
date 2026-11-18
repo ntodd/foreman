@@ -147,6 +147,18 @@ defmodule ForemanWeb.AdminLive.Deployment do
      |> load()}
   end
 
+  # GitHub took the token, but the host or user name can't be stored.
+  def handle_async(:check_registry, {:ok, {:error, %Ecto.Changeset{} = changeset}}, socket) do
+    message =
+      Enum.map_join(changeset.errors, "; ", fn
+        {:registry_host, _} -> "the registry must be a host name like ghcr.io"
+        {:registry_username, _} -> "the machine user must be a GitHub username"
+        {field, {text, _}} -> "#{field} #{text}"
+      end)
+
+    {:noreply, socket |> assign(:checking, false) |> put_flash(:error, "Not saved: #{message}")}
+  end
+
   def handle_async(:check_registry, {:ok, {:error, message}}, socket) do
     {:noreply, socket |> assign(:checking, false) |> put_flash(:error, "Not saved: #{message}")}
   end

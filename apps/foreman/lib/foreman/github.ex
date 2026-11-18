@@ -275,6 +275,46 @@ defmodule Foreman.GitHub do
     end
   end
 
+  @doc """
+  A token for a prebuild of `repo` to clone with: the app's installation
+  token, reading the repo (and its extra repos) and nothing else. A
+  prebuild belongs to no user, so it can't have a user's token.
+  """
+  def prebuild_token(%Repos.Repo{} = repo) do
+    repo = Foreman.Repo.preload(repo, :owner)
+
+    cond do
+      not configured?() ->
+        {:error, :not_configured}
+
+      is_nil(repo.owner.installation_id) ->
+        {:error, :not_installed}
+
+      true ->
+        client().repo_read_token(
+          app(),
+          repo.owner.installation_id,
+          Enum.uniq([repo.name | repo.extra_repos])
+        )
+    end
+  end
+
+  @doc """
+  Whether `token` reads `repo` and each of `names` (repos of the same
+  owner; by default the repo's extra repos), by asking GitHub for each.
+  Anything but a yes (an error, GitHub not answering) is a no.
+  """
+  def can_read?(token, %Repos.Repo{} = repo, names \\ nil) when is_binary(token) do
+    repo = Foreman.Repo.preload(repo, :owner)
+    names = names || repo.extra_repos
+    others = Enum.map(names, &"#{repo.owner.login}/#{&1}")
+
+    Enum.all?(
+      Enum.uniq([repo.full_name | others]),
+      &match?({:ok, _}, client().get_repo(token, &1))
+    )
+  end
+
   def list_branches(%User{} = user, %Repos.Repo{} = repo) do
     with {:ok, token} <- user_token(user) do
       client().list_branches(token, repo.full_name)
@@ -342,7 +382,9 @@ defmodule Foreman.GitHub do
   defp sync_installation(app, owner, installation_id) do
     with {:ok, token} <- client().installation_token(app, installation_id),
          {:ok, repos} <- client().list_installation_repos(token) do
-      for data <- repos, not data["archived"] do
+      {archived, live} = Enum.split_with(repos, & &1["archived"])
+
+      for data <- live do
         Repos.upsert_repo(
           owner,
           %{
@@ -358,6 +400,8 @@ defmodule Foreman.GitHub do
         )
       end
 
+      # Not added if never seen, but one that was synced leaves the list.
+      Repos.mark_archived(owner, Enum.map(archived, & &1["id"]))
       Repos.mark_removed(owner, Enum.map(repos, & &1["id"]))
       {:ok, length(repos)}
     else
@@ -420,7 +464,7 @@ defmodule Foreman.GitHub do
           {:ok, config} ->
             %{
               devcontainer_path: path,
-              host_requirements: config["hostRequirements"],
+              host_requirements: map_or_nil(config["hostRequirements"]),
               private_registry_refs: registry_refs(config, owner_login),
               devcontainer_error:
                 if(config["dockerComposeFile"], do: nil, else: "not a compose-based devcontainer")
@@ -454,11 +498,22 @@ defmodule Foreman.GitHub do
     end
   end
 
+  defp map_or_nil(value) when is_map(value), do: value
+  defp map_or_nil(_), do: nil
+
+  # Whatever the repo's file says; anything not in the shape the
+  # devcontainer spec gives it has no refs.
   @doc false
   def registry_refs(config, owner_login) do
     owner = String.downcase(owner_login)
-    features = config |> Map.get("features", %{}) |> Map.keys()
-    image = List.wrap(config["image"])
+
+    features =
+      case config["features"] do
+        %{} = features -> Map.keys(features)
+        _ -> []
+      end
+
+    image = if is_binary(config["image"]), do: [config["image"]], else: []
 
     (features ++ image)
     |> Enum.filter(&String.starts_with?(String.downcase(&1), "ghcr.io/#{owner}/"))

@@ -1,0 +1,50 @@
+#!/bin/sh
+# Sets up the VM's network from what the box's helper put on the kernel
+# command line: fm.mac (the NIC's MAC), fm.ip (address/prefix), fm.gw and
+# fm.dns (comma-separated). The NIC is found by its MAC, and the address
+# is set again until it sticks: udev may still be settling the device.
+set -u
+
+mac="" ip="" gw="" dns=""
+read -r cmdline < /proc/cmdline
+for arg in $cmdline; do
+  case "$arg" in
+    fm.mac=*) mac=${arg#fm.mac=} ;;
+    fm.ip=*) ip=${arg#fm.ip=} ;;
+    fm.gw=*) gw=${arg#fm.gw=} ;;
+    fm.dns=*) dns=${arg#fm.dns=} ;;
+  esac
+done
+
+# A VM started without a network (by hand, say) has nothing to set up.
+[ -n "$ip" ] && [ -n "$gw" ] || exit 0
+
+tries=0
+while :; do
+  dev=""
+  for d in /sys/class/net/*; do
+    [ -e "$d/device" ] || continue
+    if [ -z "$mac" ] || [ "$(cat "$d/address")" = "$mac" ]; then
+      dev=${d##*/}
+      break
+    fi
+  done
+  if [ -n "$dev" ] && ip link set "$dev" up 2>/dev/null &&
+    ip addr replace "$ip" dev "$dev" 2>/dev/null &&
+    ip route replace default via "$gw" dev "$dev" onlink 2>/dev/null; then
+    break
+  fi
+  tries=$((tries + 1))
+  if [ "$tries" -gt 500 ]; then
+    echo "foreman-guest: no network device${mac:+ with MAC $mac}" >&2
+    exit 1
+  fi
+  sleep 0.02
+done
+
+: > /etc/resolv.conf.new
+for server in $(echo "$dns" | tr ',' ' '); do
+  echo "nameserver $server" >> /etc/resolv.conf.new
+done
+[ -s /etc/resolv.conf.new ] || echo "nameserver 1.1.1.1" > /etc/resolv.conf.new
+mv /etc/resolv.conf.new /etc/resolv.conf

@@ -1,0 +1,18 @@
+[Unit]
+Description=Foreman guest disks
+DefaultDependencies=no
+After=systemd-udevd.service local-fs.target
+Wants=systemd-udevd.service
+Before=docker.service containerd.service foreman-guest-agent.service shutdown.target
+Conflicts=shutdown.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+# On the serial console too, where the box keeps the VM's log.
+StandardOutput=journal+console
+StandardError=journal+console
+ExecStart=/usr/local/lib/foreman-guest/disks
+
+[Install]
+WantedBy=multi-user.target

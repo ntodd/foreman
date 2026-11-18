@@ -1,0 +1,15 @@
+[Unit]
+Description=Foreman guest memory reclaim, for the guest agent
+
+[Socket]
+# Root and the guest agent's group. Nothing else in the VM needs it.
+ListenStream=/run/foreman-reclaim.sock
+SocketUser=root
+SocketGroup=foreman
+SocketMode=0660
+Accept=yes
+# One at a time: more is dropped.
+MaxConnections=1
+
+[Install]
+WantedBy=sockets.target

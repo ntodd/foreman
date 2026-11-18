@@ -1,0 +1,22 @@
+#!/bin/sh
+# Lets environment VMs' traffic through a box whose own firewall drops
+# forwarded traffic: Docker sets iptables' FORWARD policy to drop, and so
+# does ufw. Accepts what comes from a VM's tap (fm-vm<n>) and the replies
+# to it, at the top of FORWARD, and turns IPv4 forwarding on. The box
+# firewall's table for VMs (foreman.nft) runs before iptables and has
+# already dropped what VMs mustn't send by then.
+#
+# foreman-firewall.service runs it after loading the rules, and the check
+# timer every 15 seconds, so the rules come back after Docker or ufw
+# rewrites FORWARD. Idempotent.
+set -u
+
+sysctl -qw net.ipv4.ip_forward=1
+
+command -v iptables >/dev/null 2>&1 || exit 0
+iptables -S FORWARD >/dev/null 2>&1 || exit 0
+
+iptables -C FORWARD -o fm-vm+ -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT 2>/dev/null ||
+  iptables -I FORWARD 1 -o fm-vm+ -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
+iptables -C FORWARD -i fm-vm+ -j ACCEPT 2>/dev/null ||
+  iptables -I FORWARD 1 -i fm-vm+ -j ACCEPT

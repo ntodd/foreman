@@ -19,6 +19,7 @@ defmodule Foreman.Jobs.CheckAccess do
   def perform(_job) do
     if Foreman.GitHub.configured?() do
       config = Accounts.login_config()
+      Accounts.revoke_removed_config_admins(config)
       Enum.each(signed_in_users(), &check(&1, config))
     end
 

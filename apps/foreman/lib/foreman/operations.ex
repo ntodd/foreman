@@ -310,6 +310,17 @@ defmodule Foreman.Operations do
   def fail_queued(%Operation{} = op, error),
     do: transition(op, "queued", status: "failed", error: error, finished_at: DateTime.utc_now())
 
+  @doc """
+  Merges `extra` into the args of an operation that's still on the box,
+  for one sent again. A result that's already in is left alone.
+  """
+  def refresh_args(%Operation{} = op, extra) do
+    from(o in Operation, where: o.id == ^op.id and o.status in ["dispatched", "running"])
+    |> Repo.update_all(set: [args: Map.merge(op.args || %{}, extra)])
+
+    :ok
+  end
+
   @doc "Takes a queued operation for sending. `:error` if it isn't queued any more."
   def claim(%Operation{} = op, fields),
     do: transition(op, "queued", [status: "dispatched"] ++ fields)

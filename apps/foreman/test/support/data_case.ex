@@ -33,6 +33,16 @@ defmodule Foreman.DataCase do
     # Runs first (on_exit is last in, first out): stop the environment
     # servers a test started while the sandbox is still there.
     ExUnit.Callbacks.on_exit(&stop_environment_servers/0)
+    if Foreman.Repo.database() == "sqlite", do: take_write_lock()
+  end
+
+  # The sandbox begins its transaction deferred, whatever the repo's
+  # default_transaction_mode, and the last test's connection rolls back
+  # only after its owner is gone. A test that reads and then writes before
+  # that rollback gets "database busy" at once. Writing first takes the
+  # lock up front, so the test waits for it (busy_timeout) instead.
+  defp take_write_lock do
+    Foreman.Repo.query!("DELETE FROM schema_migrations WHERE 0")
   end
 
   def stop_environment_servers do

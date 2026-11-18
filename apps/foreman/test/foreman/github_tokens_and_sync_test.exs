@@ -87,18 +87,33 @@ defmodule Foreman.GitHubTokensAndSyncTest do
 
       test_pid = self()
 
+      # Hold the refresh until the caller is dead, so it can't finish first.
       stub(ClientMock, :refresh_user_token, fn _, "ghr_old" ->
-        send(test_pid, :spent)
-        Process.sleep(100)
-        new_tokens("ghu_new", "ghr_new")
+        send(test_pid, {:spent, self()})
+
+        receive do
+          :go -> new_tokens("ghu_new", "ghr_new")
+        end
       end)
 
-      caller = spawn(fn -> GitHub.user_token(user) end)
-      Mox.allow(ClientMock, test_pid, caller)
-      assert_receive :spent, 1000
-      Process.exit(caller, :kill)
+      caller =
+        spawn(fn ->
+          Process.put(:"$callers", [test_pid])
+          GitHub.user_token(user)
+        end)
 
-      assert eventually(fn -> Repo.reload!(user).refresh_token == "ghr_new" end)
+      caller_ref = Process.monitor(caller)
+      assert_receive {:spent, refresher}, 1000
+      ref = Process.monitor(refresher)
+      Process.exit(caller, :kill)
+      assert_receive {:DOWN, ^caller_ref, :process, _, :killed}
+      send(refresher, :go)
+
+      # Wait for the refresh to finish everything it does, including
+      # queueing the token push, so it can't write after the sandbox goes.
+      assert_receive {:DOWN, ^ref, :process, _, reason}, 5000
+      assert reason == :normal
+      assert Repo.reload!(user).refresh_token == "ghr_new"
     end
 
     test "a rejected refresh doesn't wipe tokens from a sign-in that happened meanwhile" do
@@ -214,6 +229,75 @@ defmodule Foreman.GitHubTokensAndSyncTest do
       refute Map.has_key?(Foreman.Secrets.resolve(env), "DB_PASSWORD")
     end
 
+    test "a devcontainer.json in a shape it shouldn't be doesn't stop the sync" do
+      configs = %{
+        "acme/null-features" => ~s({"dockerComposeFile": "c.yml", "features": null}),
+        "acme/numeric-image" => ~s({"dockerComposeFile": "c.yml", "image": 1}),
+        "acme/list" => ~s([1, 2]),
+        "acme/fine" => ~s({"dockerComposeFile": "c.yml", "hostRequirements": "lots"})
+      }
+
+      installation(
+        [
+          gh_repo(1, "null-features"),
+          gh_repo(2, "numeric-image"),
+          gh_repo(3, "list"),
+          gh_repo(4, "fine")
+        ],
+        get_file: fn _, full_name, ".devcontainer/devcontainer.json", _ ->
+          {:ok, configs[full_name]}
+        end
+      )
+
+      assert {:ok, 4} = GitHub.sync_repos()
+
+      assert %{private_registry_refs: []} =
+               Foreman.Repos.get_repo_by_full_name("acme/null-features")
+
+      assert %{private_registry_refs: []} =
+               Foreman.Repos.get_repo_by_full_name("acme/numeric-image")
+
+      assert %{devcontainer_error: error} = Foreman.Repos.get_repo_by_full_name("acme/list")
+      assert error =~ "object"
+
+      assert %{devcontainer_path: ".devcontainer/devcontainer.json", host_requirements: nil} =
+               Foreman.Repos.get_repo_by_full_name("acme/fine")
+    end
+
+    test "a repo archived after it was synced leaves the list" do
+      synced_repo(1, "storefront")
+      installation([%{gh_repo(1, "storefront") | "archived" => true}])
+
+      {:ok, _} = GitHub.sync_repos()
+      refute Enum.any?(Foreman.Repos.list_repos(), &(&1.github_id == 1))
+
+      installation([gh_repo(1, "storefront")])
+      {:ok, _} = GitHub.sync_repos()
+      assert Enum.any?(Foreman.Repos.list_repos(), &(&1.github_id == 1))
+    end
+
+    # Org 1 renames away from "acme", org 2 takes the name and installs
+    # the app: org 2 gets a row of its own, not org 1's secrets.
+    test "an account that takes over a login doesn't take over the row" do
+      {:ok, old} = Foreman.Repos.upsert_owner(%{github_id: 1, login: "acme", installation_id: 10})
+      admin = Foreman.Scope.for_user(user_fixture(role: "admin"))
+
+      {:ok, _} =
+        Foreman.Secrets.put_secret(admin, "owner", old, %{"name" => "DEPLOY_KEY", "value" => "v"})
+
+      {:ok, new} = Foreman.Repos.upsert_owner(%{github_id: 2, login: "acme", installation_id: 20})
+
+      refute new.id == old.id
+      assert {:ok, []} = Foreman.Secrets.list_secrets(admin, "owner", new)
+      assert Repo.reload!(old).github_id == 1
+
+      # Org 1 shows up again under its new name and keeps its row.
+      {:ok, back} =
+        Foreman.Repos.upsert_owner(%{github_id: 1, login: "acme-old", installation_id: 10})
+
+      assert back.id == old.id
+    end
+
     test "a renamed repo keeps its row and settings" do
       repo = synced_repo(1, "storefront")
       installation([gh_repo(1, "shopfront")])
@@ -291,14 +375,6 @@ defmodule Foreman.GitHubTokensAndSyncTest do
         end)
 
       assert log =~ "FOREMAN_ALLOWED_ORG"
-    end
-  end
-
-  defp eventually(fun, tries \\ 50) do
-    cond do
-      fun.() -> true
-      tries == 0 -> false
-      true -> Process.sleep(20) && eventually(fun, tries - 1)
     end
   end
 end

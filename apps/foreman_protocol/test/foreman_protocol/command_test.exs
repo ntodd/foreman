@@ -119,6 +119,26 @@ defmodule ForemanProtocol.CommandTest do
       end
     end
 
+    # The agent runs sh, git, node and docker with compose_env in their
+    # environment: these load code or run commands in them.
+    test "rejects compose env names that load code into the agent's tools" do
+      for name <- ~w(LD_AUDIT LD_DEBUG_OUTPUT GCONV_PATH NODE_PATH SHELLOPTS BASHOPTS PS4 IFS
+                     GIT_CONFIG_PARAMETERS GIT_CONFIG_COUNT GIT_CONFIG_KEY_0 GIT_CONFIG_VALUE_0
+                     GIT_EXEC_PATH GIT_TEMPLATE_DIR GIT_PROXY_COMMAND GIT_EXTERNAL_DIFF
+                     GIT_TRACE GIT_TRACE2_EVENT GIT_PAGER GIT_EDITOR) do
+        payload = create_payload(%{"compose_env" => %{name => "x"}})
+        assert {:error, errors} = Command.new("env.create", payload), name
+        assert {"compose_env", "contains a reserved variable name: #{name}"} in errors
+      end
+    end
+
+    test "still takes ordinary names that share a prefix" do
+      for name <- ~w(GIT_TOKEN NODE_ENV DOCKER_HUB_TOKEN LDAP_URL) do
+        payload = create_payload(%{"compose_env" => %{name => "x"}})
+        assert {:ok, _} = Command.new("env.create", payload), name
+      end
+    end
+
     test "rejects branches that could be read as options or are not valid refs" do
       for bad <- [
             "-upload-pack=evil",

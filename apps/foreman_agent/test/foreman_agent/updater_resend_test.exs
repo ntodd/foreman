@@ -75,26 +75,43 @@ defmodule ForemanAgent.UpdaterResendTest do
     test_pid = self()
     counter = :counters.new(1, [])
 
+    # The first download holds until the second update is waiting on the
+    # lock, so the two always overlap however slow the runner is.
     opts =
       stub_download(__MODULE__.Overlap, c.body, fn ->
         :counters.add(counter, 1, 1)
-        send(test_pid, :downloading)
-        Process.sleep(300)
+        send(test_pid, {:downloading, self()})
+
+        receive do
+          :go -> :ok
+        end
       end)
 
     p = payload("0.2.0", c.sha, c.private)
     run = fn -> Updater.run(p, c.config, fn _, _ -> :ok end, opts) end
 
     first = Task.async(run)
-    Req.Test.allow(__MODULE__.Overlap, self(), first.pid)
-    assert_receive :downloading
+    assert_receive {:downloading, download}, 5_000
     second = Task.async(run)
-    Req.Test.allow(__MODULE__.Overlap, self(), second.pid)
+    assert waiting_on_lock?(second.pid), "the second update didn't wait for the first"
+    send(download, :go)
 
     assert [{:ok, _}, {:ok, _}] = Task.await_many([first, second], 30_000)
     assert :counters.get(counter, 1) == 1, "the second update downloaded again"
     assert link(c.config, "current") == "releases/0.2.0"
     assert link(c.config, "previous") == "releases/0.1.0"
+  end
+
+  # True once pid is inside :global, which while the first update holds
+  # the lock can only mean it's waiting for it.
+  defp waiting_on_lock?(pid, deadline \\ System.monotonic_time(:millisecond) + 5_000) do
+    {:current_stacktrace, stack} = Process.info(pid, :current_stacktrace)
+
+    cond do
+      Enum.any?(stack, &match?({:global, _, _, _}, &1)) -> true
+      System.monotonic_time(:millisecond) > deadline -> false
+      true -> Process.sleep(10) && waiting_on_lock?(pid, deadline)
+    end
   end
 
   test "an update leaves only the current and previous releases, and no downloads", c do

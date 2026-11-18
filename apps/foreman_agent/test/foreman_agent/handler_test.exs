@@ -26,6 +26,10 @@ defmodule ForemanAgent.HandlerTest do
   defp restore(key, value), do: Application.put_env(:foreman_agent, key, value)
 
   test "a crash in an environment command comes back as a redacted error" do
+    # As the agent in a VM runs it.
+    previous = ForemanAgent.Config.get()
+    on_exit(fn -> ForemanAgent.Config.put(previous) end)
+    ForemanAgent.Config.put(%{previous | mode: :guest})
     secret = "sk_live_0123456789abcdef"
     boom = fn _, _, _ -> raise "couldn't use #{secret}" end
     stub(RunnerMock, :run, boom)
@@ -51,11 +55,13 @@ defmodule ForemanAgent.HandlerTest do
     previous = ForemanAgent.Config.get()
     on_exit(fn -> ForemanAgent.Config.put(previous) end)
 
+    # Environment commands as the agent in a VM runs them.
     config = %{
       previous
       | envs_root: Path.join(tmp, "envs"),
         secrets_root: Path.join(tmp, "run"),
-        data_dir: Path.join(tmp, "data")
+        data_dir: Path.join(tmp, "data"),
+        mode: :guest
     }
 
     ForemanAgent.Config.put(config)
@@ -107,5 +113,26 @@ defmodule ForemanAgent.HandlerTest do
     assert {:error, message, %{"pull_failed" => true}} = Handler.handle(cmd, fn _, _ -> :ok end)
     assert message =~ "checked out, not main"
     refute message =~ secret
+  end
+
+  @tag :tmp_dir
+  test "box.restart asks the root unit to reboot the box", %{tmp_dir: tmp} do
+    previous = ForemanAgent.Config.get()
+    on_exit(fn -> ForemanAgent.Config.put(previous) end)
+
+    config = %{
+      previous
+      | restart_unit: Path.join(tmp, "foreman-restart.path"),
+        restart_request: Path.join(tmp, "restart"),
+        boot_id: Path.join(tmp, "boot_id")
+    }
+
+    ForemanAgent.Config.put(config)
+    File.write!(config.restart_unit, "[Path]\n")
+    File.write!(config.boot_id, "0b5a1f0e-7d1c-4c5e-9a43-5f1e2d3c4b5a\n")
+
+    {:ok, cmd} = Command.new("box.restart", %{boot_id: "0b5a1f0e-7d1c-4c5e-9a43-5f1e2d3c4b5a"})
+    assert {:ok, %{"requested" => true}} = Handler.handle(cmd, fn _, _ -> :ok end)
+    assert File.exists?(config.restart_request)
   end
 end

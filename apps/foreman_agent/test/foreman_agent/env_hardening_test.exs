@@ -9,7 +9,6 @@ defmodule ForemanAgent.EnvHardeningTest do
   import Mox
 
   alias ForemanAgent.{Config, DockerMock, Env, RunnerMock}
-  alias ForemanAgent.Env.Policy
 
   @moduletag :tmp_dir
   @env_id "6f1c1d1e-9a3b-4c1f-8f5e-2d7a9b0c1e2f"
@@ -46,7 +45,6 @@ defmodule ForemanAgent.EnvHardeningTest do
       secrets_root: Path.join(tmp, "run"),
       release_root: Path.join(tmp, "opt"),
       feature_dir: Path.expand("../../../../features/src/foreman", __DIR__),
-      policy_rules: Policy.default_rules(),
       docker_socket: "/var/run/docker.sock"
     }
 
@@ -119,6 +117,10 @@ defmodule ForemanAgent.EnvHardeningTest do
 
         {"docker", ["exec", "-u", "0", _container, "tailscale" | _]} ->
           {:ok, %{status: 0, output: ~s({"BackendState":"Running","Self":{"ID":"nTest1CNTRL"}})}}
+
+        # Listing connect hooks: there are none.
+        {"docker", ["exec", "-u", _, "-w", _, _container, "sh", "-c", _]} ->
+          {:ok, %{status: 0, output: ""}}
       end
     end)
   end
@@ -159,34 +161,8 @@ defmodule ForemanAgent.EnvHardeningTest do
       stub_tools(standard_layout(), app_only())
       assert {:ok, _} = Env.run("env.create", payload(), ctx)
 
-      configs = for {"docker", ["compose" | args]} <- runs(), "config" in args, do: args
-      assert length(configs) == 2
-
-      for args <- configs do
-        assert ["--profile", "*"] in Enum.chunk_every(args, 2, 1)
-      end
-    end
-
-    # The CLI runs `compose up <runServices...> <service>`, and compose
-    # starts a profiled service it's asked for by name.
-    test "a privileged service behind a profile, named in runServices, is refused", %{ctx: ctx} do
-      devcontainer = ~s({"dockerComposeFile": "docker-compose.yml", "service": "app",
-                         "runServices": ["app", "debug"]})
-
-      compose = fn ->
-        %{
-          "services" => %{
-            "app" => %{},
-            "debug" => %{"profiles" => ["debug"], "privileged" => true}
-          }
-        }
-      end
-
-      stub_tools(standard_layout(devcontainer), compose)
-
-      assert {:error, message} = Env.run("env.create", payload(), ctx)
-      assert message =~ "service 'debug' runs privileged"
-      refute Enum.any?(runs(), &match?({"devcontainer", ["up" | _]}, &1))
+      assert [args] = for({"docker", ["compose" | args]} <- runs(), "config" in args, do: args)
+      assert ["--profile", "*"] in Enum.chunk_every(args, 2, 1)
     end
 
     test "refuses runServices that aren't in the compose files", %{ctx: ctx} do
@@ -255,15 +231,9 @@ defmodule ForemanAgent.EnvHardeningTest do
     # The developer pushes a fix and retries; the clone from the failed
     # attempt mustn't be checked again.
     test "a create that never came up clones again", %{ctx: ctx} do
-      bad = %{
-        "services" => %{
-          "app" => %{"volumes" => [%{"type" => "bind", "source" => "/etc", "target" => "/e"}]}
-        }
-      }
-
-      stub_tools(standard_layout(), fn -> bad end)
+      stub_tools(standard_layout(), fn -> {:fail, "services.app: bad\n"} end)
       assert {:error, message} = Env.run("env.create", payload(), ctx)
-      assert message =~ "/etc"
+      assert message =~ "docker compose config failed"
       assert Enum.any?(runs(), &match?({"git", _}, &1))
 
       stub_tools(standard_layout(), app_only())

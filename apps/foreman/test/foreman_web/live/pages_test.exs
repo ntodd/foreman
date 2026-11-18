@@ -200,7 +200,7 @@ defmodule ForemanWeb.PagesTest do
     {:ok, _} = Registry.register(Foreman.Registry, {:agent, box.id}, nil)
 
     {:ok, view, _html} = live(conn, ~p"/environments/#{env.id}")
-    view |> element("button", "Destroy") |> render_click()
+    view |> element("#env-actions [role=menuitem]", "Destroy") |> render_click()
     assert render(view) =~ "Checking for unsaved work"
 
     assert_receive {:dispatch, %{type: "env.git_status", op_id: op_id}}
@@ -236,53 +236,177 @@ defmodule ForemanWeb.PagesTest do
     refute html =~ "sk-very-secret"
   end
 
-  test "a box that opens up its policy gets a red alert everywhere it's shown", %{
+  test "an environment lists the owner, repo and user secrets it gets", %{
     conn: conn,
-    user: user
+    user: user,
+    repo: repo,
+    box: box
   } do
-    open =
-      box_fixture(
-        owner_user_id: user.id,
-        name: "open",
-        policy:
-          Map.merge(ForemanProtocol.Policy.defaults(), %{
-            "privileged" => "allow",
-            "host_bind" => "warn"
-          })
-      )
+    env = environment_fixture(user: user, repo: repo, box: box)
+    scope = Scope.for_user(user)
+    owner = Repo.preload(repo, :owner).owner
 
-    {:ok, view, _html} = live(conn, ~p"/boxes/#{open.id}")
-    assert has_element?(view, "#box-policy-alert", "privileged")
-    assert has_element?(view, "#box-policy-alert", "root on the box")
-    assert has_element?(view, "#box-policy-alert", "bind mounts from outside the workspace")
-    assert has_element?(view, "#box-policy-alert", "FOREMAN_POLICY")
+    {:ok, _} = Foreman.Secrets.put_secret(scope, "owner", owner, %{name: "ORG_KEY", value: "o"})
+    {:ok, _} = Foreman.Secrets.put_secret(scope, "repo", repo, %{name: "DB_URL", value: "r"})
+    {:ok, _} = Foreman.Secrets.put_secret(scope, "user", user, %{name: "MY_TOKEN", value: "u"})
+    {:ok, _} = Foreman.Secrets.put_secret(scope, "environment", env, %{name: "OWN", value: "e"})
 
-    {:ok, view, _html} = live(conn, ~p"/boxes")
-    assert has_element?(view, "#box-#{open.id} [data-role=policy-alert]", "Privileged allowed")
+    {:ok, view, _html} = live(conn, ~p"/environments/#{env.id}")
 
-    {:ok, view, _html} = live(conn, ~p"/")
-
-    assert has_element?(
-             view,
-             "#box-card-#{open.id} [data-role=policy-alert]",
-             "Privileged allowed"
-           )
+    assert has_element?(view, "#env-secrets--inherited-owner-ORG_KEY", "Owner")
+    assert has_element?(view, "#env-secrets--inherited-repo-DB_URL", "Repo")
+    assert has_element?(view, "#env-secrets--inherited-user-MY_TOKEN", "User")
+    refute has_element?(view, "#env-secrets--inherited [id$=OWN]")
+    assert has_element?(view, "#env-secrets-OWN")
   end
 
-  test "a box on the default policy, or one that hasn't reported it, has no alert", %{
-    conn: conn,
-    box: box,
-    user: user
-  } do
-    unknown = box_fixture(owner_user_id: user.id, name: "unknown", policy: nil)
+  test "a repo lists its owner's secrets", %{conn: conn, user: user, repo: repo} do
+    owner = Repo.preload(repo, :owner).owner
 
-    for b <- [box, unknown] do
-      {:ok, view, _html} = live(conn, ~p"/boxes/#{b.id}")
-      refute has_element?(view, "#box-policy-alert")
-    end
+    {:ok, _} =
+      Foreman.Secrets.put_secret(Scope.for_user(user), "owner", owner, %{
+        name: "ORG_KEY",
+        value: "o"
+      })
+
+    {:ok, view, _html} = live(conn, ~p"/repos/#{repo.id}")
+    assert has_element?(view, "#repo-secrets--inherited-owner-ORG_KEY", "Owner")
+  end
+
+  test "a level with nothing above it lists no inherited secrets", %{conn: conn, repo: repo} do
+    {:ok, view, _html} = live(conn, ~p"/repos/#{repo.id}")
+    refute has_element?(view, "#repo-secrets--inherited")
+  end
+
+  test "an environment secret can be moved up to the repo or to your own secrets", %{
+    conn: conn,
+    user: user,
+    repo: repo,
+    box: box
+  } do
+    env = environment_fixture(user: user, repo: repo, box: box)
+    scope = Scope.for_user(user)
+
+    {:ok, _} =
+      Foreman.Secrets.put_secret(scope, "environment", env, %{"name" => "A", "value" => "1"})
+
+    {:ok, _} =
+      Foreman.Secrets.put_secret(scope, "environment", env, %{"name" => "B", "value" => "2"})
+
+    {:ok, view, _html} = live(conn, ~p"/environments/#{env.id}")
+
+    view |> element("#env-secrets-A-promote-repo") |> render_click()
+    assert render(view) =~ "Moved A to #{repo.full_name}&#39;s secrets"
+    refute has_element?(view, "#env-secrets-A")
+
+    view |> element("#env-secrets-B-promote-user") |> render_click()
+    assert render(view) =~ "Moved B to your secrets"
+    refute has_element?(view, "#env-secrets-B")
+
+    assert has_element?(view, "#env-secrets--inherited-repo-A")
+    assert has_element?(view, "#env-secrets--inherited-user-B")
+
+    {:ok, [%{name: "A"}]} = Foreman.Secrets.list_secrets(scope, "repo", repo)
+    {:ok, [%{name: "B", repo_ids: [repo_id]}]} = Foreman.Secrets.list_secrets(scope, "user", user)
+    assert repo_id == repo.id
+  end
+
+  test "moving a secret up says why when it can't", %{
+    conn: conn,
+    user: user,
+    repo: repo,
+    box: box
+  } do
+    env = environment_fixture(user: user, repo: repo, box: box)
+    scope = Scope.for_user(user)
+    {:ok, _} = Foreman.Secrets.put_secret(scope, "repo", repo, %{"name" => "A", "value" => "old"})
+
+    {:ok, _} =
+      Foreman.Secrets.put_secret(scope, "environment", env, %{"name" => "A", "value" => "1"})
+
+    {:ok, view, _html} = live(conn, ~p"/environments/#{env.id}")
+    view |> element("#env-secrets-A-promote-repo") |> render_click()
+
+    assert render(view) =~ "#{repo.full_name} already has a secret named A"
+    assert has_element?(view, "#env-secrets-A")
+  end
+
+  test "a member can move an environment secret to their own secrets, not the repo's", %{
+    repo: repo
+  } do
+    member = user_fixture()
+    env = environment_fixture(user: member, repo: repo)
+
+    {:ok, _} =
+      Foreman.Secrets.put_secret(Scope.for_user(member), "environment", env, %{
+        "name" => "A",
+        "value" => "1"
+      })
+
+    {:ok, view, _html} = live(log_in(build_conn(), member), ~p"/environments/#{env.id}")
+    assert has_element?(view, "#env-secrets-A-promote-user")
+    refute has_element?(view, "#env-secrets-A-promote-repo")
+  end
+
+  test "an admin can't move someone else's environment secret", %{conn: conn, repo: repo} do
+    member = user_fixture()
+    env = environment_fixture(user: member, repo: repo)
+
+    {:ok, _} =
+      Foreman.Secrets.put_secret(Scope.for_user(member), "environment", env, %{
+        "name" => "A",
+        "value" => "1"
+      })
+
+    {:ok, view, _html} = live(conn, ~p"/environments/#{env.id}")
+    assert has_element?(view, "#env-secrets-A")
+    refute has_element?(view, "#env-secrets-A-promote")
+  end
+
+  test "a box that needs a reboot says so on its page and its card", %{conn: conn, user: user} do
+    box =
+      box_fixture(
+        owner_user_id: user.id,
+        name: "stale",
+        reboot_required: true,
+        reboot_packages: ["libc6", "linux-image-6.8.0-90-generic"],
+        livepatch: true
+      )
+
+    {:ok, view, _html} = live(conn, ~p"/boxes/#{box.id}")
+    assert has_element?(view, "#box-reboot-alert", "needs a reboot")
+    assert has_element?(view, "#box-reboot-alert", "libc6")
 
     {:ok, view, _html} = live(conn, ~p"/boxes")
-    refute has_element?(view, "[data-role=policy-alert]")
+    assert has_element?(view, "#box-#{box.id} [data-role=reboot-alert]", "Reboot required")
+  end
+
+  # Livepatch is shown, but doesn't make the reboot any less required.
+  test "a box with a livepatch still needs its reboot, and says Livepatch is on", %{
+    conn: conn,
+    user: user
+  } do
+    box =
+      box_fixture(
+        owner_user_id: user.id,
+        name: "patched",
+        reboot_required: true,
+        reboot_packages: ["linux-image-6.8.0-90-generic"],
+        livepatch: true
+      )
+
+    {:ok, view, _html} = live(conn, ~p"/boxes/#{box.id}")
+    assert has_element?(view, "#box-reboot-alert", "needs a reboot")
+    assert has_element?(view, "#box-reboot-alert", "Livepatch")
+
+    {:ok, view, _html} = live(conn, ~p"/boxes")
+    assert has_element?(view, "#box-#{box.id} [data-role=reboot-alert]", "Reboot required")
+  end
+
+  test "a box that doesn't need a reboot shows nothing", %{conn: conn, user: user} do
+    box = box_fixture(owner_user_id: user.id, name: "fresh", reboot_required: false)
+    {:ok, view, _html} = live(conn, ~p"/boxes/#{box.id}")
+    refute has_element?(view, "#box-reboot-alert")
   end
 
   # Without its firewall, code in a box's environments reaches the
@@ -325,12 +449,7 @@ defmodule ForemanWeb.PagesTest do
         owner_user_id: user.id,
         name: "kept",
         firewall: "outdated",
-        firewall_default_bridge: "reaches_tailnet",
-        policy:
-          Map.merge(ForemanProtocol.Policy.defaults(), %{
-            "privileged" => "allow",
-            "host_bind" => "warn"
-          })
+        firewall_default_bridge: "reaches_tailnet"
       )
 
     {:ok, view, _html} = live(conn, ~p"/boxes/#{box.id}")
@@ -338,7 +457,7 @@ defmodule ForemanWeb.PagesTest do
     assert has_element?(
              view,
              "#box-firewall-alert",
-             "sudo sh -s -- --policy host_bind=warn,privileged=allow --default-bridge-reaches-tailnet"
+             "sudo sh -s -- --default-bridge-reaches-tailnet"
            )
   end
 

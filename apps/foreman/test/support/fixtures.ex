@@ -67,6 +67,7 @@ defmodule Foreman.Fixtures do
       %Foreman.Boxes.Box{
         name: Map.get(attrs, :name, "box#{unique()}"),
         owner_user_id: Map.get(attrs, :owner_user_id),
+        shared_user_ids: Map.get(attrs, :shared_user_ids, []),
         public_key: public,
         capacity:
           Map.get(attrs, :capacity, %{
@@ -76,11 +77,18 @@ defmodule Foreman.Fixtures do
             "disk_free_mb" => 500_000
           }),
         capacity_policy: Map.get(attrs, :capacity_policy, "allow"),
-        policy: Map.get(attrs, :policy, ForemanProtocol.Policy.defaults()),
+        cpu_threshold: Map.get(attrs, :cpu_threshold, 0.9),
+        memory_threshold: Map.get(attrs, :memory_threshold, 0.9),
         firewall: Map.get(attrs, :firewall),
         firewall_default_bridge: Map.get(attrs, :firewall_default_bridge),
+        reboot_required: Map.get(attrs, :reboot_required),
+        reboot_packages: Map.get(attrs, :reboot_packages, []),
+        livepatch: Map.get(attrs, :livepatch),
+        can_restart: Map.get(attrs, :can_restart, false),
+        boot_id: Map.get(attrs, :boot_id),
         agent_version: "0.1.0",
-        protocol_version: 1,
+        protocol_version: Map.get(attrs, :protocol_version, ForemanProtocol.version()),
+        vm: Map.get(attrs, :vm),
         feature_version: Map.get(attrs, :feature_version)
       }
       |> Repo.insert!()

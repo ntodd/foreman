@@ -19,7 +19,7 @@ defmodule Foreman.AccountsTest do
   }
 
   describe "sign_in_from_github/3" do
-    test "the first user becomes admin when no admins are configured" do
+    test "the first user becomes admin when no login policy is configured" do
       assert {:ok, %User{login: "mona", role: "admin"} = user} =
                Accounts.sign_in_from_github(@profile, @tokens,
                  config: %{admins: [], allowed_users: [], allowed_org: nil},
@@ -28,6 +28,20 @@ defmodule Foreman.AccountsTest do
 
       assert user.access_token == "ghu_a"
       assert DateTime.compare(user.access_token_expires_at, DateTime.utc_now()) == :gt
+    end
+
+    test "the first allowlisted user is a member" do
+      config = %{admins: [], allowed_users: ["mona"], allowed_org: nil}
+
+      assert {:ok, %User{role: "member"}} =
+               Accounts.sign_in_from_github(@profile, @tokens, config: config)
+    end
+
+    test "the first allowed org member is a member" do
+      config = %{admins: [], allowed_users: [], allowed_org: "acme"}
+
+      assert {:ok, %User{role: "member"}} =
+               Accounts.sign_in_from_github(@profile, @tokens, config: config, org_member?: true)
     end
 
     test "after that, only allowed users get in" do

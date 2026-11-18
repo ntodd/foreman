@@ -63,19 +63,14 @@ defmodule ForemanWeb.AgentChannelTest do
       assert Repo.reload!(box).hostname == "desktop"
     end
 
-    test "records the policy the agent reports", %{box: box} do
-      {:ok, socket} = connect(AgentSocket, %{}, connect_info: signed_connect_info(box))
-      policy = Map.put(ForemanProtocol.Policy.defaults(), "privileged", "allow")
-
-      assert {:ok, _, _} =
-               subscribe_and_join(socket, "agent:#{box.id}", join_payload(%{"policy" => policy}))
-
-      assert Repo.reload!(box).policy == policy
-    end
-
     test "records the box firewall the agent reports", %{box: box} do
       {:ok, socket} = connect(AgentSocket, %{}, connect_info: signed_connect_info(box))
-      firewall = %{"firewall" => "missing", "firewall_default_bridge" => "reaches_tailnet"}
+
+      firewall = %{
+        "firewall" => "missing",
+        "firewall_default_bridge" => "reaches_tailnet",
+        "firewall_block_lan" => true
+      }
 
       assert {:ok, _, _} =
                subscribe_and_join(socket, "agent:#{box.id}", join_payload(firewall))
@@ -83,9 +78,10 @@ defmodule ForemanWeb.AgentChannelTest do
       box = Repo.reload!(box)
       assert box.firewall == "missing"
       assert box.firewall_default_bridge == "reaches_tailnet"
+      assert box.firewall_block_lan == true
     end
 
-    test "an agent from before the firewall leaves it unknown", %{box: box} do
+    test "an agent that doesn't report the firewall leaves it unknown", %{box: box} do
       box |> Ecto.Changeset.change(firewall: "active") |> Repo.update!()
       {:ok, socket} = connect(AgentSocket, %{}, connect_info: signed_connect_info(box))
 
@@ -93,16 +89,33 @@ defmodule ForemanWeb.AgentChannelTest do
                subscribe_and_join(
                  socket,
                  "agent:#{box.id}",
-                 join_payload(%{"protocol_version" => 2})
+                 Map.delete(join_payload(), "firewall")
                )
 
       assert Repo.reload!(box).firewall == nil
     end
 
-    test "an agent that doesn't report a policy leaves it unknown", %{box: box} do
+    test "records whether the box can run environment VMs", %{box: box} do
       {:ok, socket} = connect(AgentSocket, %{}, connect_info: signed_connect_info(box))
-      assert {:ok, _, _} = subscribe_and_join(socket, "agent:#{box.id}", join_payload())
-      assert Repo.reload!(box).policy == nil
+      vm = %{"ready" => false, "reason" => "this box has no /dev/kvm"}
+
+      assert {:ok, _, _} =
+               subscribe_and_join(socket, "agent:#{box.id}", join_payload(%{"vm" => vm}))
+
+      assert %{"ready" => false, "reason" => "this box has no /dev/kvm"} = Repo.reload!(box).vm
+      assert Foreman.Boxes.vm_problem(Repo.reload!(box)) == {:vm, "this box has no /dev/kvm"}
+    end
+
+    test "refuses an agent from before environment VMs, and says so on its box", %{box: box} do
+      {:ok, socket} = connect(AgentSocket, %{}, connect_info: signed_connect_info(box))
+      payload = join_payload(%{"protocol_version" => 5, "agent_version" => "0.4.13"})
+
+      assert {:error, %{reason: "unsupported protocol version"}} =
+               subscribe_and_join(socket, "agent:#{box.id}", payload)
+
+      box = Repo.reload!(box)
+      assert box.protocol_version == 5
+      assert Foreman.Boxes.vm_problem(box) == {:agent, "0.4.13"}
     end
 
     test "refuses protocol versions it doesn't speak", %{box: box} do
@@ -197,13 +210,30 @@ defmodule ForemanWeb.AgentChannelTest do
 
     test "records the box firewall when it changes between joins", %{socket: socket, box: box} do
       {:ok, firewall} =
-        Event.new("box.firewall", %{firewall: "missing", firewall_default_bridge: "filtered"})
+        Event.new("box.firewall", %{
+          firewall: "missing",
+          firewall_default_bridge: "filtered",
+          firewall_block_lan: false
+        })
 
       ref = push(socket, "event", Event.to_wire(firewall))
       assert_reply ref, :ok
       box = Repo.reload!(box)
       assert box.firewall == "missing"
       assert box.firewall_default_bridge == "filtered"
+      assert box.firewall_block_lan == false
+    end
+
+    test "records whether the box needs a reboot", %{socket: socket, box: box} do
+      {:ok, reboot} =
+        Event.new("box.reboot", %{required: true, packages: ["libc6"], livepatch: true})
+
+      ref = push(socket, "event", Event.to_wire(reboot))
+      assert_reply ref, :ok
+      box = Repo.reload!(box)
+      assert box.reboot_required
+      assert box.reboot_packages == ["libc6"]
+      assert box.livepatch
     end
 
     test "records host metrics", %{socket: socket, box: box} do
@@ -222,6 +252,19 @@ defmodule ForemanWeb.AgentChannelTest do
       ref = push(socket, "event", Event.to_wire(metrics))
       assert_reply ref, :ok
       assert_receive {:box_metrics, _, %{cpu: 42.0, memory_used: 2_000}}
+    end
+
+    test "records the box's environments' listening ports", %{socket: socket, box: box} do
+      env = environment_fixture(box: box)
+      Foreman.Environments.subscribe(env.id)
+
+      {:ok, ports} =
+        Event.new("box.ports", %{environments: %{env.id => [%{port: 4000, process: "beam.smp"}]}})
+
+      ref = push(socket, "event", Event.to_wire(ports))
+      assert_reply ref, :ok
+      assert_receive {:ports, _, [%{port: 4000, process: "beam.smp"}]}
+      assert Foreman.Ports.for_environment(env.id) == [%{port: 4000, process: "beam.smp"}]
     end
 
     test "records per-environment usage for the box's own environments", %{

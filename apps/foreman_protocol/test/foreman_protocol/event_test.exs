@@ -94,6 +94,95 @@ defmodule ForemanProtocol.EventTest do
     assert {:error, _} = Event.new("box.metrics", Map.delete(payload, :at))
   end
 
+  describe "box.ports" do
+    test "lists each environment's listening ports, with the process when it's known" do
+      payload = %{
+        "environments" => %{
+          @env_id => [%{"port" => 4000, "process" => "beam.smp"}, %{"port" => 5173}]
+        }
+      }
+
+      assert {:ok, event} = Event.new("box.ports", payload)
+
+      assert event.payload == %{
+               environments: %{@env_id => [%{port: 4000, process: "beam.smp"}, %{port: 5173}]}
+             }
+
+      assert {:ok, ^event} =
+               event |> Event.to_wire() |> JSON.encode!() |> JSON.decode!() |> Event.from_wire()
+    end
+
+    test "an environment with nothing listening has an empty list" do
+      assert {:ok, %{payload: %{environments: %{@env_id => []}}}} =
+               Event.new("box.ports", %{environments: %{@env_id => []}})
+    end
+
+    test "needs the environments" do
+      assert {:error, [{"environments", _}]} = Event.new("box.ports", %{})
+    end
+
+    test "refuses ports outside 1-65535" do
+      for port <- [0, 65_536, -1, 80.5, "80"] do
+        assert {:error, [{path, "item 0 must be a port number"}]} =
+                 Event.new("box.ports", %{environments: %{@env_id => [%{port: port}]}}),
+               "accepted #{inspect(port)}"
+
+        assert path == "environments.#{@env_id}.port"
+      end
+
+      assert {:ok, _} =
+               Event.new("box.ports", %{environments: %{@env_id => [%{port: 1}, %{port: 65_535}]}})
+    end
+
+    test "refuses keys that aren't environment ids, and extra fields" do
+      assert {:error, _} = Event.new("box.ports", %{environments: %{"nope" => []}})
+
+      assert {:error, _} =
+               Event.new("box.ports", %{environments: %{@env_id => [%{port: 80, pid: 1}]}})
+    end
+
+    test "refuses a blank, oversized or control-character process name" do
+      assert {:error, _} =
+               Event.new("box.ports", %{environments: %{@env_id => [%{port: 80, process: ""}]}})
+
+      for bad <- [String.duplicate("a", 65), "beam\nsmp", "a\e[31m", <<0xFF>>] do
+        assert {:error, _} =
+                 Event.new("box.ports", %{environments: %{@env_id => [%{port: 80, process: bad}]}}),
+               "accepted #{inspect(bad)}"
+      end
+
+      assert {:ok, _} =
+               Event.new("box.ports", %{
+                 environments: %{@env_id => [%{port: 80, process: String.duplicate("a", 64)}]}
+               })
+    end
+  end
+
+  describe "box.reboot" do
+    test "says whether the box needs a reboot, what for, and whether a livepatch is in" do
+      assert {:ok, ev} =
+               Event.new("box.reboot", %{
+                 "required" => true,
+                 "packages" => ["linux-image-6.8.0-90-generic"],
+                 "livepatch" => true
+               })
+
+      assert ev.payload == %{
+               required: true,
+               packages: ["linux-image-6.8.0-90-generic"],
+               livepatch: true,
+               can_restart: false
+             }
+    end
+
+    test "defaults to no packages and no livepatch, and needs `required`" do
+      assert {:ok, %{payload: %{packages: [], livepatch: false}}} =
+               Event.new("box.reboot", %{"required" => false})
+
+      assert {:error, _} = Event.new("box.reboot", %{})
+    end
+  end
+
   test "env.state reports an observed state change" do
     assert {:ok, _} = Event.new("env.state", %{env_id: @env_id, state: "stopped"})
     assert {:error, _} = Event.new("env.state", %{env_id: @env_id, state: "exploded"})

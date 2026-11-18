@@ -10,7 +10,7 @@ defmodule Foreman.Boxes do
   """
   import Ecto.Query
 
-  alias Foreman.Boxes.{Box, JoinToken}
+  alias Foreman.Boxes.{Box, Flatcar, JoinToken}
   alias Foreman.{Audit, Repo, Scope}
 
   @token_ttl 3600
@@ -47,11 +47,14 @@ defmodule Foreman.Boxes do
   """
   def create_join_token(%Scope{} = scope, attrs) do
     changeset =
-      {%{}, %{box_name: :string, owner_user_id: :binary_id}}
-      |> Ecto.Changeset.cast(attrs, [:box_name, :owner_user_id])
+      {%{}, %{box_name: :string, owner_user_id: :binary_id, tailscale_auth_key: :string}}
+      |> Ecto.Changeset.cast(attrs, [:box_name, :owner_user_id, :tailscale_auth_key])
       |> Ecto.Changeset.validate_required([:box_name])
       |> Ecto.Changeset.validate_format(:box_name, ~r/\A[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\z/,
         message: "must be lowercase letters, digits and dashes"
+      )
+      |> Ecto.Changeset.validate_format(:tailscale_auth_key, ~r/\Atskey-[A-Za-z0-9_-]+\z/,
+        message: "must be a Tailscale auth key (tskey-...)"
       )
 
     cond do
@@ -70,6 +73,7 @@ defmodule Foreman.Boxes do
           box_name: data.box_name,
           owner_user_id: data[:owner_user_id] || scope.user.id,
           created_by_id: scope.user.id,
+          tailscale_auth_key: data[:tailscale_auth_key],
           expires_at: DateTime.add(DateTime.utc_now(), @token_ttl)
         })
 
@@ -90,7 +94,11 @@ defmodule Foreman.Boxes do
            true <- is_nil(token.used_at) and DateTime.compare(token.expires_at, now) == :gt,
            {:ok, public_key} <- decode_key(attrs["public_key"]),
            {:ok, box} <- upsert_enrolled_box(token, public_key, attrs) do
-        token |> Ecto.Changeset.change(used_at: now, box_id: box.id) |> Repo.update!()
+        # The box's Tailscale key was for its first boot, which this is.
+        token
+        |> Ecto.Changeset.change(used_at: now, box_id: box.id, tailscale_auth_key: nil)
+        |> Repo.update!()
+
         Audit.log(nil, "box.enroll", box, %{"hostname" => attrs["hostname"]})
         disconnect(box)
         {:ok, box}
@@ -103,6 +111,80 @@ defmodule Foreman.Boxes do
   end
 
   def enroll(_, _), do: {:error, :invalid_token}
+
+  @doc """
+  The first-boot config (Ignition) for a Flatcar box that enrolls with
+  `raw_token`, for `params["arch"]` (amd64 or arm64), with
+  `params["ssh_keys"]` (a list, or one per line) for the core user, and
+  the name the box will have. See `Foreman.Boxes.Flatcar`.
+
+  The box joins the tailnet with a key of its own: the one pasted when
+  the token was made, or one the control plane's Tailscale OAuth client
+  mints for the token the first time it's asked (tagged
+  `Foreman.Tailscale.box_tags/0`), and keeps for later asks. Without
+  either, the box has to reach the control plane some other way.
+  """
+  def flatcar_ignition(raw_token, params) do
+    with true <- params["arch"] in Flatcar.arches() || {:error, :bad_arch},
+         %JoinToken{} = token <- valid_join_token(raw_token) || {:error, :invalid_token},
+         {:ok, key} <- box_tailscale_key(token),
+         {:ok, config} <-
+           Flatcar.ignition(%{
+             url: Foreman.Config.base_url(),
+             join_token: raw_token,
+             name: token.box_name,
+             arch: params["arch"],
+             tailscale_auth_key: key,
+             ssh_keys: ssh_keys(params["ssh_keys"])
+           }) do
+      {:ok, config, token.box_name}
+    end
+  end
+
+  defp valid_join_token(raw) when is_binary(raw) do
+    now = DateTime.utc_now()
+
+    case Repo.get_by(JoinToken, token_hash: hash(raw)) do
+      %JoinToken{used_at: nil} = token ->
+        if DateTime.compare(token.expires_at, now) == :gt, do: token
+
+      _ ->
+        nil
+    end
+  end
+
+  defp valid_join_token(_), do: nil
+
+  defp box_tailscale_key(%JoinToken{tailscale_auth_key: key}) when is_binary(key), do: {:ok, key}
+
+  defp box_tailscale_key(token) do
+    if Foreman.Tailscale.configured?(), do: mint_box_key(token), else: {:ok, nil}
+  end
+
+  # Minted outside a transaction (it's a call to Tailscale), then kept
+  # only if no other request stored one first: the token's key is the
+  # first one stored, and a key minted by a request that lost the race
+  # expires unused.
+  defp mint_box_key(token) do
+    expiry = max(DateTime.diff(token.expires_at, DateTime.utc_now()), 600)
+
+    case Foreman.Tailscale.create_box_auth_key(token.box_name, expiry) do
+      {:ok, %{key: key}} ->
+        from(t in JoinToken, where: t.id == ^token.id and is_nil(t.tailscale_auth_key))
+        |> Repo.update_all(set: [tailscale_auth_key: key])
+
+        {:ok, Repo.reload!(token).tailscale_auth_key}
+
+      {:error, reason} ->
+        {:error, {:tailscale, reason}}
+    end
+  end
+
+  defp ssh_keys(keys) when is_list(keys),
+    do: Enum.reject(keys, &(not is_binary(&1) or String.trim(&1) == ""))
+
+  defp ssh_keys(keys) when is_binary(keys), do: keys |> String.split(~r/\R/) |> ssh_keys()
+  defp ssh_keys(_), do: []
 
   defp upsert_enrolled_box(token, public_key, attrs) do
     box = Repo.get_by(Box, name: token.box_name) || %Box{name: token.box_name}
@@ -161,9 +243,10 @@ defmodule Foreman.Boxes do
         hostname: join.hostname,
         os: join.os,
         arch: join.arch,
-        policy: if(join.policy == %{}, do: nil, else: join.policy),
         firewall: Map.get(join, :firewall),
+        firewall_block_lan: Map.get(join, :firewall_block_lan),
         firewall_default_bridge: Map.get(join, :firewall_default_bridge),
+        vm: vm_report(Map.get(join, :vm)),
         last_seen_at: DateTime.utc_now()
       )
       |> Repo.update!()
@@ -173,6 +256,57 @@ defmodule Foreman.Boxes do
     box
   end
 
+  defp vm_report(nil), do: nil
+  defp vm_report(vm), do: Map.new(vm, fn {k, v} -> {to_string(k), v} end)
+
+  @doc """
+  Records an agent refused at join for its protocol, so the box's page can
+  say why it's offline: an agent from before environment VMs needs the
+  install script run again.
+  """
+  def agent_refused(%Box{} = box, join) do
+    box =
+      box
+      |> Ecto.Changeset.change(
+        agent_version: join.agent_version,
+        protocol_version: join.protocol_version
+      )
+      |> Repo.update!()
+
+    broadcast(box, :updated)
+    box
+  end
+
+  @doc """
+  Why a box can't run environments, or nil when it can (or hasn't said):
+  `{:agent, version}` for an agent that predates environment VMs, which
+  Foreman refuses until the install script runs again, or `{:vm, reason}`
+  for one that reported it can't run them.
+  """
+  def vm_problem(%Box{protocol_version: v, agent_version: agent})
+      when is_integer(v) and v < 6,
+      do: {:agent, agent}
+
+  def vm_problem(%Box{vm: %{"ready" => false} = vm}),
+    do: {:vm, vm["reason"] || "it can't run VMs"}
+
+  def vm_problem(%Box{}), do: nil
+
+  @doc "`:ok` when the box can run environment VMs, or what to tell someone when it can't."
+  def check_vm(%Box{} = box) do
+    case vm_problem(box) do
+      nil ->
+        :ok
+
+      {:agent, _} ->
+        {:error,
+         "#{box.name}'s agent predates environment VMs; run the install script on it again"}
+
+      {:vm, reason} ->
+        {:error, "#{box.name} can't run environments: #{reason}"}
+    end
+  end
+
   @doc "Records the box firewall an agent reports between joins."
   def record_firewall(box_id, firewall) do
     if box = get_box(box_id) do
@@ -180,6 +314,7 @@ defmodule Foreman.Boxes do
         box
         |> Ecto.Changeset.change(
           firewall: firewall.firewall,
+          firewall_block_lan: Map.get(firewall, :firewall_block_lan),
           firewall_default_bridge: Map.get(firewall, :firewall_default_bridge)
         )
         |> Repo.update!()
@@ -190,33 +325,59 @@ defmodule Foreman.Boxes do
     :ok
   end
 
-  @policy_labels %{
-    "privileged" =>
-      "privileged containers (docker-in-docker, privileged: true, SYS_ADMIN and the like)",
-    "host_namespace" => "the host's network, PID or IPC namespace",
-    "docker_socket" => "the Docker socket",
-    "host_bind" => "bind mounts from outside the workspace",
-    "host_file" => "env files, secrets and build contexts from outside the workspace",
-    "devices" => "host devices",
-    "gpu" =>
-      "NVIDIA GPUs. Environments on this box share them, and Foreman doesn't limit or isolate GPU memory between them",
-    "seccomp" => "containers with seccomp turned off (seccomp=unconfined)",
-    "compose_keys" => "compose settings Foreman hasn't reviewed"
-  }
-
   @doc """
-  The rules a box's agent has opened up from the default (refuse
-  everything), each with what it lets in. Empty for a box on the default
-  policy, and for one whose agent hasn't reported a policy.
+  Records whether a box needs a reboot, as its agent reports it after
+  every join and when it changes. A box that starts needing one is news
+  (`Foreman.Activity.box_reboot_required/1`); the same report again isn't.
+
+  Agents on protocol 5 also say whether they can reboot the box
+  (`box.restart`) and which boot they're on. A box back on another boot
+  than a reboot was sent for has rebooted, whether or not the agent's
+  answer got through first, so that operation is done.
   """
-  def policy_exceptions(%Box{policy: policy}) when is_map(policy) do
-    for {rule, action} <- ForemanProtocol.Policy.relaxed(policy) do
-      %{rule: rule, action: action, label: Map.fetch!(@policy_labels, rule)}
+  def record_reboot(box_id, reboot) do
+    if box = get_box(box_id) do
+      newly? = reboot.required and box.reboot_required != true
+      boot_id = Map.get(reboot, :boot_id)
+
+      box =
+        box
+        |> Ecto.Changeset.change(
+          reboot_required: reboot.required,
+          reboot_packages: reboot.packages,
+          livepatch: Map.get(reboot, :livepatch, false),
+          can_restart: Map.get(reboot, :can_restart, false),
+          boot_id: boot_id
+        )
+        |> Repo.update!()
+
+      if boot_id, do: finish_restarts(box.id, boot_id)
+      broadcast(box, :updated)
+      if newly?, do: Foreman.Activity.box_reboot_required(box)
     end
-    |> Enum.sort_by(&(&1.rule != "privileged"))
+
+    :ok
   end
 
-  def policy_exceptions(%Box{}), do: []
+  defp finish_restarts(box_id, boot_id) do
+    for %{action: "box.restart", args: %{"boot_id" => sent_for}} = op <-
+          Foreman.Operations.active_for_box(box_id),
+        sent_for != boot_id do
+      Foreman.Operations.mark(op, "succeeded",
+        result: %{"rebooted" => true},
+        finished_at: DateTime.utc_now()
+      )
+    end
+  end
+
+  @doc """
+  `:required` when a box's agent reports the reboot flag, else nil (nil
+  too for an agent that doesn't report it). A livepatch doesn't change
+  that: an applied one doesn't say the pending kernel's fixes are in, and
+  Livepatch clients that check coverage remove the flag themselves.
+  """
+  def reboot_needed(%Box{reboot_required: true}), do: :required
+  def reboot_needed(%Box{}), do: nil
 
   @doc """
   What's wrong with a box's firewall, which keeps the code in its
@@ -234,20 +395,11 @@ defmodule Foreman.Boxes do
   def firewall_problem(%Box{}), do: nil
 
   @doc """
-  The install command that loads a box's firewall again without
-  changing the box: running the script without the box's `--policy` or
-  `--default-bridge-reaches-tailnet` would reset them.
+  The install command that sets the box up again (its firewall, the VM
+  helper) without changing it: running the script without the box's
+  `--default-bridge-reaches-tailnet` would reset that.
   """
   def reinstall_command(%Box{} = box) do
-    policy =
-      case ForemanProtocol.Policy.relaxed(box.policy || %{}) do
-        [] ->
-          []
-
-        rules ->
-          ["--policy", Enum.map_join(rules, ",", fn {rule, action} -> "#{rule}=#{action}" end)]
-      end
-
     bridge =
       if box.firewall_default_bridge == "reaches_tailnet",
         do: ["--default-bridge-reaches-tailnet"],
@@ -255,7 +407,7 @@ defmodule Foreman.Boxes do
 
     base = "curl -fsSL #{Foreman.Config.base_url()}/agent/install.sh | sudo sh"
 
-    case policy ++ bridge do
+    case bridge do
       [] -> base
       flags -> Enum.join([base, "-s", "--" | flags], " ")
     end

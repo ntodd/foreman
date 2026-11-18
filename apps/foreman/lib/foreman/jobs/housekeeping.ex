@@ -14,16 +14,22 @@ defmodule Foreman.Jobs.Housekeeping do
 
   import Ecto.Query
 
-  alias Foreman.{Agents, Boxes, Environments, Operations, Repo}
+  alias Foreman.{Agents, Boxes, Environments, Operations, Prebuilds, Repo}
   alias Foreman.Boxes.Box
   alias Foreman.Operations.{Operation, Redactions}
 
   @stale_hours 3
+  # A connect hook's action is bounded at four minutes on the box; one that
+  # never came back is from an agent that can't run it (an older one).
+  @connect_minutes 10
   # Box commands (stats, inventory, cancel) are quick; their results come
   # straight after a reconnect if they come at all. A gc runs several
   # prunes, each allowed half an hour on the box.
   @box_command_minutes 10
   @gc_minutes 120
+  # A prebuild clones and builds a devcontainer from nothing, which the
+  # agent gives up to four hours.
+  @prebuild_minutes 300
   @log_days 30
 
   @impl true
@@ -48,14 +54,27 @@ defmodule Foreman.Jobs.Housekeeping do
   end
 
   defp fail_stale_environment_ops do
-    cutoff = DateTime.add(DateTime.utc_now(), -@stale_hours * 3600)
+    fail_stale_environment_ops(
+      DateTime.add(DateTime.utc_now(), -@stale_hours * 3600),
+      "no result after #{@stale_hours} hours",
+      dynamic([o], o.action != "connect")
+    )
 
+    fail_stale_environment_ops(
+      DateTime.add(DateTime.utc_now(), -@connect_minutes * 60),
+      "no result after #{@connect_minutes} minutes",
+      dynamic([o], o.action == "connect")
+    )
+  end
+
+  defp fail_stale_environment_ops(cutoff, message, which) do
     stale =
       Repo.all(
         from o in Operation,
           where:
             o.status in ["dispatched", "running"] and not is_nil(o.environment_id) and
-              o.dispatched_at < ^cutoff
+              o.dispatched_at < ^cutoff,
+          where: ^which
       )
 
     # The list is from before the loop, and a reconnect may have restarted an
@@ -65,7 +84,7 @@ defmodule Foreman.Jobs.Housekeeping do
       with {:ok, failed, env} <-
              Operations.timed_out(
                op,
-               "no result after #{@stale_hours} hours",
+               message,
                &Environments.record_result/1,
                dispatched_before: cutoff
              ) do
@@ -81,16 +100,27 @@ defmodule Foreman.Jobs.Housekeeping do
     now = DateTime.utc_now()
     cutoff = DateTime.add(now, -@box_command_minutes * 60)
     gc_cutoff = DateTime.add(now, -@gc_minutes * 60)
+    prebuild_cutoff = DateTime.add(now, -@prebuild_minutes * 60)
+    long = ["box.gc", "box.prebuild"]
 
     Repo.all(
       from o in Operation,
         where:
           o.status in ["dispatched", "running"] and is_nil(o.environment_id) and
             o.action != "agent.update" and
-            ((o.action != "box.gc" and o.dispatched_at < ^cutoff) or
-               (o.action == "box.gc" and o.dispatched_at < ^gc_cutoff))
+            ((o.action not in ^long and o.dispatched_at < ^cutoff) or
+               (o.action == "box.gc" and o.dispatched_at < ^gc_cutoff) or
+               (o.action == "box.prebuild" and o.dispatched_at < ^prebuild_cutoff))
     )
-    |> Enum.each(&Operations.timed_out(&1, "no result from the agent"))
+    |> Enum.each(fn op ->
+      with {:ok, failed, recorded} <-
+             Operations.timed_out(op, "no result from the agent", &Prebuilds.record_result/1) do
+        Prebuilds.after_result(recorded)
+        # A build still running on the box stops there too, so its VM
+        # doesn't run on (the box's agent gives its VM back).
+        if failed.action == "box.prebuild", do: Agents.cancel_operation(op, nil)
+      end
+    end)
   end
 
   defp settle_updates do

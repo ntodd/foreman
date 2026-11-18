@@ -1,0 +1,130 @@
+{
+  "cpus": {
+    "boot_vcpus": 2,
+    "max_vcpus": 2,
+    "kvm_hyperv": false,
+    "max_phys_bits": 46,
+    "features": {"amx": false},
+    "nested": true,
+    "core_scheduling": "Vm",
+    "profile": "Host"
+  },
+  "memory": {
+    "size": 3221225472,
+    "mergeable": false,
+    "hotplug_method": "Acpi",
+    "shared": false,
+    "hugepages": false,
+    "prefault": false,
+    "thp": true
+  },
+  "payload": {
+    "kernel": "/srv/foreman/guest/5d41402abc4b2a76b9719d911017c5925d41402abc4b2a76b9719d911017c592/vmlinuz",
+    "cmdline": "console=ttyS0 root=/dev/vda rw quiet net.ifnames=0 fm.mac=52:54:00:fa:00:00 fm.ip=10.250.0.2/30 fm.gw=10.250.0.1 fm.dns=1.1.1.1 fm.env=6f1c1d1e-9a3b-4c1f-8f5e-2d7a9b0c1e2f"
+  },
+  "disks": [
+    {
+      "id": "_disk0",
+      "pci_segment": 0,
+      "path": "/srv/foreman/vms/6f1c1d1e-9a3b-4c1f-8f5e-2d7a9b0c1e2f/root.raw",
+      "readonly": false,
+      "direct": true,
+      "num_queues": 2,
+      "queue_size": 128,
+      "vhost_user": false,
+      "disable_io_uring": false,
+      "disable_aio": false,
+      "serial": "fm-root",
+      "backing_files": false,
+      "sparse": true,
+      "image_type": "Raw",
+      "lock_granularity": "ByteRange"
+    },
+    {
+      "id": "_disk1",
+      "pci_segment": 0,
+      "path": "/srv/foreman/vms/6f1c1d1e-9a3b-4c1f-8f5e-2d7a9b0c1e2f/data.raw",
+      "readonly": false,
+      "direct": true,
+      "num_queues": 2,
+      "queue_size": 128,
+      "vhost_user": false,
+      "disable_io_uring": false,
+      "disable_aio": false,
+      "serial": "fm-data",
+      "backing_files": false,
+      "sparse": true,
+      "image_type": "Raw",
+      "lock_granularity": "ByteRange"
+    },
+    {
+      "id": "_disk2",
+      "pci_segment": 0,
+      "path": "/srv/foreman/agent-disks/0.6.0.img",
+      "readonly": true,
+      "direct": false,
+      "num_queues": 1,
+      "queue_size": 128,
+      "vhost_user": false,
+      "disable_io_uring": false,
+      "disable_aio": false,
+      "serial": "fm-agent",
+      "backing_files": false,
+      "sparse": true,
+      "image_type": "Raw",
+      "lock_granularity": "ByteRange"
+    }
+  ],
+  "net": [
+    {
+      "id": "_net3",
+      "pci_segment": 0,
+      "tap": "fm-vm0",
+      "mac": "52:54:00:fa:00:00",
+      "host_mac": "6a:1f:20:3c:9d:41",
+      "num_queues": 2,
+      "queue_size": 256,
+      "vhost_user": false,
+      "vhost_mode": "Client",
+      "offload_tso": true,
+      "offload_ufo": true,
+      "offload_csum": true
+    }
+  ],
+  "rng": {"id": "_rng0", "pci_segment": 0, "src": "/dev/urandom"},
+  "balloon": {
+    "id": "_balloon4",
+    "pci_segment": 0,
+    "size": 0,
+    "deflate_on_oom": true,
+    "free_page_reporting": true
+  },
+  "serial": {
+    "file": "/srv/foreman/vms/6f1c1d1e-9a3b-4c1f-8f5e-2d7a9b0c1e2f/serial.log",
+    "mode": "File"
+  },
+  "console": {"mode": "Off", "pci_segment": 0},
+  "debug_console": {"mode": "Off", "iobase": 233},
+  "vsock": {
+    "id": "_vsock5",
+    "pci_segment": 0,
+    "cid": 3,
+    "socket": "/srv/foreman/vms/6f1c1d1e-9a3b-4c1f-8f5e-2d7a9b0c1e2f/vsock.sock"
+  },
+  "pvpanic": false,
+  "watchdog": false,
+  "platform": {
+    "num_pci_segments": 1,
+    "iommu_address_width_bits": 64,
+    "iommufd": false,
+    "vfio_p2p_dma": true
+  },
+  "landlock_enable": true,
+  "landlock_rules": [
+    {"path": "/srv/foreman/vms/6f1c1d1e-9a3b-4c1f-8f5e-2d7a9b0c1e2f", "access": "rw"},
+    {"path": "/srv/foreman/guest/5d41402abc4b2a76b9719d911017c5925d41402abc4b2a76b9719d911017c592", "access": "r"},
+    {"path": "/srv/foreman/agent-disks/0.6.0.img", "access": "r"},
+    {"path": "/dev/net/tun", "access": "rw"},
+    {"path": "/sys/devices/virtual/net/fm-vm0", "access": "r"}
+  ]
+}

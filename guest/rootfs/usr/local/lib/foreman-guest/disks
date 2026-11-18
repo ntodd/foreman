@@ -1,0 +1,77 @@
+#!/bin/sh
+# Mounts the environment's disks. The data disk (formatted on its first
+# boot) holds everything the environment keeps: Docker's images,
+# containers and volumes, the clone, and the guest agent's state. The
+# agent disk is the box's agent release, read-only.
+set -eu
+
+disk() { # serial, the device it is when there's no by-id link
+  i=0
+  while [ $i -lt 100 ]; do
+    if [ -e "/dev/disk/by-id/virtio-$1" ]; then
+      readlink -f "/dev/disk/by-id/virtio-$1"
+      return
+    fi
+    i=$((i + 1))
+    sleep 0.05
+  done
+  echo "$2"
+}
+
+udevadm settle --timeout=10 || true
+data=$(disk fm-data /dev/vdb)
+agent=$(disk fm-agent /dev/vdc)
+
+# blkid -p probes the disk itself: 0 is a filesystem, 2 is nothing on it
+# (a new disk). Anything else (a disk it can't read, signatures that
+# disagree) stops here rather than format over the environment's data.
+probe=0
+blkid -p "$data" >/dev/null || probe=$?
+case $probe in
+  0) ;;
+  2)
+    echo "foreman-guest: formatting $data"
+    mkfs.ext4 -q -L fm-data -E nodiscard,lazy_itable_init=1,lazy_journal_init=1 "$data"
+    ;;
+  *)
+    echo "foreman-guest: can't tell what's on $data (blkid -p exited $probe); not formatting it" >&2
+    exit 1
+    ;;
+esac
+
+base=/var/lib/foreman-data
+mkdir -p "$base"
+mountpoint -q "$base" || mount -o noatime "$data" "$base"
+
+# Whose disk this is. One that isn't yet this environment's (a copy of a
+# prebuild's, or a new one) keeps its clone, images and build cache, but
+# not what ran on it: containers (some restart on their own when Docker
+# starts, before anything here could stop them), volumes, networks,
+# plugins, swarm state, containerd's own containers and the guest agent's
+# state all go before Docker starts. The marker is on the disk, so what
+# ran there could have deleted or changed it; a missing or wrong one
+# clears the disk all the same (on a new disk there's nothing to clear).
+# The box names the environment on the kernel command line.
+env_id=$(sed -n 's/.*fm\.env=\([0-9a-f-]*\).*/\1/p' /proc/cmdline)
+if [ -n "$env_id" ] && [ "$(cat "$base/.env-id" 2>/dev/null || true)" != "$env_id" ]; then
+  echo "foreman-guest: clearing what ran on this disk before it was $env_id's"
+  rm -rf "$base/docker/containers" "$base/docker/volumes" "$base/docker/network" \
+    "$base/docker/plugins" "$base/docker/swarm" "$base/containerd" "$base/agent"
+  printf '%s\n' "$env_id" > "$base/.env-id"
+fi
+
+for dir in docker containerd srv agent; do mkdir -p "$base/$dir"; done
+
+bind() {
+  mkdir -p "$2"
+  mountpoint -q "$2" || mount --bind "$1" "$2"
+}
+bind "$base/docker" /var/lib/docker
+bind "$base/containerd" /var/lib/containerd
+bind "$base/srv" /srv/foreman
+bind "$base/agent" /var/lib/foreman-agent
+# The guest agent's (it runs as foreman, not root).
+chown foreman:foreman /srv/foreman /var/lib/foreman-agent
+
+mkdir -p /opt/foreman-agent
+mountpoint -q /opt/foreman-agent || mount -o ro "$agent" /opt/foreman-agent

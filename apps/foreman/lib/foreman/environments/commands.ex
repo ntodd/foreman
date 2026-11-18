@@ -8,7 +8,7 @@ defmodule Foreman.Environments.Commands do
   secret hashes it applied, whether it carried a token).
   """
 
-  alias Foreman.{Accounts, Config, GitHub, Repo, Secrets, Tailscale}
+  alias Foreman.{Accounts, Config, GitHub, Prebuilds, Repo, Secrets, Tailscale}
   alias Foreman.Environments.Environment
   alias Foreman.Operations.Operation
   alias ForemanProtocol.Command
@@ -16,6 +16,14 @@ defmodule Foreman.Environments.Commands do
   require Logger
 
   @spec build(Operation.t(), Environment.t()) :: {:ok, Command.t(), map()} | {:error, String.t()}
+  def build(%Operation{action: "connect"} = op, %Environment{} = env) do
+    command(
+      op,
+      "env.connect",
+      Map.merge(base(env), %{hook: op.args["hook"], action: op.args["action"]})
+    )
+  end
+
   def build(%Operation{} = op, %Environment{} = env) do
     env = Repo.preload(env, [:user, :box, repo: :owner])
 
@@ -25,14 +33,20 @@ defmodule Foreman.Environments.Commands do
 
       "start" ->
         with_secrets(env, fn s ->
-          command(op, "env.start", base(env) |> Map.put(:compose_env, s.values))
+          payload =
+            base(env)
+            |> with_start_limits(env)
+            |> Map.put(:compose_env, compose_env(s.values))
+            |> put_present(:registry_auth, up_registry_auth(env))
+
+          command(op, "env.start", payload)
         end)
 
       "stop" ->
-        command(op, "env.stop", base(env))
+        command(op, "env.stop", with_start_limits(base(env), env))
 
-      "destroy" ->
-        command(op, "env.destroy", base(env))
+      action when action in ["suspend", "destroy"] ->
+        command(op, "env." <> action, base(env))
 
       "restart_all" ->
         with_secrets(env, fn s -> command(op, "env.restart", restart(env, "all", [], s)) end)
@@ -69,8 +83,11 @@ defmodule Foreman.Environments.Commands do
 
   defp base(env), do: %{env_id: env.id, slug: env.slug}
 
-  defp restart(env, mode, changed, s),
-    do: base(env) |> Map.merge(%{mode: mode, changed: changed, compose_env: s.values})
+  defp restart(env, mode, changed, s) do
+    base(env)
+    |> Map.merge(%{mode: mode, changed: changed, compose_env: compose_env(s.values)})
+    |> put_present(:registry_auth, up_registry_auth(env))
+  end
 
   defp with_secrets(env, fun) do
     secrets = secrets(env)
@@ -80,19 +97,42 @@ defmodule Foreman.Environments.Commands do
     end
   end
 
-  # Pull and rebuild is a rebuild that fast-forwards the clone first.
-  defp up_command("create"), do: {"env.create", %{}}
-  defp up_command("rebuild"), do: {"env.rebuild", %{}}
-  defp up_command("pull_rebuild"), do: {"env.rebuild", %{pull: true}}
+  # Pull and rebuild is a rebuild that fast-forwards the clone first. A
+  # create starts from the box's prebuild of the repo's branch, if it has
+  # one the user may start from.
+  defp up_command("create", env, token) do
+    case prebuild_id(env, token) do
+      nil -> {"env.create", %{}}
+      prebuild_id -> {"env.create", %{prebuild_id: prebuild_id}}
+    end
+  end
+
+  defp up_command("rebuild", _env, _token), do: {"env.rebuild", %{}}
+  defp up_command("pull_rebuild", _env, _token), do: {"env.rebuild", %{pull: true}}
+
+  # A prebuild holds the repo's content (and its extra repos'), cloned with
+  # the app's token, so the user's own token has to show it reads all of it
+  # first. Without a token, or one GitHub won't say yes to, the environment
+  # clones and builds from nothing like any other. Without GitHub (a local
+  # git server) there's no one to ask.
+  defp prebuild_id(env, token) do
+    with %{id: id, repos: repos} <- Prebuilds.ready(env.repo, env.box_id, env.branch) do
+      cond do
+        not GitHub.configured?() -> id
+        is_binary(token) and GitHub.can_read?(token, env.repo, repos) -> id
+        true -> nil
+      end
+    end
+  end
 
   defp up(op, env) do
-    {type, extra} = up_command(op.action)
-    secrets = secrets(env)
-    identity = Accounts.effective_identity(env.user, env.repo)
-    features = features(env)
     # A build shouldn't wait on GitHub: without a token it goes ahead, and
     # the token follows with the next refresh.
     {token, token_notice, token_status} = github_token(env)
+    {type, extra} = up_command(op.action, env, token)
+    secrets = secrets(env)
+    identity = Accounts.effective_identity(env.user, env.repo)
+    features = features(env)
 
     with {:ok, ts_key, env} <- tailscale_key(env, op.action) do
       files =
@@ -107,7 +147,7 @@ defmodule Foreman.Environments.Commands do
           branch: env.branch,
           config_path: env.repo.devcontainer_path || ".devcontainer/devcontainer.json",
           files: files,
-          compose_env: secrets.values,
+          compose_env: compose_env(secrets.values),
           limits: limits(env),
           tailscale: %{
             enabled: Tailscale.configured?(),
@@ -162,6 +202,12 @@ defmodule Foreman.Environments.Commands do
       {:error, errors} -> {:error, "couldn't build #{type}: #{inspect(errors)}"}
     end
   end
+
+  # Compose interpolates with these, so the agent's own tools run with
+  # them too. A secret stored before its name was reserved still reaches
+  # the environment's shells through secrets.env, but not the box.
+  defp compose_env(values),
+    do: Map.reject(values, fn {name, _} -> ForemanProtocol.Schema.reserved_env?(name) end)
 
   defp secrets(env) do
     values = Secrets.resolve(env)
@@ -229,8 +275,12 @@ defmodule Foreman.Environments.Commands do
   end
 
   # A new node needs an auth key on its first boot only; the node's state
-  # volume keeps its identity after that.
-  defp tailscale_key(env, "create") do
+  # volume keeps its identity after that. Until the environment has come
+  # up once, a rebuild is a first boot too. A failed first build drops its
+  # key (keys expire after a day), so the next attempt gets a fresh one.
+  defp tailscale_key(env, action)
+       when action == "create" or
+              (action in ["rebuild", "pull_rebuild"] and not env.created_once) do
     cond do
       not Tailscale.configured?() ->
         {:ok, nil, env}
@@ -251,6 +301,12 @@ defmodule Foreman.Environments.Commands do
   end
 
   defp tailscale_key(env, _action), do: {:ok, env.ts_authkey, env}
+
+  defp with_start_limits(payload, %{box: %{protocol_version: v}} = env)
+       when is_integer(v) and v >= 7,
+       do: Map.put(payload, :limits, limits(env))
+
+  defp with_start_limits(payload, _env), do: payload
 
   defp limits(env) do
     %{}
@@ -278,6 +334,13 @@ defmodule Foreman.Environments.Commands do
   end
 
   defp registry_auth(_), do: nil
+
+  # A start or restart runs devcontainer up too, which resolves the repo's
+  # features again. Protocol 4: an older agent refuses the field there.
+  defp up_registry_auth(%{box: %{protocol_version: v}} = env) when is_integer(v) and v >= 4,
+    do: registry_auth(env.repo.owner)
+
+  defp up_registry_auth(_env), do: nil
 
   defp put_present(map, _key, nil), do: map
   defp put_present(map, _key, ""), do: map

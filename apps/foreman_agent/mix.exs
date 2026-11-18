@@ -41,7 +41,7 @@ defmodule ForemanAgent.MixProject do
       {:credo, "~> 1.7", only: [:dev, :test], runtime: false},
       {:mox, "~> 1.3", only: :test},
       {:plug, "~> 1.18", only: :test},
-      {:bandit, "~> 1.13", only: :test}
+      {:bandit, "~> 1.14", only: :test}
     ]
   end
 
@@ -62,9 +62,30 @@ defmodule ForemanAgent.MixProject do
       foreman_agent: [
         include_executables_for: [:unix],
         applications: [runtime_tools: :permanent],
-        steps: [:assemble, &copy_feature/1, :tar]
+        steps: [:assemble, &copy_feature/1, &copy_tools/1, :tar]
       ]
     ]
+  end
+
+  # Node and the devcontainer CLI, from rel/tools/bundle.sh, so a box
+  # needs neither (docker/box.Dockerfile sets FOREMAN_AGENT_TOOLS). They go
+  # in priv/tools, where ForemanAgent.Config looks. Without it the release
+  # runs the ones on PATH.
+  defp copy_tools(release) do
+    case System.get_env("FOREMAN_AGENT_TOOLS") do
+      dir when dir in [nil, ""] ->
+        release
+
+      dir ->
+        for entry <- ["node/bin/node", "devcontainer", "bin/devcontainer"],
+            not File.exists?(Path.join(dir, entry)),
+            do: Mix.raise("#{Path.join(dir, entry)} is missing; run rel/tools/bundle.sh")
+
+        target = Path.join([release.path, "lib", "foreman_agent-#{@version}", "priv", "tools"])
+        File.rm_rf!(target)
+        File.cp_r!(dir, target)
+        release
+    end
   end
 
   # The devcontainer feature ships inside the agent release, so a box always

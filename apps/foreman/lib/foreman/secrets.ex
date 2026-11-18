@@ -9,7 +9,8 @@ defmodule Foreman.Secrets do
 
   Values are encrypted at rest and write-only: the UI can replace or
   delete a secret but never read it back. Every change is audited (names
-  only) and pushed to the running environments it affects.
+  only) and pushed to the running environments it affects. An environment
+  secret can be promoted to the repo or to its owner's secrets.
   """
   import Ecto.Query
 
@@ -64,6 +65,36 @@ defmodule Foreman.Secrets do
 
       {:ok, secrets}
     end
+  end
+
+  @doc """
+  The secrets a scope picks up from the scopes above it, without values:
+  an environment's from its owner, repo and user, a repo's from its owner.
+  Ordered by scope, then name. A name set at two scopes is listed at both.
+  A user's own secrets are listed only to that user, as on their own page,
+  so an admin on someone else's environment sees the owner's and repo's.
+  """
+  def list_inherited_secrets(%Scope{} = scope, scope_name, subject) do
+    with :ok <- authorize(scope, scope_name, subject) do
+      secrets =
+        case {scope_name, subject} do
+          {"environment", %Environment{} = env} ->
+            [owner, repo, user, _env] = env_secrets(env)
+            if Scope.user_id(scope) == env.user_id, do: [owner, repo, user], else: [owner, repo]
+
+          {"repo", %Repo{owner_id: owner_id}} ->
+            [secrets_at("owner:" <> owner_id)]
+
+          _ ->
+            []
+        end
+
+      {:ok, secrets |> Enum.concat() |> Enum.map(&%{&1 | value: nil})}
+    end
+  end
+
+  defp secrets_at(key) do
+    Foreman.Repo.all(from s in Secret, where: s.scope_key == ^key, order_by: s.name)
   end
 
   def change_secret(attrs \\ %{}), do: Secret.changeset(%Secret{}, attrs)
@@ -124,6 +155,74 @@ defmodule Foreman.Secrets do
     end
   end
 
+  @doc """
+  Moves an environment's secret up a level, for the environment's owner:
+  to their own secrets, limited to the environment's repo, or to the
+  repo's if they're an admin. The value moves as it is; nobody has to see
+  it. Only the owner can do it, since anywhere else the secret lands is
+  somewhere the person moving it could read it from.
+
+  Refuses when the level above already has a secret with that name, or
+  when a level in between would override the moved secret in this
+  environment, since either would change what the environment gets.
+  """
+  def promote_secret(%Scope{} = scope, %Environment{} = env, name, to) when is_binary(name) do
+    env = Foreman.Repo.preload(env, [:repo, :user])
+
+    with {:ok, target, attrs} <- promotion_target(to, env),
+         true <- Scope.user_id(scope) == env.user_id || {:error, :unauthorized},
+         :ok <- authorize(scope, to, target),
+         {:ok, promoted} <- move_secret(scope, env, name, to, target, attrs) do
+      Foreman.Environments.secrets_changed(affected_environment_ids(to, target))
+      {:ok, %{promoted | value: nil}}
+    end
+  end
+
+  def promote_secret(%Scope{}, _subject, _name, _to), do: {:error, :unauthorized}
+
+  defp promotion_target("repo", env), do: {:ok, env.repo, %{"repo_ids" => []}}
+  defp promotion_target("user", env), do: {:ok, env.user, %{"repo_ids" => [env.repo_id]}}
+  defp promotion_target(_to, _env), do: {:error, :unauthorized}
+
+  # Read and deleted in the transaction, and only if unchanged since the
+  # read: a value replaced meanwhile isn't lost, or moved in its old form.
+  defp move_secret(scope, env, name, to, target, attrs) do
+    Foreman.Repo.transact(fn ->
+      source = scope_key("environment", env)
+
+      with %Secret{} = secret <- Foreman.Repo.get_by(Secret, scope_key: source, name: name),
+           nil <- Foreman.Repo.get_by(Secret, scope_key: scope_key(to, target), name: name),
+           {:ok, promoted} <- insert_promoted(scope, secret, to, target, attrs),
+           {1, _} <-
+             Foreman.Repo.delete_all(
+               from s in Secret, where: s.id == ^secret.id and s.updated_at == ^secret.updated_at
+             ),
+           true <- resolve(env)[name] == secret.value || {:error, :overridden} do
+        Audit.log(scope, "secret.promote", promoted, %{
+          "from" => source,
+          "scope" => promoted.scope_key,
+          "name" => name
+        })
+
+        {:ok, promoted}
+      else
+        nil -> {:error, :not_found}
+        %Secret{} -> {:error, :exists}
+        {0, _} -> {:error, :not_found}
+        {:error, %Ecto.Changeset{errors: [name: {"already exists here", _}]}} -> {:error, :exists}
+        error -> error
+      end
+    end)
+  end
+
+  defp insert_promoted(scope, secret, to, target, attrs) do
+    %Secret{scope: to, scope_key: scope_key(to, target)}
+    |> Map.merge(subject_fields(to, target))
+    |> Secret.changeset(Map.merge(attrs, %{"name" => secret.name, "value" => secret.value}))
+    |> Ecto.Changeset.put_change(:updated_by_id, Scope.user_id(scope))
+    |> Foreman.Repo.insert()
+  end
+
   defp subject_fields("owner", %Owner{id: id}), do: %{owner_id: id}
   defp subject_fields("repo", %Repo{id: id}), do: %{repo_id: id}
   defp subject_fields("user", %User{id: id}), do: %{user_id: id}
@@ -156,6 +255,15 @@ defmodule Foreman.Secrets do
 
   @doc "The secrets an environment gets, name => value, with later scopes winning."
   def resolve(%Environment{} = env) do
+    env
+    |> env_secrets()
+    |> Enum.concat()
+    |> Enum.reduce(%{}, fn s, acc -> Map.put(acc, s.name, s.value) end)
+  end
+
+  # The secrets that reach an environment, one list per scope from owner
+  # to environment. A user secret limited to other repos doesn't.
+  defp env_secrets(%Environment{} = env) do
     env = Foreman.Repo.preload(env, :repo)
 
     keys = [
@@ -165,13 +273,15 @@ defmodule Foreman.Secrets do
       "environment:" <> env.id
     ]
 
-    rank = keys |> Enum.with_index() |> Map.new()
+    by_key =
+      from(s in Secret, where: s.scope_key in ^keys, order_by: s.name)
+      |> Foreman.Repo.all()
+      |> Enum.filter(fn s ->
+        s.scope != "user" or s.repo_ids == [] or env.repo_id in s.repo_ids
+      end)
+      |> Enum.group_by(& &1.scope_key)
 
-    from(s in Secret, where: s.scope_key in ^keys)
-    |> Foreman.Repo.all()
-    |> Enum.filter(fn s -> s.scope != "user" or s.repo_ids == [] or env.repo_id in s.repo_ids end)
-    |> Enum.sort_by(&rank[&1.scope_key])
-    |> Enum.reduce(%{}, fn s, acc -> Map.put(acc, s.name, s.value) end)
+    Enum.map(keys, &Map.get(by_key, &1, []))
   end
 
   @doc """

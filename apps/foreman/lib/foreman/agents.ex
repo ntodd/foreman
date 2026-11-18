@@ -9,7 +9,7 @@ defmodule Foreman.Agents do
   """
   import Ecto.Query
 
-  alias Foreman.{Boxes, Environments, Metrics, Operations, Repo, Scope}
+  alias Foreman.{Boxes, Environments, Metrics, Operations, Prebuilds, Repo, Scope}
   alias Foreman.Capacity.Tracker
   alias Foreman.Environments.Environment
   alias Foreman.Operations.Operation
@@ -44,38 +44,69 @@ defmodule Foreman.Agents do
   end
 
   @doc """
-  Runs a box-level command (inventory, stats, gc). Returns the operation,
-  whose result arrives later.
+  Runs a box-level command (inventory, stats, gc, restart). Returns the
+  operation, whose result arrives later.
+
+  A restart reboots the box, and names the boot the agent last reported:
+  `{:error, :cannot_restart}` for a box whose agent can't (one before
+  protocol 5, or installed before the root unit that does it).
   """
+  def run_box_command(%Scope{} = scope, box, "box.restart") do
+    # The boot the agent last reported, not the caller's copy of the box.
+    box = Boxes.get_box(box.id) || box
+
+    cond do
+      not Scope.admin?(scope) -> {:error, :unauthorized}
+      not box.can_restart or is_nil(box.boot_id) -> {:error, :cannot_restart}
+      true -> send_box_command(scope, box, "box.restart", %{boot_id: box.boot_id})
+    end
+  end
+
+  # A prune names every prebuild the control plane knows on the box, and
+  # the box deletes the others: ones whose delete it never got, or that
+  # finished after they were forgotten.
+  def run_box_command(%Scope{} = scope, box, "box.gc") do
+    if Scope.admin?(scope),
+      do: send_box_command(scope, box, "box.gc", %{prebuilds: Prebuilds.ids_on_box(box.id)}),
+      else: {:error, :unauthorized}
+  end
+
   def run_box_command(%Scope{} = scope, box, type)
-      when type in ["box.inventory", "box.stats", "box.gc"] do
-    if Scope.admin?(scope) do
-      {:ok, cmd} = Command.new(type, %{})
+      when type in ["box.inventory", "box.stats"] do
+    if Scope.admin?(scope),
+      do: send_box_command(scope, box, type, %{}),
+      else: {:error, :unauthorized}
+  end
 
-      op =
-        Operations.create!(%{
-          id: cmd.op_id,
-          box_id: box.id,
-          user_id: Scope.user_id(scope),
-          action: type,
-          command: type,
-          status: "dispatched",
-          dispatched_at: DateTime.utc_now()
-        })
+  defp send_box_command(scope, box, type, payload) do
+    {:ok, cmd} = Command.new(type, payload)
 
-      case dispatch(box.id, cmd) do
-        :ok ->
-          {:ok, op}
+    op =
+      Operations.create!(%{
+        id: cmd.op_id,
+        box_id: box.id,
+        user_id: Scope.user_id(scope),
+        action: type,
+        command: type,
+        args:
+          if(payload == %{},
+            do: nil,
+            else: Map.new(payload, &{to_string(elem(&1, 0)), elem(&1, 1)})
+          ),
+        status: "dispatched",
+        dispatched_at: DateTime.utc_now()
+      })
 
-        {:error, :offline} ->
-          {:ok,
-           Operations.mark(op, "failed",
-             error: "the box is offline",
-             finished_at: DateTime.utc_now()
-           )}
-      end
-    else
-      {:error, :unauthorized}
+    case dispatch(box.id, cmd) do
+      :ok ->
+        {:ok, op}
+
+      {:error, :offline} ->
+        {:ok,
+         Operations.mark(op, "failed",
+           error: "the box is offline",
+           finished_at: DateTime.utc_now()
+         )}
     end
   end
 
@@ -142,6 +173,8 @@ defmodule Foreman.Agents do
   def handle_event(box_id, %Event{type: "op.result", payload: payload}) do
     case owns_op(box_id, payload.op_id) do
       :ok ->
+        {payload, offer} = take_offer(payload)
+
         case Operations.finish(
                payload.op_id,
                payload.status,
@@ -149,9 +182,17 @@ defmodule Foreman.Agents do
                payload[:error],
                &Environments.record_result/1
              ) do
-          {:ok, op, env} -> Environments.after_result(op, env)
-          :already -> :ok
-          :unknown -> :ok
+          {:ok, op, env} ->
+            if offer && op.status == "succeeded",
+              do: Environments.deliver_offer(op.id, offer)
+
+            Environments.after_result(op, env)
+
+          :already ->
+            :ok
+
+          :unknown ->
+            :ok
         end
 
       # Nothing to record it against (pruned, or from another control
@@ -182,8 +223,16 @@ defmodule Foreman.Agents do
     )
   end
 
+  def handle_event(box_id, %Event{type: "box.ports", payload: %{environments: envs}}) do
+    Foreman.Ports.record(box_id, envs)
+  end
+
   def handle_event(box_id, %Event{type: "box.firewall", payload: firewall}) do
     Boxes.record_firewall(box_id, firewall)
+  end
+
+  def handle_event(box_id, %Event{type: "box.reboot", payload: reboot}) do
+    Boxes.record_reboot(box_id, reboot)
   end
 
   def handle_event(box_id, %Event{type: "box.metrics", payload: sample}) do
@@ -207,6 +256,24 @@ defmodule Foreman.Agents do
         {:error, :not_yours}
     end
   end
+
+  # A connect hook's result (`ForemanProtocol.Connect`) is a secret: it's
+  # taken out before the operation is recorded, and only broadcast. One
+  # that doesn't fit fails the operation without saying what it was.
+  defp take_offer(%{result: %{"offer" => offer} = result} = payload) do
+    payload = %{payload | result: Map.delete(result, "offer")}
+
+    case ForemanProtocol.Connect.cast_offer(offer) do
+      {:ok, offer} ->
+        {payload, offer}
+
+      {:error, reason} ->
+        error = "the connect hook's result can't be shown: #{reason}"
+        {Map.merge(payload, %{status: "error", error: error}), nil}
+    end
+  end
+
+  defp take_offer(payload), do: {payload, nil}
 
   @doc """
   Called as an agent joins, before the box counts as online: restarts

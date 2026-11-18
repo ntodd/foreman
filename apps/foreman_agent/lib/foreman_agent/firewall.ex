@@ -22,21 +22,29 @@ defmodule ForemanAgent.Firewall do
     marker = read(config.firewall_marker)
     info = read(config.firewall_info) || marker || %{}
 
-    state =
-      case marker do
-        nil -> "missing"
-        %{"source_sha256" => sha} -> if sha == bundled_sha(config), do: "active", else: "outdated"
-        _ -> "outdated"
+    state = status(marker, config)
+
+    report =
+      case info["block_lan"] do
+        value when value in ["0", "1"] -> %{firewall: state, firewall_block_lan: value == "1"}
+        _ -> %{firewall: state}
       end
 
     case info["default_bridge"] do
       bridge when bridge in ["filtered", "reaches_tailnet"] ->
-        %{firewall: state, firewall_default_bridge: bridge}
+        Map.put(report, :firewall_default_bridge, bridge)
 
       _ ->
-        %{firewall: state}
+        report
     end
   end
+
+  defp status(nil, _config), do: "missing"
+
+  defp status(%{"source_sha256" => sha}, config),
+    do: if(sha == bundled_sha(config), do: "active", else: "outdated")
+
+  defp status(_marker, _config), do: "outdated"
 
   defp read(path) do
     case File.read(path) do

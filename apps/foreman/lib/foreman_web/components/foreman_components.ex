@@ -17,15 +17,16 @@ defmodule ForemanWeb.ForemanComponents do
     """
   end
 
-  def busy?(state), do: state in ~w(pending creating starting stopping destroying)
+  def busy?(state), do: state in ~w(pending creating starting stopping suspending destroying)
 
   defp state_color("running"), do: "emerald"
   defp state_color("partial"), do: "amber"
   defp state_color("error"), do: "rose"
   defp state_color("missing"), do: "rose"
 
-  defp state_color(state) when state in ~w(pending creating starting stopping destroying),
-    do: "brand"
+  defp state_color(state)
+       when state in ~w(pending creating starting stopping suspending destroying),
+       do: "brand"
 
   defp state_color(_), do: "zinc"
 
@@ -33,6 +34,8 @@ defmodule ForemanWeb.ForemanComponents do
   def state_label("creating"), do: "Creating"
   def state_label("starting"), do: "Starting"
   def state_label("stopping"), do: "Stopping"
+  def state_label("suspending"), do: "Suspending"
+  def state_label("suspended"), do: "Suspended"
   def state_label("destroying"), do: "Destroying"
   def state_label("running"), do: "Running"
   def state_label("stopped"), do: "Stopped"
@@ -54,54 +57,42 @@ defmodule ForemanWeb.ForemanComponents do
     """
   end
 
-  @doc """
-  The chip on a box card when the box's agent accepts more than the
-  default policy. Privileged is called out by name.
-  """
+  @doc "The chip on a box card when the box can't run environments."
   attr :box, :map, required: true
 
-  def box_policy_badge(assigns) do
-    assigns = assign(assigns, :exceptions, Foreman.Boxes.policy_exceptions(assigns.box))
+  def box_vm_badge(assigns) do
+    assigns = assign(assigns, :problem, Foreman.Boxes.vm_problem(assigns.box))
 
     ~H"""
-    <.badge :if={@exceptions != []} color="rose" size="sm" data-role="policy-alert">
-      {if Enum.any?(@exceptions, &(&1.rule == "privileged")),
-        do: "Privileged allowed",
-        else: "Policy relaxed"}
+    <.badge :if={@problem} color="rose" size="sm" data-role="vm-alert">
+      {case @problem do
+        {:agent, _} -> "Agent too old"
+        {:vm, _} -> "Can't run environments"
+      end}
     </.badge>
     """
   end
 
-  @doc "The box page's alert for a box that accepts more than the default policy."
+  @doc """
+  The box page's alert for a box that can't run environments: an agent
+  from before environment VMs, or one that says it can't run them.
+  """
   attr :box, :map, required: true
 
-  def box_policy_alert(assigns) do
-    exceptions = Foreman.Boxes.policy_exceptions(assigns.box)
-
+  def box_vm_alert(assigns) do
     assigns =
       assigns
-      |> assign(:exceptions, exceptions)
-      |> assign(:privileged, Enum.any?(exceptions, &(&1.rule == "privileged")))
+      |> assign(:problem, Foreman.Boxes.vm_problem(assigns.box))
+      |> assign(:command, Foreman.Boxes.reinstall_command(assigns.box))
 
     ~H"""
-    <.callout :if={@exceptions != []} kind="danger" id="box-policy-alert" class="border-2">
-      <p class="text-[15px] font-semibold">
-        {if @privileged,
-          do: "Environments on this box can run privileged",
-          else: "This box accepts more than the default policy"}
+    <.callout :if={@problem} kind="danger" id="box-vm-alert">
+      <p class="text-[15px] font-semibold">This box can't run environments</p>
+      <p :if={match?({:agent, _}, @problem)} class="mt-1">
+        Its agent ({elem(@problem, 1)}) ran environments on the box's shared Docker, which this Foreman no longer does: every environment runs in a VM of its own now. Foreman refuses the agent until the install script runs again, which sets the box up for VMs: <span class="font-mono break-all">{@command}</span>. Environments made before then can't start; push their work, then destroy and recreate them.
       </p>
-      <p :if={@privileged} class="mt-1">
-        Privileged code is root on the box: it can read every environment's secrets, the agent's key and anything else on the machine. Only allow it on a box that holds nothing else you care about.
-      </p>
-      <ul class="mt-2 list-disc space-y-0.5 pl-5">
-        <li :for={e <- @exceptions}>
-          {if e.action == "allow", do: "Allowed", else: "Allowed with a warning"}: {e.label}
-        </li>
-      </ul>
-      <p class="mt-2 text-xs">
-        Set by <span class="font-mono">FOREMAN_POLICY</span>
-        in <span class="font-mono">/etc/foreman-agent/agent.env</span>
-        on the box. Remove it and restart the agent to refuse these again.
+      <p :if={match?({:vm, _}, @problem)} class="mt-1">
+        {String.capitalize(elem(@problem, 1))}.
       </p>
     </.callout>
     """
@@ -169,9 +160,66 @@ defmodule ForemanWeb.ForemanComponents do
     """
   end
 
-  @doc "A labelled capacity bar: used (or provisioned) of total."
+  @doc "The chip on a box card when the box needs a reboot."
+  attr :box, :map, required: true
+
+  def box_reboot_badge(assigns) do
+    assigns = assign(assigns, :needed, Foreman.Boxes.reboot_needed(assigns.box))
+
+    ~H"""
+    <.badge :if={@needed} color="amber" size="sm" data-role="reboot-alert">
+      Reboot required
+    </.badge>
+    """
+  end
+
+  @doc """
+  The box page's alert for a box that needs a reboot, with what asked for
+  it, and (`can_reboot`: an admin, the box online) a button that reboots
+  it when its agent can.
+  """
+  attr :box, :map, required: true
+  attr :can_reboot, :boolean, default: false
+
+  def box_reboot_alert(assigns) do
+    assigns = assign(assigns, :needed, Foreman.Boxes.reboot_needed(assigns.box))
+
+    ~H"""
+    <.callout :if={@needed} kind="warning" id="box-reboot-alert">
+      <p class="text-[15px] font-semibold">This box needs a reboot</p>
+      <p class="mt-1">
+        Updates installed on the box only take effect once it restarts. Its environments stop while it's down, and come back up on their own once the agent rejoins.
+      </p>
+      <p :if={@box.livepatch} class="mt-1">
+        An enabled kernel livepatch (Livepatch or kpatch) was detected. That doesn't establish that the pending updates are covered, so the reboot stays required.
+      </p>
+      <p :if={@box.reboot_packages != []} class="mt-2 text-xs">
+        For: <span class="font-mono break-all">{Enum.join(@box.reboot_packages, ", ")}</span>
+      </p>
+      <p :if={@can_reboot and not @box.can_restart} class="mt-2 text-xs">
+        To reboot it from here, run the install command on the box again; it sets up what Foreman reboots it with.
+      </p>
+      <:actions :if={@can_reboot and @box.can_restart}>
+        <.button
+          size="sm"
+          phx-click="run"
+          phx-value-type="box.restart"
+          data-confirm={"Reboot #{@box.name}? Its environments stop, and come back up once it rejoins."}
+        >Reboot now</.button>
+      </:actions>
+    </.callout>
+    """
+  end
+
+  @doc """
+  A labelled capacity bar: used (or provisioned) of total. With `used`,
+  the bar also carries what's in use: it shows the larger of the two and
+  takes the color of whichever is further past its threshold, usage being
+  held to `Foreman.Capacity.used_threshold/1`.
+  """
   attr :label, :string, required: true
   attr :value, :any, required: true
+  attr :used, :any, default: nil
   attr :max, :any, required: true
   attr :unit, :string, default: ""
   attr :threshold, :float, default: 0.9
@@ -179,25 +227,42 @@ defmodule ForemanWeb.ForemanComponents do
 
   def capacity_bar(assigns) do
     max = if is_number(assigns.max) and assigns.max > 0, do: assigns.max, else: nil
-    ratio = if max, do: (assigns.value || 0) / max, else: 0
+    value = assigns.value || 0
+    shown = if assigns.used, do: Kernel.max(value, assigns.used), else: assigns.value
+    ratio = if max, do: (shown || 0) / max, else: 0
+
+    level =
+      if max do
+        provisioned = bar_level(value / max, assigns.threshold)
+
+        if assigns.used,
+          do:
+            Kernel.max(
+              provisioned,
+              bar_level(assigns.used / max, Foreman.Capacity.used_threshold(assigns.threshold))
+            ),
+          else: provisioned
+      end
 
     assigns =
       assigns
+      |> assign(:shown, shown)
       |> assign(:ratio, ratio)
+      |> assign(:level, level)
       |> assign(:max_value, max && round(max * 100))
-      |> assign(:bar_value, max && round(min(assigns.value || 0, max) * 100))
+      |> assign(:bar_value, max && round(min(shown || 0, max) * 100))
 
     ~H"""
     <div class="space-y-1.5">
       <div class="flex items-baseline justify-between gap-2 text-xs">
         <span class="text-ink-2">{@label}</span>
         <span class="tabular-nums text-ink-3">
-          {fmt(@value, @format)}<span :if={@max_value}> / {fmt(@max, @format)}</span>{@unit}
+          {fmt(@shown, @format)}<span :if={@max_value}> / {fmt(@max, @format)}</span>{@unit}
         </span>
       </div>
       <progress
         :if={@max_value}
-        class={["bar", bar_class(@ratio, @threshold)]}
+        class={["bar", bar_class(@level)]}
         value={@bar_value}
         max={@max_value}
         aria-label={@label}
@@ -208,11 +273,20 @@ defmodule ForemanWeb.ForemanComponents do
     """
   end
 
-  defp bar_class(ratio, threshold) when ratio > 1,
-    do: if(threshold < 1, do: "bar-danger", else: "bar-warning")
+  # Amber past the threshold or 100%, whichever comes first, and red past
+  # both: a box set to overcommit is amber while it does and red past
+  # what it allows. 0 is fine, 1 amber, 2 red.
+  defp bar_level(ratio, threshold) do
+    cond do
+      ratio > max(threshold, 1) -> 2
+      ratio > min(threshold, 1) -> 1
+      true -> 0
+    end
+  end
 
-  defp bar_class(ratio, threshold) when ratio > threshold, do: "bar-warning"
-  defp bar_class(_, _), do: nil
+  defp bar_class(2), do: "bar-danger"
+  defp bar_class(1), do: "bar-warning"
+  defp bar_class(_), do: nil
 
   defp fmt(nil, _), do: "0"
   defp fmt(value, fun) when is_function(fun, 1), do: fun.(value)
@@ -267,13 +341,14 @@ defmodule ForemanWeb.ForemanComponents do
     <section id={@id} class={["rounded-xl border border-line bg-raised shadow-xs", @class]}>
       <header
         :if={@title}
-        class="flex items-start justify-between gap-4 border-b border-line px-5 py-3.5"
+        class="flex flex-wrap items-start justify-between gap-x-4 gap-y-2 border-b border-line px-5 py-3.5"
       >
-        <div class="min-w-0">
+        <%!-- Actions drop below the title when there's no room for both. --%>
+        <div class="min-w-0 flex-1 basis-48">
           <h2 class="text-sm font-semibold text-ink">{@title}</h2>
           <p :if={@subtitle != []} class="mt-0.5 text-xs text-ink-2">{render_slot(@subtitle)}</p>
         </div>
-        <div :if={@actions != []} class="flex shrink-0 items-center gap-2">
+        <div :if={@actions != []} class="flex shrink-0 flex-wrap items-center gap-2">
           {render_slot(@actions)}
         </div>
       </header>
@@ -358,10 +433,14 @@ defmodule ForemanWeb.ForemanComponents do
   def action_label("restart_all"), do: "Restart everything"
   def action_label("secrets_write"), do: "Update secrets"
   def action_label("git_status"), do: "Check git status"
+  def action_label("connect"), do: "Connect hook action"
   def action_label("logs"), do: "Fetch container logs"
   def action_label("box.inventory"), do: "Refresh inventory"
   def action_label("box.stats"), do: "Refresh stats"
   def action_label("box.gc"), do: "Prune images and caches"
+  def action_label("box.restart"), do: "Reboot"
+  def action_label("box.prebuild"), do: "Build a prebuild"
+  def action_label("box.prebuild.delete"), do: "Delete a prebuild"
   def action_label("agent.update"), do: "Update agent"
   def action_label("op.cancel"), do: "Cancel an operation"
   def action_label(other), do: other

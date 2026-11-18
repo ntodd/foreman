@@ -8,10 +8,11 @@ defmodule ForemanAgent.Env do
       <envs_root>/<env_id>/meta/              overlay, override config, saved spec (agent only)
       <secrets_root>/<env_id>/                secrets files (tmpfs, mounted at /run/foreman)
 
-  The workspace is writable from inside the environment, so everything the
-  agent reads or writes there goes through `ForemanAgent.SafeFS`, the
-  compose config is re-checked by `ForemanAgent.Env.Policy` on every start,
-  and git status runs inside the container rather than on the box.
+  This runs in the environment's own VM (the agent in guest mode, see
+  `ForemanAgent.Guest`), which is the boundary: nothing the repo's compose
+  files or devcontainer config ask for reaches the box. The workspace is
+  writable from inside the environment, so everything the agent reads or
+  writes there still goes through `ForemanAgent.SafeFS`.
 
   `run/3` takes a validated command payload and a context:
 
@@ -19,9 +20,10 @@ defmodule ForemanAgent.Env do
   """
 
   alias ForemanAgent.Config
-  alias ForemanAgent.Env.{Affected, ComposeScan, Overlay, Policy}
+  alias ForemanAgent.Env.{Affected, Overlay}
   alias ForemanAgent.SafeFS
-  alias ForemanProtocol.{Feature, Jsonc}
+  alias ForemanAgent.VM.Prebuild
+  alias ForemanProtocol.{Connect, Feature, Jsonc}
 
   require Logger
 
@@ -38,6 +40,12 @@ defmodule ForemanAgent.Env do
   @up_timeout :timer.minutes(165)
   @logs_timeout :timer.minutes(5)
   @tailscale_timeout :timer.seconds(15)
+  # A hook's describe is a listing; its actions can restart a server. Each
+  # is bounded inside the container (seconds), and docker exec a little
+  # after: stopping docker exec doesn't stop what it started there.
+  @describe_seconds 30
+  @connect_seconds 240
+  @hook_grace :timer.seconds(15)
   @join_poll 500
 
   # A start or restart rebuilds a container built with an older Foreman
@@ -68,6 +76,7 @@ defmodule ForemanAgent.Env do
 
   def run("env.logs", p, ctx), do: logs(p, ctx)
   def run("env.git_status", p, ctx), do: git_status(p, ctx)
+  def run("env.connect", p, ctx), do: connect(p, ctx)
 
   # -- paths ---------------------------------------------------------------
 
@@ -87,20 +96,22 @@ defmodule ForemanAgent.Env do
   # -- create / rebuild / start --------------------------------------------
 
   defp up(p, ctx, opts) do
+    adopted? = adopt_prebuild(p, ctx)
     paths = paths(ctx.config, p.env_id, p.repo)
-    spec = Map.drop(p, [:files, :compose_env, :registry_auth, :pull])
+    spec = Map.drop(p, [:files, :compose_env, :registry_auth, :pull, :prebuild_id, :prebuild])
     # A clone this rebuild makes is already up to date.
     pull? = Map.get(p, :pull) == true and File.exists?(spec_path(paths))
 
     with :ok <- check_clone_url(p.clone_url, ctx.config),
          :ok <- ensure_dirs(paths),
          {:ok, _} <- write_secrets(paths, p.files),
-         :ok <- ensure_clone(paths, p, ctx),
+         :ok <- if(adopted?, do: refresh_clone(paths, p, ctx), else: ensure_clone(paths, p, ctx)),
          :ok <- if(pull?, do: pull(p, ctx), else: :ok),
          {:ok, prepared} <- prepare(paths, spec, p.compose_env, ctx),
          {:ok, result} <- devcontainer_up(paths, spec, prepared, p, ctx, opts) do
       save_spec(paths, spec, prepared, result)
-      {:ok, put_node_id(result, spec, ctx)}
+      if Map.get(p, :prebuild) == true, do: keep_base_images(paths, prepared, p, ctx)
+      {:ok, result |> put_node_id(spec, ctx) |> put_connect_hooks(ctx)}
     end
   end
 
@@ -113,9 +124,220 @@ defmodule ForemanAgent.Env do
            {:ok, rebuild} <- feature_rebuild(ctx, p.env_id, prepared, opts),
            {:ok, result} <- devcontainer_up(paths, spec, prepared, p, ctx, rebuild: rebuild) do
         save_spec(paths, spec, prepared, result)
-        {:ok, if(opts[:node_id], do: put_node_id(result, spec, ctx), else: result)}
+        result = if opts[:node_id], do: put_node_id(result, spec, ctx), else: result
+        {:ok, put_connect_hooks(result, ctx)}
       end
     end
+  end
+
+  # A disk made from a prebuild (ForemanAgent.VM.Prebuild) has the
+  # prebuild's clone, built images and saved spec under the prebuild's id.
+  # The environment takes the clone over (refresh_clone/3 brings it up to
+  # date) and the CLI makes the environment's own containers from the
+  # images already there. The prebuild's spec goes, so nothing starts this
+  # environment as the prebuild before its own is saved, and so do the
+  # prebuild's containers and volumes: the environment's are its own,
+  # under its own name. Never raises: a disk it can't take over is built
+  # on as it is.
+  defp adopt_prebuild(%{prebuild_id: id, env_id: env_id}, ctx) when is_binary(id) do
+    from = paths(ctx.config, id)
+    to = paths(ctx.config, env_id)
+
+    with {:ok, %File.Stat{type: :directory}} <- File.lstat(from.env_dir),
+         false <- File.exists?(to.env_dir),
+         :ok <- File.rename(from.env_dir, to.env_dir) do
+      ctx.log.("info", "Starting from the prebuild\n")
+      _ = File.rm(spec_path(to))
+
+      case compose(ctx, Prebuild.slug(id), ["down", "--volumes", "--remove-orphans"]) do
+        {:ok, _} ->
+          :ok
+
+        {:error, message} ->
+          ctx.log.("info", "Couldn't remove the prebuild's containers: #{message}\n")
+      end
+
+      true
+    else
+      _ -> false
+    end
+  end
+
+  defp adopt_prebuild(_p, _ctx), do: false
+
+  # A prebuild's clone, made this environment's: git's settings and hooks
+  # back to what a fresh clone has (the prebuild's code could have changed
+  # them, and git runs here as the agent), then the branch fetched with
+  # this environment's own token and checked out, so it starts from the
+  # branch as it is now. What the prebuild's hooks made in the tree stays.
+  # Anything that doesn't work out, it's cloned afresh.
+  defp refresh_clone(paths, p, ctx) do
+    git_dir = Path.join(paths.clone, ".git")
+    helper = write_credential_helper(paths)
+    tracking = "refs/remotes/origin/" <> p.branch
+
+    result =
+      with {:ok, %File.Stat{type: :directory}} <- File.lstat(paths.clone),
+           {:ok, %File.Stat{type: :directory}} <- File.lstat(git_dir),
+           :ok <- new_git_dir(paths.clone, git_dir, helper, p, ctx),
+           {:ok, _} <-
+             git_in(
+               paths.clone,
+               helper,
+               p,
+               ["fetch", "--no-tags", "origin", "+refs/heads/#{p.branch}:#{tracking}"],
+               ctx
+             ),
+           {:ok, _} <-
+             git_in(paths.clone, helper, p, ["checkout", "-f", "-B", p.branch, tracking], ctx) do
+        :ok
+      end
+
+    case result do
+      :ok ->
+        :ok
+
+      other ->
+        ctx.log.(
+          "info",
+          "Couldn't bring the prebuild's clone up to date (#{inspect_short(other)}); cloning afresh\n"
+        )
+
+        with :ok <- remove_in(ctx, paths.workspace, Path.basename(paths.clone)),
+             do: clone(paths, p, ctx)
+    end
+  end
+
+  # A git directory of the environment's own, which the fetch then fills
+  # from the remote: nothing the prebuild's code could have left in the
+  # old one (replacement refs, alternate object stores, grafts, hooks,
+  # config) is used, whatever it was.
+  defp new_git_dir(clone, git_dir, helper, p, ctx) do
+    with {:ok, _} <- File.rm_rf(git_dir),
+         {:ok, _} <- git_in(clone, helper, p, ["init", "--quiet"], ctx),
+         :ok <- File.mkdir_p(git_dir) do
+      reset_git_dir(git_dir, p)
+    end
+  end
+
+  defp reset_git_dir(git_dir, p) do
+    config = """
+    [core]
+    \trepositoryformatversion = 0
+    \tfilemode = true
+    \tbare = false
+    \tlogallrefupdates = true
+    [remote "origin"]
+    \turl = #{p.clone_url}
+    \tfetch = +refs/heads/*:refs/remotes/origin/*
+    [branch "#{p.branch}"]
+    \tremote = origin
+    \tmerge = refs/heads/#{p.branch}
+    """
+
+    hooks = Path.join(git_dir, "hooks")
+
+    with :ok <- SafeFS.write_atomic(Path.join(git_dir, "config"), config, 0o644),
+         {:ok, _} <- File.rm_rf(hooks) do
+      File.mkdir(hooks)
+    end
+  end
+
+  defp git_in(dir, helper, p, args, ctx) do
+    opts =
+      ["-c", "credential.helper=", "-c", "credential.helper=" <> helper] ++
+        ["-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false"] ++
+        ["-c", "protocol.allow=never", "-c", "protocol.https.allow=always"] ++
+        http_protocol(p.clone_url)
+
+    case cmd(ctx, ctx.config.git, opts ++ ["-C", dir | args], env: %{}, label: "git #{hd(args)}") do
+      {:ok, out} -> {:ok, out}
+      {:error, output} -> {:error, "git #{hd(args)} failed: #{last_lines(output)}"}
+    end
+  end
+
+  defp inspect_short({:error, message}) when is_binary(message), do: message
+  defp inspect_short(other), do: inspect(other)
+
+  # BuildKit keeps a build's base images in its cache without tagging
+  # them, so an environment's own build from a prebuild would ask the
+  # registry about each again. Pulled by tag, they're in the image store
+  # and the build takes them as they are. Best effort: a prebuild without
+  # them still works.
+  defp keep_base_images(paths, prepared, p, ctx) do
+    case base_images(prepared.builds, paths.clone) do
+      [] ->
+        :ok
+
+      refs ->
+        ctx.log.("info", "Keeping the base images: #{Enum.join(refs, ", ")}\n")
+
+        with_docker_config(paths, Map.get(p, :registry_auth), fn docker_config ->
+          env = if docker_config, do: %{"DOCKER_CONFIG" => docker_config}, else: %{}
+          Enum.each(refs, &pull_image(&1, env, ctx))
+        end)
+    end
+  end
+
+  defp pull_image(ref, env, ctx) do
+    case cmd(ctx, ctx.config.docker, ["pull", "--quiet", ref], env: env, label: "docker pull") do
+      {:ok, _} -> :ok
+      {:error, output} -> ctx.log.("info", "Couldn't pull #{ref}: #{last_lines(output)}\n")
+    end
+  end
+
+  # What compose builds from: a Dockerfile, or one inline.
+  defp builds(compose) do
+    for {_service, %{"build" => %{} = build}} <- Map.get(compose, "services", %{}),
+        source = build_source(build),
+        uniq: true,
+        do: source
+  end
+
+  defp build_source(%{"dockerfile_inline" => inline}) when is_binary(inline),
+    do: {:inline, inline}
+
+  defp build_source(%{"context" => context} = build) when is_binary(context),
+    do: {:file, Path.expand(Map.get(build, "dockerfile", "Dockerfile"), context)}
+
+  defp build_source(_build), do: nil
+
+  # Inside the clone and no bigger than a Dockerfile, read without
+  # following a symlink out of it: the repo names the path.
+  defp read_dockerfile(clone, path) do
+    rel = Path.relative_to(path, clone)
+
+    with :relative <- Path.type(rel),
+         {:ok, content} <- SafeFS.read(clone, rel, max_bytes: 1_000_000) do
+      [content]
+    else
+      _ -> []
+    end
+  end
+
+  # FROM as Dockerfiles write it: a lowercase "from" is more likely a line
+  # of Python in a heredoc than an instruction.
+  @from ~r/^\s*FROM\s+(?:--\S+\s+)*(\S+)(?:\s+(?:AS|as)\s+(\S+))?/m
+
+  # The images a Dockerfile's stages start from, less earlier stages,
+  # scratch, and any named by a build argument.
+  defp base_images(builds, clone) do
+    builds
+    |> Enum.flat_map(fn
+      {:inline, content} -> [content]
+      {:file, path} -> read_dockerfile(clone, path)
+    end)
+    |> Enum.flat_map(fn content ->
+      froms = Regex.scan(@from, content)
+      stages = for [_, _, stage] <- froms, do: String.downcase(stage)
+
+      for [_, ref | _] <- froms,
+          ref != "scratch",
+          not String.contains?(ref, "$"),
+          String.downcase(ref) not in stages,
+          do: ref
+    end)
+    |> Enum.uniq()
   end
 
   # The control plane deletes exactly this device when the environment is
@@ -176,7 +398,8 @@ defmodule ForemanAgent.Env do
     end
   end
 
-  defp check_clone_url(url, config) do
+  @doc false
+  def check_clone_url(url, config) do
     uri = URI.parse(url)
     host = uri.host && String.downcase(uri.host)
     port_host = if uri.port in [80, 443, nil], do: host, else: "#{host}:#{uri.port}"
@@ -450,8 +673,9 @@ defmodule ForemanAgent.Env do
 
   # -- prepare -------------------------------------------------------------
 
-  # Every profile is checked: the CLI starts the services runServices
-  # names, and compose starts a profiled service it's asked for by name.
+  # Every profile: the CLI starts the services runServices names, and
+  # compose starts a profiled service it's asked for by name, so the
+  # overlay covers them all.
   @check_args [profiles: :all]
 
   defp prepare(paths, spec, compose_env, ctx) do
@@ -462,36 +686,27 @@ defmodule ForemanAgent.Env do
          {:ok, features} <- user_features(spec, config, ctx),
          {:ok, rel_files, service} <- compose_spec(config),
          {:ok, compose_files} <- resolve_compose_files(paths.clone, config_dir, rel_files),
-         {:ok, scan_warnings} <- scan_compose(paths, compose_files, spec, ctx.config),
          env = compose_env(ctx, spec.slug, compose_env),
          {:ok, base} <- files_config.(compose_files, env),
          services = base |> Map.get("services", %{}) |> Map.keys() |> Enum.sort(),
          :ok <- check_service(service, services),
          :ok <- check_run_services(config["runServices"], services),
          overlay_path = Path.join(paths.meta, "overlay.yml"),
-         :ok <- write_overlay(overlay_path, paths, spec, services, service, base, ctx),
-         {:ok, merged} <- files_config.(compose_files ++ [overlay_path], env),
-         {:ok, docker} <- docker_info(ctx),
-         {:ok, policy_warnings} <- check_policy(merged, config, paths, spec, ctx.config, docker),
-         {:ok, docker_warnings} <- check_docker(docker, paths, spec, ctx.config),
-         warnings = Enum.uniq(scan_warnings ++ policy_warnings ++ docker_warnings),
+         :ok <- write_overlay(overlay_path, paths, spec, services, service, ctx),
          override_path = Path.join(paths.meta, "devcontainer.json"),
          :ok <- write_override(override_path, config, compose_files, overlay_path),
          :ok <- install_feature(paths.clone, config_dir, ctx) do
-      Enum.each(warnings, &ctx.log.("info", "Warning: #{&1}\n"))
-
       {:ok,
        %{
          config: config,
          compose_files: compose_files,
+         builds: builds(base),
          overlay_path: overlay_path,
          override_path: override_path,
          services: services,
          devcontainer_service: service,
          features: features,
-         gpus: Policy.requests_gpus?(merged),
-         networks: network_names_in(merged),
-         warnings: warnings
+         warnings: []
        }}
     end
   end
@@ -643,13 +858,12 @@ defmodule ForemanAgent.Env do
     end
   end
 
-  defp write_overlay(path, paths, spec, services, service, base, ctx) do
+  defp write_overlay(path, paths, spec, services, service, ctx) do
     yaml =
       Overlay.compose(%{
         env_id: spec.env_id,
         slug: spec.slug,
         services: services,
-        networks: own_networks(base),
         devcontainer_service: service,
         secrets_dir: paths.secrets,
         tailscale: spec.tailscale,
@@ -660,83 +874,12 @@ defmodule ForemanAgent.Env do
     SafeFS.write_atomic(path, yaml, 0o600)
   end
 
-  # The Docker names of the networks compose will use.
-  defp network_names_in(merged) do
-    for {_key, %{"name" => name}} <- Map.get(merged, "networks") || %{},
-        is_binary(name),
-        do: name
-  end
-
-  # The networks compose creates for the project, with their Docker
-  # names. An external one already exists, so its bridge isn't compose's
-  # to name (the policy refuses it).
-  defp own_networks(base) do
-    for {key, spec} <- Enum.sort(Map.get(base, "networks") || %{}),
-        is_map(spec),
-        spec["external"] not in [true, "true"],
-        do: {key, spec["name"] || "#{base["name"]}_#{key}"}
-  end
-
   defp write_override(path, config, compose_files, overlay_path) do
     override =
       Overlay.override_config(config, compose_files: compose_files, overlay_path: overlay_path)
 
     SafeFS.write_atomic(path, JSON.encode!(override), 0o600)
   end
-
-  # Before compose reads anything: compose reads env files, label files
-  # and the files it includes or extends while it parses, folds some of
-  # them in where the path no longer shows, and quotes any it can't parse
-  # in its error. See ForemanAgent.Env.ComposeScan.
-  defp scan_compose(paths, compose_files, spec, config) do
-    with {:ok, facts} <- ComposeScan.scan(paths.clone, compose_files) do
-      case Policy.check_sources(facts, policy_ctx(paths, spec, config)) do
-        {:ok, warnings} -> {:ok, warnings}
-        {:error, refused} -> {:error, refusal(refused)}
-      end
-    end
-  end
-
-  # A service's runtime is checked against the runtimes Docker has.
-  defp check_policy(merged, devcontainer, paths, spec, config, docker) do
-    ctx = Map.put(policy_ctx(paths, spec, config), :runtimes, docker["Runtimes"] || %{})
-
-    case Policy.check(merged, devcontainer, ctx) do
-      {:ok, warnings} -> {:ok, warnings}
-      {:error, refused} -> {:error, refusal(refused)}
-    end
-  end
-
-  # The box's Docker can hand out GPUs without a reservation; see
-  # Policy.check_docker/2. Without /info there's no telling, so it's
-  # refused.
-  defp docker_info(ctx) do
-    case ctx.docker.info() do
-      {:ok, info} when is_map(info) -> {:ok, info}
-      other -> {:error, "couldn't check Docker's default runtime on this box: #{inspect(other)}"}
-    end
-  end
-
-  defp check_docker(info, paths, spec, config) do
-    case Policy.check_docker(info, policy_ctx(paths, spec, config)) do
-      {:ok, warnings} -> {:ok, warnings}
-      {:error, refused} -> {:error, refusal(refused)}
-    end
-  end
-
-  defp policy_ctx(paths, spec, config) do
-    %{
-      project: spec.slug,
-      workspace_root: paths.workspace,
-      secrets_dir: paths.secrets,
-      protected: ForemanAgent.Config.protected_paths(config),
-      rules: config.policy_rules,
-      user_features: spec |> Map.get(:features, %{}) |> Map.keys()
-    }
-  end
-
-  defp refusal(refused),
-    do: "refused by this box's policy:\n" <> Enum.map_join(refused, "\n", &("- " <> &1))
 
   # The CLI resolves local features against the repo's devcontainer
   # folder, so the feature is copied in there (and excluded from git).
@@ -851,222 +994,10 @@ defmodule ForemanAgent.Env do
         "--oci-auth-hardening"
       ]
 
-      with {:ok, warnings} <- check_resolved(config_args, env, paths, spec, ctx),
-           :ok <- move_to_foreman_bridges(ctx, spec.slug, prepared.networks) do
-        warnings = Enum.uniq(prepared.warnings ++ warnings)
-        result = up(paths, spec, %{prepared | warnings: warnings}, config_args, env, ctx, opts)
-
-        # Even after a failed up: a lifecycle command can fail it with the
-        # containers already running.
-        with {:ok, result} <- checked(result, check_foreman_bridges(ctx, spec.slug)) do
-          {:ok, put_feature_version(result, ctx, spec.env_id, prepared.devcontainer_service)}
-        end
+      with {:ok, result} <- up(paths, spec, prepared, config_args, env, ctx, opts) do
+        {:ok, put_feature_version(result, ctx, spec.env_id, prepared.devcontainer_service)}
       end
     end)
-  end
-
-  defp checked(result, :ok), do: result
-  defp checked({:error, message}, {:error, check}), do: {:error, "#{message}\n\n#{check}"}
-  defp checked(_result, error), do: error
-
-  # The box's firewall knows environment traffic by its fm- bridge (see
-  # Overlay), and nothing moves an existing network onto one by itself:
-  # the CLI leaves a running environment alone, and compose reuses a
-  # network it didn't label with a config hash, or didn't create. A
-  # network compose labelled is recreated by its next up once the project
-  # is stopped, containers kept. Anything else would mean taking the
-  # containers down, and what they hold (an anonymous volume's data, say)
-  # with them, so it's refused before anything starts.
-  defp move_to_foreman_bridges(ctx, slug, names) do
-    with {:ok, stale} <- stale_networks(ctx, names) do
-      {recreated, kept} =
-        Enum.split_with(stale, &(compose_label(&1) == slug and config_hash?(&1)))
-
-      cond do
-        kept != [] ->
-          {:error,
-           "the Docker network #{network_names(kept)} isn't on a Foreman bridge, and compose would keep using it as it is, out of the box firewall's sight; destroy the environment and create it again, or remove the network on the box"}
-
-        recreated != [] ->
-          ctx.log.("info", "Moving #{network_names(recreated)} onto Foreman bridges\n")
-          with {:ok, _} <- compose(ctx, slug, ["stop"]), do: :ok
-
-        true ->
-          :ok
-      end
-    end
-  end
-
-  # The existing networks the project's compose config names, matched by
-  # exact name (Docker's name filter matches substrings).
-  defp stale_networks(_ctx, []), do: {:ok, []}
-
-  defp stale_networks(ctx, names) do
-    with {:ok, networks} <- list_networks(ctx, %{"name" => names}) do
-      {:ok, Enum.filter(networks, &(&1["Name"] in names and not foreman_bridge?(&1)))}
-    end
-  end
-
-  # What the containers really got, whatever compose was asked for.
-  defp check_foreman_bridges(ctx, slug) do
-    with {:ok, containers} <- list_project_containers(ctx, slug),
-         {:ok, stale} <- stale_attachments(ctx, containers) do
-      case stale do
-        [] ->
-          :ok
-
-        _ ->
-          stop_unsafe(
-            ctx,
-            slug,
-            "#{Enum.join(stale, ", ")} isn't on a Foreman bridge, so the box's firewall can't keep it off the tailnet"
-          )
-      end
-    else
-      {:error, message} -> stop_unsafe(ctx, slug, message)
-    end
-  end
-
-  defp stop_unsafe(ctx, slug, why) do
-    case compose(ctx, slug, ["stop"]) do
-      {:ok, _} -> {:error, "#{why}; the environment is stopped"}
-      {:error, stop} -> {:error, "#{why}, and Foreman couldn't stop the environment: #{stop}"}
-    end
-  end
-
-  defp stale_attachments(ctx, containers) do
-    attachments =
-      for c <- containers,
-          {_, %{"NetworkID" => id}} <- get_in(c, ["NetworkSettings", "Networks"]) || %{},
-          do: {container_name(c), id}
-
-    case Enum.uniq(for {_, id} <- attachments, do: id) do
-      [] ->
-        {:ok, []}
-
-      ids ->
-        with {:ok, networks} <- list_networks(ctx, %{"id" => ids}) do
-          ok =
-            for n <- networks,
-                n["Driver"] == "null" or foreman_bridge?(n),
-                into: MapSet.new(),
-                do: n["Id"]
-
-          {:ok, for({name, id} <- attachments, id not in ok, uniq: true, do: name)}
-        end
-    end
-  end
-
-  defp container_name(%{"Names" => [name | _]}), do: String.trim_leading(name, "/")
-  defp container_name(c), do: c["Id"]
-
-  defp list_project_containers(ctx, slug) do
-    case ctx.docker.list_containers(["com.docker.compose.project=#{slug}"]) do
-      {:ok, containers} ->
-        {:ok, containers}
-
-      {:error, reason} ->
-        {:error, "couldn't list this environment's containers: #{inspect(reason)}"}
-    end
-  end
-
-  defp list_networks(ctx, filters) do
-    case ctx.docker.list_networks(filters) do
-      {:ok, networks} -> {:ok, networks}
-      {:error, reason} -> {:error, "couldn't list Docker networks: #{inspect(reason)}"}
-    end
-  end
-
-  # The option alone proves nothing: other drivers keep it and ignore it.
-  defp foreman_bridge?(%{"Driver" => "bridge", "Options" => options}) do
-    case options do
-      %{"com.docker.network.bridge.name" => name} when is_binary(name) ->
-        String.starts_with?(name, Overlay.bridge_prefix())
-
-      _ ->
-        false
-    end
-  end
-
-  defp foreman_bridge?(_network), do: false
-
-  defp compose_label(network), do: (network["Labels"] || %{})["com.docker.compose.project"]
-
-  defp config_hash?(network),
-    do: (network["Labels"] || %{})["com.docker.compose.config-hash"] not in [nil, ""]
-
-  defp network_names(networks), do: Enum.map_join(networks, ", ", & &1["Name"])
-
-  # Features can ask for privileges in their own metadata, which only the
-  # CLI resolves. Ask it what the devcontainer will get before running it.
-  #
-  # Given no id label, read-configuration looks for a container by the
-  # CLI's default labels, which a repo can give a service, and then takes
-  # the merged config from that container instead of resolving features.
-  # A label no container has makes it resolve them from the config every
-  # time, and the result has to show it did.
-  defp check_resolved(config_args, env, paths, spec, ctx) do
-    nonce = 18 |> :crypto.strong_rand_bytes() |> Base.url_encode64(padding: false)
-
-    args =
-      [
-        "read-configuration",
-        "--include-merged-configuration",
-        "--id-label",
-        "foreman.check=#{nonce}"
-      ] ++
-        config_args
-
-    with {:ok, %{status: status, output: output}} <-
-           run_tool(
-             ctx,
-             ctx.config.devcontainer,
-             args,
-             [
-               env: env,
-               keep: 1_048_576,
-               timeout: @command_timeout,
-               label: "devcontainer read-configuration"
-             ],
-             fn _ -> nil end
-           ) do
-      resolved =
-        output
-        |> String.split("\n", trim: true)
-        |> Enum.find_value(fn line ->
-          case JSON.decode(line) do
-            {:ok, %{"mergedConfiguration" => _} = resolved} -> resolved
-            _ -> nil
-          end
-        end)
-
-      cond do
-        status != 0 or is_nil(resolved) ->
-          {:error, "devcontainer read-configuration failed: #{last_lines(output)}"}
-
-        not resolved_feature?(resolved, @feature_ref) ->
-          {:error,
-           "couldn't check what the devcontainer's features ask for: " <>
-             "the devcontainer CLI didn't resolve them"}
-
-        true ->
-          case Policy.check_resolved(resolved, policy_ctx(paths, spec, ctx.config)) do
-            {:ok, warnings} ->
-              Enum.each(warnings, &ctx.log.("info", "Warning: #{&1}\n"))
-              {:ok, warnings}
-
-            {:error, refused} ->
-              {:error, refusal(refused)}
-          end
-      end
-    end
-  end
-
-  defp resolved_feature?(resolved, ref) do
-    sets = get_in(resolved, ["featuresConfiguration", "featureSets"])
-
-    is_list(sets) and
-      Enum.any?(sets, &(get_in(&1, ["sourceInformation", "userFeatureId"]) == ref))
   end
 
   defp up(paths, spec, prepared, config_args, env, ctx, opts) do
@@ -1076,8 +1007,7 @@ defmodule ForemanAgent.Env do
           "--id-label",
           "foreman.env_id=#{spec.env_id}",
           "--skip-post-attach",
-          # hostRequirements.gpu (the repo's or an image's) would have the
-          # CLI reserve GPUs after the policy has checked compose.
+          # Environment VMs have no GPUs to hand out.
           "--gpu-availability",
           "none"
         ] ++
@@ -1115,17 +1045,15 @@ defmodule ForemanAgent.Env do
          }}
 
       {_, %{"message" => message} = outcome} ->
-        {:error,
-         "devcontainer up failed: #{gpu_hint(output, prepared)}#{message}#{describe(outcome)}"}
+        {:error, "devcontainer up failed: #{message}#{describe(outcome)}"}
 
       {status, nil} ->
         {:error,
-         "#{gpu_hint(output, prepared)}#{exited("devcontainer up", status)} without reporting a result. " <>
+         "#{exited("devcontainer up", status)} without reporting a result. " <>
            output_below(last_lines(output, &devcontainer_log/1))}
 
       {_, _} ->
-        {:error,
-         "devcontainer up failed: #{gpu_hint(output, prepared)}#{last_lines(output, &devcontainer_log/1)}"}
+        {:error, "devcontainer up failed: #{last_lines(output, &devcontainer_log/1)}"}
     end
   end
 
@@ -1149,18 +1077,6 @@ defmodule ForemanAgent.Env do
 
   defp output_below(""), do: "It printed nothing."
   defp output_below(tail), do: "Its last output is below.\n" <> tail
-
-  # Docker's error when no device driver it knows takes the request,
-  # which for an NVIDIA GPU means the toolkit's hook isn't installed.
-  defp gpu_hint(output, %{gpus: true}) do
-    if output =~ "could not select device driver",
-      do:
-        "Docker has no driver for this environment's GPUs; the box needs the NVIDIA driver and " <>
-          "the NVIDIA Container Toolkit (nvidia-container-toolkit). ",
-      else: ""
-  end
-
-  defp gpu_hint(_output, _prepared), do: ""
 
   # The CLI writes devcontainer-lock.json next to the config. Keep that
   # behaviour for repos that commit one; otherwise it'd leave an untracked
@@ -1251,14 +1167,18 @@ defmodule ForemanAgent.Env do
   defp with_docker_config(_paths, nil, fun), do: fun.(nil)
   defp with_docker_config(_paths, [], fun), do: fun.(nil)
 
+  # On the secrets' tmpfs, never the environment's disk: that can become a
+  # prebuild other people's environments start from, and a deleted file's
+  # blocks stay on it.
   defp with_docker_config(paths, auths, fun) do
     dir =
       Path.join(
-        paths.meta,
-        "docker-" <> (9 |> :crypto.strong_rand_bytes() |> Base.url_encode64(padding: false))
+        Path.dirname(paths.secrets),
+        ".docker-" <> (9 |> :crypto.strong_rand_bytes() |> Base.url_encode64(padding: false))
       )
 
-    File.mkdir_p!(dir)
+    File.mkdir_p!(Path.dirname(dir))
+    File.mkdir!(dir)
     File.chmod!(dir, 0o700)
 
     config = %{
@@ -1271,11 +1191,44 @@ defmodule ForemanAgent.Env do
     :ok = SafeFS.write_atomic(Path.join(dir, "config.json"), JSON.encode!(config), 0o600)
     link_cli_plugins(dir)
 
+    # Cancelling kills this process, so `after` doesn't run then; this
+    # cleans up when it dies. The token is only meant to be on disk for
+    # the build.
+    owner = self()
+
+    janitor =
+      spawn(fn ->
+        ref = Process.monitor(owner)
+
+        receive do
+          {:DOWN, ^ref, :process, _, _} -> File.rm_rf(dir)
+        end
+      end)
+
     try do
       fun.(dir)
     after
       File.rm_rf(dir)
+      Process.exit(janitor, :kill)
     end
+  end
+
+  @doc """
+  Removes registry credentials an agent that died mid-build left in any
+  environment's directory (see `with_docker_config/3`). Runs at start,
+  before any operation can be using one.
+  """
+  def sweep_docker_configs(config) do
+    # Where earlier agents kept them, on the environment's disk.
+    config.envs_root
+    |> Path.join("*/meta/docker-*")
+    |> Path.wildcard(match_dot: false)
+    |> Enum.each(&File.rm_rf/1)
+
+    config.secrets_root
+    |> Path.join(".docker-*")
+    |> Path.wildcard(match_dot: true)
+    |> Enum.each(&File.rm_rf/1)
   end
 
   defp link_cli_plugins(dir) do
@@ -1318,7 +1271,10 @@ defmodule ForemanAgent.Env do
   defp restart(%{mode: "all"} = p, ctx) do
     with {:ok, _} <- stop(p, ctx),
          {:ok, result} <- start(p, ctx) do
-      {:ok, %{"restarted" => "all", "feature_version" => result["feature_version"]}}
+      {:ok,
+       result
+       |> Map.take(["connect"])
+       |> Map.merge(%{"restarted" => "all", "feature_version" => result["feature_version"]})}
     end
   end
 
@@ -1343,28 +1299,34 @@ defmodule ForemanAgent.Env do
 
     with {:ok, outdated} <- feature_rebuild(ctx, p.env_id, prepared, []),
          rebuild = service in affected or outdated,
-         :ok <- recreate_checked(ctx, spec.slug, files, env, sidecars, prepared),
+         :ok <- recreate_sidecars(ctx, paths, spec.slug, files, env, sidecars, p),
          {:ok, _} <- compose(ctx, spec.slug, ["stop", service]),
          # Recreating the devcontainer itself means the CLI has to do it,
          # since it owns the image and labels.
          {:ok, result} <- devcontainer_up(paths, spec, prepared, p, ctx, rebuild: rebuild) do
       {:ok,
-       %{"restarted" => sidecars ++ [service], "feature_version" => result["feature_version"]}}
+       result
+       |> put_connect_hooks(ctx)
+       |> Map.take(["connect"])
+       |> Map.merge(%{
+         "restarted" => sidecars ++ [service],
+         "feature_version" => result["feature_version"]
+       })}
     end
   end
 
-  # Compose recreates sidecars itself, so they get the same checks as
-  # the CLI's up (see devcontainer_up).
-  defp recreate_checked(_ctx, _slug, _files, _env, [], _prepared), do: :ok
-
-  defp recreate_checked(ctx, slug, files, env, services, prepared) do
-    with :ok <- move_to_foreman_bridges(ctx, slug, prepared.networks) do
-      result = recreate(ctx, slug, files, env, services, prepared)
-      checked(result, check_foreman_bridges(ctx, slug))
-    end
+  # The recreate pulls a sidecar's image if the box doesn't have it, so it
+  # gets the registry credentials the CLI's up does.
+  defp recreate_sidecars(ctx, paths, slug, files, env, sidecars, p) do
+    with_docker_config(paths, Map.get(p, :registry_auth), fn docker_config ->
+      env = if docker_config, do: Map.put(env, "DOCKER_CONFIG", docker_config), else: env
+      recreate(ctx, slug, files, env, sidecars)
+    end)
   end
 
-  defp recreate(ctx, slug, files, env, services, prepared) do
+  defp recreate(_ctx, _slug, _files, _env, []), do: :ok
+
+  defp recreate(ctx, slug, files, env, services) do
     args =
       ["compose", "-p", slug] ++
         Enum.flat_map(files, &["-f", &1]) ++
@@ -1375,8 +1337,7 @@ defmodule ForemanAgent.Env do
         :ok
 
       {:error, output} ->
-        {:error,
-         "recreating #{Enum.join(services, ", ")} failed: #{gpu_hint(output, prepared)}#{last_lines(output)}"}
+        {:error, "recreating #{Enum.join(services, ", ")} failed: #{last_lines(output)}"}
     end
   end
 
@@ -1551,6 +1512,16 @@ defmodule ForemanAgent.Env do
     end
   end
 
+  defp running_container(ctx, env_id, service) do
+    case devcontainer_container(ctx, env_id, service) do
+      {:error, "the environment isn't running" <> _} ->
+        {:error, "the environment isn't running; start it first"}
+
+      other ->
+        other
+    end
+  end
+
   defp devcontainer_container(ctx, env_id, service) do
     case ctx.docker.list_containers(["foreman.env_id=#{env_id}"]) do
       {:ok, containers} ->
@@ -1566,6 +1537,146 @@ defmodule ForemanAgent.Env do
       {:error, reason} ->
         {:error, "couldn't list containers: #{inspect(reason)}"}
     end
+  end
+
+  # -- connect hooks -------------------------------------------------------
+
+  # The executables in the hooks directory, by name. Missing is none.
+  @list_hooks ~s(cd #{Connect.dir()} 2>/dev/null || exit 0
+for f in *; do [ -f "$f" ] && [ -x "$f" ] && printf '%s\\n' "$f"; done
+exit 0)
+
+  # Runs a hook under `timeout`, or not at all: stopping docker exec
+  # doesn't stop what it started in the container.
+  @with_timeout ~S"""
+  t=$1; shift
+  command -v timeout >/dev/null 2>&1 || {
+    echo '{"error":"the container has no timeout command (coreutils or busybox)"}'
+    exit 125
+  }
+  exec timeout -k 5 "$t" "$@"
+  """
+
+  @doc false
+  def hook_wrapper, do: @with_timeout
+
+  # The hooks the devcontainer has (see `ForemanProtocol.Connect`), as
+  # "connect" in every up's result, so a result without it is from an older
+  # agent, which can't run them. A hook that doesn't describe itself is left
+  # out and logged; a container that can't be asked has none.
+  defp put_connect_hooks(%{"container_id" => container, "remote_user" => user} = result, ctx)
+       when is_binary(container) and is_binary(user) do
+    list = &container_exec(ctx, result, &1, :timer.seconds(@describe_seconds))
+    exec = &run_hook(ctx, result, &1, @describe_seconds)
+
+    case list.(["sh", "-c", @list_hooks]) do
+      {:ok, output} ->
+        names = output |> String.split("\n", trim: true) |> Enum.filter(&Connect.name?/1)
+
+        hooks =
+          names
+          |> Enum.sort()
+          |> Enum.take(Connect.max_hooks())
+          |> Enum.flat_map(&describe_hook(&1, exec, ctx))
+
+        Map.put(result, "connect", hooks)
+
+      {:error, _} ->
+        Map.put(result, "connect", [])
+    end
+  end
+
+  defp put_connect_hooks(result, _ctx), do: Map.put(result, "connect", [])
+
+  defp describe_hook(name, exec, ctx) do
+    with {:ok, output} <- exec.([hook_path(name), "describe"]) |> describe_failed(name),
+         {:ok, describe} <- last_json(output),
+         {:ok, hook} <- Connect.cast_hook(name, describe) do
+      [hook]
+    else
+      {:error, reason} ->
+        ctx.log.("info", "connect hook #{name}: #{reason}\n")
+        []
+    end
+  end
+
+  # Runs a hook's action. What it prints is usually a secret, so none of it
+  # goes to the operation's log or its error: a hook that fails can explain
+  # itself with {"error": "..."} as its last line, and that alone is shown.
+  defp connect(p, ctx) do
+    with {:ok, spec} <- load_spec(ctx.config, p.env_id),
+         {:ok, container} <- running_container(ctx, p.env_id, spec.devcontainer_service),
+         where = %{
+           "container_id" => container,
+           "remote_user" => spec.remote_user,
+           "remote_workspace_folder" => spec.remote_workspace_folder
+         },
+         {:ok, output} <-
+           run_hook(ctx, where, [hook_path(p.hook), "run", p.action], @connect_seconds)
+           |> run_failed(p.hook),
+         {:ok, offer} <- connect_result(output, p.hook) do
+      {:ok, %{"offer" => offer}}
+    end
+  end
+
+  defp connect_result(output, hook) do
+    with {:ok, json} <- last_json(output),
+         {:ok, offer} <- Connect.cast_offer(json) do
+      {:ok, offer}
+    else
+      {:error, reason} -> {:error, "connect hook #{hook} didn't print a result: #{reason}"}
+    end
+  end
+
+  defp hook_path(name), do: Path.join(Connect.dir(), name)
+
+  # A describe is a listing, so its output can say what went wrong.
+  defp describe_failed({:ok, output}, _name), do: {:ok, output}
+  defp describe_failed({:error, output}, _name), do: {:error, "failed: #{last_lines(output)}"}
+
+  defp run_failed({:ok, output}, _name), do: {:ok, output}
+
+  defp run_failed({:error, output}, name) do
+    with {:ok, json} <- last_json(output),
+         {:ok, error} <- Connect.cast_error(json) do
+      {:error, "connect hook #{name} failed: #{error}"}
+    else
+      _ -> {:error, "connect hook #{name} failed"}
+    end
+  end
+
+  defp run_hook(ctx, where, args, seconds) do
+    exec = ["sh", "-c", @with_timeout, "sh", Integer.to_string(seconds) | args]
+    container_exec(ctx, where, exec, :timer.seconds(seconds) + @hook_grace)
+  end
+
+  defp last_json(output) do
+    line = output |> String.split("\n") |> Enum.map(&String.trim/1) |> Enum.reject(&(&1 == ""))
+
+    case List.last(line) do
+      nil ->
+        {:error, "no output"}
+
+      line ->
+        case JSON.decode(line) do
+          {:ok, %{} = json} -> {:ok, json}
+          _ -> {:error, "its last line isn't a JSON object"}
+        end
+    end
+  end
+
+  # As the devcontainer's remote user, in the workspace, like a shell there.
+  defp container_exec(ctx, where, args, timeout) do
+    exec =
+      ["exec", "-u", where["remote_user"]] ++
+        ["-w", where["remote_workspace_folder"] || "/", where["container_id"]] ++ args
+
+    cmd(ctx, ctx.config.docker, exec,
+      env: %{},
+      quiet: true,
+      timeout: timeout,
+      label: "connect hook"
+    )
   end
 
   # -- helpers -------------------------------------------------------------

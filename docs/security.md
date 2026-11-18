@@ -8,15 +8,16 @@ gaps" section is the place to start.
 
 | Asset | Where it lives |
 |---|---|
-| Environment secrets (owner, repo, user, environment) | Control plane DB, encrypted (AES-256-GCM, Cloak); on boxes in `/run/foreman/envs/<id>/` (tmpfs, 0600) |
+| Environment secrets (owner, repo, user, environment) | Control plane DB, encrypted (AES-256-GCM, Cloak); on boxes in `/run/foreman/envs/<id>/` (tmpfs, 0600, agent user), and the same path in the environment's VM |
 | GitHub user access and refresh tokens | Control plane DB, encrypted |
-| Scoped GitHub tokens | Boxes, `/run/foreman/envs/<id>/github-token` |
+| Scoped GitHub tokens | With the secrets, as `github-token` |
 | GitHub App private key and client secret | Control plane DB (encrypted) or its environment |
 | Tailscale OAuth client secret | Control plane environment |
-| Registry (GHCR) tokens | Control plane DB, encrypted; on a box only during a build |
+| Registry (GHCR) tokens | Control plane DB, encrypted; in an environment's VM only during a build |
 | `FOREMAN_ENCRYPTION_KEY`, `SECRET_KEY_BASE` | Control plane environment |
 | Agent private keys | Each box, `/var/lib/foreman-agent/identity.json` (0600, agent user) |
-| The boxes themselves | The agent user is in the `docker` group, which is root |
+| Environments' work (the clone, Docker volumes, Tailscale state) | Each VM's data disk, `/srv/foreman/vms/<id>/data.raw` on the box (agent user) |
+| The boxes themselves | The agent runs unprivileged; its root actions are the VM helper's fixed vocabulary and the reboot unit |
 
 ## Trust boundaries
 
@@ -44,7 +45,16 @@ gaps" section is the place to start.
   takes a renamed user's old login doesn't get their account.
   Sign-in attempts are rate limited per client. Behind a loopback proxy
   (`tailscale serve`) the client is the last `X-Forwarded-For` entry;
-  that header is ignored from any other peer.
+  that header is ignored from any other peer, except those in
+  `FOREMAN_TRUSTED_PROXIES`. The image trusts its default gateway, which
+  is where connections to the port Docker publishes on the host's
+  loopback come from; without that, every client behind the proxy
+  shared one limit.
+- The People page identifies logins listed in `FOREMAN_ADMINS`. Remove the
+  login from configuration to revoke that grant. A separate promotion on
+  the People page survives a change to the list. On upgrade, review admins
+  removed from configuration before this release: older records do not
+  identify how those users became admins.
 - Sessions: a random 32-byte token in an encrypted, signed, `HttpOnly`,
   `SameSite=Lax` cookie (`Secure` in production); only its SHA-256 is
   stored, so a database leak doesn't leak sessions. Sessions last 30
@@ -85,7 +95,10 @@ gaps" section is the place to start.
   as their use: slugs are DNS labels, env ids UUIDs, branch names can't
   start with `-`, clone URLs can't carry credentials, secret file names
   come from an allowlist, compose variables can't override `PATH`,
-  `DOCKER_HOST`, `LD_PRELOAD` and the like.
+  `DOCKER_HOST` and the like, or set anything that loads code into the
+  agent's own tools: any `LD_` variable, `GCONV_PATH`, `NODE_PATH`, git
+  config through the environment (`GIT_CONFIG_*`) and git's helper
+  commands and trace files.
 - An agent may only report on its own box's operations and
   environments; anything else is refused and logged.
 - Agent self-update: the release signature (ed25519 over version, target
@@ -94,6 +107,128 @@ gaps" section is the place to start.
   that escape the release directory are refused. The signing key lives
   only in CI, so a compromised control plane can't push agent code. A
   failing new release is rolled back by a systemd `OnFailure` unit.
+  The release carries the devcontainer CLI and the Node it runs on
+  (Node's official build, pinned by digest; the CLI from a lockfile) and
+  Cloud Hypervisor (its static build, pinned by digest), so the
+  signature covers them too, and a box runs no Node of its own. An amd64
+  release is built with the guest image's URL and SHA-256, so the
+  signature covers which image its VMs boot: the agent checks the
+  download against that digest, and unpacks only the three plain files
+  the image is made of. `FOREMAN_GUEST_URL` and `FOREMAN_GUEST_SHA256`
+  in the agent's settings (root's file) override both.
+- Rebooting a box (`box.restart`, an admin's button): the agent can't
+  reboot anything itself. It writes `/run/foreman/restart`, which a root
+  path unit the install script set up watches, and that unit reboots
+  the box. The file is in the agent's runtime directory on the box, and
+  environments run in VMs that see none of the box's files, so nothing
+  in an environment can write it. The command names the boot it's for, so a stale or replayed
+  one doesn't reboot the box again. A compromised control plane can
+  reboot boxes, which it could already disrupt in plenty of ways.
+
+### The box and its environment VMs
+
+Every environment runs in a Cloud Hypervisor VM of its own
+([architecture.md](architecture.md#environment-vms)), and the guest is
+hostile: anything running in an environment can take its VM over, root
+included. Nothing the guest says is trusted, and its limits are set on
+the box.
+
+- The agent on the box runs as the unprivileged `foreman` user, outside
+  the `docker` group. What needs root goes through `foreman-vmctl`, a
+  root helper the install script puts in `/etc/foreman-agent/vmctl`
+  (root's, so the agent can't change it), on a socket only the `foreman`
+  group can use. It reads one request line of at most 200 characters
+  (lowercase letters, digits, spaces, dots and dashes) and knows five
+  requests: `version`, `start`, `restore`, `stop` and `release`. Each
+  takes an environment id (a UUID) and sizes or versions checked against
+  fixed patterns, never a path or a command line. Every path is a fixed
+  place under `/srv/foreman` or the agent's install, a disk or kernel
+  that isn't a plain file is refused, and it builds Cloud Hypervisor's
+  command line itself.
+- Each VM runs in a systemd unit of its own, `foreman-vm-<env_id>` in
+  `foreman.slice`, as the agent's user with the `kvm` group: no
+  capabilities, `NoNewPrivileges`, a read-only system apart from the VM's
+  directory, `/dev/kvm` and `/dev/net/tun` as its only devices, and
+  limits on CPU, memory (the guest's plus 512 MB, no swap) and tasks.
+  Cloud Hypervisor puts a seccomp filter on every thread, and Landlock
+  keeps it to the VM's directory, the guest image, the agent disk and
+  its tap. A box whose kernel can't apply Landlock (Linux 6.2 or later,
+  with `landlock` in its LSM list) runs no VMs: the helper refuses them
+  and the box reports why. A guest reaches the box only through
+  the devices Cloud Hypervisor emulates (disks, network, vsock, balloon,
+  serial console): there's no shared filesystem and no device
+  passthrough.
+- The channel to the guest agent is Cloud Hypervisor's hybrid vsock, and
+  only the box connects: nothing on the box listens for a guest. The
+  box caps a guest's frames at 1 MiB and closes the connection on a
+  larger one; decoding a frame is bounded in memory and time, and the
+  box reads a guest no faster than a per-link byte-rate limit, so a
+  guest that streams costly frames can't spend the box's CPU outside its
+  VM's cgroup. Anything that isn't a valid hello,
+  event or reply is dropped, an event only reaches the operation it
+  names, and inventory and ports replies only count for the VM's own
+  environment, under the slug the box knows it by. A reclaim reply is
+  checked field by field, and nothing on the box counts on what it says. The box's agent
+  scrubs a command's secret values from the logs and errors the guest
+  sends back, as it does for its own commands. Every guest has the same
+  vsock CID and no path to another.
+- The guest agent holds nothing its environment doesn't already have:
+  its secrets, its clone and its containers. It runs as its own user in
+  the VM, in Docker's group, with `CAP_SYS_TIME` (the box sets the
+  guest's clock) and nothing else, and refuses the box's own commands
+  (updates, reboots). A root helper in the guest image reclaims the
+  guest's page cache for it: it takes a byte count from the agent's
+  group and writes four kernel files (`memory.reclaim`, and
+  `compact_memory`, `percpu_pagelist_high_fraction` and `stat_refresh`
+  in `/proc/sys/vm`), under systemd's sandbox, putting the fraction back
+  as it found it. Anything in Docker's group is root in the guest
+  already; the helper is there to keep the agent's own privileges narrow.
+- Each VM has its own copy of the guest's root disk and its own data
+  disk. The agent disk (the box's agent release) is shared and
+  read-only.
+- A guest reaches the internet and, unless the box was installed with
+  `--block-lan`, the box's LAN, and nothing else: not the box, not
+  another guest, not the tailnet as the box. See
+  [Environments and the tailnet](#environments-and-the-tailnet).
+
+### Flatcar boxes
+
+A Flatcar box ([flatcar.md](setup/flatcar.md)) sets itself up from a
+first-boot config the control plane makes for a join token:
+
+- The config holds the join token and the box's Tailscale key: a
+  single-use, pre-authorized key, tagged `tag:foreman-box`, minted once
+  per token and stored encrypted with it, and expiring with the token
+  (the box has to boot before the token expires anyway). Enrolling
+  clears it from the token. The box deletes the token, the key and the
+  config once it has enrolled, and the launcher deletes its copy. Downloads of the config are no-store, and its endpoint takes
+  the join token like enrollment does: a bad one counts against the
+  client's enroll attempts.
+- The config's extensions (Compose, Tailscale) are checked against
+  digests pinned in Foreman. Their updates come from Flatcar's sysext
+  bakery over HTTPS, checked only against the bakery's own SHA256SUMS:
+  trusting the bakery is trusting Flatcar's builds, as the OS itself
+  does.
+- The launcher, `vm.sh`, pins what it downloads: Flatcar's image and
+  kernel against the digests in its signed release files.
+- As a VM, a box is a second boundary: code that escapes an
+  environment's VM lands in the box's VM, not on the machine running it.
+  QEMU runs as the `foreman-box` user under systemd's sandboxing (no
+  capabilities, a read-only system, `/dev/kvm` and the box's directory
+  and nothing else) with QEMU's seccomp sandbox, and user-mode
+  networking without IPv6. Environment VMs run nested inside it.
+- The VM's gateway is the machine it runs on, and under QEMU's user-mode
+  network the gateway's address reaches that machine's loopback, where
+  services expect only local clients. On a Flatcar box that is a VM, the
+  install script adds a table to the box's firewall that rejects
+  environments' traffic (and image builds' on the box's own Docker) to
+  the gateway, DNS aside.
+  A box on another Linux in a VM doesn't get it: its environments may
+  use something on the gateway. The box itself still
+  reaches it, which a control plane on the same machine relies on, so
+  code that gets root in the box can too.
+- The box's own tailnet node is governed by the tailnet policy like any
+  machine's; give `tag:foreman-box` the control plane and nothing else.
 
 ### The control plane and its host
 
@@ -120,125 +255,73 @@ no Docker socket. Updating it from the Deployment page goes through
 ### Repo content and the box
 
 The repo, and anything running in an environment, is treated as hostile
-to the box it runs on (up to the limits in "Known gaps").
+to the box it runs on (up to the limits in "Known gaps"). The wall
+between them is the environment's VM ([above](#the-box-and-its-environment-vms));
+inside it, the environment can do as it likes.
 
 - Commands are run with an argv, never a shell string, and with a clean
   environment, so nothing from the agent's own environment (like its
   join token) reaches a child.
 - Clone hosts are allowlisted per box (`github.com` by default); plain
-  HTTP needs an explicit opt-in per host. The GitHub token reaches git
-  through a credential helper reading a file, never the URL or
-  `.git/config`.
-- The workspace is writable from inside the environment, so the agent
-  never follows a symlink out of it (`ForemanAgent.SafeFS`): reads
+  HTTP needs an explicit opt-in per host. The box passes its list to the
+  guest agent, which clones. The GitHub token reaches git through a
+  credential helper reading a file, never the URL or `.git/config`.
+- The workspace is writable from inside the environment, so the guest
+  agent never follows a symlink out of it (`ForemanAgent.SafeFS`): reads
   resolve symlinks only inside the clone, writes replace rather than
   write through a symlink, and directories it creates refuse symlinked
-  parents.
-- `initializeCommand` is dropped from the config the devcontainer CLI
-  sees (it would run on the box).
-- Environments run unprivileged. On every start (anything inside can
-  rewrite its own config) the agent checks the compose config with every
-  profile enabled (`docker compose --profile '*' config`),
-  `devcontainer.json`, and what the devcontainer CLI resolves from
-  features (the repo's and the user's own) and image metadata, before
-  anything runs. Compose reads some files while it parses (env files,
-  label files, the files a compose file includes or extends, and an
-  include's env files), folds them in where the path no longer shows,
-  and quotes any it can't parse in its error. So before compose runs,
-  the agent reads the repo's compose files itself (with a vendored
-  js-yaml, run by the box's Node: Erlang's yamerl resolves aliases to
-  lists and maps wrongly), follows includes and extends inside the
-  clone, and checks every file compose would read.
-  Merge keys are kept rather than merged, so every value a merge could
-  produce is checked. A path built from variables, a remote include, an
-  unknown YAML tag, or files that expand past a size budget are refused,
-  and so are `runServices` entries that aren't in the checked compose
-  files. By default it refuses all of these:
-  - privileged containers: `privileged: true`, the docker-in-docker
-    feature, any feature whose metadata asks for privileged, and
-    capabilities that amount to root on the box (`SYS_ADMIN`,
-    `SYS_MODULE`, `SYS_RAWIO`, `DAC_READ_SEARCH`, `BPF`, `PERFMON`,
-    `MAC_ADMIN`, `ALL`), whether the repo, a feature or the merged
-    configuration asks for them
-  - turning seccomp off (`seccomp=unconfined`, which the official Go and
-    Rust features ask for): its own `seccomp` rule, so a box can allow it
-    without allowing privileged containers
-  - any other `security_opt` / `securityOpt` than `no-new-privileges`
-    (under the privileged rule)
-  - the host's network, PID, IPC, UTS or cgroup namespace,
-    `userns_mode: host`, and joining another container's namespaces or
-    volumes (`container:…`, `volumes_from`); `service:` within the
-    project is fine
-  - the Docker socket, including through a feature's mounts or a bind of
-    a directory that contains it
-  - host binds outside the workspace, and host files read through
-    `env_file`, `secrets`, `configs`, build contexts, Dockerfiles or
-    build `ssh` keys. Paths in the workspace are resolved, so a symlink
-    pointing out of it counts as the host path it points to.
-  - named volumes that are really host paths (`driver_opts` with
-    `o: bind` or a `device`), and volumes from outside the project
-    (`external`, or a `name:` belonging to another project)
-  - host devices, `/dev/net/tun` included, also through
-    `device_cgroup_rules`, device reservations that aren't NVIDIA GPUs,
-    `runtime: nvidia`, and a box whose Docker runs nvidia as its default
-    runtime (any image could then take the GPUs through its environment)
-  - NVIDIA GPU reservations (`deploy.resources.reservations.devices`,
-    `gpus`), under their own `gpu` rule. Only `driver: nvidia` with the
-    driver capabilities listed, from `compute`, `compat32`, `utility` and
-    `video`, counts as a GPU; anything else, `graphics` and `display`
-    included, is a host device. The devcontainer CLI runs with
-    `--gpu-availability none`, so `hostRequirements.gpu` can't add a
-    reservation after the check. GPUs and their memory are shared by the
-    box's environments.
-  - builds that run privileged, on the host network, or with BuildKit
-    entitlements (`security.insecure` is privileged)
-  - networks from outside the project (`external`, or a fixed `name:`):
-    another environment's network reaches its sidecars. So are network
-    drivers other than `bridge` (macvlan and ipvlan put containers on the
-    box's own network), Docker's default bridge (`network_mode: bridge`)
-    and a network named directly in `network_mode`
-  - `devcontainer.json` or feature mounts of an `external` volume that
-    isn't this environment's
-  - `use_api_socket` (the Docker socket, under its rule)
-  - any compose key the agent hasn't reviewed (`compose_keys`), at the
-    top level, in a service or in a build: whatever Compose adds next is
-    refused until someone has looked at it. `x-` extension keys are fine.
-
-  `provider` services are refused whatever the box allows: Compose runs a
-  provider's `type` as a program on the box.
-
-  The overlay puts every network an environment uses on a bridge named
-  `fm-` and a hash of the environment and network, replacing any bridge
-  name the repo set. A network that ends up on any other bridge is
-  refused whatever the box allows: that name is how the box tells
-  environment traffic from other containers'.
-
-  Binds and host files that expose the agent's state, other environments
-  or secrets directories are refused whatever the box allows. A failed
-  `compose config` returns a generic error; its output goes to the
-  redacted operation log, never into the error, and the agent's own key
-  is redacted from everything it sends. A box can loosen a
-  rule with `FOREMAN_POLICY` on its agent (for example
-  `privileged=allow`). The agent reports its policy when it connects,
-  and the control plane shows any box that has loosened one with a red
-  alert on its page and its cards.
-- git status before a destroy runs inside the container, not on the
-  box (a repo's `.git/config` can name programs to run).
-- Secrets on a box: a tmpfs directory per environment, 0700, files
-  0600, owned by the agent user, bind-mounted read-only at
-  `/run/foreman`. Inside the environment, the container's own
-  environment (which can include compose-interpolated secrets) is saved
-  to `/etc/foreman/container.env`, mode 0644, so SSH shells get it; any
-  user in that container can read it. On Linux the devcontainer CLI gives the container's
-  user the agent's uid, so the environment reads them and other users
-  on the box can't.
+  parents. The box's agent never reads the workspace.
+- Privileged containers, docker-in-docker, host namespaces, devices,
+  binds of the VM's paths and seccomp turned off are all allowed:
+  they're the environment's own VM's, which holds that environment and
+  nothing else. `initializeCommand` runs too, in the VM.
+- Until environments moved into VMs (2026-11-16), they ran on the box's
+  shared Docker, where a privileged container was root on the box. The
+  agent then checked every compose file, `devcontainer.json` and feature
+  on every start and refused privileged containers, host namespaces,
+  the Docker socket, host binds and files, devices and unreviewed
+  compose keys, put every network on an `fm-` bridge the firewall knew,
+  and dropped `initializeCommand`. A box could loosen a rule with
+  `FOREMAN_POLICY`, shown in red in the control plane. All of that
+  (`ForemanAgent.Env.Policy`, `ComposeScan`) is gone: inside a VM those
+  rules protected nothing.
+- The overlay still strips published ports. Nothing outside the box can
+  reach a guest's ports anyway; Tailscale is how people reach an
+  environment.
+- git status before a destroy runs inside the container, not as the
+  agent (a repo's `.git/config` can name programs to run).
+- Secrets: on the box, a tmpfs directory per environment, 0700, files
+  0600, owned by the agent user, which no environment sees. The agent
+  writes them into the environment's VM after every boot and with every
+  change, to the same layout on the VM's tmpfs, bind-mounted read-only
+  at `/run/foreman`. The devcontainer CLI gives the container's user the
+  guest agent's uid, so the environment reads them. Inside the
+  environment, the container's own environment (which can include
+  compose-interpolated secrets) is saved to `/etc/foreman/container.env`,
+  mode 0644, so SSH shells get it; any user in that container can read
+  it.
 - Secret values are kept out of logs twice: the agent scrubs every value
   a command carried from its output and errors (and drops the CLI's
-  compose-config dumps; a crash is reported only by its exception type); the control plane scrubs the environment's
+  compose-config dumps; a crash is reported only by its exception type),
+  on the box as well as in the VM; the control plane scrubs the environment's
   resolved secrets from every log chunk and error before storing or
   showing it, which covers container logs the agent had no values for.
-- Registry credentials go to a throwaway `DOCKER_CONFIG` for one build,
-  never argv, and are deleted afterwards.
+- Registry credentials go to a throwaway `DOCKER_CONFIG` in the VM for
+  one build, never argv, and are deleted afterwards.
+- Connect hooks ([connect-hooks.md](setup/connect-hooks.md)) are code
+  from the environment, so the agent runs them inside the devcontainer
+  as its remote user, with a timeout inside the container as well as on
+  `docker exec` (stopping `docker exec` doesn't stop what it started). It takes only a hook name and an
+  action id that are short lowercase names, and holds what they print
+  to a few short single-line fields (`ForemanProtocol.Connect`), checked
+  again by the control plane. A hook's result is usually a credential
+  for the environment (a pairing code). The agent keeps everything an action prints
+  out of the operation's log and its error, except a short
+  `{"error": ...}` the hook writes for that purpose. The
+  control plane takes it out of the result before recording the
+  operation and broadcasts it only to the page that asked. Only the
+  environment's owner can run an action, not an admin, and the audit
+  log records the hook and action, never the result.
 
 ### Environments and the tailnet
 
@@ -249,21 +332,39 @@ environments and grants environments nothing, so an environment's node
 can't reach laptops or other environments. Tailscale SSH replaces sshd;
 no ports are published.
 
-That node isn't the only way out. A container's ordinary traffic is
-forwarded through the box, and a box on the tailnet sends tailnet
-addresses over its own Tailscale interface, so peers would see the box
-and apply the box's grants. The box's firewall (an nftables table loaded
-by `foreman-firewall.service`, see
-[setup/tailscale.md](setup/tailscale.md#boxes-on-the-tailnet)) rejects
-anything from an environment's bridges, or from Docker's default bridge
-where image builds run, bound for the tailnet, the box's own tailnet
-addresses (published ports included, by the destination before Docker
-rewrote it) or `tailscale0`, except DNS to MagicDNS. Environment bridges
-are all named `fm-...`, which the overlay and the policy guarantee
-(below). The agent reports whether the firewall is loaded, and from the
-rules it ships with, when it joins and whenever that changes; the
-control plane flags a box without it. A process on the box that an environment can reach and that
-connects onward (a proxy, say) still connects as the box.
+That node isn't the only way out. A VM's ordinary traffic is routed
+through the box, and a box on the tailnet sends tailnet addresses over
+its own Tailscale interface, so peers would see the box and apply the
+box's grants. The box's firewall (nftables, loaded by
+`foreman-firewall.service`, see
+[setup/tailscale.md](setup/tailscale.md#boxes-on-the-tailnet)) has a
+table for guests, `inet foreman_guests`, that works on each VM's tap
+(`fm-vm<n>`):
+
+- nothing from a guest reaches the box itself, on any of its addresses,
+  apart from replies to the box's own connections
+- nothing goes from one guest to another
+- nothing a guest sends goes to the tailnet (`100.64.0.0/10`),
+  MagicDNS included; guests get the box's upstream resolvers instead,
+  never a loopback or tailnet one
+- a guest sends only from its own address: anything that wouldn't be
+  routed back through its tap is dropped, and IPv6 is dropped
+- nothing outside the box starts a connection into a guest
+- the firewall blocks IPv4 link-local destinations, including HTTP to cloud
+  instance metadata. It permits TCP and UDP port 53 to configured resolvers
+- `install.sh --block-lan` extends that policy to RFC 1918 addresses
+
+What's left goes out through the box's NAT. The box's other table,
+`inet foreman`, also rejects anything arriving on an `fm-` interface,
+or on Docker's default bridge on a box that has Docker, bound for the
+tailnet, the box's own tailnet addresses or `tailscale0`. The agent
+reports whether the firewall is loaded, and from the rules it ships
+with, when it joins and whenever that changes; the control plane flags
+a box without it. Something that flushes the box's whole ruleset
+removes the firewall until its timer loads it again (within 15
+seconds), and in that window nothing keeps guests in. A machine on the
+LAN that an environment can reach and that connects onward (a proxy,
+say) connects with its own access, tailnet included.
 
 Tailscale runs in userspace mode, without a TUN device or `NET_ADMIN`.
 In that mode it delivers tailnet connections to `127.0.0.1:<port>` in
@@ -276,40 +377,44 @@ Grant `tag:foreman-env` only to the people whose environments they are.
 
 These are accepted for now, or need someone to try them:
 
-1. **The agent is root on its box.** The agent user is in the `docker`
-   group, which is root in all but name. Environments don't get that by
-   default, since privileged containers are refused, but a box that sets
-   `privileged=allow` gives code in its environments root on the box:
-   every other environment's secrets, the agent's key, and the host.
-   The policy check makes a rewritten compose file harder to abuse, not
-   impossible. A box belongs to one person, and shared boxes should
-   wait for per-developer Incus containers or VMs.
+1. **A compromised agent has every environment on its box.** The agent
+   is no longer root in all but name: it's out of the `docker` group, and
+   its root actions are the VM helper's fixed vocabulary and the reboot
+   unit. It does own every VM's disks (the clones, Docker volumes and
+   Tailscale state), the box's copy of every environment's secrets, and
+   its key, which can ask the control plane for the secrets of every
+   environment placed on the box. Every VM runs as the agent's user too
+   (see 17). A box belongs to one person.
 2. **Container root reads 0600 files.** Root in a container has
    `CAP_DAC_OVERRIDE`, so it reads the secrets directory regardless of
    ownership. That's the environment's own secrets, by design, but also
    means "0600" isn't a boundary inside the environment.
-3. **Secrets in `ps` on the box.** The devcontainer CLI puts probed
+3. **Secrets in `ps` in the VM.** The devcontainer CLI puts probed
    environment variables (which include sourced secrets) on the
    `docker exec` command line during lifecycle hooks
-   (devcontainers/cli#1317). Any user on the box can read them with
-   `ps`. Mount `/proc` with `hidepid=2` on shared boxes.
-4. **Symlink races.** `SafeFS` and the policy check resolve symlinks,
-   then act. A process in the environment racing the agent could swap a
-   directory for a symlink between the check and the copy of the feature
-   into `.devcontainer/.foreman`, or between the policy check and
-   `docker compose up` resolving a bind source. The feature copy is a
-   directory of known files somewhere the agent user can write; a
-   swapped bind source is a real escape, but needs a process already
-   running in the environment to win the race during a start.
+   (devcontainers/cli#1317). That runs in the environment's VM, so the
+   box's process list doesn't show them, but anything in the VM that
+   can see its processes can read them with `ps`. They're that
+   environment's own secrets.
+4. **Symlink races.** `SafeFS` resolves symlinks, then acts. A process
+   in the environment racing the guest agent could swap a directory for
+   a symlink between the check and the copy of the feature into
+   `.devcontainer/.foreman`. That happens inside the environment's own
+   VM, where the guest agent holds nothing the environment doesn't
+   already have, and the box's agent never reads the workspace. (Before
+   environment VMs, a bind source swapped between the policy check and
+   `docker compose up` was a way onto the box.)
 5. **A compromised control plane can run repo code on every box.** It
    can't run arbitrary commands (fixed vocabulary, clone host
    allowlist), but it can create environments from any repo the GitHub
-   App sees, and their lifecycle hooks run in those environments (as
-   root on the box, on a box that allows privileged). Keep the control
-   plane tailnet-only and its admins few.
+   App sees, and their lifecycle hooks run in those environments' VMs.
+   Keep the control plane tailnet-only and its admins few.
 6. **The first install trusts the control plane.** `install.sh` checks
    the agent tarball against a SHA-256 the control plane sends, not the
-   release signature (updates after that are signature-checked).
+   release signature (updates after that are signature-checked), and
+   that agent names the guest image the box's VMs boot. The same goes
+   for a Flatcar box's first-boot config and the launcher, which the
+   control plane serves.
 7. **Redaction is best effort.** Values shorter than six characters
    aren't redacted, and an encoded secret (base64, URL-encoded) isn't
    recognised. Logs are redacted a line at a time, so a value split
@@ -335,34 +440,97 @@ These are accepted for now, or need someone to try them:
     dependency, or a coding agent following injected instructions, gets
     the same power. Branch protection and rulesets still apply, because
     the token acts as the user.
-13. **Environments share the box's kernel.** The policy keeps
-    environments unprivileged, but a container escape (a kernel or runc
-    bug) lands on the box: every environment's secrets there and the
-    agent's key, which can ask the control plane for the secrets of
-    every environment placed on that box. Tailscale runs in userspace
-    mode, so Foreman adds no capabilities to the devcontainer, but most
-    devcontainer images give their user passwordless sudo, and a repo
-    can still add ordinary capabilities like `NET_ADMIN` itself. Keep
-    boxes patched, keep them single-owner, and treat code
-    in an environment (including coding agents) as able to reach
-    anything the box can: there's no egress filtering, and on cloud
-    instances the metadata endpoint is reachable unless blocked. The
-    tailnet is the exception: the box's firewall keeps environments off
-    it as the box. Something that flushes the box's whole ruleset
-    removes the firewall until its timer loads it again (within 15
-    seconds), and a box installed with
-    `--default-bridge-reaches-tailnet` lets image builds reach the
-    tailnet as the box. Even with the firewall, Docker's builder fetches
-    a Dockerfile's `ADD <url>` (and a git build context) itself, from
-    the box, so a Dockerfile can read from the tailnet as the box; its
-    RUN steps can't. Filtering the daemon would also stop the box
-    pulling images from a registry on the tailnet.
-14. **No default resource limits.** Without CPU, memory or pids limits
-    on the repo or environment, one runaway process can starve every
-    environment on its box.
+13. **Environments reach the internet and the LAN.** (Before
+    environment VMs this gap was the shared kernel: environments ran on
+    the box's Docker, and a container escape landed on the box. Each
+    environment now has its own kernel, and an escape lands in its own
+    VM; 17 covers what's between a VM and the box.) Treat code in an
+    environment (including coding agents) as able to reach anything on
+    the internet and, unless the box was installed with `--block-lan`,
+    on the box's LAN. The firewall always blocks HTTP to link-local
+    instance metadata. Most devcontainer images give their user passwordless sudo,
+    and privileged containers are allowed, so assume root in the VM. The
+    box itself, other environments and the tailnet as the box are kept
+    out by the firewall, and something that flushes the box's whole
+    ruleset removes it until its timer loads it again (within 15
+    seconds).
+14. **VMs can overcommit the box.** Every VM has CPU, memory and task
+    limits, so one runaway environment can't take the whole box (before
+    environment VMs there were no limits by default). Their sum can
+    still be more than the box has: the box's capacity setting decides
+    whether placement allows that, and a box that runs out of memory has
+    the kernel kill a process to make room, quite likely a VM. Data disks
+    are sparse, so they can promise more than `/srv/foreman` holds. Some
+    of the box's shared resources have no per-VM limit at all, the
+    connection tracking table among them.
 15. **Removed members keep access for up to six hours.** Membership is
     re-checked periodically, not instantly. Disable someone in Foreman to
     cut their access at once.
+16. **Snapshots hold secrets.** Suspending an environment writes the
+    VM's whole memory, secrets included, to the box's disk, where
+    otherwise secrets only ever touch tmpfs. The snapshot is in the VM's
+    own directory (0700, the agent's user), is deleted once the VM is back
+    from it and on destroy, and is never copied off the box; a
+    suspend the agent was stopped in the middle of is cleaned up when it
+    starts again. Until then it
+    is readable by root on the box, and once deleted its blocks stay on
+    the disk until they're reused: a box whose disk isn't encrypted
+    keeps them at rest. Stop rather than suspend an environment whose
+    secrets matter more than its running processes.
+17. **A hostile guest against Cloud Hypervisor.** A guest that finds a
+    bug in Cloud Hypervisor's device emulation (block, network, vsock,
+    balloon, serial) or in KVM gets code running on the box as the
+    agent's user, still inside its VM's unit: no capabilities, a seccomp
+    filter, Landlock rules to its own files, and its cgroup. Every VM
+    runs as that one user, so Landlock is what keeps one VM's process
+    away from another's disks, and out of the agent's files and other
+    VMs' through `/proc/<pid>/root`, which the unit's mount namespace
+    doesn't stop. A box whose kernel can't apply it runs no VMs; a user
+    per VM isn't built. A resumed VM is the exception for now: on a
+    restore, Cloud Hypervisor v54.1 starts its virtio workers, the
+    threads a device bug lands in, before it applies Landlock, and they
+    run without it until the VM next boots
+    ([cloud-hypervisor#9118](https://github.com/cloud-hypervisor/cloud-hypervisor/issues/9118)).
+    The VM's directory is inside its own rules, and Cloud Hypervisor
+    opens its log, the serial console and, on a resume, the snapshot and
+    the disks before Landlock confines it. So nothing a VM leaves there
+    is trusted: the helper won't start or resume a VM where one of those
+    is a symlink or isn't a plain file, and before a resume the agent
+    checks the snapshot's saved config (Landlock on with start's rules,
+    the VM's own raw disks, kernel and sockets, the tap the helper gave
+    it, no other device). The agent writes and reads its own files there
+    without following symlinks, and the VM's unit can't reach the
+    helper's socket, so a VMM can't ask for a resume past the agent.
+    Nothing here has been tested against attacks on the device
+    emulation. The defence is upstream's work and keeping Cloud
+    Hypervisor current (19).
+18. **A guest can fill its own log.** Cloud Hypervisor writes a guest's
+    serial console to `serial.log` in the VM's directory on the box, with
+    no size limit and no rotation, and root in the guest can write to its
+    console for as long as it likes, until `/srv/foreman` is full.
+19. **The guest image and Cloud Hypervisor need keeping current.** The
+    guest's kernel, Docker and the rest come from the guest image a
+    release names, and Cloud Hypervisor from the version pinned in the
+    release. Neither updates on its own: their fixes reach boxes with a
+    Foreman release, and a VM moves to a new guest image on its next
+    boot.
+20. **No core scheduling on Flatcar.** Cloud Hypervisor keeps two VMs'
+    vCPUs off a core's sibling hyperthreads where the kernel has core
+    scheduling. Flatcar's kernel doesn't (`CONFIG_SCHED_CORE` is unset),
+    so on a Flatcar box two environments' vCPUs can share a core, which
+    is what side channels between hyperthreads need. Keep a Flatcar box
+    to environments whose owners trust each other.
+21. **A prebuild's disk is shared.** Every environment of a repo made
+    from a prebuild starts from the same disk: whatever the prebuild's
+    lifecycle hooks wrote there, every later user of the repo gets. The
+    prebuild has no one's secrets and clones with an installation token
+    that reads the repo for an hour; registry credentials are on the
+    guest's tmpfs during builds, never the disk. A hook that copies that
+    token into a file leaves it for the repo's other users, who can read
+    the repo anyway. Treat what hooks write as you would a commit. An
+    environment starts from a prebuild only once its user's own GitHub
+    token has read the repo and its extra repos; without a GitHub App
+    configured, nothing checks.
 
 ## Things worth trying
 
@@ -370,20 +538,32 @@ These are accepted for now, or need someone to try them:
   ids in events, a replayed connect, a revoked box reconnecting).
 - Get a secret value back out: the UI, LiveView events, the audit log,
   operation logs, error messages, `inspect` output in logs.
-- From inside an environment: escape to the box without privileged
-  mode; get privileges past the policy (a feature's metadata,
-  `devcontainer.json` capabilities, a capability not on the list); make
-  the agent read or write outside the workspace (symlinks in
-  `.devcontainer`, `.git/info`, compose file paths); get a rewritten
-  compose file past the policy (YAML anchors, `extends`, `include`,
-  interpolation into bind sources, long-syntax binds).
+- From inside an environment, as root in its VM (that's the starting
+  point): reach the box, another VM or the tailnet over the network (a
+  spoofed source address, IPv6, DNS to the box or MagicDNS, the LAN on a
+  box with `--block-lan`, a published port); get the box's agent to act
+  on something the guest sent (oversized or malformed frames, events
+  for another operation, inventory or ports for another environment, a
+  hello that never comes); get out through Cloud Hypervisor's devices
+  or the vsock socket; fill the box's disk or memory past the VM's
+  limits.
+- Ask `foreman-vmctl` for something outside its vocabulary: a path, an
+  id that isn't a UUID, a size past its bounds, a symlinked disk.
+- Make the guest agent read or write outside the workspace (symlinks in
+  `.devcontainer`, `.git/info`, compose file paths).
 - Inject into git config through identity fields, branch names, repo
   names or dotfiles settings.
-- Get past the policy or the Foreman feature with a user's own
-  devcontainer features: a ref that isn't an OCI ref, one with the
-  Foreman feature's id, options the agent passes on, or getting them
-  into another user's environments.
+- Get past the Foreman feature with a user's own devcontainer features:
+  a ref that isn't an OCI ref, one with the Foreman feature's id,
+  options the agent passes on, or getting them into another user's
+  environments.
 - Cross-user access as a member: another user's environments, secrets,
   boxes, or admin pages and Oban Web.
 - Sign-in: the OAuth state and PKCE, open redirects in `return_to`, the
   dev sign-in route in a production build (it shouldn't be compiled in).
+- A Flatcar box's first-boot config: get one, or a Tailscale key,
+  without a valid join token; get the key minted more than once; get
+  something into the config through a box name or SSH key; reach the
+  host from inside a box's VM.
+- Reboot a box that isn't yours, or one that's already rebooting again,
+  through `box.restart`.

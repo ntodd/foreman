@@ -206,6 +206,50 @@ defmodule ForemanWeb.AgentReconnectTest do
     end
   end
 
+  describe "a prebuild across a reconnect" do
+    # Sent while the agent is connected (a registry entry stands in for its
+    # channel), then the box goes away before anything comes back.
+    setup ctx do
+      admin = Scope.for_user(user_fixture(role: "admin"))
+      box = Repo.update!(Ecto.Changeset.change(ctx.box, vm: %{"ready" => true}))
+      {:ok, _} = Registry.register(Foreman.Registry, {:agent, box.id}, nil)
+      {:ok, prebuild} = Foreman.Prebuilds.build(admin, ctx.repo, box)
+      assert_receive {:dispatch, %{type: "box.prebuild", op_id: op_id}}
+      Registry.unregister(Foreman.Registry, {:agent, box.id})
+      %{prebuild: prebuild, build_id: op_id}
+    end
+
+    test "one the agent lost fails at once, rather than hours later", ctx do
+      _socket = join_box(ctx.box)
+
+      assert %{status: "failed", error: "the box's agent restarted during the build"} =
+               Repo.reload!(ctx.prebuild)
+
+      assert Operations.get!(ctx.build_id).status == "failed"
+    end
+
+    test "one the agent still has keeps building", ctx do
+      _socket = join_box(ctx.box, %{"in_flight" => [ctx.build_id]})
+      assert %{status: "building"} = Repo.reload!(ctx.prebuild)
+      assert Operations.get!(ctx.build_id).status == "dispatched"
+    end
+
+    # A blip, not a restart: the build finished while the box was away, and
+    # its result follows the join from the agent's outbox.
+    test "one that finished while the box was away still counts when its result arrives", ctx do
+      socket = join_box(ctx.box)
+
+      send_event(socket, "op.result", %{
+        op_id: ctx.build_id,
+        status: "ok",
+        result: %{"size_mb" => 512}
+      })
+
+      assert %{status: "ready", size_mb: 512, error: nil} = Repo.reload!(ctx.prebuild)
+      assert Operations.get!(ctx.build_id).status == "succeeded"
+    end
+  end
+
   describe "agent updates" do
     setup %{box: box} do
       # Short: the release's path is stored in a 255-character column.
@@ -407,6 +451,26 @@ defmodule ForemanWeb.AgentReconnectTest do
       refute_push "command", %{"type" => "agent.update"}
 
       send_event(socket, "op.result", %{op_id: stop_id, status: "ok"})
+      :ok = Foreman.Jobs.Dispatch.perform(%Oban.Job{})
+      {"agent.update", _} = next_command()
+    end
+
+    test "waits for a prebuild the box is building", ctx do
+      build =
+        Operations.create!(%{
+          id: Ecto.UUID.generate(),
+          box_id: ctx.box.id,
+          action: "box.prebuild",
+          command: "box.prebuild",
+          args: %{"prebuild_id" => Ecto.UUID.generate()},
+          status: "running",
+          dispatched_at: DateTime.utc_now()
+        })
+
+      socket = join_box(ctx.box, %{"in_flight" => [build.id]})
+      refute_push "command", %{"type" => "agent.update"}
+
+      send_event(socket, "op.result", %{op_id: build.id, status: "error", error: "failed"})
       :ok = Foreman.Jobs.Dispatch.perform(%Oban.Job{})
       {"agent.update", _} = next_command()
     end

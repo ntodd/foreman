@@ -85,6 +85,39 @@ defmodule ForemanAgent.OpsTest do
     assert error =~ "crashed"
   end
 
+  # A :logger handler that holds up one process's log calls until the test
+  # lets it go (or ends), like a handler that's slow or backed up.
+  defmodule StalledLog do
+    def log(%{meta: %{pid: pid}}, %{config: %{pid: pid, test: test, ref: ref}}) do
+      monitor = Process.monitor(test)
+      send(test, {:logging, ref})
+
+      receive do
+        {:carry_on, ^ref} -> Process.demonitor(monitor, [:flush])
+        {:DOWN, ^monitor, :process, _, _} -> :ok
+      end
+    end
+
+    def log(_event, _config), do: :ok
+  end
+
+  test "a crash is reported without waiting on its log line", %{ops: ops} do
+    ref = make_ref()
+    config = %{config: %{pid: ops, test: self(), ref: ref}}
+    :ok = :logger.add_handler(:ops_test_stalled_log, StalledLog, config)
+    on_exit(fn -> :logger.remove_handler(:ops_test_stalled_log) end)
+
+    Ops.submit(ops, stop_cmd(@env1))
+    assert_receive {:started, _, pid}, @timeout
+    Process.exit(pid, :kill)
+
+    assert_receive {:event, "op.result", %{status: "error", error: "operation crashed"}},
+                   @timeout
+
+    assert_receive {:logging, ^ref}, @timeout
+    send(ops, {:carry_on, ref})
+  end
+
   test "a duplicate op_id is not run twice", %{ops: ops} do
     cmd = stop_cmd(@env1)
     assert :accepted = Ops.submit(ops, cmd)
@@ -174,19 +207,57 @@ defmodule ForemanAgent.OpsTest do
     refute_receive {:started, ^target, _}, 200
   end
 
-  test "a cancel for an operation that finished leaves its result alone", %{ops: ops} do
+  # So whoever sent the cancel hears the operation is over, even if its
+  # first result was lost.
+  test "a cancel for an operation that finished sends its result again", %{ops: ops} do
     cmd = stop_cmd(@env1)
     target = cmd.op_id
     Ops.submit(ops, cmd)
     assert_receive {:started, ^target, pid}, @timeout
-    finish(pid)
+    finish(pid, {:ok, %{"done" => true}})
     assert_receive {:event, "op.result", %{op_id: ^target, status: "ok"}}, @timeout
 
     Ops.submit(ops, command("op.cancel", %{target_op_id: target}))
-    refute_receive {:event, "op.result", %{op_id: ^target}}, 200
+
+    assert_receive {:event, "op.result",
+                    %{op_id: ^target, status: "ok", result: %{"done" => true}}},
+                   @timeout
 
     assert :duplicate = Ops.submit(ops, cmd)
     assert_receive {:event, "op.result", %{op_id: ^target, status: "ok"}}, @timeout
+    refute_receive {:started, ^target, _}, 50
+  end
+
+  describe "operations don't outlive Ops" do
+    defp start_op(ops) do
+      cmd = stop_cmd(@env1)
+      op_id = cmd.op_id
+      Ops.submit(ops, cmd)
+      assert_receive {:started, ^op_id, pid}, @timeout
+      Process.monitor(pid)
+    end
+
+    test "when its supervisor stops it", %{ops: ops} do
+      ref = start_op(ops)
+      :ok = stop_supervised(Ops)
+      assert_receive {:DOWN, ^ref, :process, _, _}, @timeout
+    end
+
+    test "when it crashes", %{ops: ops} do
+      ref = start_op(ops)
+
+      ExUnit.CaptureLog.capture_log(fn ->
+        catch_exit(GenServer.call(ops, :not_a_call))
+      end)
+
+      assert_receive {:DOWN, ^ref, :process, _, _}, @timeout
+    end
+
+    test "when it's killed", %{ops: ops} do
+      ref = start_op(ops)
+      Process.exit(ops, :kill)
+      assert_receive {:DOWN, ^ref, :process, _, _}, @timeout
+    end
   end
 
   test "in_flight lists running and queued op ids", %{ops: ops} do

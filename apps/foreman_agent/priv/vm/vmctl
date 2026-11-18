@@ -1,0 +1,368 @@
+#!/bin/sh
+# foreman-vmctl: the root helper for the Foreman agent's environment VMs.
+#
+# The agent runs unprivileged; a VM needs a tap, an address and a systemd
+# unit of its own, which take root. install.sh copies this script to
+# /etc/foreman-agent/vmctl (root's, so the agent can't change it), and
+# foreman-vmctl.socket runs it for each connection on
+# /run/foreman-vmctl.sock (group foreman) with the connection as stdin and
+# stdout. It reads one request line and answers one line, "ok ..." or
+# "error ...":
+#
+#   version
+#   resolvers                 (the box's upstream resolvers, for its firewall)
+#   landlock                  (whether the box's kernel can confine its VMs)
+#   tap ENV_ID                (the tap the environment's VM has)
+#   start ENV_ID CPUS MEMORY_MB GUEST_SHA256 AGENT_VERSION
+#   restore ENV_ID CPUS MEMORY_MB
+#   stop ENV_ID
+#   release ENV_ID
+#
+# It takes ids, sizes and versions, checked against fixed patterns, never
+# paths or command lines: every path is a fixed place under its config's
+# directories, and it builds Cloud Hypervisor's command line itself. The
+# VM runs as the agent's user, in a unit of its own (foreman-vm-ENV_ID,
+# in foreman.slice) with CPU, memory and task limits and systemd's
+# sandboxing, so it outlives the agent. Cloud Hypervisor confines it with
+# Landlock too, and a box whose kernel can't do that runs no VMs: every
+# VM runs as the same user, and Landlock is what keeps one VMM out of the
+# others' files and processes. Nothing in the VM's directory, which is
+# the agent's, is opened as root: Cloud Hypervisor writes its own log
+# there, as the agent's user, and the unit's output goes to the journal.
+# The unit sees only its own VM's directory under SRV, with the guest
+# images and agent disks read-only, and none of the box's secrets,
+# identity or settings, and can't reach this helper's socket: a VMM that
+# got out of its guest could otherwise ask for any VM, its own included.
+#
+# Each VM gets a /30 from POOL (the first two octets of a /16): index n
+# is POOL.(n/64).(4*(n%64)+1) on the box and +2 in the guest, on tap
+# fm-vm<n>. The index is recorded under STATE until release, so a VM
+# restored from a snapshot comes back on the address it had.
+set -u
+# Byte ranges in the request's patterns, whatever the locale.
+export LC_ALL=C
+
+VERSION=3
+
+SRV=/srv/foreman
+AGENT_ROOT=/opt/foreman-agent
+AGENT_USER=foreman
+POOL=10.250
+STATE=/var/lib/foreman-vmctl
+MEMINFO=/proc/meminfo
+RESOLV=/etc/resolv.conf
+LSM=/sys/kernel/security/lsm
+SOCKET=/run/foreman-vmctl.sock
+CONF=${FOREMAN_VMCTL_CONF:-/etc/foreman-agent/vmctl.conf}
+# Root's, written by install.sh: SRV, AGENT_ROOT, AGENT_USER, POOL, STATE
+# (and RESOLV and LSM, for tests).
+# shellcheck disable=SC1090
+[ -r "$CONF" ] && . "$CONF"
+
+answer() {
+  printf '%s\n' "$*"
+  exit 0
+}
+
+uuid_ok() {
+  printf '%s' "$1" | grep -Eqx '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}'
+}
+
+int_between() { # value, min, max
+  case "$1" in '' | *[!0-9]*) return 1 ;; esac
+  [ "${#1}" -le 7 ] && [ "$1" -ge "$2" ] && [ "$1" -le "$3" ]
+}
+
+# The index of an environment's /30, allocated on first use.
+net_index() {
+  mkdir -p "$STATE/nets"
+  for f in "$STATE"/nets/*; do
+    [ -f "$f" ] || continue
+    if [ "$(cat "$f")" = "$1" ]; then
+      basename "$f"
+      return 0
+    fi
+  done
+  i=0
+  while [ "$i" -lt 16384 ]; do
+    if (set -C && printf '%s\n' "$1" > "$STATE/nets/$i") 2>/dev/null; then
+      echo "$i"
+      return 0
+    fi
+    i=$((i + 1))
+  done
+  return 1
+}
+
+existing_index() {
+  for f in "$STATE"/nets/*; do
+    [ -f "$f" ] || continue
+    if [ "$(cat "$f")" = "$1" ]; then
+      basename "$f"
+      return 0
+    fi
+  done
+  return 1
+}
+
+# Sets tap, host_ip, guest_ip and mac for index $1, and brings the tap up.
+net_up() {
+  n=$1
+  base=$((4 * (n % 64)))
+  third=$((n / 64))
+  tap=fm-vm$n
+  host_ip=$POOL.$third.$((base + 1))
+  guest_ip=$POOL.$third.$((base + 2))
+  mac=$(printf '52:54:00:fa:%02x:%02x' $((n / 256)) $((n % 256)))
+  # One group per address slot, retained for reuse. The VM keeps the agent
+  # uid for its disks, but only this VM gets the group its tap requires.
+  vm_group=foreman-tap$n
+  printf 'g %s -\n' "$vm_group" | systemd-sysusers - >/dev/null ||
+    answer "error couldn't allocate the group for $tap"
+  if ip link show "$tap" >/dev/null 2>&1; then
+    # Upgrade a stopped VM's old uid-only tap, keeping its name/address.
+    # tuntap del requires attachment to this single-queue tap and fails
+    # if a live VMM is still using it.
+    ip tuntap del dev "$tap" mode tap || answer "error couldn't replace $tap"
+  fi
+  ip tuntap add dev "$tap" mode tap user "$AGENT_USER" group "$vm_group" ||
+    answer "error couldn't create $tap"
+  sysctl -qw "net.ipv6.conf.$tap.disable_ipv6=1" 2>/dev/null || true
+  ip addr replace "$host_ip/30" dev "$tap" || answer "error couldn't address $tap"
+  ip link set "$tap" up || answer "error couldn't bring $tap up"
+}
+
+# The box's upstream resolvers for the guest: systemd-resolved's list when
+# the box uses its stub, without loopback, IPv6 or tailnet ones (MagicDNS,
+# 100.100.100.100, answers for the box's tailnet, which guests stay off);
+# 1.1.1.1 if that leaves none.
+resolvers() {
+  f=$RESOLV
+  if grep -q '^nameserver 127\.0\.0\.53' "$RESOLV" 2>/dev/null &&
+    [ -r /run/systemd/resolve/resolv.conf ]; then
+    f=/run/systemd/resolve/resolv.conf
+  fi
+  list=$(awk '$1 == "nameserver" && $2 ~ /^[0-9.]+$/ && $2 !~ /^127\./ &&
+    $2 !~ /^100\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\./ { print $2 }' "$f" 2>/dev/null |
+    head -n 3 | paste -sd, -)
+  echo "${list:-1.1.1.1}"
+}
+
+ch_binary() {
+  set -- "$AGENT_ROOT"/current/lib/foreman_agent-*/priv/tools/vm/cloud-hypervisor
+  [ "$#" -eq 1 ] && [ -x "$1" ] && echo "$1"
+}
+
+# Runs Cloud Hypervisor in the VM's unit; the rest of the arguments are its own.
+run_unit() { # env_id cpus memory_mb vm_dir ch args...
+  id=$1 cpus=$2 memory=$3 vm=$4 ch=$5
+  shift 5
+  unit=foreman-vm-$id
+  systemctl reset-failed "$unit.service" >/dev/null 2>&1 || true
+  # Room for Cloud Hypervisor itself on top of the guest's memory.
+  systemd-run --unit="$unit" --slice=foreman.slice --collect --quiet \
+    --uid="$AGENT_USER" --gid="$vm_group" -p SupplementaryGroups=kvm -p ProtectProc=ptraceable -p RestrictNamespaces=yes \
+    -p "MemoryMax=$((memory + 512))M" -p MemorySwapMax=0 -p "CPUQuota=$((cpus * 100))%" \
+    -p TasksMax=1024 -p UMask=0077 -p NoNewPrivileges=yes -p ProtectSystem=strict \
+    -p ProtectHome=yes -p PrivateTmp=yes -p ProtectKernelTunables=yes \
+    -p ProtectKernelModules=yes -p ProtectKernelLogs=yes -p ProtectControlGroups=yes \
+    -p RestrictSUIDSGID=yes -p LockPersonality=yes -p CapabilityBoundingSet= \
+    -p DevicePolicy=closed -p "DeviceAllow=/dev/kvm rw" -p "DeviceAllow=/dev/net/tun rw" \
+    -p "TemporaryFileSystem=$SRV:ro" -p "BindPaths=$vm" -p "ReadWritePaths=$vm" \
+    -p "BindReadOnlyPaths=$SRV/guest $SRV/agent-disks" \
+    -p "InaccessiblePaths=-/run/foreman -/var/lib/foreman-agent -/etc/foreman-agent -$STATE -$SOCKET -/sys/fs/cgroup/foreman.slice -/run/systemd/private -/run/dbus/system_bus_socket" \
+    -p StandardOutput=journal -p StandardError=journal \
+    -- "$ch" --log-file "$vm/ch.log" "$@" >/dev/null 2>&1
+}
+
+plain_file() { [ -f "$1" ] && [ ! -L "$1" ]; }
+
+# Cloud Hypervisor opens its log and the serial console's file, and on a
+# restore the snapshot and the disks, before Landlock confines it, as the
+# agent's user and following symlinks. The VM's directory is the VM's to
+# write, so whatever a VM left there must be a plain file of its own.
+plain_or_absent() {
+  if [ -e "$1" ] || [ -L "$1" ]; then
+    plain_file "$1" || answer "error $1 isn't a plain file"
+  fi
+}
+
+vm_logs_ok() { # vm_dir
+  plain_or_absent "$1/ch.log"
+  plain_or_absent "$1/serial.log"
+}
+
+# Whether the kernel has Landlock as Cloud Hypervisor needs it: ABI 3
+# (Linux 6.2), which it asks for as a hard requirement, so it won't start
+# on less. A kernel that backports it to an older release is refused too.
+landlock_ok() {
+  grep -qw landlock "$LSM" 2>/dev/null || return 1
+  release=$(uname -r)
+  major=${release%%.*}
+  minor=${release#*.}
+  minor=${minor%%[!0-9]*}
+  int_between "$major" 0 999 || return 1
+  int_between "$minor" 0 999 || return 1
+  [ "$major" -gt 6 ] || { [ "$major" -eq 6 ] && [ "$minor" -ge 2 ]; }
+}
+
+need_landlock() {
+  landlock_ok ||
+    answer "error this box's kernel has no Landlock: environment VMs need Linux 6.2 or later with landlock in its LSM list"
+}
+
+check_size() {
+  int_between "$1" 1 256 || answer "error bad CPU count"
+  int_between "$2" 256 4194304 || answer "error bad memory size"
+  cpus=$(nproc) || answer "error could not read host CPU count"
+  memory=$(awk '$1 == "MemTotal:" && $3 == "kB" {print int($2 / 1024)}' "$MEMINFO") ||
+    answer "error could not read host memory"
+  int_between "$1" 1 "$cpus" || answer "error requested CPUs exceed host capacity"
+  int_between "$2" 256 "$memory" || answer "error requested memory exceeds host capacity"
+}
+
+cmd_start() { # env_id cpus memory_mb guest_sha256 agent_version
+  [ "$#" -eq 5 ] || answer "error start takes ENV_ID CPUS MEMORY_MB GUEST_SHA256 AGENT_VERSION"
+  uuid_ok "$1" || answer "error bad environment id"
+  check_size "$2" "$3"
+  printf '%s' "$4" | grep -Eqx '[0-9a-f]{64}' || answer "error bad guest image"
+  printf '%s' "$5" | grep -Eqx '[0-9]+\.[0-9]+\.[0-9]+(-[0-9a-z.]+)?' || answer "error bad agent version"
+  id=$1 cpus=$2 memory=$3
+  vm=$SRV/vms/$id
+  guest=$SRV/guest/$4
+  agent_disk=$SRV/agent-disks/$5.img
+  for f in "$vm/root.raw" "$vm/data.raw" "$guest/vmlinuz" "$agent_disk"; do
+    plain_file "$f" || answer "error missing $f"
+  done
+  vm_logs_ok "$vm"
+  need_landlock
+  systemctl is-active --quiet "foreman-vm-$id.service" && answer "ok running"
+  ch=$(ch_binary) || answer "error the agent release has no cloud-hypervisor"
+  n=$(net_index "$id") || answer "error no addresses left"
+  net_up "$n"
+  queues=$cpus
+  [ "$queues" -gt 4 ] && queues=4
+  dns=$(resolvers)
+  # What the guests' firewall lets through under --block-lan: kept for its
+  # loader, and added now for a VM that starts before the next load.
+  printf '%s\n' "$dns" > "$STATE/guest-dns"
+  nft add element inet foreman_guests guest_dns "{ $dns }" >/dev/null 2>&1 || true
+  # Landlock: the VM's own files, and the tap (Cloud Hypervisor opens
+  # /dev/net/tun and reads the tap's flags from sysfs). It adds the disks
+  # and the kernel itself.
+  set -- --kernel "$guest/vmlinuz" \
+    --cmdline "console=ttyS0 root=/dev/vda rw quiet net.ifnames=0 fm.mac=$mac fm.ip=$guest_ip/30 fm.gw=$host_ip fm.dns=$dns fm.env=$id" \
+    --disk "path=$vm/root.raw,image_type=raw,direct=on,num_queues=$queues,serial=fm-root" \
+    --disk "path=$vm/data.raw,image_type=raw,direct=on,num_queues=$queues,serial=fm-data" \
+    --disk "path=$agent_disk,image_type=raw,readonly=on,serial=fm-agent" \
+    --cpus "boot=$cpus" --memory "size=${memory}M" \
+    --balloon size=0,free_page_reporting=on,deflate_on_oom=on \
+    --net "tap=$tap,mac=$mac" \
+    --vsock "cid=3,socket=$vm/vsock.sock" \
+    --serial "file=$vm/serial.log" --console off \
+    --api-socket "path=$vm/api.sock" \
+    --landlock --landlock-rules "path=$vm,access=rw" "path=$guest,access=r" \
+    "path=$agent_disk,access=r" "path=/dev/net/tun,access=rw" \
+    "path=/sys/devices/virtual/net/$tap,access=r"
+  run_unit "$id" "$cpus" "$memory" "$vm" "$ch" "$@" || answer "error systemd-run failed"
+  answer "ok started $tap $guest_ip"
+}
+
+cmd_restore() { # env_id cpus memory_mb
+  [ "$#" -eq 3 ] || answer "error restore takes ENV_ID CPUS MEMORY_MB"
+  uuid_ok "$1" || answer "error bad environment id"
+  check_size "$2" "$3"
+  id=$1
+  vm=$SRV/vms/$id
+  plain_file "$vm/snapshot/config.json" || answer "error no snapshot"
+  if [ -L "$vm/snapshot" ] || [ ! -d "$vm/snapshot" ]; then
+    answer "error $vm/snapshot isn't a plain directory"
+  fi
+  for f in "$vm/snapshot"/* "$vm/snapshot"/.[!.]* "$vm/snapshot"/..?*; do
+    plain_or_absent "$f"
+  done
+  for f in "$vm/root.raw" "$vm/data.raw"; do
+    plain_file "$f" || answer "error missing $f"
+  done
+  vm_logs_ok "$vm"
+  need_landlock
+  systemctl is-active --quiet "foreman-vm-$id.service" && answer "ok running"
+  ch=$(ch_binary) || answer "error the agent release has no cloud-hypervisor"
+  n=$(existing_index "$id") || answer "error the environment has no address to come back to"
+  net_up "$n"
+  # The snapshot names everything else, Landlock's rules included; the
+  # agent checks its config first (VM.SnapshotConfig).
+  run_unit "$id" "$2" "$3" "$vm" "$ch" --api-socket "path=$vm/api.sock" \
+    --restore "source_url=file://$vm/snapshot,memory_restore_mode=copyonwrite,resume=true" ||
+    answer "error systemd-run failed"
+  answer "ok restored $tap $guest_ip"
+}
+
+cmd_tap() {
+  if [ "$#" -ne 1 ] || ! uuid_ok "$1"; then answer "error tap takes ENV_ID"; fi
+  n=$(existing_index "$1") || answer "error the environment has no address"
+  answer "ok fm-vm$n"
+}
+
+stop_unit() {
+  unit="foreman-vm-$1.service"
+  systemctl stop "$unit" >/dev/null 2>&1 && return 0
+  # A transient unit is collected after exit. A failed query is inconclusive.
+  units=$(systemctl list-units --all --plain --no-legend "$unit") || answer "error could not query $unit"
+  [ -z "$units" ] || answer "error could not confirm $unit stopped"
+}
+
+cmd_stop() {
+  if [ "$#" -ne 1 ] || ! uuid_ok "$1"; then answer "error stop takes ENV_ID"; fi
+  stop_unit "$1"
+  answer "ok"
+}
+
+cmd_release() {
+  if [ "$#" -ne 1 ] || ! uuid_ok "$1"; then answer "error release takes ENV_ID"; fi
+  stop_unit "$1"
+  if n=$(existing_index "$1"); then
+    if ! ip link del "fm-vm$n" 2>/dev/null; then
+      links=$(ip -o link show) || answer "error could not list network interfaces"
+      if printf '%s\n' "$links" | awk -v name="fm-vm$n" '$2 == name ":" || index($2, name "@") == 1 { found=1 } END { exit !found }'; then
+        answer "error could not remove fm-vm$n"
+      fi
+    fi
+    rm -f "$STATE/nets/$n" || answer "error could not release address"
+  fi
+  answer "ok"
+}
+
+IFS= read -r line || answer "error no request"
+case "$line" in
+  *[!a-z0-9\ .-]*) answer "error unexpected characters" ;;
+esac
+[ "${#line}" -le 200 ] || answer "error request too long"
+
+# One request at a time: allocating an address reads, then writes.
+mkdir -p "$STATE" || answer "error cannot open VM helper state"
+
+dispatch() {
+  flock 9 || answer "error cannot acquire VM helper lock"
+
+  set -f
+  # shellcheck disable=SC2086
+  set -- $line
+  set +f
+  [ "$#" -ge 1 ] || answer "error no request"
+  request=$1
+  shift
+  case "$request" in
+    version) answer "ok $VERSION" ;;
+    resolvers) answer "ok $(resolvers)" ;;
+    landlock) need_landlock && answer "ok" ;;
+    tap) cmd_tap "$@" ;;
+    start) cmd_start "$@" ;;
+    restore) cmd_restore "$@" ;;
+    stop) cmd_stop "$@" ;;
+    release) cmd_release "$@" ;;
+    *) answer "error unknown request" ;;
+  esac
+}
+
+dispatch 9>"$STATE/lock" || answer "error cannot open VM helper lock"
