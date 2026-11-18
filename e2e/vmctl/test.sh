@@ -110,6 +110,17 @@ check "failed locks never launch a unit" test ! -e "$work/last-run"
 
 # -- refusals --------------------------------------------------------------
 expect "says its version" "version" "ok 3"
+nonce=0123456789abcdef0123456789abcdef
+stage=$work/srv/vms/.adopt-$nonce
+expect "refuses a published VM id as an adoption stage" "adopt $env1 $env1 $guest" "error invalid adoption stage"
+mkdir "$stage"
+ln "$work/srv/vms/$env1/data.raw" "$stage/data.raw"
+expect "refuses a staging hard link to published data" "adopt $env1 $nonce $guest" "error adoption disk has additional links"
+rm "$stage/data.raw"
+ln -s "$work/srv/vms/$env1/data.raw" "$stage/data.raw"
+expect "refuses a staging symlink to published data" "adopt $env1 $nonce $guest" "error missing private adoption disk"
+rm "$stage/data.raw"
+rmdir "$stage"
 expect "says the box's resolvers, not MagicDNS" "resolvers" "ok 192.168.1.1"
 expect "refuses an unknown request" "reboot" "error unknown request"
 expect "refuses characters outside its vocabulary" "start ../../etc/shadow 1 2" "error unexpected characters"

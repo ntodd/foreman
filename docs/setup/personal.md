@@ -248,6 +248,13 @@ reflink: made at once, with no extra space. On ext4 it's a full copy,
 which takes its full size. The install script says which you have, and
 the box's page shows "full-copy disks" when it can't reflink.
 
+The agent writes the environment ID into each new data disk. For a prebuild,
+a short-lived VM clears the private copy's old containers, volumes and agent
+state before the agent publishes it. If the box asks for an updated VM helper,
+re-run the installer. An existing environment whose disk has a missing or
+wrong `.env-id` stops before Docker starts. Keep the VM off, back up the disk
+and verify which environment it belongs to before repairing its marker.
+
 ext4 is fine, and on the production box it was the better choice. A full
 copy of a 1.5 GB prebuild took under half a second on fast NVMe, and the
 whole path from a prebuild to a running environment was quicker than

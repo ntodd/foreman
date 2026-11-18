@@ -1,0 +1,21 @@
+#!/bin/sh
+# PID 1 only in an offline provisioning VM. vda is the pristine read-only
+# guest image and vdb a private prebuild copy. No normal services run.
+set -eu
+# Power off even on an error. Only the success line permits publication.
+trap 'echo o > /proc/sysrq-trigger' EXIT
+echo "foreman-adopt: starting"
+mountpoint -q /proc || mount -t proc proc /proc
+[ -b /dev/vdb ] || mount -t devtmpfs devtmpfs /dev
+env_id=$(sed -n 's/.*fm\.env=\([0-9a-f-]*\).*/\1/p' /proc/cmdline)
+[ -n "$env_id" ]
+echo "foreman-adopt: mounting the private copy"
+mount -t ext4 -o noatime /dev/vdb /mnt
+# A prebuild controls its Docker directory. Never traverse a symlink
+# into the initializer's root or one of its virtual filesystems.
+[ ! -L /mnt/docker ]
+rm -rf /mnt/docker/containers /mnt/docker/volumes /mnt/docker/network \
+  /mnt/docker/plugins /mnt/docker/swarm /mnt/containerd /mnt/agent /mnt/.env-id
+printf '%s\n' "$env_id" > /mnt/.env-id
+umount /mnt
+echo "foreman-adopted $env_id"

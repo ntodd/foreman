@@ -99,14 +99,14 @@ defmodule ForemanAgent.VM.Helper do
   def release(config, env_id), do: request(config, ["release", env_id])
 
   @doc false
-  @spec request(Config.t(), [String.t()]) :: {:ok, [String.t()]} | {:error, String.t()}
-  def request(config, words) do
+  @spec request(Config.t(), [String.t()], timeout()) :: {:ok, [String.t()]} | {:error, String.t()}
+  def request(config, words, timeout \\ @timeout) do
     opts = [:binary, packet: :line, active: false, packet_size: 4096]
 
     with {:ok, socket} <- connect(config.vmctl_socket, opts) do
       try do
         with :ok <- :gen_tcp.send(socket, Enum.join(words, " ") <> "\n"),
-             {:ok, line} <- :gen_tcp.recv(socket, 0, @timeout) do
+             {:ok, line} <- :gen_tcp.recv(socket, 0, timeout) do
           answer(String.trim_trailing(line))
         else
           {:error, reason} -> {:error, "the VM helper didn't answer (#{inspect(reason)})"}

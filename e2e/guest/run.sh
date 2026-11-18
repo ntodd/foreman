@@ -38,12 +38,34 @@ ch=$1
 [ -x "$ch" ] || fail "the agent release has no Cloud Hypervisor"
 size=$(( $(du -sm "$dir/rel" | cut -f1) * 13 / 10 + 64 ))
 mkfs.ext4 -q -F -L fm-agent -d "$dir/rel" "$dir/run/agent.img" "${size}M"
-mkfs.ext4 -q -F -L fm-data "$dir/run/data.raw" 8G
+env_id=6f1c1d1e-9a3b-4c1f-8f5e-2d7a9b0c1e2f
+mkdir "$dir/seed"
+printf '%s\n' "$env_id" > "$dir/seed/.env-id"
+mkfs.ext4 -q -F -L fm-data -d "$dir/seed" "$dir/run/data.raw" 8G
 uuid=$(blkid -p -s UUID -o value "$dir/run/data.raw")
+
+# Boot the offline initializer with an independent copy and inspect its
+# filesystem before using the normal guest boot path.
+mkdir -p "$dir/fixture/docker/volumes/test" "$dir/fixture/srv"
+echo old-volume > "$dir/fixture/docker/volumes/test/canary"
+echo keep > "$dir/fixture/srv/clone"
+mkfs.ext4 -q -F -d "$dir/fixture" "$dir/run/adopt.raw" 64M
+timeout 90 "$ch" --kernel "$dir/guest/vmlinuz" \
+  --cmdline "console=ttyS0 root=/dev/vda ro quiet panic=1 init=/usr/local/lib/foreman-guest/adopt fm.env=$env_id" \
+  --disk "path=$dir/run/root.raw,image_type=raw,readonly=on,serial=fm-root" \
+  --disk "path=$dir/run/adopt.raw,image_type=raw,serial=fm-data" \
+  --cpus boot=1 --memory size=256M --serial "file=$dir/run/adopt.log" --console off \
+  --landlock --landlock-rules "path=$dir/run,access=rw" "path=$dir/guest,access=r" ||
+  { cat "$dir/run/adopt.log"; fail "offline initialization did not exit"; }
+grep -aq "^foreman-adopted $env_id" "$dir/run/adopt.log" ||
+  { cat "$dir/run/adopt.log"; fail "offline initialization did not finish"; }
+[ "$(debugfs -R 'cat /.env-id' "$dir/run/adopt.raw" 2>/dev/null)" = "$env_id" ] || fail "incorrect owner"
+[ "$(debugfs -R 'cat /srv/clone' "$dir/run/adopt.raw" 2>/dev/null)" = keep ] || fail "clone lost"
+[ -z "$(debugfs -R 'cat /docker/volumes/test/canary' "$dir/run/adopt.raw" 2>/dev/null)" ] || fail "inherited volume"
 
 boot() {
   rm -f "$dir/run/api.sock" "$dir/run/vsock.sock"
-  "$ch" --kernel "$dir/guest/vmlinuz" --cmdline "console=ttyS0 root=/dev/vda rw net.ifnames=0" \
+  "$ch" --kernel "$dir/guest/vmlinuz" --cmdline "console=ttyS0 root=/dev/vda rw net.ifnames=0 fm.env=$env_id" \
     --disk "path=$dir/run/root.raw,image_type=raw,direct=on,num_queues=2,serial=fm-root" \
     --disk "path=$dir/run/data.raw,image_type=raw,direct=on,num_queues=2,serial=fm-data" \
     --disk "path=$dir/run/agent.img,image_type=raw,readonly=on,serial=fm-agent" \
@@ -107,6 +129,28 @@ for n in 1 2; do
 done
 
 [ "$(blkid -p -s UUID -o value "$dir/run/data.raw")" = "$uuid" ] || fail "data filesystem changed"
+
+# Ordinary boots must leave volumes intact when the ownership marker is
+# lost or replaced. Work against the stopped ext4 image between boots.
+echo canary > "$dir/canary"
+debugfs -w -R "mkdir /docker/volumes/check" "$dir/run/data.raw"
+debugfs -w -R "write $dir/canary /docker/volumes/check/canary" "$dir/run/data.raw"
+debugfs -w -R 'rm /.env-id' "$dir/run/data.raw"
+for marker in missing wrong; do
+  if [ "$marker" = wrong ]; then
+    debugfs -w -R "write $dir/canary /.env-id" "$dir/run/data.raw"
+  fi
+  boot "$marker"
+  i=0
+  until grep -aq 'data disk ownership does not match' "$dir/run/serial-$marker.log" 2>/dev/null; do
+    i=$((i + 1))
+    [ "$i" -lt 120 ] || fail "guest did not report the $marker marker"
+    sleep 0.5
+  done
+  power_off
+  [ "$(debugfs -R 'cat /docker/volumes/check/canary' "$dir/run/data.raw" 2>/dev/null)" = canary ] ||
+    fail "boot with $marker ownership removed the volume"
+done
 
 # An unrecognizable data disk must survive a boot attempt byte-for-byte.
 printf 'recoverable contents\n' > "$dir/run/data.raw"

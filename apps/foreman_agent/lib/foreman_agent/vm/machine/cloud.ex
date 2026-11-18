@@ -19,6 +19,25 @@ defmodule ForemanAgent.VM.Machine.Cloud do
   defdelegate ready(config), to: Helper
 
   @impl true
+  def adopt(env_id, nonce, guest, config) do
+    case Helper.request(config, ["adopt", env_id, nonce, guest], 105_000) do
+      {:ok, _} ->
+        :ok
+
+      {:error, "unknown request"} ->
+        {:error, "re-run the install script to enable prebuild adoption"}
+
+      error ->
+        error
+    end
+  end
+
+  @impl true
+  def stop_adoption(nonce, config) do
+    with {:ok, _} <- Helper.request(config, ["stop-adopt", nonce]), do: :ok
+  end
+
+  @impl true
   def boot(env_id, spec, config) do
     paths = VM.paths(config, env_id)
     # What an earlier run left: Cloud Hypervisor won't bind over them. Not
