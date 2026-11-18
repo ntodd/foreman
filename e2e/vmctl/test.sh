@@ -178,11 +178,11 @@ has() { if printf '%s\n' "$run" | grep -qxF -- "$2"; then pass "$1"; else fail "
 has "in a unit of its own" "--unit=foreman-vm-$env1"
 has "as the agent's user" "--uid=foreman"
 has "limited to its CPUs" "CPUQuota=200%"
-has "accounts for the VM's disk IO" "IOAccounting=yes"
-for op in Read Write; do
-  has "limits disk bandwidth ($op)" "IO${op}BandwidthMax=$work/srv/vms 40M"
-  has "limits disk operations ($op)" "IO${op}IOPSMax=$work/srv/vms 2000"
-done
+if grep -Eq 'IO(Read|Write)(Bandwidth|IOPS)Max=' "$work/last-run"; then
+  fail "default VM has a disk throttle"
+else
+  pass "default VM has unrestricted disk throughput"
+fi
 has "limited to its memory and some" "MemoryMax=2560M"
 has "on its tap" "tap=fm-vm0,mac=52:54:00:fa:00:00"
 has "confined by Landlock" "--landlock"
@@ -215,7 +215,16 @@ expect "says when a VM has no tap" "tap $env2" "error the environment has no add
 expect "refuses a tap request without an id" "tap not-an-id" "error tap takes ENV_ID"
 expect "a VM that's running isn't started twice" "start $env1 2 2048 $guest 1.2.3" "ok running"
 printf 'nameserver 100.100.100.100\n' > "$work/resolv.conf"
+printf 'IO_BANDWIDTH=500M\nIO_IOPS=75000\n' >> "$work/vmctl.conf"
+check_configured_io() {
+  run=$(cat "$work/last-run")
+  for op in Read Write; do
+    has "configured disk bandwidth ($op)" "IO${op}BandwidthMax=$work/srv/vms 500M"
+    has "configured disk operations ($op)" "IO${op}IOPSMax=$work/srv/vms 75000"
+  done
+}
 expect "a second VM gets the next address" "start $env2 1 1024 $guest 1.2.3" "ok started fm-vm1 10.250.0.6"
+check_configured_io
 check "a box with only MagicDNS gives its guests 1.1.1.1" grep -q "fm.dns=1.1.1.1 " "$work/last-run"
 
 # -- release and restore -----------------------------------------------------
@@ -260,6 +269,7 @@ expect "refuses to restore with a console log that's a symlink" "restore $env2 1
 rm "$vm2/serial.log"
 check "nothing refused restored a VM" test ! -s "$work/last-run"
 expect "restores a VM on the address it had" "restore $env2 1 1024" "ok restored fm-vm1 10.250.0.6"
+check_configured_io
 check "from its own snapshot" grep -qxF -- \
   "source_url=file://$work/srv/vms/$env2/snapshot,memory_restore_mode=copyonwrite,resume=true" "$work/last-run"
 expect "stops a VM" "stop $env2" "ok"

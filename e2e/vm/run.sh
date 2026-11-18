@@ -284,10 +284,10 @@ echo "ok: the VM helper is root's and listening"
 sudo nft list table inet foreman_guests >/dev/null || fail "the VM firewall table isn't loaded"
 echo "ok: the VM firewall table is loaded"
 
-check_disk_limits() {
-  io_max="/sys/fs/cgroup$(systemctl show -p ControlGroup --value "$1")/io.max"
-  for limit in rbps=40000000 wbps=40000000 riops=2000 wiops=2000; do
-    grep -qw "$limit" "$io_max" || fail "$1 is missing disk limit $limit"
+check_unthrottled_disk() {
+  for property in IOReadBandwidthMax IOWriteBandwidthMax IOReadIOPSMax IOWriteIOPSMax; do
+    [ -z "$(systemctl show -p "$property" --value "$1")" ] ||
+      fail "default VM unit $1 has a disk throttle in $property"
   done
 }
 vm_ready() { cp_eval 'E2E.vm_status()' | grep -q "^VM ready=true"; }
@@ -328,7 +328,7 @@ systemctl is-active --quiet "$unit" || fail "$unit isn't running"
 [ "$(systemctl show -p User --value "$unit")" = foreman ] || fail "the VM doesn't run as foreman"
 [ "$(systemctl show -p MemoryMax --value "$unit")" = $(((3072 + 512) * 1024 * 1024)) ] || fail "the VM's memory isn't limited"
 [ "$(systemctl show -p CPUQuotaPerSecUSec --value "$unit")" = 2s ] || fail "the VM's CPU isn't limited"
-check_disk_limits "$unit"
+check_unthrottled_disk "$unit"
 group=$(systemctl show -p Group --value "$unit")
 case "$group" in foreman-tap[0-9]*) ;; *) fail "the VM has no dedicated tap group" ;; esac
 gid=$(getent group "$group" | cut -d: -f3)
@@ -396,9 +396,7 @@ $(beat)
 EOF
 [ -n "$boot_before" ] || fail "no heartbeat before the suspend"
 lv_click "/environments/$first" action '{"do":"suspend"}' >/dev/null || fail "couldn't suspend hello-1"
-# Snapshot writes share the VM disk limits. Allow the agent its ten-minute
-# snapshot deadline plus time to stop the unit and report completion.
-wait_for_env hello-1 suspended 660
+wait_for_env hello-1 suspended 180
 systemctl is-active --quiet "$unit" && fail "the VM is still running after suspend"
 sudo test -f "/srv/foreman/vms/$first/snapshot/config.json" || fail "no snapshot"
 echo "ok: suspended, VM off, snapshot on disk"
@@ -434,7 +432,7 @@ EOF
 fi
 sudo test -e "/srv/foreman/vms/$first/snapshot" && fail "the snapshot outlived the resume"
 landlocked "$first" || fail "the resumed VM wrote a snapshot outside its own directory: it isn't confined by Landlock"
-check_disk_limits "$unit"
+check_unthrottled_disk "$unit"
 echo "ok: resumed on the same boot, its VMM thread under Landlock, clock within ${skew}s, snapshot gone"
 
 say "restarting the agent leaves the VMs running"
