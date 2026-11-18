@@ -227,8 +227,9 @@ since the firewall would cut environments off from the internet there.
 | `--reenroll` | enrolls the box again with a new `--token` (after revoking it, say); the old identity is moved aside |
 | `--url` | the control plane's address, when the box reaches it some other way than the one in the command |
 
-Re-running the script refreshes the installed agent version, its root helpers
-and systemd units. It keeps the box identity, pending rollback and local
+Re-running the script refreshes the root helpers from the control plane’s fleet release
+and reinstalls the systemd units. It keeps the installed agent version, box
+identity, pending rollback and local
 settings in `/etc/foreman-agent/agent.env`. Installer-managed values, including
 the control plane URL and enrollment token, live in `install.env` and take
 precedence. An enrolled box needs no token. The installer remembers

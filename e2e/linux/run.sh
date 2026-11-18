@@ -176,6 +176,9 @@ echo "ok: reused join token refused"
 
 say "re-running the install script keeps the enrollment and restarts the agent"
 box sh -c 'printf "%s\n" "# local git fixture" FOREMAN_ALLOWED_GIT_HOSTS=git FOREMAN_INSECURE_GIT_HOSTS=git >> /etc/foreman-agent/agent.env'
+# Mark the agent-owned copy of the privileged helper. A normal rerun
+# must keep the userland tree as-is and install root's helper from fleet.
+box sh -c 'echo "# pinned userland fixture" >> /opt/foreman-agent/current/lib/foreman_agent-*/priv/vm/vmctl'
 local_settings=$(box sha256sum /etc/foreman-agent/agent.env)
 cp_eval 'E2E.desire_version("0.1.0")'
 publish 0.1.1
@@ -186,6 +189,9 @@ wait_for "agent rejoined" 60 joined_more box1 "$n"
 [ "$(box sha256sum /var/lib/foreman-agent/identity.json)" = "$identity" ] || fail "the re-run changed the identity"
 [ "$(box sha256sum /etc/foreman-agent/agent.env)" = "$local_settings" ] || fail "the re-run changed local settings"
 current_is 0.1.0 || fail "the re-run moved off the installed release"
+grep -qx 'foreman: refreshing root helpers from fleet agent 0.1.1' "$work/install.log" || fail "the re-run did not select fleet helpers"
+box sh -c 'grep -qx "# pinned userland fixture" /opt/foreman-agent/current/lib/foreman_agent-*/priv/vm/vmctl' || fail "the re-run replaced pinned userland"
+box grep -q 'pinned userland fixture' /etc/foreman-agent/vmctl && fail "agent-owned helper installed as root"
 echo "ok: same identity, settings and installed release after a re-run"
 
 say "a box without KVM says so, and gets no environments"

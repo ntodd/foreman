@@ -178,7 +178,7 @@ systemd-tmpfiles --create /etc/tmpfiles.d/foreman.conf
 echo "foreman: downloading the agent for $target"
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"; restart_agent' EXIT
-release=latest
+install_release=1
 current=/opt/foreman-agent/current
 valid_version() {
   printf '%s\n' "$1" | LC_ALL=C grep -Eq '^[0-9]{1,4}\.[0-9]{1,4}\.[0-9]{1,4}(-[0-9A-Za-z.]{1,32})?$'
@@ -192,10 +192,12 @@ if [ -L "$current" ] || [ -e "$current" ]; then
   # themselves. The root-owned helper was introduced with VM installs.
   if [ ! -f /etc/foreman-agent/vmctl ]; then
     echo "foreman: migrating the box to the fleet VM agent"
-    release=latest
+    install_release=1
+  else
+    install_release=""
   fi
 fi
-curl -fsSL -D "$tmp/headers" -o "$tmp/agent.tar.gz" "$FOREMAN_URL/agent/releases/$release/$target" ||
+curl -fsSL -D "$tmp/headers" -o "$tmp/agent.tar.gz" "$FOREMAN_URL/agent/releases/latest/$target" ||
   fail "couldn't download the agent from $FOREMAN_URL (has a release been published for $target?)"
 version=$(sed -n 's/^x-foreman-version: *\([^[:space:]]*\).*/\1/ip' "$tmp/headers" | tail -1)
 sha=$(sed -n 's/^x-foreman-sha256: *\([0-9a-f]*\).*/\1/ip' "$tmp/headers" | tail -1)
@@ -204,38 +206,34 @@ if [ -z "$version" ] || [ -z "$sha" ]; then
 fi
 case "$version" in *[!A-Za-z0-9.-]*) fail "invalid downloaded release" ;; esac
 valid_version "$version" || fail "invalid downloaded release"
-[ "$release" = latest ] || [ "$release" = "$version" ] || fail "downloaded a different release"
 printf '%s  %s\n' "$sha" "$tmp/agent.tar.gz" | sha256sum -c - >/dev/null || fail "the download doesn't match its digest"
 
-echo "foreman: installing agent $version"
-dest="/opt/foreman-agent/releases/$version"
-# Unpack beside the release and swap it in: on a re-run the agent may be
-# running from $dest, and deleting it under the running agent breaks it.
-new="$dest.new.$$"
-rm -rf "$new"
-# Unpacked first where only root can write: what runs as root (the VM
-# helper, the firewall's rules and script) is installed from this copy,
-# never from the release tree the agent owns.
+# Privileged files always come from the fleet archive chosen by the
+# control plane. Neither an agent-owned symlink nor a userland pin can
+# select the version of the root helper or firewall.
+echo "foreman: refreshing root helpers from fleet agent $version"
 staged="$tmp/release"
 mkdir -m 0700 "$staged"
 tar -xzf "$tmp/agent.tar.gz" -C "$staged"
-install -d -o foreman -g foreman "$new"
-cp -a "$staged/." "$new/"
-# The release carries the devcontainer CLI and the Node it runs on; this
-# script no longer installs them. One that doesn't (an agent older than
-# this script, served to a box pinned to it) wouldn't run environments.
-set -- "$new"/lib/foreman_agent-*/priv/tools/bin/devcontainer
-[ -x "$1" ] || { rm -rf "$new"; fail "agent $version doesn't carry the devcontainer CLI; install a newer agent (unpin this box in Foreman, or publish the release that came with this control plane)"; }
-set -- "$new"/lib/foreman_agent-*/priv/vm/vmctl
-[ -f "$1" ] || { rm -rf "$new"; fail "agent $version doesn't run environment VMs; install a newer agent (unpin this box in Foreman)"; }
-chown -R foreman:foreman "$new"
-rm -rf "$dest.old"
-if [ -d "$dest" ]; then mv "$dest" "$dest.old"; fi
-mv "$new" "$dest"
-ln -sfn "releases/$version" /opt/foreman-agent/current
-chown -h foreman:foreman /opt/foreman-agent/current
-# A rerun can interrupt an unconfirmed self-update. Its rollback state
-# belongs to the updater and remains valid for the same release.
+set -- "$staged"/lib/foreman_agent-*/priv/tools/bin/devcontainer
+[ -x "$1" ] || fail "fleet agent $version doesn't carry the devcontainer CLI"
+set -- "$staged"/lib/foreman_agent-*/priv/vm/vmctl
+[ -f "$1" ] || fail "fleet agent $version doesn't run environment VMs"
+
+if [ -n "$install_release" ]; then
+  echo "foreman: installing agent $version"
+  dest="/opt/foreman-agent/releases/$version"
+  new="$dest.new.$$"
+  rm -rf "$new"
+  install -d -o foreman -g foreman "$new"
+  cp -a "$staged/." "$new/"
+  chown -R foreman:foreman "$new"
+  rm -rf "$dest.old"
+  if [ -d "$dest" ]; then mv "$dest" "$dest.old"; fi
+  mv "$new" "$dest"
+  ln -sfn "releases/$version" "$current"
+  chown -h foreman:foreman "$current"
+fi
 
 if [ -n "$enroll" ] && [ -e "$IDENTITY" ]; then
   # Keep the old identity aside rather than deleting a key.
@@ -646,7 +644,7 @@ systemctl restart foreman-firewall
 # have hit its start limit) with the old settings and join token.
 systemctl reset-failed foreman-agent 2>/dev/null || true
 systemctl restart foreman-agent
-rm -rf "$dest.old"
+if [ -n "$install_release" ]; then rm -rf "$dest.old"; fi
 
 # Whether a new environment's disk is a reflink or a full copy.
 probe=/srv/foreman/.reflink-probe
