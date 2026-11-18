@@ -38,12 +38,15 @@ ch=$1
 [ -x "$ch" ] || fail "the agent release has no Cloud Hypervisor"
 size=$(( $(du -sm "$dir/rel" | cut -f1) * 13 / 10 + 64 ))
 mkfs.ext4 -q -F -L fm-agent -d "$dir/rel" "$dir/run/agent.img" "${size}M"
-mkfs.ext4 -q -F -L fm-data "$dir/run/data.raw" 8G
+env_id=6f1c1d1e-9a3b-4c1f-8f5e-2d7a9b0c1e2f
+mkdir "$dir/seed"
+printf '%s\n' "$env_id" > "$dir/seed/.env-id"
+mkfs.ext4 -q -F -L fm-data -d "$dir/seed" "$dir/run/data.raw" 8G
 uuid=$(blkid -p -s UUID -o value "$dir/run/data.raw")
 
 boot() {
   rm -f "$dir/run/api.sock" "$dir/run/vsock.sock"
-  "$ch" --kernel "$dir/guest/vmlinuz" --cmdline "console=ttyS0 root=/dev/vda rw net.ifnames=0" \
+  "$ch" --kernel "$dir/guest/vmlinuz" --cmdline "console=ttyS0 root=/dev/vda rw net.ifnames=0 fm.env=$env_id" \
     --disk "path=$dir/run/root.raw,image_type=raw,direct=on,num_queues=2,serial=fm-root" \
     --disk "path=$dir/run/data.raw,image_type=raw,direct=on,num_queues=2,serial=fm-data" \
     --disk "path=$dir/run/agent.img,image_type=raw,readonly=on,serial=fm-agent" \
@@ -107,6 +110,28 @@ for n in 1 2; do
 done
 
 [ "$(blkid -p -s UUID -o value "$dir/run/data.raw")" = "$uuid" ] || fail "data filesystem changed"
+
+# Ordinary boots must leave volumes intact when the ownership marker is
+# lost or replaced. Work against the stopped ext4 image between boots.
+echo canary > "$dir/canary"
+debugfs -w -R "mkdir /docker/volumes/check" "$dir/run/data.raw"
+debugfs -w -R "write $dir/canary /docker/volumes/check/canary" "$dir/run/data.raw"
+debugfs -w -R 'rm /.env-id' "$dir/run/data.raw"
+for marker in missing wrong; do
+  if [ "$marker" = wrong ]; then
+    debugfs -w -R "write $dir/canary /.env-id" "$dir/run/data.raw"
+  fi
+  boot "$marker"
+  i=0
+  until grep -aq 'data disk ownership does not match' "$dir/run/serial-$marker.log" 2>/dev/null; do
+    i=$((i + 1))
+    [ "$i" -lt 120 ] || fail "guest did not report the $marker marker"
+    sleep 0.5
+  done
+  power_off
+  [ "$(debugfs -R 'cat /docker/volumes/check/canary' "$dir/run/data.raw" 2>/dev/null)" = canary ] ||
+    fail "boot with $marker ownership removed the volume"
+done
 
 # An unrecognizable data disk must survive a boot attempt byte-for-byte.
 printf 'recoverable contents\n' > "$dir/run/data.raw"

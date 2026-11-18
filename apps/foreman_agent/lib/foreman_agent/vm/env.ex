@@ -364,7 +364,7 @@ defmodule ForemanAgent.VM.Env do
          {:ok, agent} <- Image.ensure_agent_disk(config, ctx.runner, log),
          :ok <- File.mkdir_p(paths.dir),
          :ok <- File.chmod(paths.dir, 0o700),
-         :ok <- ensure_data_disk(paths, p, ctx, log, type),
+         :ok <- ensure_data_disk(paths, p, ctx, log, type, guest.digest),
          p = keep_snapshot_compatible(p, guest, agent, ctx, log),
          {:ok, meta} <- ensure_root_disk(p, paths, guest, ctx, log) do
       size = VM.size(Map.get(p, :limits, %{}), config, VM.box_size(config.proc))
@@ -428,14 +428,14 @@ defmodule ForemanAgent.VM.Env do
 
   # A new environment's disk: a copy of its prebuild's when the box has
   # it, otherwise a fresh sparse ext4 filesystem.
-  defp ensure_data_disk(paths, p, ctx, log, type) do
+  defp ensure_data_disk(paths, p, ctx, log, type, guest) do
     case File.lstat(paths.data) do
       {:ok, %{type: :regular}} ->
         :ok
 
       {:error, :enoent} ->
         if type == "env.create" and new_disk?(paths, p, ctx.config),
-          do: create_data_disk(paths, p, ctx, log),
+          do: create_data_disk(paths, p, ctx, log, guest),
           else: {:error, "the existing VM's data disk is missing; restore it before starting"}
 
       _ ->
@@ -453,21 +453,38 @@ defmodule ForemanAgent.VM.Env do
             match?({:ok, %{"kind" => "prebuild"}}, VM.read_meta(config, p.env_id))))
   end
 
-  defp create_data_disk(paths, p, ctx, log) do
+  defp create_data_disk(paths, p, ctx, log, guest) do
     prebuild = Map.get(p, :prebuild_id)
 
     if is_binary(prebuild) and Prebuild.exists?(ctx.config, prebuild) do
       log.("info", "Starting from a prebuild\n")
-      copy_disk(Prebuild.disk(ctx.config, prebuild), paths.data, ctx)
+      nonce = Base.encode16(:crypto.strong_rand_bytes(16), case: :lower)
+      stage = Path.join(ctx.config.vm_root, ".adopt-" <> nonce)
+
+      # Only the private copy is attached for cleanup. Once published,
+      # retry, resume and ordinary boot have no path back to adoption.
+      with :ok <- File.mkdir(stage) do
+        try do
+          clone = Path.join(stage, "data.raw")
+
+          with :ok <- copy_disk(Prebuild.disk(ctx.config, prebuild), clone, ctx),
+               :ok <- Machine.impl(ctx.config).adopt(p.env_id, nonce, guest, ctx.config),
+               :ok <- File.ln(clone, paths.data) do
+            :ok
+          end
+        after
+          File.rm_rf!(stage)
+        end
+      end
     else
       if is_binary(prebuild),
         do: log.("info", "This box no longer has the prebuild; starting from scratch\n")
 
-      format_new_disk(paths.data, ctx)
+      format_new_disk(paths.data, p.env_id, ctx)
     end
   end
 
-  defp format_new_disk(dest, ctx) do
+  defp format_new_disk(dest, env_id, ctx) do
     # mkfs only sees a new file in the agent-owned parent. Link it into
     # place once complete, failing if another disk appeared meanwhile.
     tmp =
@@ -478,6 +495,8 @@ defmodule ForemanAgent.VM.Env do
       "-F",
       "-L",
       "fm-data",
+      "-d",
+      tmp <> ".seed",
       "-E",
       "nodiscard,lazy_itable_init=1,lazy_journal_init=1",
       tmp,
@@ -485,6 +504,9 @@ defmodule ForemanAgent.VM.Env do
     ]
 
     try do
+      File.mkdir!(tmp <> ".seed")
+      File.write!(Path.join(tmp <> ".seed", ".env-id"), env_id <> "\n")
+
       case ctx.runner.run("mkfs.ext4", args, timeout: 120_000) do
         {:ok, %{status: 0}} ->
           File.ln(tmp, dest)
@@ -497,6 +519,7 @@ defmodule ForemanAgent.VM.Env do
       end
     after
       File.rm(tmp)
+      File.rm_rf!(tmp <> ".seed")
     end
   end
 

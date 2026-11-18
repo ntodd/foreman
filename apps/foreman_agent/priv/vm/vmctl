@@ -13,6 +13,7 @@
 #   resolvers                 (the box's upstream resolvers, for its firewall)
 #   landlock                  (whether the box's kernel can confine its VMs)
 #   tap ENV_ID                (the tap the environment's VM has)
+#   adopt ENV_ID STAGE_NONCE GUEST_SHA256
 #   start ENV_ID CPUS MEMORY_MB GUEST_SHA256 AGENT_VERSION
 #   restore ENV_ID CPUS MEMORY_MB
 #   stop ENV_ID
@@ -157,9 +158,15 @@ ch_binary() {
 run_unit() { # env_id cpus memory_mb vm_dir ch args...
   id=$1 cpus=$2 memory=$3 vm=$4 ch=$5
   shift 5
-  unit=foreman-vm-$id
+  unit=${unit_prefix:-foreman-vm}-$id
   systemctl reset-failed "$unit.service" >/dev/null 2>&1 || true
   # Room for Cloud Hypervisor itself on top of the guest's memory.
+  # The offline initializer must finish before its copy can be published.
+  if [ "${unit_prefix:-}" = foreman-adopt ]; then
+    set -- --wait -p RuntimeMaxSec=90 -- "$ch" --log-file "$vm/ch.log" "$@"
+  else
+    set -- -- "$ch" --log-file "$vm/ch.log" "$@"
+  fi
   systemd-run --unit="$unit" --slice=foreman.slice --collect --quiet \
     --uid="$AGENT_USER" --gid="$vm_group" -p SupplementaryGroups=kvm -p ProtectProc=ptraceable -p RestrictNamespaces=yes \
     -p "MemoryMax=$((memory + 512))M" -p MemorySwapMax=0 -p "CPUQuota=$((cpus * 100))%" \
@@ -172,7 +179,7 @@ run_unit() { # env_id cpus memory_mb vm_dir ch args...
     -p "BindReadOnlyPaths=$SRV/guest $SRV/agent-disks" \
     -p "InaccessiblePaths=-/run/foreman -/var/lib/foreman-agent -/etc/foreman-agent -$STATE -$SOCKET -/sys/fs/cgroup/foreman.slice -/run/systemd/private -/run/dbus/system_bus_socket" \
     -p StandardOutput=journal -p StandardError=journal \
-    -- "$ch" --log-file "$vm/ch.log" "$@" >/dev/null 2>&1
+    "$@" >/dev/null 2>&1
 }
 
 plain_file() { [ -f "$1" ] && [ ! -L "$1" ]; }
@@ -219,6 +226,35 @@ check_size() {
     answer "error could not read host memory"
   int_between "$1" 1 "$cpus" || answer "error requested CPUs exceed host capacity"
   int_between "$2" 256 "$memory" || answer "error requested memory exceeds host capacity"
+}
+
+cmd_adopt() {
+  if [ "$#" -ne 3 ] || ! uuid_ok "$1"; then answer "error adopt takes ENV_ID STAGE_NONCE GUEST_SHA256"; fi
+  printf '%s' "$2" | grep -Eqx '[0-9a-f]{32}' || answer "error invalid adoption stage"
+  printf '%s' "$3" | grep -Eqx '[0-9a-f]{64}' || answer "error bad guest image"
+  env_id=$1 nonce=$2 guest=$SRV/guest/$3 stage=$SRV/vms/.adopt-$2
+  if [ ! -d "$stage" ] || [ -L "$stage" ] || ! plain_file "$stage/data.raw"; then
+    answer "error missing private adoption disk"
+  fi
+  # Neither the published environment disk nor a hard link to it may be
+  # opened for initialization. The agent creates this stage exclusively.
+  [ "$(stat -c %h "$stage/data.raw")" = 1 ] || answer "error adoption disk has additional links"
+  vm_logs_ok "$stage"
+  [ ! -e "$stage/serial.log" ] || answer "error adoption stage already used"
+  need_landlock
+  ch=$(ch_binary) || answer "error the agent release has no cloud-hypervisor"
+  vm_group=$AGENT_USER unit_prefix=foreman-adopt
+  run_unit "$nonce" 1 256 "$stage" "$ch" --kernel "$guest/vmlinuz" \
+    --cmdline "console=ttyS0 root=/dev/vda ro quiet panic=1 init=/usr/local/lib/foreman-guest/adopt fm.env=$env_id" \
+    --disk "path=$guest/root.raw,image_type=raw,readonly=on,serial=fm-root" \
+    --disk "path=$stage/data.raw,image_type=raw,serial=fm-data" \
+    --cpus boot=1 --memory size=256M --serial "file=$stage/serial.log" --console off \
+    --landlock --landlock-rules "path=$stage,access=rw" "path=$guest,access=r" ||
+    answer "error could not initialize the private prebuild copy"
+  # Read as the agent; the serial file is inside its directory.
+  runuser -u "$AGENT_USER" -- grep -aq "^foreman-adopted $env_id" "$stage/serial.log" ||
+    answer "error guest did not finish initializing the prebuild copy"
+  answer "ok"
 }
 
 cmd_start() { # env_id cpus memory_mb guest_sha256 agent_version
@@ -343,7 +379,6 @@ esac
 mkdir -p "$STATE" || answer "error cannot open VM helper state"
 
 dispatch() {
-  flock 9 || answer "error cannot acquire VM helper lock"
 
   set -f
   # shellcheck disable=SC2086
@@ -352,6 +387,9 @@ dispatch() {
   [ "$#" -ge 1 ] || answer "error no request"
   request=$1
   shift
+  # Adoption has a unique private disk and no network allocation.
+  if [ "$request" = adopt ]; then cmd_adopt "$@"; fi
+  flock 9 || answer "error cannot acquire VM helper lock"
   case "$request" in
     version) answer "ok $VERSION" ;;
     resolvers) answer "ok $(resolvers)" ;;

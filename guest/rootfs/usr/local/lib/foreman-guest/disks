@@ -30,21 +30,13 @@ if ! mountpoint -q "$base" && ! mount -t ext4 -o noatime "$data" "$base"; then
   exit 1
 fi
 
-# Whose disk this is. One that isn't yet this environment's (a copy of a
-# prebuild's, or a new one) keeps its clone, images and build cache, but
-# not what ran on it: containers (some restart on their own when Docker
-# starts, before anything here could stop them), volumes, networks,
-# plugins, swarm state, containerd's own containers and the guest agent's
-# state all go before Docker starts. The marker is on the disk, so what
-# ran there could have deleted or changed it; a missing or wrong one
-# clears the disk all the same (on a new disk there's nothing to clear).
-# The box names the environment on the kernel command line.
+# The provisioning agent gives each new filesystem its owner before
+# publication. Losing that marker on an established disk requires repair.
 env_id=$(sed -n 's/.*fm\.env=\([0-9a-f-]*\).*/\1/p' /proc/cmdline)
-if [ -n "$env_id" ] && [ "$(cat "$base/.env-id" 2>/dev/null || true)" != "$env_id" ]; then
-  echo "foreman-guest: clearing what ran on this disk before it was $env_id's"
-  rm -rf "$base/docker/containers" "$base/docker/volumes" "$base/docker/network" \
-    "$base/docker/plugins" "$base/docker/swarm" "$base/containerd" "$base/agent"
-  printf '%s\n' "$env_id" > "$base/.env-id"
+if [ -z "$env_id" ] || [ -L "$base/.env-id" ] || [ ! -f "$base/.env-id" ] ||
+   [ "$(cat "$base/.env-id")" != "$env_id" ]; then
+  echo "foreman-guest: data disk ownership does not match this environment; check .env-id before retrying" >&2
+  exit 1
 fi
 
 for dir in docker containerd srv agent; do mkdir -p "$base/$dir"; done

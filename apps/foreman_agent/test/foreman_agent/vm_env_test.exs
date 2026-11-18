@@ -61,7 +61,8 @@ defmodule ForemanAgent.VMEnvTest do
 
     # cp --reflink=auto --sparse=always SRC DEST, as the box's cp would.
     stub(ForemanAgent.RunnerMock, :run, fn
-      "mkfs.ext4", ["-q", "-F", "-L", "fm-data", "-E", _, path, size], _opts ->
+      "mkfs.ext4", ["-q", "-F", "-L", "fm-data", "-d", seed, "-E", _, path, size], _opts ->
+        assert File.read!(Path.join(seed, ".env-id")) =~ ~r/^[0-9a-f-]{36}\n$/
         {gb, "G"} = Integer.parse(size)
 
         File.open!(path, [:write, :exclusive], fn fd ->
@@ -996,7 +997,20 @@ defmodule ForemanAgent.VMEnvTest do
       # Kept for the next environment.
       assert File.read!(VM.Prebuild.disk(ctx.config, @prebuild)) == "prebuilt disk"
       assert_received {:log, "info", "Starting from a prebuild\n"}
+      assert_received {:adopt, @env, stage}
+      refute File.exists?(stage)
       assert_receive {:guest, "env.create", %{prebuild_id: @prebuild}}
+    end
+
+    test "failed adoption leaves the source intact and publishes no data disk", ctx do
+      prebuilt(ctx.config, "prebuilt disk")
+      FakeMachine.configure(test: self(), adopt: {:error, "interrupted adoption"})
+
+      assert {:error, "interrupted adoption"} = run(create(%{prebuild_id: @prebuild}), ctx)
+      refute File.exists?(VM.paths(ctx.config, @env).data)
+      assert File.read!(VM.Prebuild.disk(ctx.config, @prebuild)) == "prebuilt disk"
+      assert_received {:adopt, @env, stage}
+      refute File.exists?(stage)
     end
 
     test "one the box doesn't have starts from an empty disk", ctx do
