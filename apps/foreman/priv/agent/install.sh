@@ -3,7 +3,7 @@
 #
 #   curl -fsSL __FOREMAN_URL__/agent/install.sh | sudo sh -s -- --token fj_...
 #
-# Re-running it on an enrolled box updates the agent and keeps the box's
+# Re-running it on an enrolled box refreshes its units and keeps the installed release and box's
 # identity (no token needed). To enroll again, for
 # example after the box was revoked, pass --reenroll with a new token.
 #
@@ -178,13 +178,27 @@ systemd-tmpfiles --create /etc/tmpfiles.d/foreman.conf
 echo "foreman: downloading the agent for $target"
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"; restart_agent' EXIT
-curl -fsSL -D "$tmp/headers" -o "$tmp/agent.tar.gz" "$FOREMAN_URL/agent/releases/latest/$target" ||
+release=latest
+current=/opt/foreman-agent/current
+valid_version() {
+  printf '%s\n' "$1" | LC_ALL=C grep -Eq '^[0-9]{1,4}\.[0-9]{1,4}\.[0-9]{1,4}(-[0-9A-Za-z.]{1,32})?$'
+}
+if [ -L "$current" ] || [ -e "$current" ]; then
+  link=$(readlink "$current") || fail "current release is not a symlink"
+  release=${link#releases/}
+  case "$release" in *[!A-Za-z0-9.-]*) fail "invalid installed release" ;; esac
+  [ "$link" = "releases/$release" ] && valid_version "$release" || fail "invalid installed release"
+fi
+curl -fsSL -D "$tmp/headers" -o "$tmp/agent.tar.gz" "$FOREMAN_URL/agent/releases/$release/$target" ||
   fail "couldn't download the agent from $FOREMAN_URL (has a release been published for $target?)"
 version=$(sed -n 's/^x-foreman-version: *\([^[:space:]]*\).*/\1/ip' "$tmp/headers" | tail -1)
 sha=$(sed -n 's/^x-foreman-sha256: *\([0-9a-f]*\).*/\1/ip' "$tmp/headers" | tail -1)
 if [ -z "$version" ] || [ -z "$sha" ]; then
   fail "the release download is missing its version or digest"
 fi
+case "$version" in *[!A-Za-z0-9.-]*) fail "invalid downloaded release" ;; esac
+valid_version "$version" || fail "invalid downloaded release"
+[ "$release" = latest ] || [ "$release" = "$version" ] || fail "downloaded a different release"
 printf '%s  %s\n' "$sha" "$tmp/agent.tar.gz" | sha256sum -c - >/dev/null || fail "the download doesn't match its digest"
 
 dest="/opt/foreman-agent/releases/$version"
@@ -213,8 +227,8 @@ if [ -d "$dest" ]; then mv "$dest" "$dest.old"; fi
 mv "$new" "$dest"
 ln -sfn "releases/$version" /opt/foreman-agent/current
 chown -h foreman:foreman /opt/foreman-agent/current
-# A fresh install isn't an update waiting to be confirmed.
-rm -f /opt/foreman-agent/previous /opt/foreman-agent/update-pending
+# A rerun can interrupt an unconfirmed self-update. Its rollback state
+# belongs to the updater and remains valid for the same release.
 
 if [ -n "$enroll" ] && [ -e "$IDENTITY" ]; then
   # Keep the old identity aside rather than deleting a key.
@@ -232,15 +246,20 @@ if [ -x "$legacy_cli" ]; then legacy_cli_env="FOREMAN_DEVCONTAINER_CLI=$legacy_c
 umask 077
 join_token=""
 if [ -n "$enroll" ]; then join_token="$TOKEN"; fi
-cat > /etc/foreman-agent/agent.env <<EOF
+# Existing agent.env may contain quoted multiline values and operator
+# comments. systemd reads the installer settings last on every version.
+touch /etc/foreman-agent/agent.env
+managed=/etc/foreman-agent/install.env
+cat > "$managed.new" <<EOF
 FOREMAN_URL=$FOREMAN_URL
 FOREMAN_JOIN_TOKEN=$join_token
 $legacy_cli_env
 HOME=/var/lib/foreman-agent
 RELEASE_TMP=/var/lib/foreman-agent/tmp
 EOF
-chgrp foreman /etc/foreman-agent/agent.env
-chmod 0640 /etc/foreman-agent/agent.env
+chgrp foreman "$managed.new" /etc/foreman-agent/agent.env
+chmod 0640 "$managed.new" /etc/foreman-agent/agent.env
+mv "$managed.new" "$managed"
 umask 022
 
 # The box's firewall: environments don't reach the tailnet as the box
@@ -503,6 +522,7 @@ StartLimitBurst=5
 User=foreman
 Group=foreman
 EnvironmentFile=/etc/foreman-agent/agent.env
+EnvironmentFile=/etc/foreman-agent/install.env
 ExecStart=/opt/foreman-agent/current/bin/foreman_agent start
 Restart=always
 RestartSec=3
@@ -646,7 +666,7 @@ i=0
 while [ $i -lt 30 ]; do
   if [ -s "$IDENTITY" ]; then
     # The join token is spent; don't leave it lying around.
-    sed -i '/^FOREMAN_JOIN_TOKEN=/d' /etc/foreman-agent/agent.env
+    sed -i 's/^FOREMAN_JOIN_TOKEN=.*/FOREMAN_JOIN_TOKEN=/' "$managed"
     echo "foreman: enrolled. This box should show as online in Foreman."
     exit 0
   fi
