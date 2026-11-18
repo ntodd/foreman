@@ -38,6 +38,10 @@ for tool in ip sysctl systemctl systemd-run; do
 echo "$tool \$*" >> "$work/calls"
 case "$tool \$1 \$2" in
   "ip link show") grep -q "^tap \$3\$" "$work/taps" 2>/dev/null ;;
+  "ip link del") [ ! -f "$work/fail-del" ] || exit 1; sed -i "/^tap \$3\$/d" "$work/taps" ;;
+  "ip -o link") awk '{ print NR ": " \$2 ": <UP>" }' "$work/taps" ;;
+  "systemctl stop "*) [ ! -f "$work/fail-stop" ] || exit 1; sed -i "/^unit \$2\$/d" "$work/units" ;;
+  "systemctl list-units --all") grep -F "unit \$6" "$work/units" || true ;;
   "ip tuntap add") echo "tap \$4" >> "$work/taps" ;;
   "systemctl is-active --quiet") grep -q "^unit \$3\$" "$work/units" 2>/dev/null ;;
   *) exit 0 ;;
@@ -202,6 +206,14 @@ expect "a second VM gets the next address" "start $env2 1 1024 $guest 1.2.3" "ok
 check "a box with only MagicDNS gives its guests 1.1.1.1" grep -q "fm.dns=1.1.1.1 " "$work/last-run"
 
 # -- release and restore -----------------------------------------------------
+touch "$work/fail-stop"
+expect "refuses to release a VM whose stop failed" "release $env1" "error could not confirm .* stopped"
+check "keeps the reservation after a failed stop" test -f "$work/state/nets/0"
+rm "$work/fail-stop"
+touch "$work/fail-del"
+expect "refuses to release an address while its tap remains" "release $env1" "error could not remove fm-vm0"
+check "keeps the reservation after a failed tap deletion" test -f "$work/state/nets/0"
+rm "$work/fail-del"
 expect "releases a VM" "release $env1" "ok"
 check "removes its tap" grep -q "ip link del fm-vm0" "$work/calls"
 check "frees its address" test ! -e "$work/state/nets/0"

@@ -334,6 +334,15 @@ defmodule ForemanAgent.VMEnvTest do
              run(command("env.start"), ctx)
   end
 
+  test "failed release preserves the VM disks and cached files for a retry", ctx do
+    {:ok, _} = run(create(), ctx)
+    FakeMachine.configure(test: self(), release: {:error, "unit still active"})
+    assert {:error, "unit still active"} = run(command("env.destroy"), ctx)
+    assert {:error, "unit still active"} = VM.Prebuild.discard(ctx.config, @env)
+    assert File.regular?(VM.paths(ctx.config, @env).data)
+    assert File.regular?(Path.join([ctx.config.secrets_root, @env, "secrets.env"]))
+  end
+
   test "env.destroy gives back the VM and removes its disks and secrets", ctx do
     {:ok, _} = run(create(), ctx)
     assert {:ok, %{}} = run(command("env.destroy"), ctx)
