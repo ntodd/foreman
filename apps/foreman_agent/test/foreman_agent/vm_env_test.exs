@@ -610,6 +610,32 @@ defmodule ForemanAgent.VMEnvTest do
       assert_received {:machine, :unpause, @env}
     end
 
+    test "startup removes interrupted disk copies and extra links to published disks", ctx do
+      paths = VM.paths(ctx.config, @env)
+
+      staging = fn ->
+        Path.join(
+          ctx.config.vm_root,
+          ".disk-" <> Base.url_encode64(:crypto.strong_rand_bytes(16))
+        )
+      end
+
+      extra_link = staging.()
+      interrupted_copy = staging.()
+      other = Path.join(ctx.config.vm_root, ".disk-local")
+      File.ln!(paths.data, extra_link)
+      File.write!(interrupted_copy, "unfinished")
+      File.write!(other, "local")
+      original = File.stat!(paths.data)
+
+      :ok = VM.Env.recover(ctx.config)
+      refute File.exists?(extra_link)
+      refute File.exists?(interrupted_copy)
+      assert File.stat!(paths.data).inode == original.inode
+      assert File.stat!(paths.data).links == original.links - 1
+      assert File.read!(other) == "local"
+    end
+
     test "at the agent's start, what a suspend cut short is cleaned up", ctx do
       paths = VM.paths(ctx.config, @env)
       File.mkdir_p!(paths.snapshot <> ".tmp")
