@@ -235,6 +235,9 @@ defmodule ForemanAgent.GuestChannelTest do
   test "a command that runs past its timeout fails, and is cancelled in the guest", ctx do
     start_guest(ctx)
     link = start_link(ctx)
+    # The timeout counts from the call, connecting included: run it once
+    # the guest has said hello, so the command goes before it can expire.
+    wait_until(fn -> Link.connected?(link) end)
     cmd = command()
     op_id = cmd.op_id
     run_async(link, cmd, timeout: 1_000)
