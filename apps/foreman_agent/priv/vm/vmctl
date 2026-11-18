@@ -42,13 +42,14 @@ set -u
 # Byte ranges in the request's patterns, whatever the locale.
 export LC_ALL=C
 
-VERSION=2
+VERSION=3
 
 SRV=/srv/foreman
 AGENT_ROOT=/opt/foreman-agent
 AGENT_USER=foreman
 POOL=10.250
 STATE=/var/lib/foreman-vmctl
+MEMINFO=/proc/meminfo
 RESOLV=/etc/resolv.conf
 LSM=/sys/kernel/security/lsm
 SOCKET=/run/foreman-vmctl.sock
@@ -113,9 +114,19 @@ net_up() {
   host_ip=$POOL.$third.$((base + 1))
   guest_ip=$POOL.$third.$((base + 2))
   mac=$(printf '52:54:00:fa:%02x:%02x' $((n / 256)) $((n % 256)))
-  if ! ip link show "$tap" >/dev/null 2>&1; then
-    ip tuntap add dev "$tap" mode tap user "$AGENT_USER" || answer "error couldn't create $tap"
+  # One group per address slot, retained for reuse. The VM keeps the agent
+  # uid for its disks, but only this VM gets the group its tap requires.
+  vm_group=foreman-tap$n
+  printf 'g %s -\n' "$vm_group" | systemd-sysusers - >/dev/null ||
+    answer "error couldn't allocate the group for $tap"
+  if ip link show "$tap" >/dev/null 2>&1; then
+    # Upgrade a stopped VM's old uid-only tap, keeping its name/address.
+    # tuntap del requires attachment to this single-queue tap and fails
+    # if a live VMM is still using it.
+    ip tuntap del dev "$tap" mode tap || answer "error couldn't replace $tap"
   fi
+  ip tuntap add dev "$tap" mode tap user "$AGENT_USER" group "$vm_group" ||
+    answer "error couldn't create $tap"
   sysctl -qw "net.ipv6.conf.$tap.disable_ipv6=1" 2>/dev/null || true
   ip addr replace "$host_ip/30" dev "$tap" || answer "error couldn't address $tap"
   ip link set "$tap" up || answer "error couldn't bring $tap up"
@@ -150,7 +161,7 @@ run_unit() { # env_id cpus memory_mb vm_dir ch args...
   systemctl reset-failed "$unit.service" >/dev/null 2>&1 || true
   # Room for Cloud Hypervisor itself on top of the guest's memory.
   systemd-run --unit="$unit" --slice=foreman.slice --collect --quiet \
-    --uid="$AGENT_USER" --gid="$AGENT_USER" -p SupplementaryGroups=kvm \
+    --uid="$AGENT_USER" --gid="$vm_group" -p SupplementaryGroups=kvm -p ProtectProc=ptraceable -p RestrictNamespaces=yes \
     -p "MemoryMax=$((memory + 512))M" -p MemorySwapMax=0 -p "CPUQuota=$((cpus * 100))%" \
     -p TasksMax=1024 -p UMask=0077 -p NoNewPrivileges=yes -p ProtectSystem=strict \
     -p ProtectHome=yes -p PrivateTmp=yes -p ProtectKernelTunables=yes \
@@ -159,7 +170,7 @@ run_unit() { # env_id cpus memory_mb vm_dir ch args...
     -p DevicePolicy=closed -p "DeviceAllow=/dev/kvm rw" -p "DeviceAllow=/dev/net/tun rw" \
     -p "TemporaryFileSystem=$SRV:ro" -p "BindPaths=$vm" -p "ReadWritePaths=$vm" \
     -p "BindReadOnlyPaths=$SRV/guest $SRV/agent-disks" \
-    -p "InaccessiblePaths=-/run/foreman -/var/lib/foreman-agent -/etc/foreman-agent -$STATE -$SOCKET" \
+    -p "InaccessiblePaths=-/run/foreman -/var/lib/foreman-agent -/etc/foreman-agent -$STATE -$SOCKET -/sys/fs/cgroup/foreman.slice -/run/systemd/private -/run/dbus/system_bus_socket" \
     -p StandardOutput=journal -p StandardError=journal \
     -- "$ch" --log-file "$vm/ch.log" "$@" >/dev/null 2>&1
 }
@@ -200,11 +211,20 @@ need_landlock() {
     answer "error this box's kernel has no Landlock: environment VMs need Linux 6.2 or later with landlock in its LSM list"
 }
 
+check_size() {
+  int_between "$1" 1 256 || answer "error bad CPU count"
+  int_between "$2" 256 4194304 || answer "error bad memory size"
+  cpus=$(nproc) || answer "error could not read host CPU count"
+  memory=$(awk '$1 == "MemTotal:" && $3 == "kB" {print int($2 / 1024)}' "$MEMINFO") ||
+    answer "error could not read host memory"
+  int_between "$1" 1 "$cpus" || answer "error requested CPUs exceed host capacity"
+  int_between "$2" 256 "$memory" || answer "error requested memory exceeds host capacity"
+}
+
 cmd_start() { # env_id cpus memory_mb guest_sha256 agent_version
   [ "$#" -eq 5 ] || answer "error start takes ENV_ID CPUS MEMORY_MB GUEST_SHA256 AGENT_VERSION"
   uuid_ok "$1" || answer "error bad environment id"
-  int_between "$2" 1 256 || answer "error bad CPU count"
-  int_between "$3" 256 4194304 || answer "error bad memory size"
+  check_size "$2" "$3"
   printf '%s' "$4" | grep -Eqx '[0-9a-f]{64}' || answer "error bad guest image"
   printf '%s' "$5" | grep -Eqx '[0-9]+\.[0-9]+\.[0-9]+(-[0-9a-z.]+)?' || answer "error bad agent version"
   id=$1 cpus=$2 memory=$3
@@ -251,8 +271,7 @@ cmd_start() { # env_id cpus memory_mb guest_sha256 agent_version
 cmd_restore() { # env_id cpus memory_mb
   [ "$#" -eq 3 ] || answer "error restore takes ENV_ID CPUS MEMORY_MB"
   uuid_ok "$1" || answer "error bad environment id"
-  int_between "$2" 1 256 || answer "error bad CPU count"
-  int_between "$3" 256 4194304 || answer "error bad memory size"
+  check_size "$2" "$3"
   id=$1
   vm=$SRV/vms/$id
   plain_file "$vm/snapshot/config.json" || answer "error no snapshot"

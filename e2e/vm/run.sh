@@ -51,6 +51,7 @@ logs() {
   docker logs --tail 60 "$cp_name" >&2 2>&1 || true
   echo "== agent" >&2
   sudo journalctl --no-pager -n 120 -u foreman-agent >&2 || true
+  sudo journalctl --no-pager -n 40 -u 'foreman-vm-*.service' >&2 || true
   # The VMs' directories are the agent's alone.
   sudo sh -c 'for log in /srv/foreman/vms/*/serial.log /srv/foreman/vms/*/ch.log; do
     [ -e "$log" ] || continue
@@ -321,6 +322,14 @@ systemctl is-active --quiet "$unit" || fail "$unit isn't running"
 [ "$(systemctl show -p User --value "$unit")" = foreman ] || fail "the VM doesn't run as foreman"
 [ "$(systemctl show -p MemoryMax --value "$unit")" = $(((3072 + 512) * 1024 * 1024)) ] || fail "the VM's memory isn't limited"
 [ "$(systemctl show -p CPUQuotaPerSecUSec --value "$unit")" = 2s ] || fail "the VM's CPU isn't limited"
+group=$(systemctl show -p Group --value "$unit")
+case "$group" in foreman-tap[0-9]*) ;; *) fail "the VM has no dedicated tap group" ;; esac
+gid=$(getent group "$group" | cut -d: -f3)
+[ -n "$gid" ] || fail "the VM tap group does not exist"
+[ "$(cat "/sys/class/net/fm-vm${group#foreman-tap}/group")" = "$gid" ] ||
+  fail "the tap does not require the VM's group"
+[ "$(systemctl show -p ProtectProc --value "$unit")" = ptraceable ] ||
+  fail "the VM can enumerate other processes"
 pid=$(systemctl show -p MainPID --value "$unit")
 grep -q '^CapEff:\s*0000000000000000$' "/proc/$pid/status" || fail "the VM has capabilities"
 grep -q '^NoNewPrivs:\s*1$' "/proc/$pid/status" || fail "the VM can gain privileges"
