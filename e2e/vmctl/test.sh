@@ -34,7 +34,7 @@ STUB
 printf '#!/bin/sh\necho 4\n' > "$work/bin/nproc"
 printf 'MemTotal: 8388608 kB\n' > "$work/meminfo"
 chmod +x "$work/bin/uname" "$work/bin/nproc"
-for tool in ip sysctl systemctl systemd-run; do
+for tool in ip sysctl systemctl systemd-run systemd-sysusers; do
   cat > "$work/bin/$tool" <<STUB
 #!/bin/sh
 echo "$tool \$*" >> "$work/calls"
@@ -109,7 +109,7 @@ check "failed locks never touch networking or units" test ! -e "$work/calls"
 check "failed locks never launch a unit" test ! -e "$work/last-run"
 
 # -- refusals --------------------------------------------------------------
-expect "says its version" "version" "ok 2"
+expect "says its version" "version" "ok 3"
 expect "says the box's resolvers, not MagicDNS" "resolvers" "ok 192.168.1.1"
 expect "refuses an unknown request" "reboot" "error unknown request"
 expect "refuses characters outside its vocabulary" "start ../../etc/shadow 1 2" "error unexpected characters"
@@ -200,6 +200,9 @@ has "sees its own directory" "BindPaths=$work/srv/vms/$env1"
 has "sees the guest images and agent disks read-only" "BindReadOnlyPaths=$work/srv/guest $work/srv/agent-disks"
 has "can't see the box's secrets, identity or settings, or reach this helper" \
   "InaccessiblePaths=-/run/foreman -/var/lib/foreman-agent -/etc/foreman-agent -$work/state -/run/foreman-vmctl.sock -/sys/fs/cgroup/foreman.slice -/run/systemd/private -/run/dbus/system_bus_socket"
+has "uses its tap group as the primary VM group" "--gid=foreman-tap0"
+has "hides processes outside the VM's ptrace permissions" "ProtectProc=ptraceable"
+check "its tap requires its own group" grep -q 'ip tuntap add dev fm-vm0 mode tap user foreman group foreman-tap0' "$work/calls"
 check "gives the box's end its address" grep -q "ip addr replace 10.250.0.1/30 dev fm-vm0" "$work/calls"
 check "keeps the guests' resolvers for the firewall's loader" grep -qx "192.168.1.1" "$work/state/guest-dns"
 expect "says which tap a VM has" "tap $env1" "ok fm-vm0"

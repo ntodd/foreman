@@ -35,10 +35,20 @@ defmodule ForemanAgent.VM.Env do
   @spec run(Command.t(), (String.t(), String.t() -> any()), map()) ::
           {:ok, map()} | {:error, String.t()} | {:error, String.t(), map()}
   def run(cmd, log, ctx) do
-    execute(cmd, log, ctx)
+    with :ok <- ready_for_command(cmd, ctx.config), do: execute(cmd, log, ctx)
   rescue
     e in SnapshotSyncError -> {:error, Exception.message(e)}
   end
+
+  defp ready_for_command(%Command{type: type}, config)
+       when type in ["env.create", "env.rebuild", "env.start"],
+       do: Machine.impl(config).ready(config)
+
+  defp ready_for_command(%Command{type: "env.stop", payload: p}, config) do
+    if VM.suspended?(config, p.env_id), do: Machine.impl(config).ready(config), else: :ok
+  end
+
+  defp ready_for_command(_cmd, _config), do: :ok
 
   defp execute(%Command{type: type, payload: p} = cmd, log, ctx)
        when type in ["env.create", "env.rebuild"] do

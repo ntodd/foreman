@@ -18,7 +18,8 @@ defmodule ForemanAgent.VM.Helper do
   # Version 2 refuses VMs on a kernel without Landlock instead of running
   # them unconfined, keeps VMs from its socket, and says which tap a VM
   # has, which a resume checks its snapshot against.
-  @version 2
+  # Version 3 assigns each VM its own tap group.
+  @version 3
   @timeout 60_000
 
   def version, do: @version

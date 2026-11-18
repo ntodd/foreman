@@ -54,6 +54,9 @@ defmodule ForemanAgent.Test.FakeMachine do
   end
 
   @impl true
+  def ready(_config), do: opts()[:ready] || :ok
+
+  @impl true
   def boot(env_id, spec, config) do
     report({:boot, spec}, env_id)
 

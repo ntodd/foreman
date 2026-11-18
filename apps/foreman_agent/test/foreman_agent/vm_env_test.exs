@@ -584,6 +584,19 @@ defmodule ForemanAgent.VMEnvTest do
       refute File.exists?(paths.snapshot)
     end
 
+    test "an outdated host helper leaves a suspended VM intact", ctx do
+      assert {:ok, _} = run(command("env.suspend"), ctx)
+      FakeMachine.configure(test: self(), ready: {:error, "reinstall the helper"})
+      flush()
+
+      for type <- ["env.start", "env.stop"] do
+        assert {:error, "reinstall the helper"} = run(command(type), ctx)
+        assert VM.suspended?(ctx.config, @env)
+      end
+
+      refute_received {:machine, {:restore, _}, @env}
+    end
+
     test "a failed marker sync prevents restore and cold boot", ctx do
       {:ok, _} = run(command("env.suspend"), ctx)
       flush()
