@@ -188,6 +188,12 @@ if [ -L "$current" ] || [ -e "$current" ]; then
   release=${link#releases/}
   case "$release" in *[!A-Za-z0-9.-]*) fail "invalid installed release" ;; esac
   [ "$link" = "releases/$release" ] && valid_version "$release" || fail "invalid installed release"
+  # Shared-Docker agents cannot join the VM-era control plane to update
+  # themselves. The root-owned helper was introduced with VM installs.
+  if [ ! -f /etc/foreman-agent/vmctl ]; then
+    echo "foreman: migrating the box to the fleet VM agent"
+    release=latest
+  fi
 fi
 curl -fsSL -D "$tmp/headers" -o "$tmp/agent.tar.gz" "$FOREMAN_URL/agent/releases/$release/$target" ||
   fail "couldn't download the agent from $FOREMAN_URL (has a release been published for $target?)"

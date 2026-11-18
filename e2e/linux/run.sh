@@ -209,6 +209,12 @@ $compose restart box
 wait_for "agent rejoined" 180 joined_more box1 "$n"
 echo "ok: rejoined after a reboot"
 
+say "a shared-Docker install without a VM helper can recover to the fleet agent"
+box rm /etc/foreman-agent/vmctl
+install_agent | tee "$work/migrate.log"
+grep -q "migrating the box" "$work/migrate.log" || fail "legacy migration was skipped"
+box test -x /etc/foreman-agent/vmctl || fail "legacy migration did not install the VM helper"
+
 say "self-update to 0.1.1"
 cp_eval 'E2E.desire_version("0.1.1")'
 # The running control plane sends the update on the agent's next connect.

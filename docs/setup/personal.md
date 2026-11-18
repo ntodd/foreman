@@ -233,7 +233,8 @@ settings in `/etc/foreman-agent/agent.env`. Installer-managed values, including
 the control plane URL and enrollment token, live in `install.env` and take
 precedence. An enrolled box needs no token. The installer remembers
 `--block-lan` and `--vm-subnet`. Pass `--default-bridge-reaches-tailnet`
-again if you use it. Change the desired agent version in Foreman.
+again if you use it. A box migrating from shared Docker installs the fleet VM
+release so it can reconnect. Change the desired agent version in Foreman.
 
 ### Disks for environments
 
