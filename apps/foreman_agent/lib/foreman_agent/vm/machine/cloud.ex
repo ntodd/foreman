@@ -16,6 +16,9 @@ defmodule ForemanAgent.VM.Machine.Cloud do
   @cgroup "/sys/fs/cgroup/foreman.slice"
 
   @impl true
+  defdelegate ready(config), to: Helper
+
+  @impl true
   def boot(env_id, spec, config) do
     paths = VM.paths(config, env_id)
     # What an earlier run left: Cloud Hypervisor won't bind over them. Not

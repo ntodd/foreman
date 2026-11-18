@@ -105,7 +105,7 @@ check "failed locks never touch networking or units" test ! -e "$work/calls"
 check "failed locks never launch a unit" test ! -e "$work/last-run"
 
 # -- refusals --------------------------------------------------------------
-expect "says its version" "version" "ok 2"
+expect "says its version" "version" "ok 3"
 expect "says the box's resolvers, not MagicDNS" "resolvers" "ok 192.168.1.1"
 expect "refuses an unknown request" "reboot" "error unknown request"
 expect "refuses characters outside its vocabulary" "start ../../etc/shadow 1 2" "error unexpected characters"

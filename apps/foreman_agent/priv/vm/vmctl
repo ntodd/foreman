@@ -42,7 +42,7 @@ set -u
 # Byte ranges in the request's patterns, whatever the locale.
 export LC_ALL=C
 
-VERSION=2
+VERSION=3
 
 SRV=/srv/foreman
 AGENT_ROOT=/opt/foreman-agent

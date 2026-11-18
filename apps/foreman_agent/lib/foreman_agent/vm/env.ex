@@ -32,7 +32,8 @@ defmodule ForemanAgent.VM.Env do
           {:ok, map()} | {:error, String.t()} | {:error, String.t(), map()}
   def run(%Command{type: type, payload: p} = cmd, log, ctx)
       when type in ["env.create", "env.rebuild"] do
-    with :ok <- Env.check_clone_url(p.clone_url, ctx.config),
+    with :ok <- Machine.impl(ctx.config).ready(ctx.config),
+         :ok <- Env.check_clone_url(p.clone_url, ctx.config),
          {:ok, _} <- cache_secrets(ctx, p.env_id, p.files),
          {:ok, spec} <- prepare(p, ctx, log),
          {:ok, _how} <- ensure_running(p.env_id, spec, ctx, log),
@@ -44,7 +45,8 @@ defmodule ForemanAgent.VM.Env do
   # A start that resumed the VM says so: the environment's processes kept
   # the secrets they had when it was suspended.
   def run(%Command{type: "env.start", payload: p} = cmd, log, ctx) do
-    with {:ok, meta} <- existing(ctx.config, p.env_id),
+    with :ok <- Machine.impl(ctx.config).ready(ctx.config),
+         {:ok, meta} <- existing(ctx.config, p.env_id),
          {:ok, spec} <- prepare(Map.put(p, :limits, limits(meta)), ctx, log),
          {:ok, how} <- ensure_running(p.env_id, spec, ctx, log),
          resumed? = remember_resume(ctx.config, p.env_id, cmd.op_id, how),
@@ -94,11 +96,15 @@ defmodule ForemanAgent.VM.Env do
 
   def run(%Command{type: "env.stop", payload: p} = cmd, log, ctx) do
     machine = Machine.impl(ctx.config)
-    if VM.suspended?(ctx.config, p.env_id), do: resume_to_stop(p, log, ctx)
+    suspended? = VM.suspended?(ctx.config, p.env_id)
 
-    if machine.running?(p.env_id, ctx.config),
-      do: stop_running(cmd, machine, log, ctx),
-      else: {:ok, %{}}
+    with :ok <- if(suspended?, do: machine.ready(ctx.config), else: :ok) do
+      if suspended?, do: resume_to_stop(p, log, ctx)
+
+      if machine.running?(p.env_id, ctx.config),
+        do: stop_running(cmd, machine, log, ctx),
+        else: {:ok, %{}}
+    end
   end
 
   def run(%Command{type: "env.secrets.write", payload: p} = cmd, log, ctx) do
