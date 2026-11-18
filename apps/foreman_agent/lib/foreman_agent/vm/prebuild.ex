@@ -57,7 +57,7 @@ defmodule ForemanAgent.VM.Prebuild do
       with {:ok, create} <- create_command(cmd),
            {:ok, up} <- Env.run(create, log, ctx),
            :ok <- stop(id, log, ctx),
-           :ok <- keep_disk(config, id, p) do
+           :ok <- keep_disk(ctx, id, p) do
         {:ok,
          %{
            "prebuild_id" => id,
@@ -136,26 +136,59 @@ defmodule ForemanAgent.VM.Prebuild do
     end
   end
 
-  defp keep_disk(config, id, p) do
+  defp keep_disk(ctx, id, p) do
+    config = ctx.config
     target = dir(config, id)
-    File.rm_rf!(target)
+    stage = Path.join(target, ".publish-" <> Base.url_encode64(:crypto.strong_rand_bytes(12)))
     File.mkdir_p!(target)
     File.chmod!(target, 0o700)
+    File.mkdir!(stage)
 
-    case File.rename(VM.paths(config, id).data, disk(config, id)) do
-      :ok -> :ok
-      {:error, reason} -> raise "couldn't keep the prebuild's disk: #{:file.format_error(reason)}"
+    try do
+      File.chmod!(stage, 0o700)
+
+      File.write!(
+        Path.join(stage, "prebuild.json"),
+        JSON.encode!(%{
+          "repo" => p.repo,
+          "branch" => p.branch,
+          "config_path" => p.config_path,
+          "built_at" => DateTime.to_iso8601(DateTime.utc_now())
+        })
+      )
+
+      # Consumers test for data.raw. Publish it last, after the metadata
+      # and any cross-device copy are complete on the destination mount.
+      with :ok <- stage_disk(VM.paths(config, id).data, Path.join(stage, "data.raw"), ctx),
+           :ok <-
+             File.rename(Path.join(stage, "prebuild.json"), Path.join(target, "prebuild.json")) do
+        File.rename(Path.join(stage, "data.raw"), disk(config, id))
+      end
+    after
+      File.rm_rf!(stage)
     end
+  end
 
-    File.write!(
-      Path.join(target, "prebuild.json"),
-      JSON.encode!(%{
-        "repo" => p.repo,
-        "branch" => p.branch,
-        "config_path" => p.config_path,
-        "built_at" => DateTime.to_iso8601(DateTime.utc_now())
-      })
-    )
+  defp stage_disk(source, dest, ctx) do
+    with {:ok, %{type: :regular}} <- File.lstat(source),
+         {:error, :exdev} <- File.rename(source, dest) do
+      case ctx.runner.run(
+             "cp",
+             ["--no-dereference", "--reflink=auto", "--sparse=always", source, dest],
+             timeout: 600_000
+           ) do
+        {:ok, %{status: 0}} ->
+          if match?({:ok, %{type: :regular}}, File.lstat(dest)),
+            do: :ok,
+            else: {:error, "invalid prebuild disk"}
+
+        other ->
+          {:error, "couldn't copy the prebuild disk: #{inspect(other)}"}
+      end
+    else
+      {:ok, _} -> {:error, "invalid prebuild disk"}
+      result -> result
+    end
   end
 
   defp normalize({:ok, _} = ok), do: ok
