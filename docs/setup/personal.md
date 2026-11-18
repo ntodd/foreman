@@ -227,14 +227,15 @@ since the firewall would cut environments off from the internet there.
 | `--reenroll` | enrolls the box again with a new `--token` (after revoking it, say); the old identity is moved aside |
 | `--url` | the control plane's address, when the box reaches it some other way than the one in the command |
 
-Re-running the script on a box that's already enrolled upgrades the
-agent and its units and keeps the box's identity; it doesn't need a
-token. It rewrites `/etc/foreman-agent/agent.env` and the firewall,
-though, so pass `--block-lan`, `--vm-subnet` and
-`--default-bridge-reaches-tailnet` again if the box had them, and add
-back anything you added by hand.
-
-Boxes don't need the script for agent updates; see below.
+Re-running the script refreshes the root helpers from the control plane’s fleet release
+and reinstalls the systemd units. It keeps the installed agent version, box
+identity, pending rollback and local
+settings in `/etc/foreman-agent/agent.env`. Installer-managed values, including
+the control plane URL and enrollment token, live in `install.env` and take
+precedence. An enrolled box needs no token. The installer remembers
+`--block-lan` and `--vm-subnet`. Pass `--default-bridge-reaches-tailnet`
+again if you use it. A box migrating from shared Docker installs the fleet VM
+release so it can reconnect. Change the desired agent version in Foreman.
 
 ### Disks for environments
 

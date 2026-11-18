@@ -158,15 +158,12 @@ publish 0.1.0
 say "boot the box and install the agent with the served install script"
 $compose --profile box up -d box
 wait_for "box booted" 120 box_is_up
-# The fixture repo's host, which the agent refuses by default. A drop-in,
-# because the install script owns the unit and its env file.
-box sh -c 'mkdir -p /etc/systemd/system/foreman-agent.service.d && printf "[Service]\nEnvironment=FOREMAN_ALLOWED_GIT_HOSTS=git FOREMAN_INSECURE_GIT_HOSTS=git\n" > /etc/systemd/system/foreman-agent.service.d/e2e.conf'
 install_agent --token "$token" | tee "$work/install.log"
 grep -q "foreman: enrolled" "$work/install.log" || fail "install.sh didn't enroll"
 wait_for "agent joined" 60 joined_more box1 0 0.1.0
 [ "$(box systemctl is-enabled foreman-agent)" = enabled ] || fail "foreman-agent isn't enabled"
 [ "$(box stat -c %a /var/lib/foreman-agent/identity.json)" = "600" ] || fail "identity file isn't 0600"
-box grep -q '^FOREMAN_JOIN_TOKEN=' /etc/foreman-agent/agent.env && fail "the spent join token is still in agent.env"
+box grep -qx 'FOREMAN_JOIN_TOKEN=' /etc/foreman-agent/install.env || fail "the spent join token was kept"
 [ "$(box stat -c '%a %U' /run/foreman /run/foreman/envs)" = "$(printf '711 foreman\n700 foreman')" ] ||
   fail "tmpfiles didn't create /run/foreman"
 echo "ok: enrolled, the unit enabled, the token removed, /run/foreman created"
@@ -178,12 +175,24 @@ again=$($compose exec -T box sh -c "curl -s -o /dev/null -w '%{http_code}' -X PO
 echo "ok: reused join token refused"
 
 say "re-running the install script keeps the enrollment and restarts the agent"
+box sh -c 'printf "%s\n" "# local git fixture" FOREMAN_ALLOWED_GIT_HOSTS=git FOREMAN_INSECURE_GIT_HOSTS=git >> /etc/foreman-agent/agent.env'
+# Mark the agent-owned copy of the privileged helper. A normal rerun
+# must keep the userland tree as-is and install root's helper from fleet.
+box sh -c 'set -- /opt/foreman-agent/current/lib/foreman_agent-*/priv/vm/vmctl; echo "# pinned userland fixture" >> "$1"'
+local_settings=$(box sha256sum /etc/foreman-agent/agent.env)
+cp_eval 'E2E.desire_version("0.1.0")'
+publish 0.1.1
 n=$(joins box1)
 install_agent | tee "$work/install.log"
 grep -q "keeps its enrollment" "$work/install.log" || fail "the re-run didn't keep the enrollment"
 wait_for "agent rejoined" 60 joined_more box1 "$n"
 [ "$(box sha256sum /var/lib/foreman-agent/identity.json)" = "$identity" ] || fail "the re-run changed the identity"
-echo "ok: same identity after a re-run"
+[ "$(box sha256sum /etc/foreman-agent/agent.env)" = "$local_settings" ] || fail "the re-run changed local settings"
+current_is 0.1.0 || fail "the re-run moved off the installed release"
+grep -qx 'foreman: refreshing root helpers from fleet agent 0.1.1' "$work/install.log" || fail "the re-run did not select fleet helpers"
+box sh -c 'grep -qx "# pinned userland fixture" /opt/foreman-agent/current/lib/foreman_agent-*/priv/vm/vmctl' || fail "the re-run replaced pinned userland"
+box grep -q 'pinned userland fixture' /etc/foreman-agent/vmctl && fail "agent-owned helper installed as root"
+echo "ok: same identity, settings and installed release after a re-run"
 
 say "a box without KVM says so, and gets no environments"
 vm_status() { cp_eval 'E2E.vm_status()' | grep "^VM"; }
@@ -206,11 +215,14 @@ $compose restart box
 wait_for "agent rejoined" 180 joined_more box1 "$n"
 echo "ok: rejoined after a reboot"
 
+say "a shared-Docker install without a VM helper can recover to the fleet agent"
+box rm /etc/foreman-agent/vmctl
+install_agent | tee "$work/migrate.log"
+grep -q "migrating the box" "$work/migrate.log" || fail "legacy migration was skipped"
+grep -qx "foreman: installing agent 0.1.1" "$work/migrate.log" || fail "migration did not fetch the fleet release"
+box test -x /etc/foreman-agent/vmctl || fail "legacy migration did not install the VM helper"
+
 say "self-update to 0.1.1"
-# Pinned to what it runs, so registering 0.1.1 (unpinned boxes follow the
-# newest registered) doesn't start the update before the reconnect below.
-cp_eval 'E2E.desire_version("0.1.0")'
-publish 0.1.1
 cp_eval 'E2E.desire_version("0.1.1")'
 # The running control plane sends the update on the agent's next connect.
 box systemctl restart foreman-agent
