@@ -1002,6 +1002,27 @@ defmodule ForemanAgent.VMEnvTest do
       assert_receive {:guest, "env.create", %{prebuild_id: @prebuild}}
     end
 
+    test "startup stops an interrupted initializer before reclaiming its unpublished disk", ctx do
+      nonce = String.duplicate("a", 32)
+      stage = Path.join(ctx.config.vm_root, ".adopt-" <> nonce)
+      File.mkdir_p!(stage)
+      File.write!(Path.join(stage, "data.raw"), "abandoned clone")
+
+      seed =
+        Path.join(
+          ctx.config.vm_root,
+          ".disk-" <> Base.url_encode64(:crypto.strong_rand_bytes(16)) <> ".seed"
+        )
+
+      File.mkdir!(seed)
+      File.write!(Path.join(seed, ".env-id"), @env)
+      :ok = VM.Env.recover(ctx.config)
+      assert_received {:machine, :stop_adoption, ^nonce}
+      refute File.exists?(stage <> ".discard")
+      refute File.exists?(stage)
+      refute File.exists?(seed)
+    end
+
     test "failed adoption leaves the source intact and publishes no data disk", ctx do
       prebuilt(ctx.config, "prebuilt disk")
       FakeMachine.configure(test: self(), adopt: {:error, "interrupted adoption"})

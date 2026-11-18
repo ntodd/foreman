@@ -63,6 +63,12 @@ defmodule ForemanAgent.Test.FakeMachine do
   end
 
   @impl true
+  def stop_adoption(nonce, _) do
+    report(:stop_adoption, nonce)
+    :ok
+  end
+
+  @impl true
   def boot(env_id, spec, config) do
     report({:boot, spec}, env_id)
 

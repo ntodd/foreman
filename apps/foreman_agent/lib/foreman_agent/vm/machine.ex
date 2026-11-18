@@ -24,6 +24,8 @@ defmodule ForemanAgent.VM.Machine do
   @doc "Initializes a private prebuild clone before publication."
   @callback adopt(String.t(), String.t(), String.t(), Config.t()) :: :ok | {:error, String.t()}
 
+  @callback stop_adoption(String.t(), Config.t()) :: :ok | {:error, String.t()}
+
   @doc "Boots the VM from its disks."
   @callback boot(env_id :: String.t(), spec(), Config.t()) :: :ok | {:error, String.t()}
 

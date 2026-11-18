@@ -163,9 +163,9 @@ run_unit() { # env_id cpus memory_mb vm_dir ch args...
   # Room for Cloud Hypervisor itself on top of the guest's memory.
   # The offline initializer must finish before its copy can be published.
   if [ "${unit_prefix:-}" = foreman-adopt ]; then
-    set -- --wait -p RuntimeMaxSec=90 -- "$ch" --log-file "$vm/ch.log" "$@"
+    set -- --wait -p RuntimeMaxSec=90 -p PrivateNetwork=yes -- "$ch" --log-file "$vm/ch.log" "$@"
   else
-    set -- -- "$ch" --log-file "$vm/ch.log" "$@"
+    set -- -p "DeviceAllow=/dev/net/tun rw" -- "$ch" --log-file "$vm/ch.log" "$@"
   fi
   systemd-run --unit="$unit" --slice=foreman.slice --collect --quiet \
     --uid="$AGENT_USER" --gid="$vm_group" -p SupplementaryGroups=kvm -p ProtectProc=ptraceable -p RestrictNamespaces=yes \
@@ -174,7 +174,7 @@ run_unit() { # env_id cpus memory_mb vm_dir ch args...
     -p ProtectHome=yes -p PrivateTmp=yes -p ProtectKernelTunables=yes \
     -p ProtectKernelModules=yes -p ProtectKernelLogs=yes -p ProtectControlGroups=yes \
     -p RestrictSUIDSGID=yes -p LockPersonality=yes -p CapabilityBoundingSet= \
-    -p DevicePolicy=closed -p "DeviceAllow=/dev/kvm rw" -p "DeviceAllow=/dev/net/tun rw" \
+    -p DevicePolicy=closed -p "DeviceAllow=/dev/kvm rw" \
     -p "TemporaryFileSystem=$SRV:ro" -p "BindPaths=$vm" -p "ReadWritePaths=$vm" \
     -p "BindReadOnlyPaths=$SRV/guest $SRV/agent-disks" \
     -p "InaccessiblePaths=-/run/foreman -/var/lib/foreman-agent -/etc/foreman-agent -$STATE -$SOCKET -/sys/fs/cgroup/foreman.slice -/run/systemd/private -/run/dbus/system_bus_socket" \
@@ -243,7 +243,7 @@ cmd_adopt() {
   [ ! -e "$stage/serial.log" ] || answer "error adoption stage already used"
   need_landlock
   ch=$(ch_binary) || answer "error the agent release has no cloud-hypervisor"
-  vm_group=$AGENT_USER unit_prefix=foreman-adopt
+  vm_group=65534 unit_prefix=foreman-adopt
   run_unit "$nonce" 1 256 "$stage" "$ch" --kernel "$guest/vmlinuz" \
     --cmdline "console=ttyS0 root=/dev/vda ro quiet panic=1 init=/usr/local/lib/foreman-guest/adopt fm.env=$env_id" \
     --disk "path=$guest/root.raw,image_type=raw,readonly=on,serial=fm-root" \
@@ -341,7 +341,7 @@ cmd_tap() {
 }
 
 stop_unit() {
-  unit="foreman-vm-$1.service"
+  unit="${2:-foreman-vm}-$1.service"
   systemctl stop "$unit" >/dev/null 2>&1 && return 0
   # A transient unit is collected after exit. A failed query is inconclusive.
   units=$(systemctl list-units --all --plain --no-legend "$unit") || answer "error could not query $unit"
@@ -397,6 +397,11 @@ dispatch() {
     tap) cmd_tap "$@" ;;
     start) cmd_start "$@" ;;
     restore) cmd_restore "$@" ;;
+    stop-adopt)
+      [ "$#" -eq 1 ] || answer "error stop-adopt takes STAGE_NONCE"
+      printf '%s' "$1" | grep -Eqx '[0-9a-f]{32}' || answer "error invalid adoption stage"
+      stop_unit "$1" foreman-adopt
+      answer "ok" ;;
     stop) cmd_stop "$@" ;;
     release) cmd_release "$@" ;;
     *) answer "error unknown request" ;;

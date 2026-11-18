@@ -20,7 +20,7 @@ defmodule ForemanAgent.VM.Machine.Cloud do
 
   @impl true
   def adopt(env_id, nonce, guest, config) do
-    case Helper.request(config, ["adopt", env_id, nonce, guest]) do
+    case Helper.request(config, ["adopt", env_id, nonce, guest], 105_000) do
       {:ok, _} ->
         :ok
 
@@ -30,6 +30,11 @@ defmodule ForemanAgent.VM.Machine.Cloud do
       error ->
         error
     end
+  end
+
+  @impl true
+  def stop_adoption(nonce, config) do
+    with {:ok, _} <- Helper.request(config, ["stop-adopt", nonce]), do: :ok
   end
 
   @impl true

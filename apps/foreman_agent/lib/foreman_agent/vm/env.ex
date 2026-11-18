@@ -236,6 +236,8 @@ defmodule ForemanAgent.VM.Env do
   def recover(config) do
     machine = Machine.impl(config)
 
+    recover_provisioning(config)
+
     # A prebuild being built when the agent stopped: nothing will finish it.
     for id <- VM.list(config, :all),
         match?({:ok, %{"kind" => "prebuild"}}, VM.read_meta(config, id)),
@@ -458,29 +460,65 @@ defmodule ForemanAgent.VM.Env do
 
     if is_binary(prebuild) and Prebuild.exists?(ctx.config, prebuild) do
       log.("info", "Starting from a prebuild\n")
-      nonce = Base.encode16(:crypto.strong_rand_bytes(16), case: :lower)
-      stage = Path.join(ctx.config.vm_root, ".adopt-" <> nonce)
-
-      # Only the private copy is attached for cleanup. Once published,
-      # retry, resume and ordinary boot have no path back to adoption.
-      with :ok <- File.mkdir(stage) do
-        try do
-          clone = Path.join(stage, "data.raw")
-
-          with :ok <- copy_disk(Prebuild.disk(ctx.config, prebuild), clone, ctx),
-               :ok <- Machine.impl(ctx.config).adopt(p.env_id, nonce, guest, ctx.config),
-               :ok <- File.ln(clone, paths.data) do
-            :ok
-          end
-        after
-          File.rm_rf!(stage)
-        end
-      end
+      adopt_copy(paths, p, ctx, guest, prebuild)
     else
       if is_binary(prebuild),
         do: log.("info", "This box no longer has the prebuild; starting from scratch\n")
 
       format_new_disk(paths.data, p.env_id, ctx)
+    end
+  end
+
+  defp adopt_copy(paths, p, ctx, guest, prebuild) do
+    nonce = Base.encode16(:crypto.strong_rand_bytes(16), case: :lower)
+    stage = Path.join(ctx.config.vm_root, ".adopt-" <> nonce)
+    clone = Path.join(stage, "data.raw")
+
+    # Only an unpublished copy is attached for cleanup. The destination
+    # must still be absent when the fully initialized disk is published.
+    with :ok <- File.mkdir(stage) do
+      try do
+        with :ok <- copy_disk(Prebuild.disk(ctx.config, prebuild), clone, ctx),
+             :ok <- Machine.impl(ctx.config).adopt(p.env_id, nonce, guest, ctx.config) do
+          File.ln(clone, paths.data)
+        end
+      after
+        discard_adoption(stage, nonce, ctx.config)
+      end
+    end
+  end
+
+  defp recover_provisioning(config) do
+    for path <- Path.wildcard(Path.join(config.vm_root, ".*"), match_dot: true) do
+      name = Path.basename(path)
+
+      cond do
+        Regex.match?(~r/\A\.disk-[A-Za-z0-9_-]{22}==\.seed\z/, name) ->
+          VM.remove_tree(path)
+
+        Regex.match?(~r/\A\.adopt-[0-9a-f]{32}(\.discard)?\z/, name) ->
+          discard_adoption(path, binary_part(name, 7, 32), config)
+
+        true ->
+          :ok
+      end
+    end
+  end
+
+  defp discard_adoption(path, nonce, config) do
+    # Fence a helper request that has not started its transient unit yet.
+    # The old pathname disappears before we stop any registered unit.
+    discard = String.trim_trailing(path, ".discard") <> ".discard"
+
+    result =
+      with :ok <- File.rename(path, discard),
+           :ok <- Machine.impl(config).stop_adoption(nonce, config) do
+        VM.remove_tree(discard)
+      end
+
+    if result != :ok do
+      require Logger
+      Logger.warning("could not discard prebuild staging #{path}: #{inspect(result)}")
     end
   end
 
