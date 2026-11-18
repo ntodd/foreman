@@ -240,6 +240,16 @@ defmodule ForemanAgent.VMEnvTest do
       assert_receive {:guest, "env.start", _}
     end
 
+    test "an unreadable cached file prevents the entire guest secrets write", ctx do
+      File.mkdir!(Path.join([ctx.config.secrets_root, @env, "notices"]))
+      assert {:error, message} = run(command("env.start"), ctx)
+      assert message =~ "couldn't read cached notices"
+      assert message =~ to_string(:file.format_error(:eisdir))
+      refute message =~ "TOKEN=1"
+      refute_received {:guest, "env.secrets.write", _}
+      refute_received {:guest, "env.start", _}
+    end
+
     test "can't run what needs it running", ctx do
       assert {:error, "the environment isn't running"} = run(command("env.logs"), ctx)
       assert {:error, "the environment isn't running"} = run(command("env.git_status"), ctx)
