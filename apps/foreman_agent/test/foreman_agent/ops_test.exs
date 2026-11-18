@@ -85,6 +85,39 @@ defmodule ForemanAgent.OpsTest do
     assert error =~ "crashed"
   end
 
+  # A :logger handler that holds up one process's log calls until the test
+  # lets it go (or ends), like a handler that's slow or backed up.
+  defmodule StalledLog do
+    def log(%{meta: %{pid: pid}}, %{config: %{pid: pid, test: test, ref: ref}}) do
+      monitor = Process.monitor(test)
+      send(test, {:logging, ref})
+
+      receive do
+        {:carry_on, ^ref} -> Process.demonitor(monitor, [:flush])
+        {:DOWN, ^monitor, :process, _, _} -> :ok
+      end
+    end
+
+    def log(_event, _config), do: :ok
+  end
+
+  test "a crash is reported without waiting on its log line", %{ops: ops} do
+    ref = make_ref()
+    config = %{config: %{pid: ops, test: self(), ref: ref}}
+    :ok = :logger.add_handler(:ops_test_stalled_log, StalledLog, config)
+    on_exit(fn -> :logger.remove_handler(:ops_test_stalled_log) end)
+
+    Ops.submit(ops, stop_cmd(@env1))
+    assert_receive {:started, _, pid}, @timeout
+    Process.exit(pid, :kill)
+
+    assert_receive {:event, "op.result", %{status: "error", error: "operation crashed"}},
+                   @timeout
+
+    assert_receive {:logging, ^ref}, @timeout
+    send(ops, {:carry_on, ref})
+  end
+
   test "a duplicate op_id is not run twice", %{ops: ops} do
     cmd = stop_cmd(@env1)
     assert :accepted = Ops.submit(ops, cmd)
