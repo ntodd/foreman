@@ -23,6 +23,8 @@ defmodule Foreman.EnvironmentsResendTest do
     })
 
     on_exit(fn -> Application.delete_env(:foreman, :tailscale) end)
+    # A new environment's slug skips names already on the tailnet.
+    stub(Foreman.Tailscale.ClientMock, :list_devices, fn _ -> {:ok, []} end)
 
     user = user_fixture()
     repo = repo_fixture(name: "storefront")

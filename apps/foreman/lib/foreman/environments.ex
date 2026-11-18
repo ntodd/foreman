@@ -192,11 +192,13 @@ defmodule Foreman.Environments do
 
   Slugs are unique across every repo (they're tailnet hostnames), so the
   numbering is shared by everything with the same prefix: two repos
-  called `api` under different owners get `api-1` and `api-2`.
+  called `api` under different owners get `api-1` and `api-2`. Names
+  already on the tailnet (another deployment's, say) are skipped too.
   """
   def next_slug(repo, user) do
     team? = Foreman.Config.slug_style() == :team
     prefix = slug_prefix(repo.name, if(team?, do: user.login))
+    on_tailnet = Foreman.Tailscale.taken_names()
 
     # The prefix is only [a-z0-9-], so it has no LIKE wildcards in it.
     used =
@@ -213,7 +215,11 @@ defmodule Foreman.Environments do
       end)
       |> MapSet.new()
 
-    index = Enum.find(Stream.iterate(1, &(&1 + 1)), &(not MapSet.member?(used, &1)))
+    index =
+      Enum.find(
+        Stream.iterate(1, &(&1 + 1)),
+        &(not MapSet.member?(used, &1) and not MapSet.member?(on_tailnet, "#{prefix}-#{&1}"))
+      )
 
     {"#{prefix}-#{index}", index}
   end
