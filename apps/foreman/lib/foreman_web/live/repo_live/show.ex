@@ -126,7 +126,7 @@ defmodule ForemanWeb.RepoLive.Show do
          |> assign(:override_form, to_form(override_params(setting), as: :override))
          |> put_flash(
            :info,
-           "Saved. Git identity applies right away; dotfiles on the next rebuild."
+           "Saved. Git identity applies now. Dotfiles changes apply the next time dotfiles are installed."
          )}
 
       {:error, changeset} ->

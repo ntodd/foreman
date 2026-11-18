@@ -62,7 +62,7 @@ defmodule ForemanWeb.SettingsLive do
          |> assign(:form, to_form(Accounts.change_preferences(user)))
          |> put_flash(
            :info,
-           "Saved. Git identity applies to running environments now; dotfiles on their next rebuild."
+           "Saved. Git identity applies now. Dotfiles changes apply the next time dotfiles are installed."
          )}
 
       {:error, changeset} ->
