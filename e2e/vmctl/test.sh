@@ -31,7 +31,9 @@ cat > "$work/bin/uname" <<STUB
 #!/bin/sh
 cat "$work/release"
 STUB
-chmod +x "$work/bin/uname"
+printf '#!/bin/sh\necho 4\n' > "$work/bin/nproc"
+printf 'MemTotal: 8388608 kB\n' > "$work/meminfo"
+chmod +x "$work/bin/uname" "$work/bin/nproc"
 for tool in ip sysctl systemctl systemd-run; do
   cat > "$work/bin/$tool" <<STUB
 #!/bin/sh
@@ -68,6 +70,7 @@ POOL=10.250
 STATE=$work/state
 RESOLV=$work/resolv.conf
 LSM=$work/lsm
+MEMINFO=$work/meminfo
 CONF
 
 # A box whose resolv.conf Tailscale wrote: MagicDNS first.
@@ -116,6 +119,8 @@ expect "refuses an id that isn't one" "stop not-an-id" "error stop takes ENV_ID"
 expect "refuses a path for an id" "start ..-..-etc 1 1024 $guest 1.2.3" "error bad environment id"
 expect "refuses zero CPUs" "start $env1 0 1024 $guest 1.2.3" "error bad CPU count"
 expect "refuses too little memory" "start $env1 2 100 $guest 1.2.3" "error bad memory size"
+expect "rejects CPUs beyond the host" "start $env1 5 1024 $guest 1.2.3" "error requested CPUs exceed host capacity"
+expect "rejects restored memory beyond the host" "restore $env1 1 8193" "error requested memory exceeds host capacity"
 expect "refuses a guest image that isn't a SHA-256" "start $env1 2 1024 abc 1.2.3" "error bad guest image"
 expect "refuses an agent version that isn't one" "start $env1 2 1024 $guest 1.2" "error bad agent version"
 expect "refuses a VM whose disks aren't there" "start $env1 2 1024 $guest 9.9.9" "error missing .*/agent-disks/9.9.9.img"
@@ -194,7 +199,7 @@ has "sees no other VM's disks" "TemporaryFileSystem=$work/srv:ro"
 has "sees its own directory" "BindPaths=$work/srv/vms/$env1"
 has "sees the guest images and agent disks read-only" "BindReadOnlyPaths=$work/srv/guest $work/srv/agent-disks"
 has "can't see the box's secrets, identity or settings, or reach this helper" \
-  "InaccessiblePaths=-/run/foreman -/var/lib/foreman-agent -/etc/foreman-agent -$work/state -/run/foreman-vmctl.sock"
+  "InaccessiblePaths=-/run/foreman -/var/lib/foreman-agent -/etc/foreman-agent -$work/state -/run/foreman-vmctl.sock -/sys/fs/cgroup/foreman.slice -/run/systemd/private -/run/dbus/system_bus_socket"
 check "gives the box's end its address" grep -q "ip addr replace 10.250.0.1/30 dev fm-vm0" "$work/calls"
 check "keeps the guests' resolvers for the firewall's loader" grep -qx "192.168.1.1" "$work/state/guest-dns"
 expect "says which tap a VM has" "tap $env1" "ok fm-vm0"
