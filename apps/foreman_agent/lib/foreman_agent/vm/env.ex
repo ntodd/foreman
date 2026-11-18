@@ -25,6 +25,8 @@ defmodule ForemanAgent.VM.Env do
   alias ForemanAgent.VM.{Image, Link, Links, Machine, Prebuild}
   alias ForemanProtocol.{Command, Schema}
 
+  require Logger
+
   defmodule SnapshotSyncError do
     defexception [:message]
   end
@@ -241,8 +243,12 @@ defmodule ForemanAgent.VM.Env do
     # A disk already linked into place keeps its published name and contents.
     for path <- Path.wildcard(Path.join(config.vm_root, ".disk-*"), match_dot: true),
         Regex.match?(~r/\A\.disk-[A-Za-z0-9_-]{22}==\z/, Path.basename(path)),
-        match?({:ok, %{type: :regular}}, File.lstat(path)),
-        do: File.rm!(path)
+        match?({:ok, %{type: :regular}}, File.lstat(path)) do
+      case File.rm(path) do
+        :ok -> :ok
+        {:error, reason} -> Logger.warning("could not remove disk staging file #{path}: #{reason}")
+      end
+    end
 
     # A prebuild being built when the agent stopped: nothing will finish it.
     for id <- VM.list(config, :all),
