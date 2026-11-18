@@ -31,13 +31,19 @@ cat > "$work/bin/uname" <<STUB
 #!/bin/sh
 cat "$work/release"
 STUB
-chmod +x "$work/bin/uname"
-for tool in ip sysctl systemctl systemd-run; do
+printf '#!/bin/sh\necho 4\n' > "$work/bin/nproc"
+printf 'MemTotal: 8388608 kB\n' > "$work/meminfo"
+chmod +x "$work/bin/uname" "$work/bin/nproc"
+for tool in ip sysctl systemctl systemd-run systemd-sysusers; do
   cat > "$work/bin/$tool" <<STUB
 #!/bin/sh
 echo "$tool \$*" >> "$work/calls"
 case "$tool \$1 \$2" in
   "ip link show") grep -q "^tap \$3\$" "$work/taps" 2>/dev/null ;;
+  "ip link del") [ ! -f "$work/fail-del" ] || exit 1; sed -i "/^tap \$3\$/d" "$work/taps" ;;
+  "ip -o link") awk '{ print NR ": " \$2 ": <UP>" }' "$work/taps" ;;
+  "systemctl stop "*) [ ! -f "$work/fail-stop" ] || exit 1; sed -i "/^unit \$2\$/d" "$work/units" ;;
+  "systemctl list-units --all") grep -F "unit \$6" "$work/units" || true ;;
   "ip tuntap add") echo "tap \$4" >> "$work/taps" ;;
   "systemctl is-active --quiet") grep -q "^unit \$3\$" "$work/units" 2>/dev/null ;;
   *) exit 0 ;;
@@ -64,6 +70,7 @@ POOL=10.250
 STATE=$work/state
 RESOLV=$work/resolv.conf
 LSM=$work/lsm
+MEMINFO=$work/meminfo
 CONF
 
 # A box whose resolv.conf Tailscale wrote: MagicDNS first.
@@ -89,8 +96,20 @@ expect() { # description, request, answer pattern (grep -E)
   if printf '%s' "$got" | grep -Eqx "$3"; then pass "$1"; else fail "$1 (got: $got)"; fi
 }
 
+# The helper must refuse before allocating a tap or launching a unit.
+mkdir "$work/state/lock"
+expect "refuses an inaccessible lock file" "start $env1 2 1024 $guest 1.2.3" "error cannot open VM helper lock"
+rmdir "$work/state/lock"
+printf '#!/bin/sh\nexit 1\n' > "$work/bin/flock"
+chmod +x "$work/bin/flock"
+expect "refuses a failed state lock" "start $env1 2 1024 $guest 1.2.3" "error cannot acquire VM helper lock"
+rm "$work/bin/flock"
+check "failed locks leave addresses untouched" test ! -e "$work/state/nets"
+check "failed locks never touch networking or units" test ! -e "$work/calls"
+check "failed locks never launch a unit" test ! -e "$work/last-run"
+
 # -- refusals --------------------------------------------------------------
-expect "says its version" "version" "ok 2"
+expect "says its version" "version" "ok 3"
 expect "says the box's resolvers, not MagicDNS" "resolvers" "ok 192.168.1.1"
 expect "refuses an unknown request" "reboot" "error unknown request"
 expect "refuses characters outside its vocabulary" "start ../../etc/shadow 1 2" "error unexpected characters"
@@ -100,6 +119,8 @@ expect "refuses an id that isn't one" "stop not-an-id" "error stop takes ENV_ID"
 expect "refuses a path for an id" "start ..-..-etc 1 1024 $guest 1.2.3" "error bad environment id"
 expect "refuses zero CPUs" "start $env1 0 1024 $guest 1.2.3" "error bad CPU count"
 expect "refuses too little memory" "start $env1 2 100 $guest 1.2.3" "error bad memory size"
+expect "rejects CPUs beyond the host" "start $env1 5 1024 $guest 1.2.3" "error requested CPUs exceed host capacity"
+expect "rejects restored memory beyond the host" "restore $env1 1 8193" "error requested memory exceeds host capacity"
 expect "refuses a guest image that isn't a SHA-256" "start $env1 2 1024 abc 1.2.3" "error bad guest image"
 expect "refuses an agent version that isn't one" "start $env1 2 1024 $guest 1.2" "error bad agent version"
 expect "refuses a VM whose disks aren't there" "start $env1 2 1024 $guest 9.9.9" "error missing .*/agent-disks/9.9.9.img"
@@ -183,7 +204,10 @@ has "sees no other VM's disks" "TemporaryFileSystem=$work/srv:ro"
 has "sees its own directory" "BindPaths=$work/srv/vms/$env1"
 has "sees the guest images and agent disks read-only" "BindReadOnlyPaths=$work/srv/guest $work/srv/agent-disks"
 has "can't see the box's secrets, identity or settings, or reach this helper" \
-  "InaccessiblePaths=-/run/foreman -/var/lib/foreman-agent -/etc/foreman-agent -$work/state -/run/foreman-vmctl.sock"
+  "InaccessiblePaths=-/run/foreman -/var/lib/foreman-agent -/etc/foreman-agent -$work/state -/run/foreman-vmctl.sock -/sys/fs/cgroup/foreman.slice -/run/systemd/private -/run/dbus/system_bus_socket"
+has "uses its tap group as the primary VM group" "--gid=foreman-tap0"
+has "hides processes outside the VM's ptrace permissions" "ProtectProc=ptraceable"
+check "its tap requires its own group" grep -q 'ip tuntap add dev fm-vm0 mode tap user foreman group foreman-tap0' "$work/calls"
 check "gives the box's end its address" grep -q "ip addr replace 10.250.0.1/30 dev fm-vm0" "$work/calls"
 check "keeps the guests' resolvers for the firewall's loader" grep -qx "192.168.1.1" "$work/state/guest-dns"
 expect "says which tap a VM has" "tap $env1" "ok fm-vm0"
@@ -195,6 +219,14 @@ expect "a second VM gets the next address" "start $env2 1 1024 $guest 1.2.3" "ok
 check "a box with only MagicDNS gives its guests 1.1.1.1" grep -q "fm.dns=1.1.1.1 " "$work/last-run"
 
 # -- release and restore -----------------------------------------------------
+touch "$work/fail-stop"
+expect "refuses to release a VM whose stop failed" "release $env1" "error could not confirm .* stopped"
+check "keeps the reservation after a failed stop" test -f "$work/state/nets/0"
+rm "$work/fail-stop"
+touch "$work/fail-del"
+expect "refuses to release an address while its tap remains" "release $env1" "error could not remove fm-vm0"
+check "keeps the reservation after a failed tap deletion" test -f "$work/state/nets/0"
+rm "$work/fail-del"
 expect "releases a VM" "release $env1" "ok"
 check "removes its tap" grep -q "ip link del fm-vm0" "$work/calls"
 check "frees its address" test ! -e "$work/state/nets/0"

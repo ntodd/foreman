@@ -54,6 +54,9 @@ defmodule ForemanAgent.Test.FakeMachine do
   end
 
   @impl true
+  def ready(_config), do: opts()[:ready] || :ok
+
+  @impl true
   def boot(env_id, spec, config) do
     report({:boot, spec}, env_id)
 
@@ -118,6 +121,8 @@ defmodule ForemanAgent.Test.FakeMachine do
 
   @impl true
   def restore(env_id, spec, config) do
+    {:ok, meta} = VM.read_meta(config, env_id)
+    report({:resume_id_at_restore, meta["resumed_by"]}, env_id)
     report({:restore, spec}, env_id)
 
     case {opts()[:restore], :ets.take(@table, {:suspended, env_id})} do
@@ -184,7 +189,7 @@ defmodule ForemanAgent.Test.FakeMachine do
   @impl true
   def release(env_id, config) do
     report(:release, env_id)
-    kill(env_id, config)
+    opts()[:release] || kill(env_id, config)
   end
 
   @impl true

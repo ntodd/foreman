@@ -34,6 +34,11 @@ defmodule ForemanWeb.AdminLive.Users do
   defp respond(socket, {:error, :self}),
     do: {:noreply, put_flash(socket, :error, "You can't change your own access.")}
 
+  defp respond(socket, {:error, :configured_admin}),
+    do:
+      {:noreply,
+       put_flash(socket, :error, "Remove this login from FOREMAN_ADMINS to change its role.")}
+
   defp respond(socket, {:error, _}),
     do: {:noreply, put_flash(socket, :error, "Couldn't save that.")}
 
@@ -80,9 +85,14 @@ defmodule ForemanWeb.AdminLive.Users do
               </p>
             </div>
             <div class="ml-auto flex items-center gap-3">
-              <.badge :if={user.role == "admin"} color="brand" size="sm">Admin</.badge>
+              <.badge :if={user.role == "admin"} color="brand" size="sm">
+                {if Accounts.configured_admin?(user.login),
+                  do: "Admin · FOREMAN_ADMINS",
+                  else: "Admin"}
+              </.badge>
               <%= if user.id != @current_scope.user.id do %>
                 <.button
+                  :if={!Accounts.configured_admin?(user.login)}
                   size="sm"
                   variant="ghost"
                   phx-click="role"

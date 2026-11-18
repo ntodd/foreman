@@ -46,6 +46,35 @@ defmodule Foreman.AccountsSignInTest do
   end
 
   describe "who may sign in" do
+    test "a config grant ends when the login leaves FOREMAN_ADMINS" do
+      config = %{admins: ["BoB"], allowed_users: ["bob"], allowed_org: nil}
+      assert {:ok, %{role: "admin", admin_via_config: true} = bob} = sign_in(300, "bob", config)
+      token = Accounts.create_session(bob, "test browser")
+      config = %{config | admins: []}
+
+      assert Accounts.get_user_by_session(token).role == "member"
+      assert {:ok, %{role: "member", admin_via_config: false}} = sign_in(300, "bob", config)
+    end
+
+    test "the access check revokes config grants and refreshes connected clients" do
+      config = %{admins: ["bob"], allowed_users: [], allowed_org: "acme"}
+      {:ok, bob} = sign_in(300, "bob", config)
+      member = user_fixture(role: "admin")
+      ForemanWeb.Endpoint.subscribe("user_sessions:#{bob.id}")
+
+      Accounts.revoke_removed_config_admins(%{config | admins: []})
+      assert_receive %Phoenix.Socket.Broadcast{event: "disconnect"}
+      assert Repo.reload!(bob).role == "member"
+      assert Repo.reload!(member).role == "admin"
+    end
+
+    test "an explicit local grant survives being added to and removed from configuration" do
+      user_fixture(login: "bob", github_id: 300, role: "admin")
+      config = %{admins: ["bob"], allowed_users: ["bob"], allowed_org: nil}
+      assert {:ok, %{role: "admin", admin_via_config: false}} = sign_in(300, "bob", config)
+      assert {:ok, %{role: "admin"}} = sign_in(300, "bob", %{config | admins: []})
+    end
+
     test "an admin no longer configured or in the org is refused" do
       user_fixture(login: "bob", github_id: 300, role: "admin")
       config = %{admins: ["root"], allowed_users: [], allowed_org: "acme"}

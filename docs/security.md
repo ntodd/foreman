@@ -50,6 +50,11 @@ gaps" section is the place to start.
   is where connections to the port Docker publishes on the host's
   loopback come from; without that, every client behind the proxy
   shared one limit.
+- The People page identifies logins listed in `FOREMAN_ADMINS`. Remove the
+  login from configuration to revoke that grant. A separate promotion on
+  the People page survives a change to the list. On upgrade, review admins
+  removed from configuration before this release: older records do not
+  identify how those users became admins.
 - Sessions: a random 32-byte token in an encrypted, signed, `HttpOnly`,
   `SameSite=Lax` cookie (`Secure` in production); only its SHA-256 is
   stored, so a database leak doesn't leak sessions. Sessions last 30

@@ -110,7 +110,7 @@ defmodule ForemanAgent.VM.Status do
     box = VM.box_size(config.proc)
     {disk_mb, free_mb} = Stats.disk(ctx)
     running = config |> VM.list() |> Enum.filter(&machine.running?(&1, config))
-    trim_consoles(config, running)
+    trim_consoles(ctx, running)
 
     before = machine.usage(running, config)
     started = System.monotonic_time(:microsecond)
@@ -182,12 +182,17 @@ defmodule ForemanAgent.VM.Status do
 
     # Marked as a prebuild's, not merely missing from the list above: an
     # environment made since that list was taken is no prebuild.
-    for id <- VM.list(config, :all),
-        {:ok, %{"kind" => "prebuild"} = meta} <- [VM.read_meta(config, id)],
-        meta["op_id"] not in in_flight do
-      ctx.log.("info", "Removing the VM of a prebuild nothing is building (#{id})\n")
-      Prebuild.discard(config, id)
-    end
+    cleanup_failures =
+      for id <- VM.list(config, :all),
+          {:ok, %{"kind" => "prebuild"} = meta} <- [VM.read_meta(config, id)],
+          meta["op_id"] not in in_flight do
+        ctx.log.("info", "Removing the VM of a prebuild nothing is building (#{id})\n")
+
+        case Prebuild.discard(config, id) do
+          :ok -> []
+          {:error, reason} -> [{id, reason}]
+        end
+      end
 
     metas =
       for env_id <- VM.list(config, :all),
@@ -206,9 +211,9 @@ defmodule ForemanAgent.VM.Status do
       ctx
     )
 
-    case failures do
+    case failures ++ List.flatten(cleanup_failures) do
       [] -> {:ok, %{}}
-      _ -> {:error, Enum.map_join(failures, "; ", fn {id, m} -> "#{id}: #{m}" end)}
+      errors -> {:error, Enum.map_join(errors, "; ", fn {id, m} -> "#{id}: #{m}" end)}
     end
   end
 
@@ -266,14 +271,17 @@ defmodule ForemanAgent.VM.Status do
   # every VM's: past this, it starts again. Cloud Hypervisor's own log too.
   @console_max 16 * 1024 * 1024
 
-  defp trim_consoles(config, env_ids) do
+  defp trim_consoles(ctx, env_ids) do
+    config = ctx.config
+    script = Application.app_dir(:foreman_agent, "priv/vm/trim-log.cjs")
+
     for env_id <- env_ids,
         path <- [
           VM.paths(config, env_id).serial,
           Path.join(VM.paths(config, env_id).dir, "ch.log")
         ],
-        match?({:ok, %{size: size}} when size > @console_max, File.lstat(path)) do
-      File.write(path, "[foreman: the console passed 16 MB and was cut]\n")
+        match?({:ok, %{type: :regular, size: size}} when size > @console_max, File.lstat(path)) do
+      ctx.runner.run(config.node, [script, path, Integer.to_string(@console_max)], timeout: 5_000)
     end
 
     :ok

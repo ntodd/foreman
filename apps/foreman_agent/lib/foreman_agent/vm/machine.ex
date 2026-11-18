@@ -18,6 +18,9 @@ defmodule ForemanAgent.VM.Machine do
           agent_version: String.t()
         }
 
+  @doc "Whether this host has the helper required for a new boot or restore."
+  @callback ready(Config.t()) :: :ok | {:error, String.t()}
+
   @doc "Boots the VM from its disks."
   @callback boot(env_id :: String.t(), spec(), Config.t()) :: :ok | {:error, String.t()}
 

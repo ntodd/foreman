@@ -68,6 +68,9 @@ jobs:
         with:
           elixir-version: ${{ env.ELIXIR_VERSION }}
           otp-version: ${{ env.OTP_VERSION }}
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "22"
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
@@ -230,7 +233,7 @@ jobs:
           docker cp apps/foreman_agent/priv/firewall/foreman.nft "$RUN":/foreman.nft
           docker cp apps/foreman_agent/priv/vm/guest-forward "$RUN":/guest-forward
           docker exec "$RUN" sh -c 'for _ in $(seq 60); do docker info >/dev/null 2>&1 && exit 0; sleep 1; done; exit 1'
-          docker exec "$RUN" apk add -q nftables iproute2
+          docker exec "$RUN" apk add -q nftables iproute2 bash
           docker exec -e FWTEST_IMAGE=public.ecr.aws/docker/library/busybox:1.37-musl "$RUN" sh /test.sh /foreman.nft /guest-forward
 
   images:

@@ -35,13 +35,17 @@ defmodule Foreman.Environments.Commands do
         with_secrets(env, fn s ->
           payload =
             base(env)
+            |> with_start_limits(env)
             |> Map.put(:compose_env, compose_env(s.values))
             |> put_present(:registry_auth, up_registry_auth(env))
 
           command(op, "env.start", payload)
         end)
 
-      action when action in ["stop", "suspend", "destroy"] ->
+      "stop" ->
+        command(op, "env.stop", with_start_limits(base(env), env))
+
+      action when action in ["suspend", "destroy"] ->
         command(op, "env." <> action, base(env))
 
       "restart_all" ->
@@ -297,6 +301,12 @@ defmodule Foreman.Environments.Commands do
   end
 
   defp tailscale_key(env, _action), do: {:ok, env.ts_authkey, env}
+
+  defp with_start_limits(payload, %{box: %{protocol_version: v}} = env)
+       when is_integer(v) and v >= 7,
+       do: Map.put(payload, :limits, limits(env))
+
+  defp with_start_limits(payload, _env), do: payload
 
   defp limits(env) do
     %{}

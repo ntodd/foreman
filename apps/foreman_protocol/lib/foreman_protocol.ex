@@ -21,7 +21,8 @@ defmodule ForemanProtocol do
   # the box can run them (`vm`), and no longer a compose policy (`policy`);
   # env.suspend, and environments reported suspended; box.prebuild and
   # box.prebuild.delete, and env.create's `prebuild_id`.
-  @version 6
+  # 7: start and stop carry the assigned limits for legacy VM record migration.
+  @version 7
 
   # Usually the protocol before this one is accepted too. Protocol 5
   # agents run environments on the box's shared Docker, which protocol 6

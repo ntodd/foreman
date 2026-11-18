@@ -51,6 +51,7 @@ logs() {
   docker logs --tail 60 "$cp_name" >&2 2>&1 || true
   echo "== agent" >&2
   sudo journalctl --no-pager -n 120 -u foreman-agent >&2 || true
+  sudo journalctl --no-pager -n 40 -u 'foreman-vm-*.service' >&2 || true
   # The VMs' directories are the agent's alone.
   sudo sh -c 'for log in /srv/foreman/vms/*/serial.log /srv/foreman/vms/*/ch.log; do
     [ -e "$log" ] || continue
@@ -241,7 +242,7 @@ say "start the control plane"
 docker rm -f "$cp_name" >/dev/null 2>&1 || true
 docker volume rm -f foreman-e2e-vm-data >/dev/null 2>&1 || true
 docker create --name "$cp_name" --network host \
-  -e SECRET_KEY_BASE="$(openssl rand -base64 48 | tr -d '\n')" \
+  -e FOREMAN_ADMINS=e2e -e SECRET_KEY_BASE="$(openssl rand -base64 48 | tr -d '\n')" \
   -e FOREMAN_ENCRYPTION_KEY="$(openssl rand -base64 32)" \
   -e FOREMAN_AGENT_RELEASE_PUBLIC_KEY="$FOREMAN_RELEASE_PUBLIC_KEY" \
   -e PHX_HOST=127.0.0.1 -e PORT="$port" -e FOREMAN_LISTEN_IP=127.0.0.1 \
@@ -283,6 +284,12 @@ echo "ok: the VM helper is root's and listening"
 sudo nft list table inet foreman_guests >/dev/null || fail "the VM firewall table isn't loaded"
 echo "ok: the VM firewall table is loaded"
 
+check_disk_limits() {
+  io_max="/sys/fs/cgroup$(systemctl show -p ControlGroup --value "$1")/io.max"
+  for limit in rbps=40000000 wbps=40000000 riops=2000 wiops=2000; do
+    grep -qw "$limit" "$io_max" || fail "$1 is missing disk limit $limit"
+  done
+}
 vm_ready() { cp_eval 'E2E.vm_status()' | grep -q "^VM ready=true"; }
 # Whether a VM's Cloud Hypervisor is confined by Landlock, by what it can
 # do rather than how it was started (a resumed VM takes its settings from
@@ -321,10 +328,15 @@ systemctl is-active --quiet "$unit" || fail "$unit isn't running"
 [ "$(systemctl show -p User --value "$unit")" = foreman ] || fail "the VM doesn't run as foreman"
 [ "$(systemctl show -p MemoryMax --value "$unit")" = $(((3072 + 512) * 1024 * 1024)) ] || fail "the VM's memory isn't limited"
 [ "$(systemctl show -p CPUQuotaPerSecUSec --value "$unit")" = 2s ] || fail "the VM's CPU isn't limited"
-io_max="/sys/fs/cgroup$(systemctl show -p ControlGroup --value "$unit")/io.max"
-for limit in rbps=40000000 wbps=40000000 riops=2000 wiops=2000; do
-  grep -qw "$limit" "$io_max" || fail "the VM is missing disk limit $limit"
-done
+check_disk_limits "$unit"
+group=$(systemctl show -p Group --value "$unit")
+case "$group" in foreman-tap[0-9]*) ;; *) fail "the VM has no dedicated tap group" ;; esac
+gid=$(getent group "$group" | cut -d: -f3)
+[ -n "$gid" ] || fail "the VM tap group does not exist"
+[ "$(cat "/sys/class/net/fm-vm${group#foreman-tap}/group")" = "$gid" ] ||
+  fail "the tap does not require the VM's group"
+[ "$(systemctl show -p ProtectProc --value "$unit")" = ptraceable ] ||
+  fail "the VM can enumerate other processes"
 pid=$(systemctl show -p MainPID --value "$unit")
 grep -q '^CapEff:\s*0000000000000000$' "/proc/$pid/status" || fail "the VM has capabilities"
 grep -q '^NoNewPrivs:\s*1$' "/proc/$pid/status" || fail "the VM can gain privileges"
@@ -384,7 +396,9 @@ $(beat)
 EOF
 [ -n "$boot_before" ] || fail "no heartbeat before the suspend"
 lv_click "/environments/$first" action '{"do":"suspend"}' >/dev/null || fail "couldn't suspend hello-1"
-wait_for_env hello-1 suspended 180
+# Snapshot writes share the VM disk limits. Allow the agent its ten-minute
+# snapshot deadline plus time to stop the unit and report completion.
+wait_for_env hello-1 suspended 660
 systemctl is-active --quiet "$unit" && fail "the VM is still running after suspend"
 sudo test -f "/srv/foreman/vms/$first/snapshot/config.json" || fail "no snapshot"
 echo "ok: suspended, VM off, snapshot on disk"
@@ -420,6 +434,7 @@ EOF
 fi
 sudo test -e "/srv/foreman/vms/$first/snapshot" && fail "the snapshot outlived the resume"
 landlocked "$first" || fail "the resumed VM wrote a snapshot outside its own directory: it isn't confined by Landlock"
+check_disk_limits "$unit"
 echo "ok: resumed on the same boot, its VMM thread under Landlock, clock within ${skew}s, snapshot gone"
 
 say "restarting the agent leaves the VMs running"

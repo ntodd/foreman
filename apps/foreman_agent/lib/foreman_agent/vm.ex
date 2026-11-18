@@ -5,7 +5,7 @@ defmodule ForemanAgent.VM do
 
   Layout, per environment:
 
-      <vm_root>/<env_id>/vm.json      what the agent knows about the VM (slug, size, guest image)
+      <vm_root>/.records/<env_id>.json      what the agent knows about the VM (slug, size, guest image)
       <vm_root>/<env_id>/root.raw     its copy of the guest system image
       <vm_root>/<env_id>/data.raw     its own disk: Docker's data, the clone, the guest agent's state
       <vm_root>/<env_id>/api.sock     Cloud Hypervisor's API
@@ -21,9 +21,27 @@ defmodule ForemanAgent.VM do
   """
 
   alias ForemanAgent.{Config, SafeFS}
+  alias ForemanAgent.Runner.Local
   alias ForemanProtocol.Schema
 
   @uuid ~r/\A[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\z/
+
+  @doc "Remove VM storage, reporting the path that needs operator attention on failure."
+  def remove_tree(path) do
+    with {:ok, _} <- File.rm_rf(path),
+         {:error, :enoent} <- File.lstat(path) do
+      :ok
+    else
+      {:error, reason, file} ->
+        {:error, "couldn't remove #{file}: #{:file.format_error(reason)}"}
+
+      {:error, reason} ->
+        {:error, "couldn't verify removal of #{path}: #{:file.format_error(reason)}"}
+
+      {:ok, _stat} ->
+        {:error, "#{path} still exists after removal"}
+    end
+  end
 
   @doc "The files of an environment's VM."
   @spec paths(Config.t(), String.t()) :: map()
@@ -32,7 +50,8 @@ defmodule ForemanAgent.VM do
 
     %{
       dir: dir,
-      meta: Path.join(dir, "vm.json"),
+      meta: Path.join([config.vm_root, ".records", env_id <> ".json"]),
+      legacy_meta: Path.join(dir, "vm.json"),
       root: Path.join(dir, "root.raw"),
       data: Path.join(dir, "data.raw"),
       snapshot: Path.join(dir, "snapshot"),
@@ -69,7 +88,10 @@ defmodule ForemanAgent.VM do
     all =
       case File.ls(config.vm_root) do
         {:ok, names} ->
-          Enum.filter(names, &(&1 =~ @uuid and File.regular?(paths(config, &1).meta)))
+          Enum.filter(names, fn id ->
+            p = paths(config, id)
+            id =~ @uuid and (File.regular?(p.meta) or File.regular?(p.legacy_meta))
+          end)
 
         {:error, _} ->
           []
@@ -83,11 +105,17 @@ defmodule ForemanAgent.VM do
   @doc "What the agent recorded about an environment's VM."
   @spec read_meta(Config.t(), String.t()) :: {:ok, map()} | {:error, :none}
   def read_meta(config, env_id) do
-    path = paths(config, env_id).meta
+    paths = paths(config, env_id)
 
-    # In the VM's directory: a symlink the VM left there isn't followed.
-    with {:ok, %{type: :regular}} <- File.lstat(path),
-         {:ok, json} <- File.read(path),
+    case File.lstat(paths.meta) do
+      {:ok, %{type: :regular}} -> decode_record(File.read(paths.meta))
+      {:error, :enoent} -> legacy_record(config, paths.legacy_meta)
+      _ -> {:error, :none}
+    end
+  end
+
+  defp decode_record(result) do
+    with {:ok, json} <- result,
          {:ok, %{"slug" => slug} = meta} when is_binary(slug) <- JSON.decode(json) do
       {:ok, meta}
     else
@@ -95,11 +123,37 @@ defmodule ForemanAgent.VM do
     end
   end
 
-  # In the VM's directory, which the VM can write: replaced, never written
-  # through a symlink the VM left.
+  # Keep inventory and image references during upgrades. Neither resource
+  # limits nor authority to delete an abandoned prebuild come from this file.
+  defp legacy_record(config, path) do
+    script = Application.app_dir(:foreman_agent, "priv/vm/read-legacy-record.cjs")
+
+    with {:ok, %{type: :regular}} <- File.lstat(path),
+         {:ok, %{status: 0, output: json}} <-
+           Local.run(config.node, [script, path], timeout: 5_000),
+         {:ok, record} <- decode_record({:ok, json}) do
+      record =
+        Map.reject(record, fn {key, value} ->
+          key in ["guest", "agent"] and not is_binary(value)
+        end)
+
+      booted =
+        if is_map(record["booted"]), do: Map.take(record["booted"], ["guest", "agent"]), else: %{}
+
+      {:ok,
+       record
+       |> Map.take(["slug", "guest", "agent"])
+       |> Map.merge(%{"legacy" => true, "booted" => booted})}
+    else
+      _ -> {:error, :none}
+    end
+  end
+
   @spec write_meta(Config.t(), String.t(), map()) :: :ok
   def write_meta(config, env_id, meta) do
-    :ok = SafeFS.write_atomic(paths(config, env_id).meta, JSON.encode!(meta), 0o600)
+    path = paths(config, env_id).meta
+    File.mkdir_p!(Path.dirname(path))
+    :ok = SafeFS.write_atomic(path, JSON.encode!(meta), 0o600)
   end
 
   @doc """

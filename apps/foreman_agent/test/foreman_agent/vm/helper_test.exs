@@ -22,17 +22,17 @@ defmodule ForemanAgent.VM.HelperTest do
 
   describe "ready/1" do
     test "a current helper on a kernel with Landlock is ready", ctx do
-      config = helper(ctx, %{"version" => "ok 2", "landlock" => "ok"})
+      config = helper(ctx, %{"version" => "ok 3", "landlock" => "ok"})
       assert Helper.ready(config) == :ok
     end
 
-    test "a helper from before Landlock was required is too old", ctx do
-      config = helper(ctx, %{"version" => "ok 1"})
+    test "a helper with shared-ownership VM taps is too old", ctx do
+      config = helper(ctx, %{"version" => "ok 2"})
       assert Helper.ready(config) == {:error, @too_old}
     end
 
     test "a box whose kernel has no Landlock says so, in the helper's words", ctx do
-      config = helper(ctx, %{"version" => "ok 2", "landlock" => "error " <> @no_landlock})
+      config = helper(ctx, %{"version" => "ok 3", "landlock" => "error " <> @no_landlock})
       assert Helper.ready(config) == {:error, @no_landlock}
     end
 

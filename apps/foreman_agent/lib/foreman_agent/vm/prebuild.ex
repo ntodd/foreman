@@ -66,8 +66,12 @@ defmodule ForemanAgent.VM.Prebuild do
          }}
       end
       |> normalize()
-    after
-      discard(config, id)
+    catch
+      kind, reason ->
+        discard(config, id)
+        :erlang.raise(kind, reason, __STACKTRACE__)
+    else
+      result -> with :ok <- discard(config, id), do: result
     end
   end
 
@@ -93,10 +97,9 @@ defmodule ForemanAgent.VM.Prebuild do
   end
 
   @doc "Removes a prebuild from the box."
-  @spec delete(String.t(), map()) :: {:ok, map()}
+  @spec delete(String.t(), map()) :: {:ok, map()} | {:error, String.t()}
   def delete(id, ctx) do
-    File.rm_rf(dir(ctx.config, id))
-    {:ok, %{}}
+    with :ok <- VM.remove_tree(dir(ctx.config, id)), do: {:ok, %{}}
   end
 
   @doc """
@@ -107,11 +110,12 @@ defmodule ForemanAgent.VM.Prebuild do
   def discard(config, id) do
     Links.stop(id)
     machine = Machine.impl(config)
-    if machine.running?(id, config), do: machine.kill(id, config)
-    _ = machine.release(id, config)
-    File.rm_rf(VM.paths(config, id).dir)
-    File.rm_rf(Path.join(config.secrets_root, id))
-    :ok
+
+    with :ok <- machine.release(id, config),
+         :ok <- VM.remove_tree(Path.join(config.secrets_root, id)),
+         :ok <- VM.remove_tree(VM.paths(config, id).dir) do
+      VM.remove_tree(VM.paths(config, id).meta)
+    end
   end
 
   defp stop(id, log, ctx) do
