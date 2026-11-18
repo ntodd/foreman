@@ -56,8 +56,9 @@ defmodule ForemanAgent.VM.Env do
   defp execute(%Command{type: "env.start", payload: p} = cmd, log, ctx) do
     with {:ok, meta} <- existing(ctx.config, p.env_id),
          {:ok, spec} <- prepare(Map.put(p, :limits, limits(meta)), ctx, log),
-         {:ok, how} <- ensure_running(p.env_id, spec, ctx, log),
-         resumed? = remember_resume(ctx.config, p.env_id, cmd.op_id, how),
+         {:ok, how} <- ensure_running(p.env_id, spec, ctx, log, cmd.op_id),
+         {:ok, meta} <- VM.read_meta(ctx.config, p.env_id),
+         resumed? = how == :resumed or (how == :running and meta["resumed_by"] == cmd.op_id),
          :ok <- push_secrets(p.env_id, log, ctx) do
       case relay(cmd, log, ctx) do
         {:ok, result} when resumed? -> {:ok, Map.put(result, "resumed", true)}
@@ -282,21 +283,15 @@ defmodule ForemanAgent.VM.Env do
     end
   end
 
-  # Whether this start resumed the VM, now or on an earlier run of the same
-  # operation (the box's agent stopped before it could say so).
-  defp remember_resume(config, env_id, op_id, how) do
-    {:ok, meta} = VM.read_meta(config, env_id)
-
-    case how do
-      :resumed ->
+  # Record the operation before handing the snapshot to the hypervisor.
+  # A cold boot clears it before starting a new guest process tree.
+  defp set_resume_id(config, env_id, op_id) do
+    with {:ok, meta} <- VM.read_meta(config, env_id) do
+      if meta["resumed_by"] == op_id do
+        :ok
+      else
         VM.write_meta(config, env_id, Map.put(meta, "resumed_by", op_id))
-        true
-
-      :running ->
-        meta["resumed_by"] == op_id
-
-      :booted ->
-        false
+      end
     end
   end
 
@@ -468,7 +463,7 @@ defmodule ForemanAgent.VM.Env do
   end
 
   # {:ok, :running | :booted | :resumed}
-  defp ensure_running(env_id, spec, ctx, log) do
+  defp ensure_running(env_id, spec, ctx, log, op_id \\ nil) do
     machine = Machine.impl(ctx.config)
     snapshot = VM.paths(ctx.config, env_id).snapshot
 
@@ -480,7 +475,7 @@ defmodule ForemanAgent.VM.Env do
         end
 
       VM.suspended?(ctx.config, env_id) ->
-        case restore(env_id, spec, ctx, log) do
+        case restore(env_id, spec, ctx, log, op_id) do
           :ok ->
             {:ok, :resumed}
 
@@ -513,7 +508,8 @@ defmodule ForemanAgent.VM.Env do
   defp boot(env_id, spec, ctx, log) do
     log.("info", "Booting the environment's VM\n")
 
-    with :ok <- Machine.impl(ctx.config).boot(env_id, spec, ctx.config),
+    with :ok <- set_resume_id(ctx.config, env_id, nil),
+         :ok <- Machine.impl(ctx.config).boot(env_id, spec, ctx.config),
          :ok <- await(env_id, ctx, "didn't come up") do
       log.("info", "VM running (agent #{spec.agent_version})\n")
 
@@ -541,14 +537,15 @@ defmodule ForemanAgent.VM.Env do
   # stopped in between) is found beside a running VM and deleted then
   # (ensure_running/4, recover/1), never restored over a disk the VM has
   # changed since.
-  defp restore(env_id, spec, ctx, log) do
+  defp restore(env_id, spec, ctx, log, op_id) do
     log.("info", "Resuming the environment's VM\n")
     snapshot = VM.paths(ctx.config, env_id).snapshot
 
     # On disk before the VM can run from it: whatever happens next, this
     # snapshot is never restored again (VM.suspended?/2). Made new, so not
     # written through anything the VM left in its place.
-    with :ok <- mark_consumed(snapshot, ctx.runner),
+    with :ok <- set_resume_id(ctx.config, env_id, op_id),
+         :ok <- mark_consumed(snapshot, ctx.runner),
          :ok <- Machine.impl(ctx.config).restore(env_id, spec, ctx.config),
          :ok <- await(env_id, ctx, "didn't come back from its snapshot") do
       discard_snapshot(ctx.config, env_id, ctx.runner)
