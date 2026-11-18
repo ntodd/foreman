@@ -1,9 +1,9 @@
 name: Release
 
-# Pushing a tag like v0.3.0 runs CI on it, then builds the agent for each
-# target and signs it, builds the control plane images with those agents
-# inside and pushes them to GHCR, and attaches the agents to a GitHub
-# release:
+# Pushing a tag like v0.3.0 checks that CI passed on it, then builds the
+# agent for each target and signs it, builds the control plane images with
+# those agents inside and pushes them to GHCR, and attaches the agents to
+# a GitHub release:
 #
 #   ghcr.io/<owner>/foreman:0.3.0      and :latest      (SQLite)
 #   ghcr.io/<owner>/foreman:0.3.0-pg   and :latest-pg   (Postgres)
@@ -32,8 +32,13 @@ env:
 jobs:
   check:
     runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    permissions:
+      contents: read
+      actions: read
     outputs:
       version: ${{ steps.check.outputs.version }}
+      ci: ${{ steps.ci.outputs.ci }}
     steps:
       - name: Check the tag and keys
         id: check
@@ -46,11 +51,33 @@ jobs:
           [ -n "$PUBLIC_KEY" ] || { echo "::error::Set the FOREMAN_RELEASE_PUBLIC_KEY variable"; exit 1; }
           [ "$HAS_PRIVATE_KEY" = true ] || { echo "::error::Set the FOREMAN_RELEASE_PRIVATE_KEY secret"; exit 1; }
           echo "version=$version" >> "$GITHUB_OUTPUT"
+      # A tag usually goes on a commit just merged to main, and that push
+      # runs CI. Wait for that run and take its result instead of running
+      # every job again. Without one that passes, CI runs here (below).
+      - name: Find CI on this commit
+        id: ci
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          run=$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs?head_sha=$GITHUB_SHA&event=push&branch=main&per_page=1" \
+            --jq '.workflow_runs[0].id // empty') || run=""
+          if [ -n "$run" ]; then
+            echo "Waiting for CI on main: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$run"
+          fi
+          if [ -n "$run" ] && gh run watch "$run" -R "$GITHUB_REPOSITORY" --exit-status --interval 30 >/dev/null; then
+            echo "CI passed on $GITHUB_SHA."
+            echo "ci=passed" >> "$GITHUB_OUTPUT"
+          else
+            echo "No passing CI on main for $GITHUB_SHA; running it here."
+            echo "ci=run" >> "$GITHUB_OUTPUT"
+          fi
 
   # CI doesn't run on tags by itself, and nothing gets published from a
   # commit that fails it.
   ci:
     needs: check
+    if: needs.check.outputs.ci == 'run'
     uses: ./.github/workflows/ci.yml
     permissions:
       contents: read
@@ -59,8 +86,13 @@ jobs:
   # The guest system image every environment VM boots (amd64 only for now).
   # The amd64 agent is built with its URL on this release and its SHA-256,
   # and downloads and checks it itself.
+  #
+  # This and every job after it run when nothing before them failed: ci is
+  # skipped when the commit passed CI on main, and a skipped job would
+  # otherwise skip everything after it.
   guest:
     needs: [check, ci]
+    if: ${{ !cancelled() && !failure() }}
     runs-on: ubuntu-24.04
     outputs:
       sha256: ${{ steps.build.outputs.sha256 }}
@@ -82,6 +114,7 @@ jobs:
 
   agent:
     needs: [check, ci, guest]
+    if: ${{ !cancelled() && !failure() }}
     strategy:
       matrix:
         include:
@@ -125,6 +158,7 @@ jobs:
 
   sign:
     needs: [check, agent]
+    if: ${{ !cancelled() && !failure() }}
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -163,6 +197,7 @@ jobs:
   # runner; the manifest job combines them into multi-arch tags.
   image:
     needs: [check, sign]
+    if: ${{ !cancelled() && !failure() }}
     permissions:
       contents: read
       packages: write
@@ -204,6 +239,7 @@ jobs:
 
   manifest:
     needs: [check, image]
+    if: ${{ !cancelled() && !failure() }}
     runs-on: ubuntu-24.04
     permissions:
       contents: read
@@ -232,6 +268,7 @@ jobs:
 
   release:
     needs: [check, manifest]
+    if: ${{ !cancelled() && !failure() }}
     runs-on: ubuntu-24.04
     permissions:
       contents: write

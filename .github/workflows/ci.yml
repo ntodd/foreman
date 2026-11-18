@@ -201,7 +201,17 @@ jobs:
     timeout-minutes: 40
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # The image is built from guest/ alone and takes minutes, so it's
+      # kept between runs until something there changes. A release builds
+      # its own from scratch.
+      - name: Restore the guest image
+        id: guest-image
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/guest
+          key: guest-image-${{ runner.arch }}-${{ hashFiles('guest/**') }}
       - name: Build the guest image
+        if: steps.guest-image.outputs.cache-hit != 'true'
         run: guest/build.sh "$RUNNER_TEMP/guest"
       - name: Build the agent release
         run: docker build -f docker/box.Dockerfile --target agent-tarball -o "$RUNNER_TEMP/agent" .
@@ -391,7 +401,19 @@ jobs:
           sudo udevadm control --reload-rules
           sudo udevadm trigger --name-match=kvm
           sudo apt-get install -y -qq nftables zstd >/dev/null
-      - run: E2E_VM_THROWAWAY=1 e2e/vm/run.sh
+      # The image is built from guest/ alone and takes minutes, so it's
+      # kept between runs until something there changes. A release builds
+      # its own from scratch.
+      - name: Restore the guest image
+        id: guest-image
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/guest
+          key: guest-image-${{ runner.arch }}-${{ hashFiles('guest/**') }}
+      - name: Build the guest image
+        if: steps.guest-image.outputs.cache-hit != 'true'
+        run: guest/build.sh "$RUNNER_TEMP/guest"
+      - run: E2E_VM_THROWAWAY=1 E2E_GUEST_TAR="$RUNNER_TEMP/guest/foreman-guest-linux-amd64.tar" e2e/vm/run.sh
 
   # A control plane host that boots systemd, runs the control plane from
   # docker/compose.yml and installs the updater: refused requests, an

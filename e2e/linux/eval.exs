@@ -169,6 +169,12 @@ defmodule E2E do
     IO.puts("set #{name} on #{slug}")
   end
 
+  # An environment made on its page (see e2e/vm/run.sh's create_env).
+  def env_id(slug) do
+    admin()
+    IO.puts("ENV=#{live_env(slug).id}")
+  end
+
   defp live_env(slug) do
     Repo.one!(from e in Foreman.Environments.Environment, where: e.slug == ^slug and is_nil(e.destroyed_at))
   end

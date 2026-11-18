@@ -5,6 +5,10 @@
 //
 //   node e2e/lv-click.mjs <base-url> <cookie> <path> <event> [value-json]
 //
+// An event named submit:<name> submits a form (phx-submit="<name>")
+// instead, with value-json as the form's params, nested the way they're
+// named: {"environment": {"repo_id": "…"}} is environment[repo_id].
+//
 // The cookie is a session cookie (name=value), from E2E.session_cookie().
 // Prints the reply's flash, and exits non-zero if the join or the event
 // fails.
@@ -66,7 +70,19 @@ await send(topic, "phx_join", {
   session,
   static: staticToken,
 })
-const reply = await send(topic, "event", { type: "click", event, value: JSON.parse(valueJson) })
+const value = JSON.parse(valueJson)
+const fields = (params, prefix) =>
+  Object.entries(params).flatMap(([key, v]) => {
+    const name = prefix ? `${prefix}[${key}]` : key
+    return v !== null && typeof v === "object" ? fields(v, name) : [[name, String(v)]]
+  })
+const reply = event.startsWith("submit:")
+  ? await send(topic, "event", {
+      type: "form",
+      event: event.slice("submit:".length),
+      value: new URLSearchParams(fields(value)).toString(),
+    })
+  : await send(topic, "event", { type: "click", event, value })
 
 // The flash, if the event set one, wherever the diff carries it.
 const flash = JSON.stringify(reply).match(/(Sent to [^"<]*|Rebooting [^"<]*|Building a prebuild[^"<]*|A prebuild is already[^"<]*|The box is offline[^"<]*|[^">]*can't[^"<]*|Only admins[^"<]*)/)
