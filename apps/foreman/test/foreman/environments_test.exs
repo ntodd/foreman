@@ -767,6 +767,49 @@ defmodule Foreman.EnvironmentsTest do
       })
 
       on_exit(fn -> Application.delete_env(:foreman, :tailscale) end)
+      stub(Foreman.Tailscale.ClientMock, :list_devices, fn _ -> {:ok, []} end)
+      :ok
+    end
+
+    # Another deployment on the same tailnet numbers its own environments:
+    # a second node with a name gets a suffix from Tailscale, and the slug
+    # (what people ssh to) would reach the other one.
+    test "a new environment's slug skips names already on the tailnet", %{
+      scope: scope,
+      repo: repo,
+      box: box
+    } do
+      stub(Foreman.Tailscale.ClientMock, :list_devices, fn _ ->
+        {:ok,
+         [
+           %{
+             "name" => "storefront-1.tail1234.ts.net",
+             "hostname" => "storefront-1",
+             "tags" => ["tag:foreman-env"]
+           },
+           %{"name" => "storefront-2-1.tail1234.ts.net", "hostname" => "storefront-2"},
+           %{"name" => "storefront-3.tail1234.ts.net", "hostname" => "monas-laptop"}
+         ]}
+      end)
+
+      {:ok, e1} =
+        Environments.create_environment(scope, %{"repo_id" => repo.id, "box_id" => box.id})
+
+      {:ok, e2} =
+        Environments.create_environment(scope, %{"repo_id" => repo.id, "box_id" => box.id})
+
+      assert {e1.slug, e1.index} == {"storefront-2", 2}
+      assert {e2.slug, e2.index} == {"storefront-4", 4}
+    end
+
+    test "a slug falls back to this deployment's own numbering when the tailnet can't be listed",
+         %{scope: scope, repo: repo, box: box} do
+      stub(Foreman.Tailscale.ClientMock, :list_devices, fn _ -> {:error, :timeout} end)
+
+      {:ok, env} =
+        Environments.create_environment(scope, %{"repo_id" => repo.id, "box_id" => box.id})
+
+      assert env.slug == "storefront-1"
     end
 
     test "a new environment gets a single-use auth key with its tags, once", %{

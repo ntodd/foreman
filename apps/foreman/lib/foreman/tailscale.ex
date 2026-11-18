@@ -125,6 +125,26 @@ defmodule Foreman.Tailscale do
   end
 
   @doc """
+  The MagicDNS names in use on the tailnet (the first label), whoever's
+  device it is. Tailscale gives a node whose name is taken a suffix, so a
+  new environment's slug skips these. Empty without Tailscale, or when
+  the devices can't be listed.
+  """
+  def taken_names do
+    with creds when not is_nil(creds) <- creds(),
+         {:ok, devices} <- Client.impl().list_devices(creds) do
+      devices |> Enum.map(&dns_label/1) |> Enum.reject(&(&1 == "")) |> MapSet.new()
+    else
+      nil ->
+        MapSet.new()
+
+      error ->
+        Logger.warning("couldn't list tailnet devices for a new slug: #{inspect(error)}")
+        MapSet.new()
+    end
+  end
+
+  @doc """
   Deletes the device an environment joined as. The ID came from inside
   the repo's container, so the device must also be Foreman's and carry
   the environment's hostname. With `replaced_by` (the environment came
