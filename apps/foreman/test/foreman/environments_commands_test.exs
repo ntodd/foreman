@@ -35,6 +35,22 @@ defmodule Foreman.EnvironmentsCommandsTest do
   defp on_protocol(box, version),
     do: box |> Ecto.Changeset.change(protocol_version: version) |> Repo.update!()
 
+  test "only protocol 7 boxes receive the assigned size on start and stop", %{env: env, box: box} do
+    env = env |> Ecto.Changeset.change(cpu_limit: 1.0, memory_limit_mb: 1024) |> Repo.update!()
+
+    for version <- [6, 7], action <- ["start", "stop"] do
+      env = %{env | box: on_protocol(box, version)}
+      op = %Foreman.Operations.Operation{id: Ecto.UUID.generate(), action: action, args: %{}}
+      assert {:ok, cmd, _} = Foreman.Environments.Commands.build(op, env)
+
+      if version == 7 do
+        assert cmd.payload.limits == %{cpus: 1.0, memory_mb: 1024}
+      else
+        refute Map.has_key?(cmd.payload, :limits)
+      end
+    end
+  end
+
   describe "a GitHub error while writing secrets" do
     setup ctx do
       ctx.env

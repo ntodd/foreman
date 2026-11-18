@@ -111,10 +111,10 @@ defmodule ForemanAgent.VM.Prebuild do
     Links.stop(id)
     machine = Machine.impl(config)
 
-    with :ok <- machine.release(id, config) do
-      File.rm_rf(VM.paths(config, id).dir)
-      File.rm_rf(Path.join(config.secrets_root, id))
-      :ok
+    with :ok <- machine.release(id, config),
+         :ok <- VM.remove_tree(Path.join(config.secrets_root, id)),
+         :ok <- VM.remove_tree(VM.paths(config, id).dir) do
+      VM.remove_tree(VM.paths(config, id).meta)
     end
   end
 

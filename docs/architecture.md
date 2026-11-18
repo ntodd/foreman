@@ -72,7 +72,7 @@ The same release runs in two modes. On the box (host mode):
 - It connects out to the control plane over WSS with Slipstream.
 - It runs each environment in a VM of its own (see [Environment VMs](#environment-vms)). It makes the VM's disks, asks the root helper to start, stop or release the VM, and relays the environment's commands to the agent inside it, passing logs and results back to the control plane.
 - It reports on the box: environments from the VMs on it and what each guest says about itself, usage from each VM's cgroup, and host metrics from `/proc` and `df`.
-- It holds no durable state beyond a record per VM (`/srv/foreman/vms/<env_id>/vm.json`: the slug, the size, and the guest image and agent the VM boots). The control plane owns desired state.
+- It holds no durable state beyond a record per VM (`/srv/foreman/vms/.records/<env_id>.json`: the slug, the size, and the guest image and agent the VM boots). The VM cannot mount this directory. When upgrading from a release that kept the record beside the disks, the box takes limits from the control plane on start or stop. The old file supplies inventory and image references. The control plane owns desired state.
 
 In an environment's VM (guest mode, `FOREMAN_AGENT_MODE=guest`), it runs the environment code that ran on the box before VMs:
 
