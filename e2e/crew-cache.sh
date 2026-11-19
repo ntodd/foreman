@@ -9,6 +9,7 @@ printf 'services:\n  %s:\n    volumes:\n' "$service"
 for path in "$ca" /etc/docker/certs.d/*/hosts.toml /etc/buildkit/buildkitd.toml; do
   [ -s "$path" ] || { echo "missing Crew cache configuration: $path" >&2; exit 1; }
   case "$path" in
+    */localhost:5000/hosts.toml) ;; # the updater's local fixture registry
     */hosts.toml) grep -Fq "ca = \"$ca\"" "$path" || continue ;;
   esac
   printf '      - type: bind\n        source: %s\n        target: %s\n        read_only: true\n        bind: {create_host_path: false}\n' "$path" "$path"
