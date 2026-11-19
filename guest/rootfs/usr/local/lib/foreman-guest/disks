@@ -39,6 +39,17 @@ if [ -z "$env_id" ] || [ -L "$base/.env-id" ] || [ ! -f "$base/.env-id" ] ||
   exit 1
 fi
 
+# 0.6.0 and 0.6.1 owned the workspace, private agent state and files
+# inside devcontainers as 997:993. Keep that identity for those disks.
+# This also works with prebuilds, which keep srv but discard agent.
+# Select only known IDs and do it before binding the persistent home.
+uid=1000 gid=1000
+if [ "$(stat -c '%F:%u:%g' "$base/srv" 2>/dev/null || true)" = directory:997:993 ]; then
+  uid=997 gid=993
+fi
+if [ "$(id -g foreman)" != "$gid" ]; then groupmod --gid "$gid" foreman; fi
+if [ "$(id -u foreman)" != "$uid" ]; then usermod --uid "$uid" foreman; fi
+
 for dir in docker containerd srv agent; do mkdir -p "$base/$dir"; done
 
 bind() {

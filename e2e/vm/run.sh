@@ -189,7 +189,17 @@ cat > "$work/overlay/.devcontainer/devcontainer.json" <<EOF
 EOF
 # Docker-in-docker, which needs a privileged container: the environment's
 # VM is the boundary now, not a policy on its compose file.
-cp apps/foreman_agent/test/fixtures/repos/hello/.devcontainer/docker-compose.yml "$work/overlay/.devcontainer/"
+# Real devcontainers can have messagebus or systemd-network at UID 997.
+# Give the fixture that collision so a regression fails the write and
+# private-secret probes below.
+sed '/^  app:$/,/^  sidecar:$/s|^    image: .*|    build: .|' \
+  apps/foreman_agent/test/fixtures/repos/hello/.devcontainer/docker-compose.yml \
+  > "$work/overlay/.devcontainer/docker-compose.yml"
+cat > "$work/overlay/.devcontainer/Dockerfile" <<'EOF'
+FROM mcr.microsoft.com/devcontainers/base:debian
+USER root
+RUN getent passwd 997 >/dev/null || useradd --system --uid 997 --no-create-home fixture-service
+EOF
 cat >> "$work/overlay/.devcontainer/docker-compose.yml" <<EOF
   # The guest's boot and clock, every second: a resume keeps the
   # containers running, so nothing in the lifecycle runs again to say.

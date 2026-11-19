@@ -130,6 +130,29 @@ done
 
 [ "$(blkid -p -s UUID -o value "$dir/run/data.raw")" = "$uuid" ] || fail "data filesystem changed"
 
+# A new disk uses the developer UID. A data disk from the previous
+# guest keeps its private files and named volumes under their old IDs.
+owner() {
+  debugfs -R "stat $1" "$dir/run/data.raw" 2>/dev/null |
+    awk '/^User:/ {print $2 ":" $4}'
+}
+[ "$(owner /srv)" = 1000:1000 ] || fail "unexpected workspace owner on a fresh disk"
+mkdir -p "$dir/seed/srv" "$dir/seed/agent"
+echo legacy > "$dir/seed/srv/legacy"
+chmod 0600 "$dir/seed/srv/legacy"
+rm "$dir/run/data.raw"
+mkfs.ext4 -q -F -L fm-data -d "$dir/seed" "$dir/run/data.raw" 8G
+for path in /srv /srv/legacy /agent; do
+  debugfs -w -R "sif $path uid 997" "$dir/run/data.raw"
+  debugfs -w -R "sif $path gid 993" "$dir/run/data.raw"
+done
+boot legacy
+check || fail "the guest could not run with a legacy data disk"
+power_off
+[ "$(owner /srv)" = 997:993 ] && [ "$(owner /srv/legacy)" = 997:993 ] || fail "legacy ownership changed"
+debugfs -R 'cat /etc/passwd' "$dir/run/root.raw" 2>/dev/null |
+  grep -q '^foreman:[^:]*:997:993:' || fail "the guest agent lost access to legacy files"
+
 # Ordinary boots must leave volumes intact when the ownership marker is
 # lost or replaced. Work against the stopped ext4 image between boots.
 echo canary > "$dir/canary"
