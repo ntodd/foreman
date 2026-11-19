@@ -238,7 +238,13 @@ jobs:
       - name: Test the rules
         run: |
           trap 'docker rm -f "$RUN" >/dev/null 2>&1' EXIT
-          docker run -d --privileged --name "$RUN" public.ecr.aws/docker/library/docker:29-dind >/dev/null
+          # The nested daemon pulls BusyBox using Crew's ECR mirror and its CA.
+          ecr_hosts=/etc/docker/certs.d/public.ecr.aws
+          crew_ca=/usr/local/share/ca-certificates/crew-cache.crt
+          docker run -d --privileged --name "$RUN" \
+            --mount "type=bind,src=$ecr_hosts,dst=$ecr_hosts,readonly" \
+            --mount "type=bind,src=$crew_ca,dst=$crew_ca,readonly" \
+            public.ecr.aws/docker/library/docker:29-dind >/dev/null
           docker cp e2e/firewall/test.sh "$RUN":/test.sh
           docker cp apps/foreman_agent/priv/firewall/foreman.nft "$RUN":/foreman.nft
           docker cp apps/foreman_agent/priv/vm/guest-forward "$RUN":/guest-forward
