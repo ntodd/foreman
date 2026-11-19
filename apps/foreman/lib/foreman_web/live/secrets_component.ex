@@ -128,16 +128,21 @@ defmodule ForemanWeb.SecretsComponent do
               class="input font-mono"
               spellcheck="false"
             />
-            <.input
-              field={@form[:value]}
-              type="textarea"
-              label={if @editing, do: "New value for #{@editing}", else: "Value"}
-              placeholder="Stored encrypted; can't be shown again"
-              autocomplete="off"
-              spellcheck="false"
-              class="input min-h-[2.25rem] font-mono placeholder:font-sans"
-              rows="1"
-            />
+            <div class="min-w-0">
+              <.input
+                field={@form[:value]}
+                type="textarea"
+                label={if @editing, do: "New value for #{@editing}", else: "Value"}
+                aria-describedby={"#{@id}-value-hint"}
+                autocomplete="off"
+                spellcheck="false"
+                class="input font-mono"
+                rows="1"
+              />
+              <p id={"#{@id}-value-hint"} class="mt-1.5 text-xs text-ink-2">
+                Values are encrypted and hidden after saving.
+              </p>
+            </div>
           </div>
           <.input
             :if={@scope_name == "user" and repo_options(@repos, @form) != []}
@@ -148,7 +153,7 @@ defmodule ForemanWeb.SecretsComponent do
             options={repo_options(@repos, @form)}
           />
           <div class="flex items-center gap-2">
-            <.button type="submit" variant="primary" size="sm">{if @editing,
+            <.button type="submit" variant="primary">{if @editing,
               do: "Replace value",
               else: "Add secret"}</.button>
             <.button
