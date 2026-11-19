@@ -442,6 +442,7 @@ defmodule ForemanAgent.EnvTest do
              ]
 
       overlay = File.read!(Path.join(meta, "overlay.yml"))
+      refute overlay =~ "/mnt/foreman-recovery"
       assert overlay =~ "ports: !reset []"
       assert overlay =~ ~s(source: "#{secrets}")
 
@@ -1066,6 +1067,79 @@ defmodule ForemanAgent.EnvTest do
       stub_tools()
       assert {:ok, _} = Env.run("env.create", payload(), ctx)
       refute Enum.any?(runs(), &match?({"docker", ["pull" | _], _}, &1))
+    end
+  end
+
+  describe "recovering a failed first create" do
+    test "retry and rebuild keep each previous checkout and expose them in the new container", %{
+      ctx: ctx,
+      config: config
+    } do
+      paths = Env.paths(config, @env_id, "acme/storefront")
+      stub_tools(outcome: :error)
+      assert {:error, _} = Env.run("env.create", payload(), ctx)
+
+      tracked = ".devcontainer/docker-compose.yml"
+      File.write!(Path.join(paths.clone, tracked), "edited compose file")
+      File.write!(Path.join(paths.clone, "notes"), "untracked notes")
+      File.write!(Path.join(paths.clone, ".git/HEAD"), "ref: refs/heads/local-work")
+
+      assert {:error, _} = Env.run("env.create", payload(), ctx)
+      refute File.exists?(Path.join(paths.clone, "notes"))
+      File.write!(Path.join(paths.clone, "second-attempt"), "another edit")
+      stub_tools()
+      assert {:ok, _} = Env.run("env.rebuild", payload(), ctx)
+
+      recovery = Path.join(paths.meta, "recovery")
+      assert {:ok, attempts} = File.ls(recovery)
+      assert length(attempts) == 2
+      first = Enum.find(attempts, &File.exists?(Path.join([recovery, &1, "notes"])))
+      assert File.read!(Path.join([recovery, first, tracked])) == "edited compose file"
+      assert File.read!(Path.join([recovery, first, "notes"])) == "untracked notes"
+      assert File.read!(Path.join([recovery, first, ".git/HEAD"])) == "ref: refs/heads/local-work"
+      assert [_] = Path.wildcard(Path.join(recovery, "*/second-attempt"))
+      overlay = File.read!(Path.join(paths.meta, "overlay.yml"))
+      assert overlay =~ JSON.encode!(recovery)
+      assert overlay =~ ~r/target: "\/mnt\/foreman-recovery"\s+read_only: true/
+      assert Enum.join(logged()) =~ "/mnt/foreman-recovery/#{first}"
+
+      File.write!(Path.join(paths.clone, "after-success"), "keep in place")
+      assert {:ok, _} = Env.run("env.rebuild", payload(), ctx)
+      assert File.read!(Path.join(paths.clone, "after-success")) == "keep in place"
+      assert Enum.sort(File.ls!(recovery)) == Enum.sort(attempts)
+    end
+
+    test "refuses a recovery directory that points outside the environment", %{
+      ctx: ctx,
+      config: config,
+      tmp_dir: tmp
+    } do
+      paths = Env.paths(config, @env_id, "acme/storefront")
+      stub_tools(outcome: :error)
+      assert {:error, _} = Env.run("env.create", payload(), ctx)
+      elsewhere = Path.join(tmp, "elsewhere")
+      File.mkdir!(elsewhere)
+      File.ln_s!(elsewhere, paths.recovery)
+      File.write!(Path.join(paths.clone, "notes"), "keep")
+      stub_tools()
+      assert {:error, _} = Env.run("env.create", payload(), ctx)
+      assert File.ls!(elsewhere) == []
+      assert File.read!(Path.join(paths.clone, "notes")) == "keep"
+    end
+
+    test "a failure to save the previous checkout stops the fresh clone", %{
+      ctx: ctx,
+      config: config
+    } do
+      paths = Env.paths(config, @env_id, "acme/storefront")
+      stub_tools(outcome: :error)
+      assert {:error, _} = Env.run("env.create", payload(), ctx)
+      File.write!(Path.join(paths.clone, "notes"), "keep")
+      File.write!(Path.join(paths.meta, "recovery"), "occupied")
+      stub_tools()
+      assert {:error, message} = Env.run("env.rebuild", payload(), ctx)
+      assert message =~ "save the previous workspace"
+      assert File.read!(Path.join(paths.clone, "notes")) == "keep"
     end
   end
 

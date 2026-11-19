@@ -85,6 +85,11 @@ defmodule ForemanWeb.EnvironmentListTest do
 
       {:ok, view, _html} = live(conn, ~p"/")
 
+      assert has_element?(
+               view,
+               "#env-#{failed.id} [phx-click=retry][data-confirm*='fresh clone']"
+             )
+
       view |> element("#env-#{failed.id} button", "Retry") |> render_click()
 
       assert [%{action: "create"} | _] = Foreman.Operations.list_for_environment(failed.id)

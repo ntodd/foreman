@@ -89,6 +89,7 @@ defmodule ForemanAgent.Env do
       workspace: Path.join(env_dir, "workspace"),
       clone: repo && Path.join([env_dir, "workspace", repo |> String.split("/") |> List.last()]),
       meta: Path.join(env_dir, "meta"),
+      recovery: Path.join([env_dir, "meta", "recovery"]),
       secrets: Path.join(config.secrets_root, env_id)
     }
   end
@@ -477,24 +478,50 @@ defmodule ForemanAgent.Env do
     if File.dir?(Path.join(paths.clone, ".git")) and File.exists?(spec_path(paths)) do
       :ok
     else
-      with :ok <- discard_failed_attempt(paths, p, ctx), do: clone(paths, p, ctx)
+      with :ok <- preserve_failed_attempt(paths, p, ctx), do: clone(paths, p, ctx)
     end
   end
 
-  # What an earlier attempt left behind. Its containers mount the old
-  # clone, so they go too; volumes stay. git never runs in the old clone:
-  # anything in the environment could have rewritten its .git/config.
-  defp discard_failed_attempt(paths, p, ctx) do
-    if File.exists?(paths.clone) do
-      ctx.log.("info", "Discarding the clone from an earlier attempt\n")
+  # Move the whole checkout on the same disk, including untracked files
+  # and local branches. Never run git in the old checkout as the agent.
+  defp preserve_failed_attempt(paths, p, ctx) do
+    case File.lstat(paths.clone) do
+      {:error, :enoent} ->
+        :ok
 
-      with {:ok, _} <- compose(ctx, p.slug, ["down", "--remove-orphans"]) do
-        remove_in(ctx, paths.workspace, Path.basename(paths.clone))
-      end
-    else
+      {:ok, _} ->
+        with {:ok, _} <- compose(ctx, p.slug, ["down", "--remove-orphans"]) do
+          save_previous_workspace(paths, ctx)
+        end
+
+      {:error, reason} ->
+        {:error, "couldn't inspect the previous workspace: #{:file.format_error(reason)}"}
+    end
+  end
+
+  defp save_previous_workspace(paths, ctx) do
+    attempt = "attempt-" <> Base.url_encode64(:crypto.strong_rand_bytes(12), padding: false)
+
+    with :ok <- File.mkdir_p(paths.recovery),
+         true <- recovery_directory?(paths),
+         :ok <- File.rename(paths.clone, Path.join(paths.recovery, attempt)) do
+      ctx.log.(
+        "info",
+        "Saved previous workspace at #{Overlay.recovery_mount()}/#{attempt} in the devcontainer\n"
+      )
+
       :ok
+    else
+      false ->
+        {:error, "couldn't save the previous workspace: invalid recovery directory"}
+
+      {:error, reason} ->
+        {:error, "couldn't save the previous workspace: #{:file.format_error(reason)}"}
     end
   end
+
+  defp recovery_directory?(paths),
+    do: match?({:ok, %File.Stat{type: :directory}}, File.lstat(paths.recovery))
 
   defp clone(paths, p, ctx) do
     helper = write_credential_helper(paths)
@@ -866,6 +893,7 @@ defmodule ForemanAgent.Env do
         services: services,
         devcontainer_service: service,
         secrets_dir: paths.secrets,
+        recovery_dir: if(recovery_directory?(paths), do: paths.recovery),
         tailscale: spec.tailscale,
         limits: spec.limits,
         feature_version: Config.feature_version(ctx.config)

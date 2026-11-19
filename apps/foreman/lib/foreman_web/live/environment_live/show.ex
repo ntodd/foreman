@@ -470,6 +470,7 @@ defmodule ForemanWeb.EnvironmentLive.Show do
           <.button
             :if={not @env.created_once and @env.observed_state == "error"}
             phx-click="action"
+            data-confirm={"Retry #{@env.slug}? #{fresh_clone_notice()}"}
             phx-value-do="retry"
             icon="hero-arrow-path-mini"
             variant="primary"
@@ -510,9 +511,18 @@ defmodule ForemanWeb.EnvironmentLive.Show do
               icon="hero-wrench-screwdriver-mini"
               phx-click={JS.push("action") |> hide_dropdown("env-actions")}
               phx-value-do="rebuild"
-              data-confirm={"Rebuild #{@env.slug}? Containers are recreated from a fresh build; the workspace, volumes and tailnet identity are kept."}
+              data-confirm={
+                if @env.created_once,
+                  do:
+                    "Rebuild #{@env.slug}? Containers are recreated from a fresh build; the workspace, volumes and tailnet identity are kept.",
+                  else: "Rebuild #{@env.slug}? #{fresh_clone_notice()}"
+              }
             >
-              Recreates the containers from a fresh build. Keeps the clone as it is, along with volumes and the tailnet identity.
+              <%= if @env.created_once do %>
+                Recreates the containers from a fresh build. Keeps the clone as it is, along with volumes and the tailnet identity.
+              <% else %>
+                {fresh_clone_notice()}
+              <% end %>
             </.dropdown_item>
             <.dropdown_item
               title="Pull and rebuild"
@@ -520,9 +530,18 @@ defmodule ForemanWeb.EnvironmentLive.Show do
               phx-click={JS.push("action") |> hide_dropdown("env-actions")}
               phx-value-do="pull_rebuild"
               disabled={not pull_supported?(@env)}
-              data-confirm={"Pull and rebuild #{@env.slug}? The clone is fast-forwarded to origin/#{@env.branch}, then containers are recreated from a fresh build."}
+              data-confirm={
+                if @env.created_once,
+                  do:
+                    "Pull and rebuild #{@env.slug}? The clone is fast-forwarded to origin/#{@env.branch}, then containers are recreated from a fresh build.",
+                  else: "Pull and rebuild #{@env.slug}? #{fresh_clone_notice()}"
+              }
             >
-              Fast-forwards the clone to <span class="font-mono">origin/{@env.branch}</span>, then rebuilds. Stops if there's uncommitted or unpushed work.
+              <%= if @env.created_once do %>
+                Fast-forwards the clone to <span class="font-mono">origin/{@env.branch}</span>, then rebuilds. Stops if there's uncommitted or unpushed work.
+              <% else %>
+                {fresh_clone_notice()}
+              <% end %>
               <:note :if={not pull_supported?(@env)}>
                 <span class="text-warning">{@env.box.name} needs a newer agent to pull.</span>
               </:note>
