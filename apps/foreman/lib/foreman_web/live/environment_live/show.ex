@@ -10,6 +10,7 @@ defmodule ForemanWeb.EnvironmentLive.Show do
   import ForemanWeb.ForemanComponents
 
   alias Foreman.{Boxes, Capacity, Environments, Operations, Ports}
+  alias Foreman.Environments.Environment
 
   @impl true
   def mount(%{"id" => id}, _session, socket) do
@@ -32,6 +33,8 @@ defmodule ForemanWeb.EnvironmentLive.Show do
      |> assign(:sync_op, nil)
      |> assign(:connect, nil)
      |> assign(:loaded_state, nil)
+     |> assign(:limits_form, nil)
+     |> assign(:limits_warning, nil)
      |> load()
      |> check_branch()}
   end
@@ -127,6 +130,44 @@ defmodule ForemanWeb.EnvironmentLive.Show do
   end
 
   def handle_event("later", _params, socket), do: {:noreply, assign(socket, :later, true)}
+
+  def handle_event("edit_limits", _params, socket) do
+    env = socket.assigns.env
+    gib = env.memory_limit_mb && env.memory_limit_mb / 1024
+    form = Environment.limits_changeset(env, %{"memory_limit_gib" => gib})
+    {:noreply, assign(socket, limits_form: to_form(form, as: :limits), limits_warning: nil)}
+  end
+
+  def handle_event("cancel_limits", _params, socket),
+    do: {:noreply, assign(socket, limits_form: nil, limits_warning: nil)}
+
+  def handle_event("validate_limits", %{"limits" => attrs}, socket) do
+    changeset = Environment.limits_changeset(socket.assigns.env, attrs)
+    form = to_form(changeset, as: :limits, action: :validate)
+    {:noreply, assign(socket, limits_form: form, limits_warning: nil)}
+  end
+
+  def handle_event("save_limits", %{"limits" => attrs} = params, socket) do
+    %{current_scope: scope, env: env} = socket.assigns
+
+    case Environments.update_limits(scope, env, attrs, params["confirm"] == "true") do
+      {:ok, _env} ->
+        {:noreply,
+         socket
+         |> assign(limits_form: nil, limits_warning: nil)
+         |> load()
+         |> put_flash(:info, "Saved resource settings for #{env.slug}'s next cold boot.")}
+
+      {:confirm, message} ->
+        {:noreply, assign(socket, :limits_warning, message)}
+
+      {:error, %Ecto.Changeset{} = changeset} ->
+        {:noreply, assign(socket, :limits_form, to_form(changeset, as: :limits))}
+
+      {:error, reason} ->
+        {:noreply, put_flash(socket, :error, error_message(reason))}
+    end
+  end
 
   # A connect hook's action. Its result is a secret for whoever asked, so
   # it comes to this page alone and is dropped when the dialog closes.
@@ -654,11 +695,22 @@ defmodule ForemanWeb.EnvironmentLive.Show do
             </dl>
           </.panel>
 
-          <.panel title="Resources">
+          <.panel id="environment-resources" title="Resources">
+            <:actions>
+              <.button
+                :if={!@limits_form && is_nil(@env.destroyed_at)}
+                size="sm"
+                phx-click="edit_limits"
+              >
+                Edit
+              </.button>
+            </:actions>
             <dl class="space-y-2.5">
-              <.fact term="CPU limit">{@env.cpu_limit || @env.repo.cpu_limit || "None"}</.fact>
+              <.fact term="CPU limit">
+                {limit_label(@env.cpu_limit, @env.repo.cpu_limit, &to_string/1)}
+              </.fact>
               <.fact term="Memory limit">
-                {if m = @env.memory_limit_mb || @env.repo.memory_limit_mb, do: "#{m} MB", else: "None"}
+                {limit_label(@env.memory_limit_mb, @env.repo.memory_limit_mb, &"#{&1 / 1024} GiB")}
               </.fact>
               <.fact term="Counted as">
                 {Float.round(@provisioned.cpus * 1.0, 1)} CPUs, {gib(@provisioned.memory_mb)} GiB
@@ -668,6 +720,52 @@ defmodule ForemanWeb.EnvironmentLive.Show do
                 {round(@usage.cpu_percent)}% CPU, {gib(@usage.memory_mb)} GiB
               </.fact>
             </dl>
+            <.form
+              :if={@limits_form}
+              for={@limits_form}
+              id="environment-limits"
+              phx-change="validate_limits"
+              phx-submit="save_limits"
+              class="mt-4 space-y-3 border-t border-line pt-4"
+            >
+              <.input
+                field={@limits_form[:cpu_limit]}
+                type="number"
+                step="any"
+                min="0"
+                max="512"
+                label="CPUs"
+              />
+              <.input
+                field={@limits_form[:memory_limit_gib]}
+                type="number"
+                step="any"
+                min="0.25"
+                max="4096"
+                label="Memory (GiB)"
+              />
+              <p class="text-xs text-ink-2">
+                Clear either field to inherit its default.
+                <%= if (@env.box.protocol_version || 0) >= 7 do %>
+                  Stop and start the VM to apply a new size. A suspended VM resumes at its previous size.
+                <% else %>
+                  This box needs an agent update to apply size changes on start.
+                <% end %>
+              </p>
+              <.callout :if={@limits_warning} kind="warning">{@limits_warning}</.callout>
+              <div class="flex gap-2">
+                <.button
+                  type="submit"
+                  size="sm"
+                  variant="primary"
+                  name="confirm"
+                  value={if @limits_warning, do: "true", else: "false"}
+                >
+                  {if @limits_warning, do: "Save anyway", else: "Save limits"}
+                </.button>
+                <.button type="button" size="sm" phx-click="cancel_limits">Cancel</.button>
+              </div>
+            </.form>
           </.panel>
         </aside>
       </div>
@@ -960,4 +1058,8 @@ defmodule ForemanWeb.EnvironmentLive.Show do
   defp provisioned_source(:host_requirements), do: "hostRequirements"
   defp provisioned_source(:observed), do: "15-minute average"
   defp provisioned_source(_), do: "Not measured yet"
+
+  defp limit_label(nil, nil, _format), do: "Box default"
+  defp limit_label(nil, repo, format), do: "#{format.(repo)} (repo default)"
+  defp limit_label(value, _repo, format), do: format.(value)
 end

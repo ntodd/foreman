@@ -140,7 +140,12 @@ defmodule Foreman.Environments do
   defp check_vm(box), do: Foreman.Boxes.check_vm(box)
 
   defp check_placement(box, repo, limits, confirmed?) do
-    case Capacity.check_placement(box, live_for_box(box.id), repo, limits) do
+    placement = Capacity.check_placement(box, live_for_box(box.id), repo, limits)
+    placement_decision(placement, confirmed?)
+  end
+
+  defp placement_decision(placement, confirmed?) do
+    case placement do
       :ok -> :ok
       {:contention, _} -> :ok
       {:warn, _} when confirmed? -> :ok
@@ -617,9 +622,15 @@ defmodule Foreman.Environments do
   defp command_type("connect"), do: "env.connect"
   defp command_type("logs"), do: "env.logs"
 
-  def update_limits(%Scope{} = scope, %Environment{} = env, attrs) do
+  def update_limits(%Scope{} = scope, %Environment{} = env, attrs, confirmed? \\ false) do
     with :ok <- authorize(scope, env),
-         {:ok, env} <- env |> Environment.limits_changeset(attrs) |> Repo.update() do
+         env = get!(env.id),
+         :ok <- allowed?(env, :resize),
+         changeset = Environment.limits_changeset(env, attrs),
+         {:ok, resized} <- Ecto.Changeset.apply_action(changeset, :update),
+         placement = Capacity.check_resize(env, resized, live_for_box(env.box_id)),
+         :ok <- placement_decision(placement, confirmed?),
+         {:ok, env} <- Repo.update(changeset) do
       broadcast(env)
       {:ok, env}
     end

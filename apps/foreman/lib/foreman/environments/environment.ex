@@ -23,6 +23,7 @@ defmodule Foreman.Environments.Environment do
     field :status_message, :string
     field :cpu_limit, :float
     field :memory_limit_mb, :integer
+    field :memory_limit_gib, :float, virtual: true
     field :applied_secret_hashes, :map
     field :pending_restart, :boolean, default: false
     field :pending_changes, {:array, :string}, default: []
@@ -69,6 +70,27 @@ defmodule Foreman.Environments.Environment do
     # Postgres names the partial index; SQLite reports the columns instead.
     |> unique_constraint(:slug, name: :environments_live_slug_index)
     |> unique_constraint(:slug, name: :environments_slug_index)
+  end
+
+  # The editor takes GiB, while the database and agent protocol use MiB.
+  def limits_changeset(env, %{"memory_limit_gib" => _} = attrs) do
+    env = %{env | memory_limit_gib: env.memory_limit_mb && env.memory_limit_mb / 1024}
+
+    changeset =
+      env
+      |> cast(attrs, [:cpu_limit, :memory_limit_gib])
+      |> validate_number(:memory_limit_gib,
+        greater_than_or_equal_to: 0.25,
+        less_than_or_equal_to: 4096
+      )
+      |> validate_limits()
+
+    if changeset.valid? do
+      gib = get_field(changeset, :memory_limit_gib)
+      put_change(changeset, :memory_limit_mb, gib && round(gib * 1024))
+    else
+      changeset
+    end
   end
 
   def limits_changeset(env, attrs) do

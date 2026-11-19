@@ -138,15 +138,28 @@ defmodule Foreman.Capacity do
   `{:refuse, message}`.
   """
   def check_placement(%Box{} = box, envs, repo, limits \\ %{}) do
-    summary = box_summary(box, envs)
-
     env = %Environment{
       id: "new",
       cpu_limit: limits[:cpu_limit],
       memory_limit_mb: limits[:memory_limit_mb]
     }
 
-    want = provisioned(env, repo)
+    placement(box, envs, repo, provisioned(env, repo))
+  end
+
+  def check_resize(env, resized, envs) do
+    current = provisioned(env, env.repo)
+    want = provisioned(resized, env.repo)
+
+    if want.cpus > current.cpus or want.memory_mb > current.memory_mb do
+      placement(env.box, Enum.reject(envs, &(&1.id == env.id)), env.repo, want)
+    else
+      :ok
+    end
+  end
+
+  defp placement(box, envs, repo, want) do
+    summary = box_summary(box, envs)
 
     message =
       short_of_requirements(box, summary, repo) || over_threshold(box, summary, want)

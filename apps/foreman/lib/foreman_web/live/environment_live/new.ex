@@ -247,7 +247,7 @@ defmodule ForemanWeb.EnvironmentLive.New do
         <details class="group rounded-xl border border-line bg-raised shadow-xs">
           <summary class="flex cursor-pointer list-none items-center justify-between px-5 py-3.5 text-sm font-semibold text-ink">
             Resource limits
-            <span class="text-xs font-normal text-ink-3 group-open:hidden">None: it takes what it can get</span>
+            <span class="text-xs font-normal text-ink-3 group-open:hidden">Optional overrides</span>
           </summary>
           <div class="grid gap-4 border-t border-line p-5 sm:grid-cols-2">
             <.input
@@ -256,15 +256,15 @@ defmodule ForemanWeb.EnvironmentLive.New do
               step="0.5"
               min="0.5"
               label="CPUs"
-              placeholder={(@repo && @repo.cpu_limit) || "No limit"}
+              placeholder={(@repo && @repo.cpu_limit) || "Box default"}
             />
             <.input
               field={@form[:memory_limit_mb]}
               type="number"
               step="256"
               min="256"
-              label="Memory (MB)"
-              placeholder={(@repo && @repo.memory_limit_mb) || "No limit"}
+              label="Memory (MiB)"
+              placeholder={(@repo && @repo.memory_limit_mb) || "Box default"}
             />
           </div>
         </details>

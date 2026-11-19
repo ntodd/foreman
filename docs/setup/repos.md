@@ -37,9 +37,17 @@ What still applies:
 
 - Published ports are stripped. Reach the environment over the tailnet
   instead; nothing outside the box could reach a VM's ports anyway.
-- The VM has a size: the environment's CPU and memory limits, else the
-  repo's, else the box's default of 4 CPUs and 8 GB, and a 64 GB data
-  disk by default.
+- Foreman chooses CPU and memory independently. Each uses the environment
+  override, then the repo default, then the box default (normally 4 vCPUs
+  and 8 GiB). To resize an existing VM, open **Resources → Edit** on its
+  environment page. For example, enter `8` for CPUs and `8` for memory in
+  GiB. Clearing either field restores inheritance for that resource.
+  Save, then **Stop** and **Start** to boot with the new size. A suspended
+  VM resumes with its saved size. The data disk defaults to 64 GB.
+- A Compose devcontainer can also have its own CPU or memory limit inside
+  the VM. Foreman writes its limits into the app service's Compose overlay
+  on creation or rebuild. If the app still has an older, tighter limit
+  after resizing the VM, **Rebuild** refreshes that overlay.
 - The network: the internet, and the box's LAN unless the box blocks it.
   Not the box itself, not other environments, and not the tailnet except
   through the environment's own node.
