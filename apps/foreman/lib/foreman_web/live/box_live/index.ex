@@ -305,7 +305,7 @@ defmodule ForemanWeb.BoxLive.Index do
         </.empty_state>
       </.panel>
 
-      <.panel :if={Scope.admin?(@current_scope)} title="Add a box" id="add-box">
+      <.panel :if={Scope.admin?(@current_scope)} title="Add a box" id="add-box" split={is_nil(@join)}>
         <:subtitle>Creates a single-use join token that expires in an hour.</:subtitle>
         <%= if @join do %>
           <div class="space-y-4">
@@ -388,7 +388,10 @@ defmodule ForemanWeb.BoxLive.Index do
             for={@form}
             id="join-token-form"
             phx-submit="create_token"
-            class="grid items-end gap-3 sm:grid-cols-[1fr_1fr_auto]"
+            class={[
+              "grid items-start gap-3 sm:grid-cols-2",
+              @tailscale? && "sm:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_auto]"
+            ]}
           >
             <.input
               field={@form[:box_name]}
@@ -402,7 +405,6 @@ defmodule ForemanWeb.BoxLive.Index do
               label="Owner"
               options={Enum.map(@users, &{&1.login, &1.id})}
             />
-            <.button type="submit" variant="primary">Create join token</.button>
             <.input
               :if={not @tailscale?}
               field={@form[:tailscale_auth_key]}
@@ -411,6 +413,9 @@ defmodule ForemanWeb.BoxLive.Index do
               placeholder="tskey-auth-..."
               autocomplete="off"
             />
+            <.button type="submit" variant="primary" class="sm:self-end sm:justify-self-start">
+              Create join token
+            </.button>
           </.form>
         <% end %>
       </.panel>

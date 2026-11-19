@@ -649,7 +649,7 @@ defmodule ForemanWeb.CoreComponents do
       end)
 
     ~H"""
-    <div class="mb-3">
+    <div class="min-w-0">
       <label for={@id} class="flex cursor-pointer items-center gap-2.5 text-sm text-ink">
         <input
           type="hidden"
@@ -677,7 +677,7 @@ defmodule ForemanWeb.CoreComponents do
 
   def input(%{type: "select"} = assigns) do
     ~H"""
-    <div class="mb-3">
+    <div class="min-w-0">
       <label :if={@label} for={@id} class="label">{@label}</label>
       <div class="relative">
         <select
@@ -704,7 +704,7 @@ defmodule ForemanWeb.CoreComponents do
 
   def input(%{type: "textarea"} = assigns) do
     ~H"""
-    <div class="mb-3">
+    <div class="min-w-0">
       <label :if={@label} for={@id} class="label">{@label}</label>
       <textarea
         id={@id}
@@ -721,7 +721,7 @@ defmodule ForemanWeb.CoreComponents do
   # All other inputs text, datetime-local, url, password, etc. are handled here...
   def input(assigns) do
     ~H"""
-    <div class="mb-3">
+    <div class="min-w-0">
       <label :if={@label} for={@id} class="label">{@label}</label>
       <input
         type={@type}

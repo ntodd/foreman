@@ -268,6 +268,15 @@
     line-height: 1.6;
   }
 
+  textarea.input[rows="1"] {
+    field-sizing: content;
+    min-height: 2.25rem;
+    max-height: 14rem;
+    padding-block: calc(0.5rem - 1px);
+    line-height: 1.25rem;
+    resize: vertical;
+  }
+
   /* WebKit's clear button is a fixed blue glyph that ignores the
      palette; Escape still clears a search field. */
   input[type="search"].input::-webkit-search-cancel-button {

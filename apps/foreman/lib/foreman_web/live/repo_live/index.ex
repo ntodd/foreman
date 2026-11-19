@@ -161,10 +161,16 @@ defmodule ForemanWeb.RepoLive.Index do
         </.empty_state>
       </.panel>
 
-      <.panel :if={Foreman.Scope.admin?(@current_scope)} title="Add a repo by name">
+      <.panel :if={Foreman.Scope.admin?(@current_scope)} title="Add a repo by name" split>
         <:subtitle>For public repos outside the app's installations.</:subtitle>
         <.form for={@add_form} id="add-repo" phx-submit="add" class="flex items-start gap-2">
-          <div class="flex-1"><.input field={@add_form[:full_name]} placeholder="owner/name" /></div>
+          <div class="min-w-0 flex-1">
+            <.input
+              field={@add_form[:full_name]}
+              aria-label="Repository name"
+              placeholder="owner/name"
+            />
+          </div>
           <.button type="submit">Add</.button>
         </.form>
       </.panel>

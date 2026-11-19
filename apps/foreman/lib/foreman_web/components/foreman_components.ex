@@ -331,6 +331,11 @@ defmodule ForemanWeb.ForemanComponents do
   attr :title, :string, default: nil
   attr :id, :string, default: nil
   attr :class, :any, default: nil
+
+  attr :split, :boolean,
+    default: false,
+    doc: "Place the heading beside a short form on wide screens."
+
   attr :padded, :boolean, default: true
   slot :actions
   slot :subtitle
@@ -338,17 +343,27 @@ defmodule ForemanWeb.ForemanComponents do
 
   def panel(assigns) do
     ~H"""
-    <section id={@id} class={["rounded-xl border border-line bg-raised shadow-xs", @class]}>
+    <section
+      id={@id}
+      class={[
+        "min-w-0 rounded-xl border border-line bg-raised shadow-xs",
+        @split && "xl:grid xl:grid-cols-[minmax(14rem,1fr)_minmax(0,3fr)]",
+        @class
+      ]}
+    >
       <header
         :if={@title}
-        class="flex flex-wrap items-start justify-between gap-x-4 gap-y-2 border-b border-line px-5 py-3.5"
+        class={[
+          "flex flex-wrap items-start justify-between gap-x-4 gap-y-2 rounded-t-xl border-b border-line bg-muted/30 px-5 py-3.5",
+          @split && "xl:items-center xl:rounded-l-xl xl:rounded-tr-none xl:border-r xl:border-b-0"
+        ]}
       >
         <%!-- Actions drop below the title when there's no room for both. --%>
         <div class="min-w-0 flex-1 basis-48">
           <h2 class="text-sm font-semibold text-ink">{@title}</h2>
           <p :if={@subtitle != []} class="mt-0.5 text-xs text-ink-2">{render_slot(@subtitle)}</p>
         </div>
-        <div :if={@actions != []} class="flex shrink-0 flex-wrap items-center gap-2">
+        <div :if={@actions != []} class="flex max-w-full flex-wrap items-center gap-2">
           {render_slot(@actions)}
         </div>
       </header>
@@ -381,7 +396,7 @@ defmodule ForemanWeb.ForemanComponents do
         <.icon name={@icon || callout_icon(@kind)} class="mt-0.5 size-4 shrink-0" />
         <div class="min-w-0 flex-1">{render_slot(@inner_block)}</div>
       </div>
-      <div :if={@actions != []} class="flex shrink-0 flex-wrap items-center gap-2">
+      <div :if={@actions != []} class="flex max-w-full flex-wrap items-center gap-2">
         {render_slot(@actions)}
       </div>
     </div>
