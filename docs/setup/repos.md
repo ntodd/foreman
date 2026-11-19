@@ -182,8 +182,12 @@ up as an error from Foreman.
 
 - **The remote user doesn't run as the uid you set.** The devcontainer CLI
   changes the remote user's uid and gid to the host user's that runs it,
-  which is the guest agent's own user in the VM (`foreman`, a system
-  account in the guest image, so its uid is below 1000). A Dockerfile's `useradd -u 1000` or common-utils'
+  which is the guest agent's own user in the VM (`foreman`, UID and GID
+  1000 on new disks). Disks initialized by 0.6.0 or 0.6.1 keep their
+  original 997:993 ownership so existing workspaces and volumes remain
+  accessible. If a container system account occupies UID 997 and the
+  initial build failed on one of those disks, create a fresh environment
+  with the updated guest image. A Dockerfile's `useradd -u 1000` or common-utils'
   `userUid` doesn't survive that. HOME is fine (the CLI re-owns it), but
   anything else the image chowns to the user, `/usr/local/bundle` or a
   browser cache like `/ms-playwright`, isn't writable at runtime. Make

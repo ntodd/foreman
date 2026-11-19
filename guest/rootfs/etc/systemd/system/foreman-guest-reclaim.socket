@@ -1,5 +1,7 @@
 [Unit]
 Description=Foreman guest memory reclaim, for the guest agent
+Requires=foreman-guest-disks.service
+After=foreman-guest-disks.service
 
 [Socket]
 # Root and the guest agent's group. Nothing else in the VM needs it.

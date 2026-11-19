@@ -23,10 +23,15 @@ RUN apt-get update \
     systemd-sysv udev kmod dbus iproute2 iptables ca-certificates curl git socat e2fsprogs \
     util-linux docker.io docker-compose-v2 docker-buildx linux-image-virtual \
   && rm -rf /var/lib/apt/lists/* /var/cache/apt/*
+# The devcontainer CLI maps the remote user to this account. UID 1000
+# is the usual developer UID. Ubuntu's unused image user occupies it.
+RUN userdel --remove ubuntu \
+  && groupadd --gid 1000 foreman \
+  && useradd --uid 1000 --gid foreman --groups docker --no-create-home \
+       --home-dir /var/lib/foreman-agent --shell /usr/sbin/nologin foreman
+# Older data disks need both of their original IDs available at boot.
+RUN ! getent passwd 997 >/dev/null && ! getent group 993 >/dev/null
 COPY rootfs/ /
-# The guest agent's user, in Docker's group.
-RUN useradd --system --home-dir /var/lib/foreman-agent --shell /usr/sbin/nologin foreman \
-  && usermod -aG docker foreman
 RUN systemctl enable foreman-guest-net foreman-guest-disks foreman-guest-agent foreman-guest-vsock \
     foreman-guest-reclaim.socket docker fstrim.timer \
   && systemctl mask getty.target console-getty.service serial-getty@ttyS0.service systemd-resolved.service \
