@@ -95,20 +95,55 @@ defmodule Foreman.Environments do
   placement is past capacity (pass `"confirm" => "true"` to go ahead),
   and `{:error, message}` when the policy refuses it.
   """
-  def create_environment(%Scope{user: user} = scope, attrs) do
+  def create_environment(%Scope{} = scope, attrs) do
     attrs = Map.new(attrs, fn {k, v} -> {to_string(k), v} end)
 
     with {:ok, repo} <- fetch_repo(attrs["repo_id"]),
          {:ok, box} <- fetch_box(scope, attrs["box_id"]),
-         limits = %{
-           cpu_limit: number(attrs["cpu_limit"]),
-           memory_limit_mb: integer(attrs["memory_limit_mb"])
-         },
          :ok <- check_vm(box),
-         :ok <- check_placement(box, repo, limits, attrs["confirm"] in ["true", true]) do
-      branch = blank(attrs["branch"]) || repo.default_branch
-      insert_environment(scope, user, repo, box, branch, limits)
+         {:ok, env} <- reserve_creation(scope, repo, box, attrs) do
+      Audit.log(scope, "environment.create", env, %{
+        "slug" => env.slug,
+        "repo" => repo.full_name,
+        "box" => box.name
+      })
+
+      Server.kick(env.id)
+      broadcast_list()
+      {:ok, Repo.preload(env, @preloads)}
     end
+  end
+
+  defp reserve_creation(scope, repo, box, attrs) do
+    limits = %{
+      cpu_limit: number(attrs["cpu_limit"]),
+      memory_limit_mb: integer(attrs["memory_limit_mb"])
+    }
+
+    branch = blank(attrs["branch"]) || repo.default_branch
+    confirmed? = attrs["confirm"] in ["true", true]
+    names = Foreman.Tailscale.taken_names()
+
+    with_box_lock(box.id, fn locked ->
+      with :ok <- check_placement(locked, repo, limits, confirmed?),
+           {:ok, env} <- insert_environment(scope.user, repo, locked, branch, limits, names) do
+        queue_operation(env, "create", %{}, scope.user)
+        {:ok, env}
+      end
+    end)
+  end
+
+  # Admission and its reservation must see the same box. SQLite already
+  # takes a writer lock at transaction start. Postgres locks just this box.
+  defp with_box_lock(id, fun) do
+    {:ok, result} =
+      Repo.transact(fn ->
+        box = from(b in Box, where: b.id == ^id)
+        query = if Repo.sqlite?(), do: box, else: lock(box, "FOR UPDATE")
+        {:ok, fun.(Repo.one!(query))}
+      end)
+
+    result
   end
 
   defp fetch_repo(id) when is_binary(id) do
@@ -154,8 +189,8 @@ defmodule Foreman.Environments do
     end
   end
 
-  defp insert_environment(scope, user, repo, box, branch, limits, attempt \\ 0) do
-    {slug, index} = next_slug(repo, user)
+  defp insert_environment(user, repo, box, branch, limits, names, attempt \\ 0) do
+    {slug, index} = next_slug(repo, user, names)
 
     changeset =
       Environment.create_changeset(
@@ -170,23 +205,12 @@ defmodule Foreman.Environments do
         })
       )
 
-    case Repo.insert(changeset) do
-      {:ok, env} ->
-        Audit.log(scope, "environment.create", env, %{
-          "slug" => slug,
-          "repo" => repo.full_name,
-          "box" => box.name
-        })
-
-        enqueue(env, "create", %{}, user)
-        broadcast_list()
-        {:ok, Repo.preload(env, @preloads, force: true)}
-
+    case Repo.insert(changeset, mode: :savepoint) do
       {:error, %Ecto.Changeset{errors: [slug: _]}} when attempt < 3 ->
-        insert_environment(scope, user, repo, box, branch, limits, attempt + 1)
+        insert_environment(user, repo, box, branch, limits, names, attempt + 1)
 
-      {:error, changeset} ->
-        {:error, changeset}
+      result ->
+        result
     end
   end
 
@@ -200,10 +224,11 @@ defmodule Foreman.Environments do
   called `api` under different owners get `api-1` and `api-2`. Names
   already on the tailnet (another deployment's, say) are skipped too.
   """
-  def next_slug(repo, user) do
+  def next_slug(repo, user), do: next_slug(repo, user, Foreman.Tailscale.taken_names())
+
+  defp next_slug(repo, user, on_tailnet) do
     team? = Foreman.Config.slug_style() == :team
     prefix = slug_prefix(repo.name, if(team?, do: user.login))
-    on_tailnet = Foreman.Tailscale.taken_names()
 
     # The prefix is only [a-z0-9-], so it has no LIKE wildcards in it.
     used =
@@ -240,7 +265,29 @@ defmodule Foreman.Environments do
 
   # -- actions -----------------------------------------------------------------------
 
-  def start(scope, env), do: action(scope, env, :start)
+  def start(scope, env, confirmed? \\ false) do
+    with :ok <- authorize(scope, env),
+         {:ok, op} <-
+           with_box_lock(env.box_id, fn _box ->
+             env = get!(env.id)
+
+             with :ok <- allowed?(env, :start),
+                  :ok <- admit_start(env, confirmed?) do
+               queue_action(scope, env, :start, %{})
+             end
+           end) do
+      Server.kick(env.id)
+      broadcast(env)
+      {:ok, op}
+    end
+  end
+
+  defp admit_start(%{observed_state: "running", desired_state: "running"}, _confirmed?), do: :ok
+
+  defp admit_start(env, confirmed?) do
+    env |> Capacity.check_start(live_for_box(env.box_id)) |> placement_decision(confirmed?)
+  end
+
   def stop(scope, env), do: action(scope, env, :stop)
 
   @doc """
@@ -452,9 +499,13 @@ defmodule Foreman.Environments do
   defp action(%Scope{} = scope, %Environment{} = env, action, args \\ %{}) do
     with :ok <- authorize(scope, env),
          :ok <- allowed?(env, action) do
-      if action == :destroy and box_revoked?(env),
-        do: forget(scope, env),
-        else: queue_action(scope, env, action, args)
+      if action == :destroy and box_revoked?(env) do
+        forget(scope, env)
+      else
+        result = queue_action(scope, env, action, args)
+        Server.kick(env.id)
+        result
+      end
     end
   end
 
@@ -500,9 +551,9 @@ defmodule Foreman.Environments do
     name = Atom.to_string(action)
     supersede(env, name)
 
-    if action == :start, do: enqueue(env, "secrets_write", %{}, scope.user)
+    if action == :start, do: queue_operation(env, "secrets_write", %{}, scope.user)
 
-    op = enqueue(env, name, args, scope.user)
+    op = queue_operation(env, name, args, scope.user)
     Audit.log(scope, "environment.#{action}", env)
     {:ok, op}
   end
@@ -584,6 +635,12 @@ defmodule Foreman.Environments do
 
   @doc false
   def enqueue(env, action, args, user, opts \\ []) do
+    op = queue_operation(env, action, args, user, opts)
+    Server.kick(env.id)
+    op
+  end
+
+  defp queue_operation(env, action, args, user, opts \\ []) do
     existing =
       Keyword.get(opts, :dedupe, true) &&
         Repo.one(
@@ -592,20 +649,16 @@ defmodule Foreman.Environments do
             limit: 1
         )
 
-    op =
-      existing ||
-        Operations.create!(%{
-          id: Keyword.get_lazy(opts, :id, &Ecto.UUID.generate/0),
-          environment_id: env.id,
-          box_id: env.box_id,
-          user_id: user && user.id,
-          action: action,
-          command: command_type(action),
-          args: args
-        })
-
-    Server.kick(env.id)
-    op
+    existing ||
+      Operations.create!(%{
+        id: Keyword.get_lazy(opts, :id, &Ecto.UUID.generate/0),
+        environment_id: env.id,
+        box_id: env.box_id,
+        user_id: user && user.id,
+        action: action,
+        command: command_type(action),
+        args: args
+      })
   end
 
   defp command_type("create"), do: "env.create"
@@ -624,15 +677,23 @@ defmodule Foreman.Environments do
 
   def update_limits(%Scope{} = scope, %Environment{} = env, attrs, confirmed? \\ false) do
     with :ok <- authorize(scope, env),
-         env = get!(env.id),
-         :ok <- allowed?(env, :resize),
-         changeset = Environment.limits_changeset(env, attrs),
+         {:ok, updated} <-
+           with_box_lock(env.box_id, fn _box ->
+             resize(get!(env.id), attrs, confirmed?)
+           end) do
+      broadcast(updated)
+      {:ok, updated}
+    end
+  end
+
+  defp resize(env, attrs, confirmed?) do
+    changeset = Environment.limits_changeset(env, attrs)
+
+    with :ok <- allowed?(env, :resize),
          {:ok, resized} <- Ecto.Changeset.apply_action(changeset, :update),
          placement = Capacity.check_resize(env, resized, live_for_box(env.box_id)),
-         :ok <- placement_decision(placement, confirmed?),
-         {:ok, env} <- Repo.update(changeset) do
-      broadcast(env)
-      {:ok, env}
+         :ok <- placement_decision(placement, confirmed?) do
+      Repo.update(changeset)
     end
   end
 
@@ -803,6 +864,7 @@ defmodule Foreman.Environments do
   defp result_attrs(%{status: "succeeded", action: "stop"}, _env),
     do: %{
       observed_state: "stopped",
+      vm_size: nil,
       status_message: nil,
       pending_restart: false,
       pending_changes: []
@@ -810,8 +872,13 @@ defmodule Foreman.Environments do
 
   # Its processes are as they were, with the secrets they had; a start
   # resumes it.
-  defp result_attrs(%{status: "succeeded", action: "suspend"}, _env),
-    do: %{observed_state: "suspended", status_message: nil}
+  defp result_attrs(%{status: "succeeded", action: "suspend", result: result}, _env) do
+    %{
+      observed_state: "suspended",
+      status_message: nil,
+      vm_size: saved_size((result || %{})["vm_size"])
+    }
+  end
 
   defp result_attrs(%{status: "succeeded", action: "destroy"}, _env),
     do: %{observed_state: "destroyed", destroyed_at: DateTime.utc_now(), status_message: nil}
@@ -933,6 +1000,12 @@ defmodule Foreman.Environments do
   defp node_id(v) when is_binary(v), do: if(v =~ ~r/\A[A-Za-z0-9]{1,64}\z/, do: v)
   defp node_id(_), do: nil
 
+  defp saved_size(%{"cpus" => cpus, "memory_mb" => mb})
+       when is_integer(cpus) and cpus > 0 and is_integer(mb) and mb > 0,
+       do: %{"cpus" => cpus, "memory_mb" => mb}
+
+  defp saved_size(_), do: nil
+
   defp put_if(map, _key, nil), do: map
   defp put_if(map, key, value), do: Map.put(map, key, value)
 
@@ -1028,18 +1101,30 @@ defmodule Foreman.Environments do
     Phoenix.PubSub.broadcast(Foreman.PubSub, "boxes", {:orphans, box_id, orphans})
     :persistent_term.put({__MODULE__, :orphans, box_id}, orphans)
 
-    for env <- envs, not lifecycle_active?(env.id) do
-      observed = if inv = by_id[env.id], do: inv.state, else: "missing"
+    Enum.each(envs, &reconcile_entry(&1, by_id[&1.id]))
+    :ok
+  end
 
-      env =
-        if observed != env.observed_state and env.observed_state != "error",
-          do: update_env!(env, %{observed_state: observed}),
-          else: env
+  defp reconcile_entry(env, inv) do
+    observed = if inv, do: inv.state, else: "missing"
+
+    size =
+      if inv && inv[:vm_size],
+        do: %{"cpus" => inv.vm_size.cpus, "memory_mb" => inv.vm_size.memory_mb}
+
+    if lifecycle_active?(env.id) do
+      # Inventory changes are only sent once. Keep a boot size even if
+      # the operation result hasn't arrived yet.
+      if size && size != env.vm_size, do: update_env!(env, %{vm_size: size})
+    else
+      state = if env.observed_state == "error", do: "error", else: observed
+
+      if state != env.observed_state or size != env.vm_size do
+        update_env!(env, %{observed_state: state, vm_size: size})
+      end
 
       reconcile(env, observed)
     end
-
-    :ok
   end
 
   def orphans(box_id), do: :persistent_term.get({__MODULE__, :orphans, box_id}, [])

@@ -22,6 +22,7 @@ defmodule Foreman.Environments.Environment do
     field :observed_state, :string, default: "pending"
     field :last_vm_oom_at, :utc_datetime
     field :status_message, :string
+    field :vm_size, :map
     field :cpu_limit, :float
     field :memory_limit_mb, :integer
     field :memory_limit_gib, :float, virtual: true
@@ -120,6 +121,7 @@ defmodule Foreman.Environments.Environment do
     |> cast(attrs, [
       :desired_state,
       :observed_state,
+      :vm_size,
       :status_message,
       :applied_secret_hashes,
       :pending_restart,

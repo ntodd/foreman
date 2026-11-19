@@ -463,4 +463,18 @@ defmodule ForemanWeb.ForemanComponents do
   def action_label("agent.update"), do: "Update agent"
   def action_label("op.cancel"), do: "Cancel an operation"
   def action_label(other), do: other
+  attr :warning, :map, required: true
+
+  def start_warning(assigns) do
+    ~H"""
+    <.callout kind="warning" id="start-warning">
+      <p class="font-medium">Start {@warning.slug}?</p>
+      <p>{@warning.message}</p>
+      <:actions>
+        <.button size="sm" phx-click="confirm_start">Start anyway</.button>
+        <.button size="sm" variant="ghost" phx-click="dismiss_start">Cancel</.button>
+      </:actions>
+    </.callout>
+    """
+  end
 end

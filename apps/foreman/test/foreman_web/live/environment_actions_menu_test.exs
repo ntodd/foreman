@@ -102,6 +102,45 @@ defmodule ForemanWeb.EnvironmentActionsMenuTest do
     refute has_element?(view, "#env-actions [phx-value-do=restart_all]")
   end
 
+  for page <- [:index, :show] do
+    @page page
+    test "starting over capacity from the #{page} asks before queuing", %{
+      conn: conn,
+      box: box,
+      env: env
+    } do
+      box
+      |> Ecto.Changeset.change(
+        capacity_policy: "warn",
+        vm: %{
+          "default_cpus" => 2,
+          "default_memory_mb" => 2048,
+          "host_cpus" => 2,
+          "host_memory_mb" => 2048
+        },
+        capacity: %{"cpus" => 2, "memory_mb" => 2048}
+      )
+      |> Foreman.Repo.update!()
+
+      env
+      |> Ecto.Changeset.change(observed_state: "stopped", desired_state: "stopped")
+      |> Foreman.Repo.update!()
+
+      {path, start} =
+        if @page == :index,
+          do: {~p"/", "#env-#{env.id} button[phx-click=start]"},
+          else: {~p"/environments/#{env.id}", "button[phx-value-do=start]"}
+
+      {:ok, view, _} = live(conn, path)
+      view |> element(start) |> render_click()
+      assert has_element?(view, "#start-warning", "memory")
+      assert Foreman.Repo.reload!(env).desired_state == "stopped"
+      view |> element("#start-warning button", "Start anyway") |> render_click()
+      assert Foreman.Repo.reload!(env).desired_state == "running"
+      refute has_element?(view, "#start-warning")
+    end
+  end
+
   test "Stop is the only action left outside the menu", %{conn: conn, env: env} do
     {:ok, view, _html} = live(conn, ~p"/environments/#{env.id}")
 

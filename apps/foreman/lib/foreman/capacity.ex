@@ -3,11 +3,9 @@ defmodule Foreman.Capacity do
   Capacity reporting. Foreman never assumes a box has room: by default it
   reports contention and lets you decide.
 
-  An environment's *provisioned* size is the first of:
-
-  1. its limits (or its repo's default limits)
-  2. its repo's `hostRequirements`
-  3. its observed usage, averaged over about 15 minutes
+  A running or suspended VM reports its boot allocation. Cold boots resolve
+  CPU and RAM independently from environment limits, repo limits and the
+  box's defaults. Older agents use the legacy requirements/usage estimate.
 
   A box has a threshold for CPU and one for memory, as fractions of its
   capacity, and either can be past 1 to overcommit. A box is in
@@ -29,6 +27,37 @@ defmodule Foreman.Capacity do
 
   @doc "Provisioned CPUs and memory (MB) for an environment, and where the numbers came from."
   def provisioned(%Environment{} = env, repo) do
+    provisioned(env, repo, env.box)
+  end
+
+  defp provisioned(%{vm_size: %{"cpus" => cpus, "memory_mb" => mb}}, _repo, %Box{
+         vm: %{"default_cpus" => _}
+       }),
+       do: %{cpus: cpus, memory_mb: mb, source: :booted}
+
+  defp provisioned(env, repo, box), do: cold_size(env, repo, box)
+
+  defp cold_size(env, repo, %Box{
+         vm: %{
+           "default_cpus" => default_cpus,
+           "default_memory_mb" => default_memory,
+           "host_cpus" => host_cpus,
+           "host_memory_mb" => host_memory
+         }
+       }) do
+    limits = %{
+      cpus: env.cpu_limit || repo.cpu_limit,
+      memory_mb: env.memory_limit_mb || repo.memory_limit_mb
+    }
+
+    ForemanProtocol.VMSize.resolve(limits, %{cpus: default_cpus, memory_mb: default_memory}, %{
+      cpus: host_cpus,
+      memory_mb: host_memory
+    })
+    |> Map.put(:source, :configured)
+  end
+
+  defp cold_size(env, repo, _box) do
     reqs = env.host_requirements || repo.host_requirements
 
     from_limits(env, repo, reqs) || from_requirements(reqs) || from_observed(env.id) ||
@@ -87,13 +116,12 @@ defmodule Foreman.Capacity do
   """
   def box_summary(%Box{} = box, envs) do
     cap = box.capacity || %{}
-    cpus = cap["cpus"] || 0
-    mem = cap["memory_mb"] || 0
+    cpus = cap["cpus"] || (box.vm || %{})["host_cpus"] || 0
+    mem = cap["memory_mb"] || (box.vm || %{})["host_memory_mb"] || 0
 
-    running =
-      Enum.filter(envs, &(&1.observed_state in ["running", "partial", "starting", "creating"]))
+    running = Enum.filter(envs, &allocated?/1)
 
-    provisioned = Enum.map(running, &{&1, provisioned(&1, &1.repo)})
+    provisioned = Enum.map(running, &{&1, provisioned(&1, &1.repo, box)})
     latest = Tracker.latest(box.id)
 
     used_cpus =
@@ -124,6 +152,15 @@ defmodule Foreman.Capacity do
     }
   end
 
+  defp allocated?(%{observed_state: state})
+       when state in ~w(running partial starting creating pending), do: true
+
+  defp allocated?(%{desired_state: "running", observed_state: state})
+       when state in ~w(stopped suspended missing), do: true
+
+  defp allocated?(%{vm_size: size, observed_state: state}),
+    do: is_map(size) and state != "suspended"
+
   defp thresholds(%Box{} = box),
     do: %{cpus: box.cpu_threshold || 0.9, memory_mb: box.memory_threshold || 0.9}
 
@@ -144,12 +181,21 @@ defmodule Foreman.Capacity do
       memory_limit_mb: limits[:memory_limit_mb]
     }
 
-    placement(box, envs, repo, provisioned(env, repo))
+    placement(box, envs, repo, cold_size(env, repo, box))
+  end
+
+  def check_start(env, envs) do
+    placement(
+      env.box,
+      Enum.reject(envs, &(&1.id == env.id)),
+      env.repo,
+      provisioned(env, env.repo)
+    )
   end
 
   def check_resize(env, resized, envs) do
-    current = provisioned(env, env.repo)
-    want = provisioned(resized, env.repo)
+    current = cold_size(env, env.repo, env.box)
+    want = cold_size(resized, env.repo, env.box)
 
     if want.cpus > current.cpus or want.memory_mb > current.memory_mb do
       placement(env.box, Enum.reject(envs, &(&1.id == env.id)), env.repo, want)
@@ -161,16 +207,24 @@ defmodule Foreman.Capacity do
   defp placement(box, envs, repo, want) do
     summary = box_summary(box, envs)
 
-    message =
-      short_of_requirements(box, summary, repo) || over_threshold(box, summary, want)
+    requirement = short_of_requirements(box, summary, repo)
+    threshold = over_threshold(box, summary, want)
 
-    case {message, box.capacity_policy} do
-      {nil, _} -> :ok
-      {msg, "refuse"} -> {:refuse, msg}
-      {msg, "warn"} -> {:warn, msg}
-      {msg, _allow} -> {:contention, msg}
+    if want.source in [:configured, :booted] do
+      # Requirements describe the repo's preferred host. Only the VM's
+      # allocation can make a placement exceed the box's threshold.
+      if threshold,
+        do: apply_policy(threshold, box.capacity_policy),
+        else: apply_policy(requirement, "allow")
+    else
+      apply_policy(requirement || threshold, box.capacity_policy)
     end
   end
+
+  defp apply_policy(nil, _policy), do: :ok
+  defp apply_policy(message, "refuse"), do: {:refuse, message}
+  defp apply_policy(message, "warn"), do: {:warn, message}
+  defp apply_policy(message, _policy), do: {:contention, message}
 
   defp short_of_requirements(box, summary, repo) do
     cpus = req_cpus(repo.host_requirements)

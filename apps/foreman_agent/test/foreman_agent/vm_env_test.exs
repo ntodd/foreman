@@ -168,6 +168,16 @@ defmodule ForemanAgent.VMEnvTest do
 
   defp run(cmd, %{ctx: ctx}), do: VM.Env.run(cmd, ctx.log, ctx)
 
+  test "the join reports the same capped default allocation used at boot", ctx do
+    config = %{ctx.config | vm_cpus: 256, vm_memory_mb: 1536}
+    host = VM.box_size(config.proc)
+    expected = VM.size(%{}, config, host)
+    report = Status.report(config)
+    assert report.default_cpus == expected.cpus
+    assert report.default_memory_mb == 1536
+    assert report.host_memory_mb == host.memory_mb
+  end
+
   describe "env.create" do
     test "makes and boots the VM, writes its secrets, then runs the create in it", ctx do
       sha = ctx.sha
@@ -498,12 +508,19 @@ defmodule ForemanAgent.VMEnvTest do
     end
 
     test "saves the VM and stops it; the box reports it suspended", ctx do
-      assert {:ok, %{"suspended" => true}} = run(command("env.suspend"), ctx)
+      assert {:ok, %{"suspended" => true, "vm_size" => result_size}} =
+               run(command("env.suspend"), ctx)
+
       assert_received {:machine, :snapshot, @env}
       refute FakeMachine.running?(@env, ctx.config)
       assert VM.suspended?(ctx.config, @env)
       refute File.exists?(VM.paths(ctx.config, @env).snapshot <> ".tmp")
-      assert {:ok, [%{env_id: @env, state: "suspended"}]} = Status.inventory(ctx.config)
+
+      assert {:ok, [%{env_id: @env, state: "suspended", vm_size: saved}]} =
+               Status.inventory(ctx.config)
+
+      assert saved == VM.size(%{}, ctx.config, VM.box_size(ctx.config.proc))
+      assert result_size == %{"cpus" => saved.cpus, "memory_mb" => saved.memory_mb}
     end
 
     test "a start resumes it rather than booting, and drops the snapshot", ctx do
@@ -574,6 +591,8 @@ defmodule ForemanAgent.VMEnvTest do
       {:ok, _} = run(command("env.suspend"), ctx)
       {:ok, meta} = VM.read_meta(ctx.config, @env)
       VM.write_meta(ctx.config, @env, put_in(meta, ["booted", "agent"], "0.0.1"))
+      assert {:ok, [%{state: "suspended"} = entry]} = Status.inventory(ctx.config)
+      refute Map.has_key?(entry, :vm_size)
       flush()
 
       assert {:ok, result} = run(command("env.start"), ctx)

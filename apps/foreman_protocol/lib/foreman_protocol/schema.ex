@@ -228,6 +228,9 @@ defmodule ForemanProtocol.Schema do
     end
   end
 
+  defp cast_value(v, :positive_integer, _p) when is_integer(v) and v > 0, do: {:ok, v}
+  defp cast_value(_v, :positive_integer, p), do: err(p, "must be a positive integer")
+
   defp cast_value(v, :positive_number, _p) when is_number(v) and v > 0, do: {:ok, v}
   defp cast_value(_v, :positive_number, p), do: err(p, "must be a positive number")
 

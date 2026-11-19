@@ -45,28 +45,29 @@ defmodule ForemanAgent.VM.Status do
 
   defp entry(env_id, config, machine) do
     case VM.read_meta(config, env_id) do
-      {:ok, %{"slug" => slug}} ->
+      {:ok, %{"slug" => slug} = record} ->
         base = %{env_id: env_id, slug: slug, containers: []}
 
         case machine.inventory_state(env_id, config) do
           :running ->
-            guest_entry(env_id, slug, base, config)
+            with_size(guest_entry(env_id, slug, base, config), VM.boot_size(record))
 
           {:oom_kill, at} ->
             Map.merge(base, %{state: "stopped", oom_killed_at: at})
 
           :stopped ->
-            Map.put(
-              base,
-              :state,
-              if(VM.suspended?(config, env_id), do: "suspended", else: "stopped")
-            )
+            if VM.suspended?(config, env_id),
+              do: with_size(Map.put(base, :state, "suspended"), VM.resume_size(record, config)),
+              else: Map.put(base, :state, "stopped")
         end
 
       {:error, :none} ->
         nil
     end
   end
+
+  defp with_size(entry, nil), do: entry
+  defp with_size(entry, size), do: Map.put(entry, :vm_size, size)
 
   defp guest_entry(env_id, slug, base, config) do
     with {:ok, entries} <- Link.query(Links.get(env_id, config), "inventory", @query_timeout),
@@ -324,7 +325,18 @@ defmodule ForemanAgent.VM.Status do
           end
       end
 
-    %{ready: reason == nil, nested: nested?(), reflink: reflink?(config)}
+    host = VM.box_size(config.proc)
+    defaults = VM.size(%{}, config, host)
+
+    %{
+      ready: reason == nil,
+      nested: nested?(),
+      reflink: reflink?(config),
+      default_cpus: defaults.cpus,
+      default_memory_mb: defaults.memory_mb,
+      host_cpus: host.cpus,
+      host_memory_mb: host.memory_mb
+    }
     |> then(&if(reason, do: Map.put(&1, :reason, reason), else: &1))
   end
 

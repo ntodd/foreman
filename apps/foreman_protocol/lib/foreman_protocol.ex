@@ -22,7 +22,8 @@ defmodule ForemanProtocol do
   # env.suspend, and environments reported suspended; box.prebuild and
   # box.prebuild.delete, and env.create's `prebuild_id`.
   # 7: start and stop carry the assigned limits for legacy VM record migration.
-  @version 7
+  # 8: the join reports VM defaults and host caps, and inventory carries boot sizes.
+  @version 8
 
   # Usually the protocol before this one is accepted too. Protocol 5
   # agents run environments on the box's shared Docker, which protocol 6
@@ -63,6 +64,10 @@ defmodule ForemanProtocol do
         ready: {:boolean, required: true},
         reason: {:text, []},
         nested: {:boolean, default: false},
+        default_cpus: {:positive_integer, []},
+        default_memory_mb: {:positive_integer, []},
+        host_cpus: {:positive_integer, []},
+        host_memory_mb: {:positive_integer, []},
         reflink: {:boolean, default: false}}, []}
   ]
 

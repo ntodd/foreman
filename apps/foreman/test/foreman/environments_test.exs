@@ -173,6 +173,30 @@ defmodule Foreman.EnvironmentsTest do
                Environments.create_environment(scope, %{"repo_id" => bare.id, "box_id" => box.id})
     end
 
+    test "a pending creation reserves the default allocation before the first stats arrive", %{
+      scope: scope,
+      repo: repo,
+      box: box
+    } do
+      box
+      |> Ecto.Changeset.change(
+        capacity_policy: "refuse",
+        capacity: %{"cpus" => 8, "memory_mb" => 8192},
+        vm: %{
+          "default_cpus" => 2,
+          "default_memory_mb" => 4096,
+          "host_cpus" => 8,
+          "host_memory_mb" => 8192
+        }
+      )
+      |> Repo.update!()
+
+      attrs = %{"box_id" => box.id, "repo_id" => repo.id}
+      assert {:ok, _} = Environments.create_environment(scope, attrs)
+      assert {:error, reason} = Environments.create_environment(scope, attrs)
+      assert reason =~ "memory"
+    end
+
     test "applies the box's capacity policy", %{scope: scope} do
       big = repo_fixture(host_requirements: %{"cpus" => 32, "memory" => "8gb"})
       warn_box = box_fixture(owner_user_id: scope.user.id, capacity_policy: "warn")
