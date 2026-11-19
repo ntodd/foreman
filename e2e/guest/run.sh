@@ -149,7 +149,8 @@ done
 boot legacy
 check || fail "the guest could not run with a legacy data disk"
 power_off
-[ "$(owner /srv)" = 997:993 ] && [ "$(owner /srv/legacy)" = 997:993 ] || fail "legacy ownership changed"
+[ "$(owner /srv)" = 997:993 ] || fail "legacy workspace ownership changed"
+[ "$(owner /srv/legacy)" = 997:993 ] || fail "legacy file ownership changed"
 debugfs -R 'cat /etc/passwd' "$dir/run/root.raw" 2>/dev/null |
   grep -q '^foreman:[^:]*:997:993:' || fail "the guest agent lost access to legacy files"
 
