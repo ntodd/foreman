@@ -237,14 +237,10 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Test the rules
         run: |
-          trap 'docker rm -f "$RUN" >/dev/null 2>&1' EXIT
-          # The nested daemon pulls BusyBox using Crew's ECR mirror and its CA.
-          ecr_hosts=/etc/docker/certs.d/public.ecr.aws
-          crew_ca=/usr/local/share/ca-certificates/crew-cache.crt
-          docker run -d --privileged --name "$RUN" \
-            --mount "type=bind,src=$ecr_hosts,dst=$ecr_hosts,readonly" \
-            --mount "type=bind,src=$crew_ca,dst=$crew_ca,readonly" \
-            public.ecr.aws/docker/library/docker:29-dind >/dev/null
+          trap 'docker rm -f "$RUN" >/dev/null 2>&1; docker network rm "${RUN}_default" >/dev/null 2>&1 || true' EXIT
+          sh e2e/crew-cache.sh firewall > "$RUNNER_TEMP/firewall-cache.yml"
+          docker compose -p "$RUN" -f e2e/firewall/compose.yml -f "$RUNNER_TEMP/firewall-cache.yml" \
+            run --no-deps --name "$RUN" -d firewall >/dev/null
           docker cp e2e/firewall/test.sh "$RUN":/test.sh
           docker cp apps/foreman_agent/priv/firewall/foreman.nft "$RUN":/foreman.nft
           docker cp apps/foreman_agent/priv/vm/guest-forward "$RUN":/guest-forward
@@ -347,6 +343,7 @@ jobs:
     runs-on: crew-4x2
     timeout-minutes: 40
     env:
+      E2E_CREW_CACHE: "1"
       E2E_PROJECT: foreman-e2e-${{ github.run_id }}-${{ github.run_attempt }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -429,6 +426,7 @@ jobs:
     runs-on: crew-4x2
     timeout-minutes: 40
     env:
+      E2E_CREW_CACHE: "1"
       E2E_PROJECT: foreman-update-e2e-${{ github.run_id }}-${{ github.run_attempt }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
