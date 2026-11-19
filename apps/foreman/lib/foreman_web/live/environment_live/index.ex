@@ -29,6 +29,7 @@ defmodule ForemanWeb.EnvironmentLive.Index do
 
     {:ok,
      socket
+     |> assign(:start_warning, nil)
      |> assign(:page_title, "Environments")
      |> assign(:has_repos, Repos.list_repos(with_devcontainer: true) != [])
      |> assign(:filters, %{state: nil, box: nil})
@@ -137,6 +138,14 @@ defmodule ForemanWeb.EnvironmentLive.Index do
   def handle_event("start", %{"id" => id}, socket),
     do: act(socket, id, &Environments.start/2, "Starting")
 
+  def handle_event("confirm_start", _, %{assigns: %{start_warning: %{id: id}}} = socket),
+    do: act(socket, id, &Environments.start(&1, &2, true), "Starting")
+
+  def handle_event("confirm_start", _, socket), do: {:noreply, socket}
+
+  def handle_event("dismiss_start", _, socket),
+    do: {:noreply, assign(socket, :start_warning, nil)}
+
   def handle_event("stop", %{"id" => id}, socket),
     do: act(socket, id, &Environments.stop/2, "Stopping")
 
@@ -146,9 +155,17 @@ defmodule ForemanWeb.EnvironmentLive.Index do
   defp act(socket, id, fun, verb) do
     env = Environments.get_environment!(socket.assigns.current_scope, id)
 
+    socket = assign(socket, :start_warning, nil)
+
     case fun.(socket.assigns.current_scope, env) do
-      {:ok, _} -> {:noreply, socket |> put_flash(:info, "#{verb} #{env.slug}…") |> load()}
-      {:error, reason} -> {:noreply, put_flash(socket, :error, error_message(reason))}
+      {:confirm, message} ->
+        {:noreply, assign(socket, :start_warning, %{id: id, slug: env.slug, message: message})}
+
+      {:ok, _} ->
+        {:noreply, socket |> put_flash(:info, "#{verb} #{env.slug}…") |> load()}
+
+      {:error, reason} ->
+        {:noreply, put_flash(socket, :error, error_message(reason))}
     end
   end
 
@@ -289,6 +306,8 @@ defmodule ForemanWeb.EnvironmentLive.Index do
           New environment
         </.button>
       </:actions>
+
+      <.start_warning :if={@start_warning} warning={@start_warning} />
 
       <section :if={@boxes != []} id="box-strip" class="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
         <.link

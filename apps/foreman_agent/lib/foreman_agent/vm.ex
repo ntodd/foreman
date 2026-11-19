@@ -149,6 +149,23 @@ defmodule ForemanAgent.VM do
     end
   end
 
+  @doc "The CPU and memory recorded by the host at cold boot."
+  def boot_size(%{"booted" => %{"cpus" => cpus, "memory_mb" => mb}})
+      when is_integer(cpus) and cpus > 0 and is_integer(mb) and mb > 0,
+      do: %{cpus: cpus, memory_mb: mb}
+
+  def boot_size(_record), do: nil
+
+  def snapshot_compatible?(booted, config) do
+    booted["guest"] == config.guest_sha256 and booted["agent"] == ForemanAgent.Identity.version()
+  end
+
+  def resume_size(%{"booted" => booted} = record, config) do
+    if snapshot_compatible?(booted, config), do: boot_size(record)
+  end
+
+  def resume_size(_record, _config), do: nil
+
   @spec write_meta(Config.t(), String.t(), map()) :: :ok
   def write_meta(config, env_id, meta) do
     path = paths(config, env_id).meta
@@ -163,22 +180,11 @@ defmodule ForemanAgent.VM do
   @spec size(map(), Config.t(), %{cpus: pos_integer(), memory_mb: pos_integer()}) ::
           %{cpus: pos_integer(), memory_mb: pos_integer()}
   def size(limits, config, box) do
-    cpus =
-      case limits do
-        %{cpus: cpus} when is_number(cpus) and cpus > 0 -> ceil(cpus)
-        _ -> config.vm_cpus
-      end
-
-    memory =
-      case limits do
-        %{memory_mb: mb} when is_integer(mb) and mb > 0 -> mb
-        _ -> config.vm_memory_mb
-      end
-
-    %{
-      cpus: cpus |> min(box.cpus) |> max(1),
-      memory_mb: memory |> min(box.memory_mb) |> max(512)
-    }
+    ForemanProtocol.VMSize.resolve(
+      limits,
+      %{cpus: config.vm_cpus, memory_mb: config.vm_memory_mb},
+      box
+    )
   end
 
   @doc "This box's cores and memory, for capping a VM's size."

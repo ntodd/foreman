@@ -101,7 +101,7 @@ defmodule ForemanAgent.VM.Env do
             discard_snapshot(ctx.config, p.env_id, ctx.runner)
             File.rename!(tmp, paths.snapshot)
             sync_path!(paths.dir, ctx.runner)
-            {:ok, %{"suspended" => true}}
+            suspend_result(ctx.config, p.env_id)
 
           {:error, message} ->
             File.rm_rf(tmp)
@@ -110,7 +110,7 @@ defmodule ForemanAgent.VM.Env do
 
       VM.suspended?(ctx.config, p.env_id) ->
         sync_path!(paths.dir, ctx.runner)
-        {:ok, %{"suspended" => true}}
+        suspend_result(ctx.config, p.env_id)
 
       true ->
         {:error, "the environment isn't running"}
@@ -301,6 +301,17 @@ defmodule ForemanAgent.VM.Env do
     remove_discarded(paths, runner)
   end
 
+  defp suspend_result(config, env_id) do
+    result = %{"suspended" => true}
+
+    with {:ok, record} <- VM.read_meta(config, env_id),
+         %{cpus: cpus, memory_mb: mb} <- VM.resume_size(record, config) do
+      {:ok, Map.put(result, "vm_size", %{"cpus" => cpus, "memory_mb" => mb})}
+    else
+      _ -> {:ok, result}
+    end
+  end
+
   defp remove_discarded(paths, runner) do
     case Path.wildcard(paths.snapshot <> ".discard-*") do
       [] ->
@@ -387,7 +398,7 @@ defmodule ForemanAgent.VM.Env do
          :ok <- File.mkdir_p(paths.dir),
          :ok <- File.chmod(paths.dir, 0o700),
          :ok <- ensure_data_disk(paths, p, ctx, log, type, guest.digest),
-         p = keep_snapshot_compatible(p, guest, agent, ctx, log),
+         p = keep_snapshot_compatible(p, ctx, log),
          {:ok, meta} <- ensure_root_disk(p, paths, guest, ctx, log) do
       size = VM.size(Map.get(p, :limits, %{}), config, VM.box_size(config.proc))
 
@@ -417,13 +428,13 @@ defmodule ForemanAgent.VM.Env do
   # restores a snapshot only with the binary, guest image and agent disk it
   # was taken with, and memory the size it was. The box updated since, the
   # snapshot goes and the environment boots afresh.
-  defp keep_snapshot_compatible(p, guest, agent, ctx, log) do
+  defp keep_snapshot_compatible(p, ctx, log) do
     config = ctx.config
 
     with true <- VM.suspended?(config, p.env_id),
          false <- Machine.impl(config).running?(p.env_id, config),
          {:ok, %{"booted" => booted}} <- VM.read_meta(config, p.env_id) do
-      if booted["agent"] == agent.version and booted["guest"] == guest.digest do
+      if VM.snapshot_compatible?(booted, config) do
         case booted do
           %{"cpus" => cpus, "memory_mb" => mb} ->
             Map.put(p, :limits, %{cpus: cpus, memory_mb: mb})

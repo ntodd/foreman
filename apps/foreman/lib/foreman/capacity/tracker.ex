@@ -2,7 +2,7 @@ defmodule Foreman.Capacity.Tracker do
   @moduledoc """
   Keeps the last 15 minutes of each box's stats in memory, for live usage
   and for the rolling average Foreman uses as an environment's
-  provisioned size when it has no limits or hostRequirements.
+  provisioned size on older agents when it has no limits or hostRequirements.
   """
   use GenServer
 
