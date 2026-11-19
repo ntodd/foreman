@@ -38,8 +38,9 @@ defmodule Foreman.EnvironmentsSuspendTest do
     # Nothing starts it again but a start, and nothing stops it.
     assert env.desired_state == "suspended"
 
-    report(ctx.box, cmd, %{status: "ok"})
-    assert Repo.reload!(ctx.env).observed_state == "suspended"
+    saved = %{"cpus" => 3, "memory_mb" => 4096}
+    report(ctx.box, cmd, %{status: "ok", result: %{"suspended" => true, "vm_size" => saved}})
+    assert %{observed_state: "suspended", vm_size: ^saved} = Repo.reload!(ctx.env)
   end
 
   test "a failed suspend goes back to running, with the error shown", ctx do
@@ -51,6 +52,46 @@ defmodule Foreman.EnvironmentsSuspendTest do
     assert env.observed_state == "running"
     assert env.desired_state == "running"
     assert env.status_message == "suspend failed: no room for the snapshot"
+  end
+
+  test "resume checks the saved allocation after editing limits for the next cold boot", ctx do
+    ctx.box
+    |> Ecto.Changeset.change(
+      capacity_policy: "refuse",
+      capacity: %{"cpus" => 8, "memory_mb" => 8192},
+      vm: %{
+        "default_cpus" => 1,
+        "default_memory_mb" => 1024,
+        "host_cpus" => 8,
+        "host_memory_mb" => 8192
+      }
+    )
+    |> Repo.update!()
+
+    env =
+      ctx.env
+      |> Ecto.Changeset.change(
+        desired_state: "suspended",
+        observed_state: "suspended",
+        memory_limit_mb: 1024
+      )
+      |> Repo.update!()
+
+    entry = %{
+      env_id: env.id,
+      slug: env.slug,
+      state: "suspended",
+      containers: [],
+      vm_size: %{cpus: 2, memory_mb: 8192}
+    }
+
+    {:ok, event} = Event.new("box.inventory", %{environments: [entry]})
+    :ok = Agents.handle_event(ctx.box.id, event)
+
+    assert {:error, reason} = Environments.start(ctx.scope, env)
+    assert reason =~ "memory"
+    assert Repo.reload!(env).desired_state == "suspended"
+    refute_receive {:dispatch, _}, 50
   end
 
   # An inventory taken while the VM was still pausing can arrive after the

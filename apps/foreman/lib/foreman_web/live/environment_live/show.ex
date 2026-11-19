@@ -24,6 +24,7 @@ defmodule ForemanWeb.EnvironmentLive.Show do
     {:ok,
      socket
      |> assign(:env, env)
+     |> assign(:start_warning, nil)
      |> assign(:page_title, env.slug)
      |> assign(:selected_op, nil)
      |> assign(:log, "")
@@ -108,6 +109,7 @@ defmodule ForemanWeb.EnvironmentLive.Show do
 
   # -- events ------------------------------------------------------------------
 
+  defp run_action(:confirmed_start, scope, env), do: Environments.start(scope, env, true)
   defp run_action("start", scope, env), do: Environments.start(scope, env)
   defp run_action("retry", scope, env), do: Environments.retry(scope, env)
   defp run_action("stop", scope, env), do: Environments.stop(scope, env)
@@ -120,12 +122,29 @@ defmodule ForemanWeb.EnvironmentLive.Show do
   defp run_action(_, _scope, _env), do: {:error, "That isn't something an environment can do."}
 
   @impl true
+  def handle_event("dismiss_start", _, socket),
+    do: {:noreply, assign(socket, :start_warning, nil)}
+
+  def handle_event("confirm_start", _, %{assigns: %{start_warning: nil}} = socket),
+    do: {:noreply, socket}
+
+  def handle_event("confirm_start", _, socket),
+    do: handle_event("action", %{"do" => :confirmed_start}, socket)
+
   def handle_event("action", %{"do" => action}, socket) do
     %{current_scope: scope, env: env} = socket.assigns
 
+    socket = assign(socket, :start_warning, nil)
+
     case run_action(action, scope, env) do
-      {:ok, op} -> {:noreply, socket |> load() |> watch_op(op.id)}
-      {:error, reason} -> {:noreply, put_flash(socket, :error, error_message(reason))}
+      {:confirm, message} ->
+        {:noreply, assign(socket, :start_warning, %{slug: env.slug, message: message})}
+
+      {:ok, op} ->
+        {:noreply, socket |> load() |> watch_op(op.id)}
+
+      {:error, reason} ->
+        {:noreply, put_flash(socket, :error, error_message(reason))}
     end
   end
 
@@ -561,6 +580,8 @@ defmodule ForemanWeb.EnvironmentLive.Show do
           </.dropdown>
         </:actions>
       </.header>
+
+      <.start_warning :if={@start_warning} warning={@start_warning} />
 
       <%!-- Also after a failed stop or secrets write, which leave the state as it was. --%>
       <.callout
@@ -1073,6 +1094,8 @@ defmodule ForemanWeb.EnvironmentLive.Show do
     """
   end
 
+  defp provisioned_source(:booted), do: "Size at boot"
+  defp provisioned_source(:configured), do: "Cold boot size"
   defp provisioned_source(:limits), do: "Its limits"
   defp provisioned_source(:host_requirements), do: "hostRequirements"
   defp provisioned_source(:observed), do: "15-minute average"

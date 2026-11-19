@@ -34,6 +34,10 @@ defmodule ForemanProtocol.Event do
            env_id: {:uuid, required: true},
            slug: {:slug, required: true},
            state: {{:enum, @env_states}, required: true},
+           vm_size:
+             {{:object,
+               cpus: {:positive_integer, required: true},
+               memory_mb: {:positive_integer, required: true}}, []},
            containers:
              {{:list,
                {:object,

@@ -38,6 +38,45 @@ defmodule Foreman.CapacityTest do
                Capacity.provisioned(%Environment{id: Ecto.UUID.generate()}, bare)
     end
 
+    test "charges the box defaults for an unsampled VM and resolves each override at boot size" do
+      box = %{
+        box_fixture(capacity_policy: "refuse", capacity: %{"cpus" => 8, "memory_mb" => 8192})
+        | vm: %{
+            "default_cpus" => 3,
+            "default_memory_mb" => 6144,
+            "host_cpus" => 8,
+            "host_memory_mb" => 8192
+          }
+      }
+
+      repo = repo_fixture(host_requirements: %{"cpus" => 1, "memory" => "1gb"})
+
+      env = %Environment{
+        id: Ecto.UUID.generate(),
+        repo: repo,
+        box: box,
+        observed_state: "running"
+      }
+
+      assert %{cpus: 3, memory_mb: 6144} = Capacity.provisioned(env, repo)
+      assert %{cpus: 2, memory_mb: 6144} = Capacity.provisioned(%{env | cpu_limit: 1.5}, repo)
+
+      assert %{cpus: 8, memory_mb: 512} =
+               Capacity.provisioned(%{env | cpu_limit: 32, memory_limit_mb: 256}, repo)
+
+      assert %{cpus: 2, memory_mb: 8192} =
+               Capacity.provisioned(%{env | cpu_limit: 1.1}, %{repo | memory_limit_mb: 16_384})
+
+      assert {:refuse, _} = Capacity.check_placement(box, [env], repo)
+      assert {:refuse, _} = Capacity.check_resize(env, %{env | memory_limit_mb: 8192}, [env])
+
+      wants_more = %{repo | host_requirements: %{"cpus" => 16}}
+      assert {:contention, warning} = Capacity.check_placement(box, [], wants_more)
+      assert warning =~ "16 CPUs"
+      assert {:refuse, warning} = Capacity.check_placement(box, [env], wants_more)
+      assert warning =~ "memory"
+    end
+
     test "parses hostRequirements memory sizes" do
       assert Capacity.parse_size("8gb") == 8192
       assert Capacity.parse_size("512mb") == 512

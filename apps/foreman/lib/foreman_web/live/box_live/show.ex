@@ -268,7 +268,11 @@ defmodule ForemanWeb.BoxLive.Show do
         <div class="min-w-0 space-y-6">
           <.panel title="Capacity">
             <:subtitle>
-              Provisioned counts each running environment's limits, else its hostRequirements, else its 15-minute average.
+              <%= if @box.vm && @box.vm["default_cpus"] do %>
+                Provisioned counts running VMs at their boot size and queued starts at their expected size.
+              <% else %>
+                This agent reports no VM defaults. Foreman estimates allocation from limits, repo requirements or recent usage.
+              <% end %>
             </:subtitle>
             <div class="grid gap-4 sm:grid-cols-2">
               <.capacity_bar
@@ -504,6 +508,8 @@ defmodule ForemanWeb.BoxLive.Show do
     """
   end
 
+  defp source(:booted), do: "size at boot"
+  defp source(:configured), do: "cold boot size"
   defp source(:limits), do: "limits"
   defp source(:host_requirements), do: "hostRequirements"
   defp source(:observed), do: "observed average"
