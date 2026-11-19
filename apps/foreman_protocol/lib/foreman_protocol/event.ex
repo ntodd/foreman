@@ -83,6 +83,8 @@ defmodule ForemanProtocol.Event do
           {:list, {:object, port: {:port, required: true}, process: {:process, []}}}},
          required: true}
     ],
+    # VM unit exits that systemd attributed to the OOM killer, in Unix seconds.
+    "box.vm_oom" => [environments: {{:map_of, :uuid, :integer}, required: true}],
     # Host-wide usage, sampled every few seconds. `at` is the agent's
     # Unix time in seconds; cpu_percent is of the whole box (0-100).
     "box.metrics" => [

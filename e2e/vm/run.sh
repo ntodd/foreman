@@ -508,15 +508,45 @@ echo "create took ${cold}s from scratch, ${warm}s from the prebuild"
 [ "$warm" -lt "$cold" ] || fail "the create from the prebuild wasn't faster"
 echo "ok: hello-3 started from the prebuild, without cloning"
 
-say "destroy"
-cp_eval 'E2E.act("hello-1", "destroy")' >/dev/null
+say "release the other VMs before testing the memory reserve"
 cp_eval 'E2E.act("hello-2", "destroy")' >/dev/null
 cp_eval 'E2E.act("hello-3", "destroy")' >/dev/null
+wait_for_env hello-2 destroyed 180
+wait_for_env hello-3 destroyed 180
+
+say "the slice contains an OOM and the environment page records the cause"
+slice=/sys/fs/cgroup/foreman.slice
+limit=$(cat "$slice/memory.max")
+case "$limit" in ''|*[!0-9]*) fail "foreman.slice has no memory ceiling" ;; esac
+total=$(awk '/^MemTotal:/ {print $2}' /proc/meminfo)
+# Allow for page rounding when systemd converts the configured percentage.
+expected=$((total * 1024 * 90 / 100))
+[ "$limit" -ge $((expected - 1048576)) ] && [ "$limit" -le $((expected + 1048576)) ] ||
+  fail "unexpected default VM memory ceiling: $limit bytes"
+agent_pid=$(systemctl show foreman-agent -p MainPID --value)
+[ "$agent_pid" -gt 0 ] || fail "agent is offline before the pressure test"
+# Limit only the disposable VM slice. The agent and the control plane
+# stay outside it. Restore its normal limit as soon as the kernel acts.
+oom_count() { awk '$1 == "oom_kill" { print $2 }' "$slice/memory.events"; }
+before=$(oom_count)
+killed() { [ "$(oom_count)" -gt "$before" ]; }
+(
+  trap 'sudo systemctl set-property --runtime foreman.slice "MemoryMax=${limit}"' EXIT
+  sudo systemctl set-property --runtime foreman.slice MemoryMax=64M
+  wait_for "the VM slice recorded an OOM kill" 30 killed
+)
+oom_visible() {
+  curl -fsS -b "$cookie" "$url/environments/$first" | grep 'id="vm-oom"' >/dev/null
+}
+wait_for "the environment page shows the box-reported OOM" 90 oom_visible
+[ "$(systemctl show foreman-agent -p MainPID --value)" = "$agent_pid" ] ||
+  fail "the agent restarted under pressure"
+
+say "destroy"
+cp_eval 'E2E.act("hello-1", "destroy")' >/dev/null
 lv_click "/repos/$repo_id" delete_prebuild "{\"id\":\"$prebuild\"}" >/dev/null ||
   fail "couldn't delete the prebuild"
 wait_for_env hello-1 destroyed 180
-wait_for_env hello-2 destroyed 180
-wait_for_env hello-3 destroyed 180
 [ -z "$(ls -A /srv/foreman/vms 2>/dev/null)" ] || fail "VM disks left behind: $(ls /srv/foreman/vms)"
 wait_for "the prebuild's disk is deleted" 30 sh -c "[ -z \"\$(sudo ls -A /srv/foreman/prebuilds)\" ]"
 ip -br link | grep -q '^fm-vm' && fail "taps left behind"

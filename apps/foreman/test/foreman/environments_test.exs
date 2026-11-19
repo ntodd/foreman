@@ -617,6 +617,25 @@ defmodule Foreman.EnvironmentsTest do
       %{env: environment_fixture(user: user, repo: repo, box: box)}
     end
 
+    test "records the latest host OOM result across reconnects and only for the reporting box", %{
+      env: env,
+      box: box
+    } do
+      at = 1_798_800_000
+
+      for {from, time} <- [
+            {box.id, at},
+            {box.id, at},
+            {box.id, at - 60},
+            {Ecto.UUID.generate(), at + 60}
+          ] do
+        event = event!("box.vm_oom", %{environments: %{env.id => time}})
+        assert :ok = Agents.handle_event(from, event)
+      end
+
+      assert Repo.reload!(env).last_vm_oom_at == DateTime.from_unix!(at)
+    end
+
     test "starts a stopped environment that should be running (after a reboot)", %{
       env: env,
       box: box
