@@ -521,8 +521,9 @@ case "$limit" in ''|*[!0-9]*) fail "foreman.slice has no memory ceiling" ;; esac
 total=$(awk '/^MemTotal:/ {print $2}' /proc/meminfo)
 # Allow for page rounding when systemd converts the configured percentage.
 expected=$((total * 1024 * 90 / 100))
-[ "$limit" -ge $((expected - 1048576)) ] && [ "$limit" -le $((expected + 1048576)) ] ||
+if [ "$limit" -lt $((expected - 1048576)) ] || [ "$limit" -gt $((expected + 1048576)) ]; then
   fail "unexpected default VM memory ceiling: $limit bytes"
+fi
 agent_pid=$(systemctl show foreman-agent -p MainPID --value)
 [ "$agent_pid" -gt 0 ] || fail "agent is offline before the pressure test"
 # Limit only the disposable VM slice. The agent and the control plane
