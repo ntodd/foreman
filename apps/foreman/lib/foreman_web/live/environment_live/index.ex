@@ -246,6 +246,7 @@ defmodule ForemanWeb.EnvironmentLive.Index do
               :if={not env.created_once and env.observed_state == "error"}
               size="sm"
               icon="hero-arrow-path-mini"
+              data-confirm={"Retry #{env.slug}? #{fresh_clone_notice()}"}
               phx-click="retry"
               phx-value-id={env.id}
             >

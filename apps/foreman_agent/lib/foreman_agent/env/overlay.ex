@@ -18,6 +18,7 @@ defmodule ForemanAgent.Env.Overlay do
   @tailscale_volume "foreman-tailscale"
 
   @type params :: %{
+          optional(:recovery_dir) => Path.t() | nil,
           env_id: String.t(),
           slug: String.t(),
           services: [String.t()],
@@ -89,14 +90,11 @@ defmodule ForemanAgent.Env.Overlay do
       "    environment:\n",
       Enum.map(env, fn {k, v} -> ["      ", q(k), ": ", q(v), "\n"] end),
       "    volumes:\n",
-      "      - type: bind\n",
-      "        source: ",
-      q(params.secrets_dir),
-      "\n",
-      "        target: \"/run/foreman\"\n",
-      "        read_only: true\n",
-      "        bind:\n",
-      "          create_host_path: false\n",
+      readonly_mount(params.secrets_dir, "/run/foreman"),
+      if(params[:recovery_dir],
+        do: readonly_mount(params.recovery_dir, recovery_mount()),
+        else: []
+      ),
       if(tailscale?,
         do: [
           "      - type: volume\n",
@@ -108,6 +106,23 @@ defmodule ForemanAgent.Env.Overlay do
         else: []
       ),
       limits(params.limits)
+    ]
+  end
+
+  def recovery_mount, do: "/mnt/foreman-recovery"
+
+  defp readonly_mount(source, target) do
+    [
+      "      - type: bind\n",
+      "        source: ",
+      q(source),
+      "\n",
+      "        target: ",
+      q(target),
+      "\n",
+      "        read_only: true\n",
+      "        bind:\n",
+      "          create_host_path: false\n"
     ]
   end
 

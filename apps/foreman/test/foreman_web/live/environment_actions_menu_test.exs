@@ -23,6 +23,21 @@ defmodule ForemanWeb.EnvironmentActionsMenuTest do
     assert has_element?(view, "#env-actions [role=menuitem]", "origin/feature/x")
   end
 
+  test "warns about a fresh clone on every recovery action after a failed create", %{
+    conn: conn,
+    user: user,
+    box: box
+  } do
+    env = environment_fixture(user: user, box: box, observed_state: "error", created_once: false)
+    {:ok, view, _html} = live(conn, ~p"/environments/#{env.id}")
+
+    for action <- ~w(retry rebuild pull_rebuild) do
+      assert has_element?(view, "[phx-value-do=#{action}][data-confirm*='fresh clone']")
+    end
+
+    refute has_element?(view, "#env-actions", "Keeps the clone as it is")
+  end
+
   test "pull and rebuild", %{conn: conn, env: env} do
     {:ok, view, _html} = live(conn, ~p"/environments/#{env.id}")
     view |> element("#env-actions [role=menuitem]", "Pull and rebuild") |> render_click()

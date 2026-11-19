@@ -5,6 +5,10 @@ defmodule ForemanWeb.ForemanComponents do
 
   import ForemanWeb.CoreComponents
 
+  def fresh_clone_notice do
+    "Setup will use a fresh clone. Updated agents save the previous workspace under /mnt/foreman-recovery. On older agents, copy your changes before continuing."
+  end
+
   @doc "An environment's observed state as a badge, pulsing while work is in flight."
   attr :state, :string, required: true
   attr :size, :string, default: "md"

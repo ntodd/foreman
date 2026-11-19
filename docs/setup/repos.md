@@ -116,6 +116,15 @@ unused anonymous volumes) and removes guest images and agent disks no VM uses an
 more. Stopped environments aren't pruned. Nothing runs it on a
 schedule.
 
+### Recovering work after a failed first build
+
+Retry and Rebuild use a fresh clone so they can pick up a fix pushed to the
+branch. If the failed build left a workspace, the agent saves the entire
+checkout, including its Git history. The operation log gives the path under
+`/mnt/foreman-recovery/` inside the devcontainer. Each attempt has its own
+read-only directory. Copy the files you need back into the active checkout.
+These directories live on the environment disk until the environment is destroyed.
+
 ## Prebuilds
 
 A prebuild saves the cold start. An admin builds one from the repo's
