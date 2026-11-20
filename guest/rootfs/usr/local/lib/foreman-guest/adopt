@@ -2,8 +2,9 @@
 # PID 1 only in an offline provisioning VM. vda is the pristine read-only
 # guest image and vdb a private prebuild copy. No normal services run.
 set -eu
-# Power off even on an error. Only the success line permits publication.
-trap 'echo o > /proc/sysrq-trigger' EXIT
+# Replace PID 1 with the program that makes the power-off syscall.
+# Two --force flags bypass the service manager, which never runs here.
+trap 'exec systemctl --force --force poweroff' EXIT
 echo "foreman-adopt: starting"
 mountpoint -q /proc || mount -t proc proc /proc
 [ -b /dev/vdb ] || mount -t devtmpfs devtmpfs /dev

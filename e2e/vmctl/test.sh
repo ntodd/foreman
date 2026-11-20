@@ -185,6 +185,7 @@ check "nothing refused started a VM" test ! -e "$work/last-run"
 # -- start -----------------------------------------------------------------
 expect "starts a VM on the first address" "start $env1 2 2048 $guest 1.2.3" "ok started fm-vm0 10.250.0.2"
 run=$(cat "$work/last-run")
+if grep -q ' fm.zram=' "$work/last-run"; then fail "zram should be opt-in"; fi
 has() { if printf '%s\n' "$run" | grep -qxF -- "$2"; then pass "$1"; else fail "$1: no '$2' in: $run"; fi; }
 has "in a unit of its own" "--unit=foreman-vm-$env1"
 has "as the agent's user" "--uid=foreman"
@@ -222,7 +223,10 @@ expect "says when a VM has no tap" "tap $env2" "error the environment has no add
 expect "refuses a tap request without an id" "tap not-an-id" "error tap takes ENV_ID"
 expect "a VM that's running isn't started twice" "start $env1 2 2048 $guest 1.2.3" "ok running"
 printf 'nameserver 100.100.100.100\n' > "$work/resolv.conf"
+export FOREMAN_VM_ZRAM=1
 expect "a second VM gets the next address" "start $env2 1 1024 $guest 1.2.3" "ok started fm-vm1 10.250.0.6"
+unset FOREMAN_VM_ZRAM
+grep -q ' fm.zram=1$' "$work/last-run" || fail "the opt-in did not reach the guest command line"
 check "a box with only MagicDNS gives its guests 1.1.1.1" grep -q "fm.dns=1.1.1.1 " "$work/last-run"
 
 # -- release and restore -----------------------------------------------------

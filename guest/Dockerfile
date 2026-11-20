@@ -16,12 +16,12 @@ FROM ${UBUNTU_IMAGE} AS rootfs
 ARG DEBIAN_FRONTEND=noninteractive
 # systemd and udev to boot; Docker, Compose and buildx for the
 # environment; git for the clone; socat joins vsock to the guest agent;
-# e2fsprogs supplies ext4 tools. The kernel is the virtual flavour,
-# booted directly without an initrd.
+# e2fsprogs supplies ext4 tools. Noble's HWE virtual kernel boots
+# directly without an initrd and ships zram in its base modules.
 RUN apt-get update \
   && apt-get install -y --no-install-recommends \
     systemd-sysv udev kmod dbus iproute2 iptables ca-certificates curl git socat e2fsprogs \
-    util-linux docker.io docker-compose-v2 docker-buildx linux-image-virtual \
+    util-linux docker.io docker-compose-v2 docker-buildx linux-image-virtual-hwe-24.04 \
   && rm -rf /var/lib/apt/lists/* /var/cache/apt/*
 # The devcontainer CLI maps the remote user to this account. UID 1000
 # is the usual developer UID. Ubuntu's unused image user occupies it.
@@ -33,7 +33,7 @@ RUN userdel --remove ubuntu \
 RUN ! getent passwd 997 >/dev/null && ! getent group 993 >/dev/null
 COPY rootfs/ /
 RUN systemctl enable foreman-guest-net foreman-guest-disks foreman-guest-agent foreman-guest-vsock \
-    foreman-guest-reclaim.socket docker fstrim.timer \
+    foreman-guest-reclaim.socket foreman-guest-zram.service docker fstrim.timer \
   && systemctl mask getty.target console-getty.service serial-getty@ttyS0.service systemd-resolved.service \
     systemd-timesyncd.service systemd-networkd.service systemd-networkd.socket systemd-networkd-wait-online.service \
     systemd-firstboot.service e2scrub_all.timer apt-daily.timer apt-daily-upgrade.timer motd-news.timer \
@@ -43,6 +43,7 @@ RUN systemctl enable foreman-guest-net foreman-guest-disks foreman-guest-agent f
   && mkdir -p /out \
   && cp "$(ls /boot/vmlinuz-* | sort -V | tail -n 1)" /out/vmlinuz \
   && basename "$(ls -d /lib/modules/* | sort -V | tail -n 1)" > /out/kernel \
+  && modprobe --set-version "$(cat /out/kernel)" --show-depends zram > /dev/null \
   && rm -f /boot/initrd.img* /boot/vmlinuz* /boot/System.map* \
   && docker --version > /out/docker && docker compose version --short > /out/compose
 

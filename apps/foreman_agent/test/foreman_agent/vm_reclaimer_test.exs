@@ -362,7 +362,7 @@ defmodule ForemanAgent.VMReclaimerTest do
                    Reclaimer.run_round(plan, 2048, reclaim)
         end)
 
-      assert log =~ "couldn't reclaim a's page cache: the environment's VM didn't answer"
+      assert log =~ "couldn't reclaim memory from a: the environment's VM didn't answer"
     end
 
     test "a guest whose writes failed counts for nothing, and is warned about" do
@@ -377,7 +377,7 @@ defmodule ForemanAgent.VMReclaimerTest do
       log = capture_log(fn -> assert [_, _] = Reclaimer.run_round(plan, 2048, reclaim) end)
 
       assert log =~
-               "couldn't reclaim a's page cache: the guest's writes failed " <>
+               "couldn't reclaim memory from a: the guest's writes failed " <>
                  "(reclaim failed, compact failed, drain failed)"
     end
 
@@ -396,7 +396,9 @@ defmodule ForemanAgent.VMReclaimerTest do
           assert [{%{id: "a"}, {:ok, _}, _}] = Reclaimer.run_round(plan, 2048, reclaim)
         end)
 
-      assert log =~ "reclaimed a's page cache: 10240 to 2048 MiB, 8192 MiB freed in the guest"
+      assert log =~
+               "reclaimed memory from a: file cache 10240 to 2048 MiB, 8192 MiB freed in the guest"
+
       assert log =~ "drain failed in 3 ms"
       assert log =~ "the guest couldn't drain its per-CPU free lists"
     end
@@ -416,7 +418,7 @@ defmodule ForemanAgent.VMReclaimerTest do
           Logger.delete_module_level(Reclaimer)
         end
 
-      assert log =~ "[info] reclaimed a's page cache"
+      assert log =~ "[info] reclaimed memory from a"
       assert log =~ "(reclaim ok in 900 ms, compact ok in 400 ms, drain ok in 30 ms)"
     end
 

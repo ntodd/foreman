@@ -241,7 +241,7 @@ defmodule ForemanAgent.VM.Reclaimer do
 
   defp log(id, {:ok, %{reclaim: "failed"} = r}) do
     Logger.warning(
-      "couldn't reclaim #{id}'s page cache: the guest's writes failed " <>
+      "couldn't reclaim memory from #{id}: the guest's writes failed " <>
         "(reclaim failed, compact #{r.compact}, drain #{r.drain})"
     )
   end
@@ -254,7 +254,7 @@ defmodule ForemanAgent.VM.Reclaimer do
   # come back to the box.
   defp log(id, {:ok, r}) do
     message =
-      "reclaimed #{id}'s page cache: #{r.file_before_mb} to #{r.file_after_mb} MiB, " <>
+      "reclaimed memory from #{id}: file cache #{r.file_before_mb} to #{r.file_after_mb} MiB, " <>
         "#{max(r.free_after_mb - r.free_before_mb, 0)} MiB freed in the guest " <>
         "(reclaim #{r.reclaim} in #{r.reclaim_ms} ms, compact #{r.compact} in #{r.compact_ms} ms, " <>
         "drain #{r.drain} in #{r.drain_ms} ms)"
@@ -277,10 +277,10 @@ defmodule ForemanAgent.VM.Reclaimer do
       )
 
   defp log(id, {:error, reason}) when is_binary(reason),
-    do: Logger.warning("couldn't reclaim #{id}'s page cache: #{reason}")
+    do: Logger.warning("couldn't reclaim memory from #{id}: #{reason}")
 
   defp log(id, {:error, reason}),
-    do: Logger.warning("couldn't reclaim #{id}'s page cache: #{inspect(reason)}")
+    do: Logger.warning("couldn't reclaim memory from #{id}: #{inspect(reason)}")
 
   @doc """
   Takes outcomes in at `now`. A VM that reclaimed settles, and nothing

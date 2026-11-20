@@ -24,7 +24,9 @@ defmodule ForemanAgent.Guest.Reclaim do
   The files need root, and the agent has no capabilities for them, so a
   root helper in the guest image does the writes: `foreman-guest-reclaim`,
   socket-activated on `/run/foreman-reclaim.sock` (root and the agent's
-  group), one request line (the bytes to reclaim) and one answer line. A
+  group), one request line and one answer line. On an opted-in guest a second
+  byte count asks the helper to swap anonymous pages into LZ4 zram before
+  it compacts. Older images receive the original single file byte count. A
   VM whose root disk was made from an older image has no helper, and says
   so (`unsupported/0`).
 
@@ -41,6 +43,8 @@ defmodule ForemanAgent.Guest.Reclaim do
   # Less than this past what to keep isn't worth a compaction.
   @min_request 64 * 1_048_576
   @max_keep_mb 1_048_576
+  @max_anon 2560 * 1_048_576
+  @zram_marker "/run/foreman-guest-zram"
 
   @unsupported "this VM's system image can't reclaim memory"
 
@@ -83,17 +87,31 @@ defmodule ForemanAgent.Guest.Reclaim do
     proc = Keyword.get(opts, :proc, "/proc")
 
     with {:ok, before} <- memory(proc) do
-      request = before.file - keep_mb * 1_048_576
+      file = worthwhile(before.file - keep_mb * 1_048_576)
+      anon = anon_request(before, Keyword.get(opts, :zram_marker, @zram_marker))
 
-      if request < @min_request do
+      if file + anon == 0 do
         skipped = %{reclaim: "skipped", compact: "skipped", drain: "skipped", ms: {0, 0, 0}}
         {:ok, result(before, before, 0, skipped)}
       else
-        with {:ok, done} <- ask(request, opts),
+        with {:ok, done} <- ask(file, anon, opts),
              {:ok, later} <- memory(proc) do
-          {:ok, result(before, later, request, done)}
+          {:ok, result(before, later, file + anon, done)}
         end
       end
+    end
+  end
+
+  defp worthwhile(bytes) when bytes >= @min_request, do: bytes
+  defp worthwhile(_), do: 0
+
+  # Keep at least a third of the resident anonymous pages out of each
+  # request. The 32 GiB benchmark swapped about 2.5 GiB of 3.7 GiB.
+  defp anon_request(memory, marker) do
+    if memory.swap_free > 0 and File.exists?(marker) do
+      min(div(memory.anon * 2, 3), min(memory.swap_free, @max_anon)) |> worthwhile()
+    else
+      0
     end
   end
 
@@ -121,17 +139,16 @@ defmodule ForemanAgent.Guest.Reclaim do
   defp memory(proc) do
     case File.read(Path.join(proc, "meminfo")) do
       {:ok, text} ->
-        kb = fn key ->
-          case Regex.run(~r/^#{Regex.escape(key)}:\s+(\d+) kB$/m, text) do
-            [_, n] -> String.to_integer(n) * 1024
-            nil -> nil
-          end
-        end
-
-        case {kb.("Active(file)"), kb.("Inactive(file)"), kb.("MemFree")} do
+        case {bytes(text, "Active(file)"), bytes(text, "Inactive(file)"), bytes(text, "MemFree")} do
           {active, inactive, free}
           when is_integer(active) and is_integer(inactive) and is_integer(free) ->
-            {:ok, %{file: active + inactive, free: free}}
+            {:ok,
+             %{
+               file: active + inactive,
+               free: free,
+               anon: bytes(text, "Active(anon)", 0) + bytes(text, "Inactive(anon)", 0),
+               swap_free: bytes(text, "SwapFree", 0)
+             }}
 
           _ ->
             {:error, "couldn't read the guest's memory: meminfo is missing a field"}
@@ -142,9 +159,17 @@ defmodule ForemanAgent.Guest.Reclaim do
     end
   end
 
+  defp bytes(text, key, default \\ nil) do
+    case Regex.run(~r/^#{Regex.escape(key)}:\s+(\d+) kB$/m, text) do
+      [_, n] -> String.to_integer(n) * 1024
+      nil -> default
+    end
+  end
+
   # The helper reads to the end of the request, so the write side closes
   # once it's sent.
-  defp ask(request, opts) do
+  defp ask(file, anon, opts) do
+    request = if anon == 0, do: Integer.to_string(file), else: "#{file} #{anon}"
     path = Keyword.get(opts, :helper, @helper)
     timeout = Keyword.get(opts, :timeout, @timeout)
     socket_opts = [:binary, active: false, packet: :line, buffer: 1024]
