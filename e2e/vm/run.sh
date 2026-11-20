@@ -137,6 +137,16 @@ fi
 # shellcheck source=/dev/null
 . "$work/release-keys.env"
 
+# The control plane image builds while the agent does: neither needs the
+# other, and each takes about a minute.
+cp_build=""
+if [ -z "${E2E_CP_IMAGE:-}" ]; then
+  say "build the control plane image, while the agent builds"
+  E2E_CP_IMAGE=foreman-e2e-vm-cp
+  docker build -q -f docker/control-plane.Dockerfile -t "$E2E_CP_IMAGE" . >/dev/null &
+  cp_build=$!
+fi
+
 if [ -n "${E2E_AGENT_TARBALL:-}" ]; then
   cp "$E2E_AGENT_TARBALL" "$tarball"
 else
@@ -153,10 +163,9 @@ else
   (cd apps/foreman_agent && FOREMAN_RELEASE_PRIVATE_KEY=$FOREMAN_RELEASE_PRIVATE_KEY $mix foreman_agent.sign "$version" "$target" "$tarball" | tail -1) > "$tarball.sig"
 fi
 
-if [ -z "${E2E_CP_IMAGE:-}" ]; then
-  say "build the control plane image"
-  E2E_CP_IMAGE=foreman-e2e-vm-cp
-  docker build -q -f docker/control-plane.Dockerfile -t "$E2E_CP_IMAGE" . >/dev/null
+if [ -n "$cp_build" ]; then
+  wait "$cp_build" || { echo "FAILED: the control plane image didn't build" >&2; exit 1; }
+  echo "ok: the control plane image is built"
 fi
 
 # What an earlier run on this machine left: its agent (which would start

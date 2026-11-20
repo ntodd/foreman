@@ -1,9 +1,9 @@
 name: Release
 
-# Pushing a tag like v0.3.0 checks that CI passed on it, then builds the
-# agent for each target and signs it, builds the control plane images with
-# those agents inside and pushes them to GHCR, and attaches the agents to
-# a GitHub release:
+# Pushing a tag like v0.3.0 builds the guest image and the agent for each
+# target while it checks that CI passed on the commit. Once it has, it
+# signs the agents, builds the control plane images with them inside and
+# pushes them to GHCR, and attaches the agents to a GitHub release:
 #
 #   ghcr.io/<owner>/foreman:0.3.0      and :latest      (SQLite)
 #   ghcr.io/<owner>/foreman:0.3.0-pg   and :latest-pg   (Postgres)
@@ -32,13 +32,9 @@ env:
 jobs:
   check:
     runs-on: ubuntu-24.04
-    timeout-minutes: 90
-    permissions:
-      contents: read
-      actions: read
+    timeout-minutes: 5
     outputs:
       version: ${{ steps.check.outputs.version }}
-      ci: ${{ steps.ci.outputs.ci }}
     steps:
       - name: Check the tag and keys
         id: check
@@ -51,9 +47,20 @@ jobs:
           [ -n "$PUBLIC_KEY" ] || { echo "::error::Set the FOREMAN_RELEASE_PUBLIC_KEY variable"; exit 1; }
           [ "$HAS_PRIVATE_KEY" = true ] || { echo "::error::Set the FOREMAN_RELEASE_PRIVATE_KEY secret"; exit 1; }
           echo "version=$version" >> "$GITHUB_OUTPUT"
-      # A tag usually goes on a commit just merged to main, and that push
-      # runs CI. Wait for that run and take its result instead of running
-      # every job again. Without one that passes, CI runs here (below).
+
+  # A tag usually goes on a commit just merged to main, and that push runs
+  # CI. Wait for that run and take its result instead of running every job
+  # again. Without one that passes, CI runs here (below).
+  wait:
+    needs: check
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      ci: ${{ steps.ci.outputs.ci }}
+    steps:
       - name: Find CI on this commit
         id: ci
         shell: bash
@@ -73,11 +80,11 @@ jobs:
             echo "ci=run" >> "$GITHUB_OUTPUT"
           fi
 
-  # CI doesn't run on tags by itself, and nothing gets published from a
-  # commit that fails it.
+  # CI doesn't run on tags by itself, and nothing is signed or published
+  # from a commit that fails it (see sign).
   ci:
-    needs: check
-    if: needs.check.outputs.ci == 'run'
+    needs: wait
+    if: needs.wait.outputs.ci == 'run'
     uses: ./.github/workflows/ci.yml
     permissions:
       contents: read
@@ -87,13 +94,12 @@ jobs:
   # The amd64 agent is built with its URL on this release and its SHA-256,
   # and downloads and checks it itself.
   #
-  # This and every job after it run when nothing before them failed: ci is
-  # skipped when the commit passed CI on main, and a skipped job would
-  # otherwise skip everything after it.
+  # This and the agent build don't wait for CI: they publish nothing, and
+  # they're done by the time it passes.
   guest:
-    needs: [check, ci]
-    if: ${{ !cancelled() && !failure() }}
+    needs: check
     runs-on: ubuntu-24.04
+    timeout-minutes: 30
     outputs:
       sha256: ${{ steps.build.outputs.sha256 }}
     steps:
@@ -113,8 +119,7 @@ jobs:
           if-no-files-found: error
 
   agent:
-    needs: [check, ci, guest]
-    if: ${{ !cancelled() && !failure() }}
+    needs: [check, guest]
     strategy:
       matrix:
         include:
@@ -123,6 +128,7 @@ jobs:
           - arch: arm64
             runner: ubuntu-24.04-arm
     runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Build the agent
@@ -156,10 +162,17 @@ jobs:
           path: out/*.tar.gz
           if-no-files-found: error
 
+  # The release key is first used here, so this is where the builds wait
+  # for CI: on main (wait), or run here (ci).
+  #
+  # This and every job after it run when nothing before them failed: ci is
+  # skipped when the commit passed CI on main, and a skipped job would
+  # otherwise skip everything after it.
   sign:
-    needs: [check, agent]
+    needs: [check, wait, ci, agent]
     if: ${{ !cancelled() && !failure() }}
     runs-on: ubuntu-24.04
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
@@ -211,6 +224,7 @@ jobs:
           - arch: arm64
             runner: ubuntu-24.04-arm
     runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
@@ -241,6 +255,7 @@ jobs:
     needs: [check, image]
     if: ${{ !cancelled() && !failure() }}
     runs-on: ubuntu-24.04
+    timeout-minutes: 10
     permissions:
       contents: read
       packages: write
@@ -270,6 +285,7 @@ jobs:
     needs: [check, manifest]
     if: ${{ !cancelled() && !failure() }}
     runs-on: ubuntu-24.04
+    timeout-minutes: 10
     permissions:
       contents: write
     steps:
