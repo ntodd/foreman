@@ -121,6 +121,46 @@ defmodule ForemanAgent.GuestReclaimTest do
     refute_received {:helper_request, _}
   end
 
+  test "an opted-in guest can reclaim anonymous pages with little file cache", ctx do
+    meminfo(ctx, 1_000_000, 200_000, 200_000)
+    path = Path.join(ctx.proc, "meminfo")
+
+    File.write!(path, "Active(anon): 3145728 kB\nInactive(anon): 0 kB\nSwapFree: 1048576 kB\n", [
+      :append
+    ])
+
+    marker = Path.join(ctx.dir, "zram")
+    File.touch!(marker)
+    start_helper(ctx, "ok reclaim=ok compact=ok drain=ok reclaim_ms=1 compact_ms=1 drain_ms=1\n")
+
+    assert {:ok, %{"requested_mb" => 1024}} = run(ctx, %{"keep_mb" => 2048}, zram_marker: marker)
+    assert_received {:helper_request, "0 1073741824\n"}
+
+    File.rm!(marker)
+    assert {:ok, %{"reclaim" => "skipped"}} = run(ctx, %{"keep_mb" => 2048}, zram_marker: marker)
+    refute_received {:helper_request, _}
+  end
+
+  test "caps anonymous reclaim at two thirds of resident pages and at 2.5 GiB", ctx do
+    marker = Path.join(ctx.dir, "zram")
+    File.touch!(marker)
+    start_helper(ctx, "ok reclaim=ok compact=ok drain=ok reclaim_ms=1 compact_ms=1 drain_ms=1\n")
+
+    for {anon_kb, expected} <- [{786_432, 536_870_912}, {8_388_608, 2_684_354_560}] do
+      meminfo(ctx, 1_000_000, 131_072, 131_072)
+
+      File.write!(
+        Path.join(ctx.proc, "meminfo"),
+        "Inactive(anon): #{anon_kb} kB\nSwapFree: 8388608 kB\n",
+        [:append]
+      )
+
+      assert {:ok, _} = run(ctx, %{"keep_mb" => 0}, zram_marker: marker)
+      request = "268435456 #{expected}\n"
+      assert_received {:helper_request, ^request}
+    end
+  end
+
   test "a VM whose system image has no helper says it can't", ctx do
     meminfo(ctx, 1_000_000, 3_000_000, 6_000_000)
     assert {:error, message} = run(ctx, %{"keep_mb" => 0})

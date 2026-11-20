@@ -1,0 +1,21 @@
+#!/bin/sh
+# Opted-in guests have one swap device, entirely in RAM. The marker
+# tells the guest agent that this image supports anonymous reclaim.
+set -eu
+modprobe zram
+case $(awk 'NR > 1 {print $1}' /proc/swaps) in
+  /dev/zram0) [ -e /run/foreman-guest-zram ] || { echo "zram0 already in use" >&2; exit 1; } ;;
+  "")
+  # Reserve half the guest's RAM as logical swap, up to the 16 GiB
+  # tested on 32 GiB guests. Physical pages are allocated on demand.
+  size=$(awk '/^MemTotal:/ { n=$2*512; printf "%.0f", (n < 17179869184 ? n : 17179869184) }' /proc/meminfo)
+  zramctl --algorithm lz4 --size "$size" /dev/zram0
+  trap 'zramctl --reset /dev/zram0' EXIT
+  mkswap /dev/zram0
+  swapon /dev/zram0
+  trap - EXIT
+  touch /run/foreman-guest-zram
+  ;;
+  *) echo "another swap device is active" >&2; exit 1 ;;
+esac
+sysctl -qw vm.swappiness=180

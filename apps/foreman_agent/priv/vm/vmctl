@@ -279,6 +279,8 @@ cmd_start() { # env_id cpus memory_mb guest_sha256 agent_version
   queues=$cpus
   [ "$queues" -gt 4 ] && queues=4
   dns=$(resolvers)
+  zram=""
+  [ "${FOREMAN_VM_ZRAM:-0}" = 1 ] && zram=" fm.zram=1"
   # What the guests' firewall lets through under --block-lan: kept for its
   # loader, and added now for a VM that starts before the next load.
   printf '%s\n' "$dns" > "$STATE/guest-dns"
@@ -287,7 +289,7 @@ cmd_start() { # env_id cpus memory_mb guest_sha256 agent_version
   # /dev/net/tun and reads the tap's flags from sysfs). It adds the disks
   # and the kernel itself.
   set -- --kernel "$guest/vmlinuz" \
-    --cmdline "console=ttyS0 root=/dev/vda rw quiet net.ifnames=0 fm.mac=$mac fm.ip=$guest_ip/30 fm.gw=$host_ip fm.dns=$dns fm.env=$id" \
+    --cmdline "console=ttyS0 root=/dev/vda rw quiet net.ifnames=0 fm.mac=$mac fm.ip=$guest_ip/30 fm.gw=$host_ip fm.dns=$dns fm.env=$id$zram" \
     --disk "path=$vm/root.raw,image_type=raw,direct=on,num_queues=$queues,serial=fm-root" \
     --disk "path=$vm/data.raw,image_type=raw,direct=on,num_queues=$queues,serial=fm-data" \
     --disk "path=$agent_disk,image_type=raw,readonly=on,serial=fm-agent" \

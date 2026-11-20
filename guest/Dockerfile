@@ -33,7 +33,7 @@ RUN userdel --remove ubuntu \
 RUN ! getent passwd 997 >/dev/null && ! getent group 993 >/dev/null
 COPY rootfs/ /
 RUN systemctl enable foreman-guest-net foreman-guest-disks foreman-guest-agent foreman-guest-vsock \
-    foreman-guest-reclaim.socket docker fstrim.timer \
+    foreman-guest-reclaim.socket foreman-guest-zram.service docker fstrim.timer \
   && systemctl mask getty.target console-getty.service serial-getty@ttyS0.service systemd-resolved.service \
     systemd-timesyncd.service systemd-networkd.service systemd-networkd.socket systemd-networkd-wait-online.service \
     systemd-firstboot.service e2scrub_all.timer apt-daily.timer apt-daily-upgrade.timer motd-news.timer \

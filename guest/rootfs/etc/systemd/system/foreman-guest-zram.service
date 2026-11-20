@@ -1,0 +1,13 @@
+[Unit]
+Description=Set up compressed swap in guest RAM
+ConditionKernelCommandLine=fm.zram=1
+After=systemd-sysctl.service
+Before=docker.service foreman-guest-agent.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/lib/foreman-guest/zram
+
+[Install]
+WantedBy=multi-user.target

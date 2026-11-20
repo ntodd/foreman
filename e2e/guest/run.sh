@@ -67,7 +67,9 @@ grep -aq "^foreman-adopted $env_id" "$dir/run/adopt.log" ||
 boot() {
   rm -f "$dir/run/api.sock" "$dir/run/vsock.sock"
   serial="$dir/run/serial-$1.log"
-  "$ch" --kernel "$dir/guest/vmlinuz" --cmdline "console=ttyS0 root=/dev/vda rw net.ifnames=0 fm.env=$env_id" \
+  zram=""
+  [ "$1" = 2 ] && zram=" fm.zram=1"
+  "$ch" --kernel "$dir/guest/vmlinuz" --cmdline "console=ttyS0 root=/dev/vda rw net.ifnames=0 fm.env=$env_id$zram" \
     --disk "path=$dir/run/root.raw,image_type=raw,direct=on,num_queues=2,serial=fm-root" \
     --disk "path=$dir/run/data.raw,image_type=raw,direct=on,num_queues=2,serial=fm-data" \
     --disk "path=$dir/run/agent.img,image_type=raw,readonly=on,serial=fm-agent" \
@@ -116,6 +118,10 @@ if version != ForemanAgent.Identity.version(), do: fail.("guest agent #{inspect(
 # the per-CPU free lists (which also checks it put the fraction back).
 case Link.reclaim(link, 0) do
   {:ok, %{reclaim: r, compact: "ok", drain: "ok"} = done} when r in ["ok", "partial"] ->
+    if "$zram" != "" and done.requested_mb < done.file_before_mb + 63,
+      do: fail.("zram did not add an anonymous reclaim: #{inspect(done)}")
+    if "$zram" == "" and done.requested_mb != done.file_before_mb,
+      do: fail.("unexpected anonymous reclaim: #{inspect(done)}")
     IO.puts("e2e/guest: reclaimed #{done.file_before_mb - done.file_after_mb} MiB of page cache " <>
       "(#{r}, #{done.reclaim_ms} ms), compacted (#{done.compact_ms} ms), drained (#{done.drain_ms} ms)")
   other -> fail.("reclaim: #{inspect(other)}")
