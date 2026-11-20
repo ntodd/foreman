@@ -1,0 +1,28 @@
+name: Use the Crew runner's Docker cache
+description: Require cached registry resolution for this job and its nested Docker hosts
+inputs:
+  postgres:
+    description: Start PostgreSQL with this initial database
+    default: ""
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      run: |
+        sudo python3 "$GITHUB_ACTION_PATH/configure.py"
+        echo E2E_CREW_CACHE=1 >> "$GITHUB_ENV"
+    # Service containers are pulled before checkout and before the job can
+    # require cache-only resolution. Start Postgres after that change.
+    - if: inputs.postgres != ''
+      shell: bash
+      env:
+        POSTGRES_DB: ${{ inputs.postgres }}
+      run: |
+        id=$(docker run -d -e POSTGRES_DB -e POSTGRES_PASSWORD=postgres public.ecr.aws/docker/library/postgres:18)
+        echo "POSTGRES=$id" >> "$GITHUB_ENV"
+        for _ in {1..60}; do
+          docker exec "$id" pg_isready -h 127.0.0.1 -U postgres && exit 0
+          sleep 1
+        done
+        docker logs "$id"
+        exit 1

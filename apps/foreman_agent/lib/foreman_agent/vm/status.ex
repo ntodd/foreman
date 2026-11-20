@@ -48,15 +48,17 @@ defmodule ForemanAgent.VM.Status do
       {:ok, %{"slug" => slug} = record} ->
         base = %{env_id: env_id, slug: slug, containers: []}
 
-        cond do
-          machine.running?(env_id, config) ->
+        case machine.inventory_state(env_id, config) do
+          :running ->
             with_size(guest_entry(env_id, slug, base, config), VM.boot_size(record))
 
-          VM.suspended?(config, env_id) ->
-            with_size(Map.put(base, :state, "suspended"), VM.resume_size(record, config))
+          {:oom_kill, at} ->
+            Map.merge(base, %{state: "stopped", oom_killed_at: at})
 
-          true ->
-            Map.put(base, :state, "stopped")
+          :stopped ->
+            if VM.suspended?(config, env_id),
+              do: with_size(Map.put(base, :state, "suspended"), VM.resume_size(record, config)),
+              else: Map.put(base, :state, "stopped")
         end
 
       {:error, :none} ->

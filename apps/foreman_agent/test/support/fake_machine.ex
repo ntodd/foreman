@@ -188,6 +188,15 @@ defmodule ForemanAgent.Test.FakeMachine do
   end
 
   @impl true
+  def inventory_state(env_id, config) do
+    cond do
+      running?(env_id, config) -> :running
+      at = opts()[:oom_killed_at] -> {:oom_kill, at}
+      true -> :stopped
+    end
+  end
+
+  @impl true
   def kill(env_id, _config) do
     ensure_table()
 

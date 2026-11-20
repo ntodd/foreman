@@ -5,6 +5,8 @@ defmodule ForemanAgent.ReporterTest do
 
   alias ForemanAgent.{DockerMock, Reporter, RunnerMock}
 
+  alias ForemanAgent.VM.Machine.Cloud
+
   setup :set_mox_global
 
   setup do
@@ -23,6 +25,36 @@ defmodule ForemanAgent.ReporterTest do
 
   defp restore(key, nil), do: Application.delete_env(:foreman_agent, key)
   defp restore(key, value), do: Application.put_env(:foreman_agent, key, value)
+
+  test "only a systemd OOM result supplies an exit time" do
+    id = "6f1c1d1e-9a3b-4c1f-8f5e-2d7a9b0c1e2f"
+
+    args = [
+      "show",
+      "--property=ActiveState,Result,ExecMainExitTimestamp",
+      "foreman-vm-#{id}.service"
+    ]
+
+    for {result, expected} <- [
+          {"oom-kill", {:oom_kill, 1_735_689_600}},
+          {"signal", :stopped},
+          {"success", :stopped}
+        ] do
+      expect(RunnerMock, :run, fn "systemctl", ^args, opts ->
+        assert opts[:env]["TZ"] == "UTC"
+
+        {:ok,
+         %{
+           status: 0,
+           output: "ExecMainExitTimestamp=Wed 2025-01-01 00:00:00 UTC\nResult=#{result}\n"
+         }}
+      end)
+
+      assert Cloud.inventory_state(id, nil) == expected
+    end
+
+    verify!()
+  end
 
   test "keeps running when collecting metrics, stats or inventory raises" do
     stub(RunnerMock, :run, fn _cmd, _args, _opts -> :erlang.error(:eagain) end)
