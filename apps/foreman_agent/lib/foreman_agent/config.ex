@@ -15,9 +15,8 @@ defmodule ForemanAgent.Config do
             data_dir: "/var/lib/foreman-agent",
             envs_root: "/srv/foreman/envs",
             secrets_root: "/run/foreman/envs",
-            # load/0 resolves these with tools/2.
+            # load/0 resolves the bundled CLI.
             devcontainer: "devcontainer",
-            node: "node",
             docker: "docker",
             git: "git",
             docker_socket: "/var/run/docker.sock",
@@ -92,7 +91,7 @@ defmodule ForemanAgent.Config do
     |> Map.put(:guest_sha256, present(env[:guest_sha256_override]) || present(@guest_sha256))
     |> Map.update!(:feature_dir, &(&1 || default_feature_dir()))
     |> Map.update!(:firewall_rules, &(&1 || default_firewall_rules()))
-    |> Map.merge(tools(default_tools_dir(), Map.new([:devcontainer, :node], &{&1, env[&1]})))
+    |> Map.put(:devcontainer, devcontainer_cli(default_tools_dir(), env[:devcontainer]))
   end
 
   @doc "The loaded config. Loaded on first use and cached."
@@ -117,26 +116,18 @@ defmodule ForemanAgent.Config do
   @legacy_cli "/opt/foreman-agent/node/node_modules/.bin/devcontainer"
 
   @doc """
-  The devcontainer CLI and Node the agent runs. A release carries both in
-  `dir` (priv/tools: `bin/devcontainer` and `node/bin/node`), so a box
-  needs no Node of its own. An override (`FOREMAN_DEVCONTAINER_CLI`,
-  `FOREMAN_NODE`) wins, except the path older install scripts wrote,
-  which gives way to the release's. Without them, both come from PATH.
+  Resolves the devcontainer CLI from its override, the release, or PATH.
+  The release's CLI takes precedence over the legacy installer path.
   """
-  @spec tools(Path.t() | nil, %{optional(:devcontainer | :node) => String.t() | nil}) ::
-          %{devcontainer: String.t(), node: String.t()}
-  def tools(dir, overrides) do
+  @spec devcontainer_cli(Path.t() | nil, String.t() | nil) :: String.t()
+  def devcontainer_cli(dir, configured) do
     bundled_cli = bundled(dir, "bin/devcontainer")
 
-    cli =
-      case override(overrides[:devcontainer]) do
-        @legacy_cli when is_binary(bundled_cli) -> bundled_cli
-        nil -> bundled_cli || "devcontainer"
-        path -> path
-      end
-
-    node = override(overrides[:node]) || bundled(dir, "node/bin/node") || "node"
-    %{devcontainer: cli, node: node}
+    case override(configured) do
+      @legacy_cli when is_binary(bundled_cli) -> bundled_cli
+      nil -> bundled_cli || "devcontainer"
+      path -> path
+    end
   end
 
   defp override(path) when is_binary(path) and path != "", do: path

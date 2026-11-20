@@ -1,4 +1,5 @@
 **/_build
+apps/foreman_agent/priv/vm/vm-file
 **/deps
 **/tmp
 **/node_modules

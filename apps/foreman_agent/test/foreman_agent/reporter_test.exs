@@ -26,6 +26,19 @@ defmodule ForemanAgent.ReporterTest do
   defp restore(key, nil), do: Application.delete_env(:foreman_agent, key)
   defp restore(key, value), do: Application.put_env(:foreman_agent, key, value)
 
+  test "box polling checks multiple units in one call and keeps their states in order" do
+    ids = Enum.map(1..4, fn _ -> ForemanProtocol.uuid() end)
+    args = ["is-active" | Enum.map(ids, &Cloud.unit/1)]
+
+    expect(RunnerMock, :run, fn "systemctl", ^args, _ ->
+      {:ok, %{status: 0, output: "inactive\nactive\nfailed\nreloading\n"}}
+    end)
+
+    assert Cloud.running(ids, nil) == [Enum.at(ids, 1), Enum.at(ids, 3)]
+    assert Cloud.running([], nil) == []
+    verify!()
+  end
+
   test "only a systemd OOM result supplies an exit time" do
     id = "6f1c1d1e-9a3b-4c1f-8f5e-2d7a9b0c1e2f"
 

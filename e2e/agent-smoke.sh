@@ -62,8 +62,13 @@ for image in $images; do
     tar -xzf /agent.tar.gz -C /opt/agent
     /opt/agent/bin/foreman_agent eval "$1"
     ! command -v node >/dev/null || { echo "this image has a Node of its own" >&2; exit 1; }
+    echo record > /tmp/vm-record
+    for helper in /opt/agent/lib/foreman_agent-*/priv/vm/vm-file; do
+      [ "$("$helper" read-record /tmp/vm-record)" = record ]
+    done
     for cli in /opt/agent/lib/foreman_agent-*/priv/tools/bin/devcontainer; do
-      echo "ok: devcontainer CLI $("$cli" --version)"
+      version=$("$cli" --version)
+      echo "ok: devcontainer CLI $version"
     done
   ' sh "$check")
   docker cp "$tarball" "$id:/agent.tar.gz"

@@ -36,6 +36,7 @@ WORKDIR /src/apps/foreman_agent
 RUN mix deps.get --only prod
 COPY apps/foreman_agent/config config
 RUN mix deps.compile
+COPY apps/foreman_agent/c_src c_src
 COPY apps/foreman_agent/lib lib
 COPY apps/foreman_agent/priv priv
 COPY apps/foreman_agent/rel rel

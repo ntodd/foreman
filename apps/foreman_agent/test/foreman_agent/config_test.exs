@@ -3,45 +3,38 @@ defmodule ForemanAgent.ConfigTest do
 
   alias ForemanAgent.Config
 
-  describe "tools/2" do
+  describe "devcontainer_cli/2" do
     @describetag :tmp_dir
 
     setup %{tmp_dir: tmp} do
       release = Path.join(tmp, "priv/tools")
       cli = Path.join(release, "bin/devcontainer")
-      node = Path.join(release, "node/bin/node")
-
-      for path <- [cli, node] do
-        File.mkdir_p!(Path.dirname(path))
-        File.write!(path, "#!/bin/sh\n")
-        File.chmod!(path, 0o755)
-      end
-
-      %{release: release, cli: cli, node: node}
+      File.mkdir_p!(Path.dirname(cli))
+      File.write!(cli, "#!/bin/sh\n")
+      File.chmod!(cli, 0o755)
+      %{release: release, cli: cli}
     end
 
-    test "a release runs the devcontainer CLI and Node it carries", c do
-      assert Config.tools(c.release, %{}) == %{devcontainer: c.cli, node: c.node}
+    test "a release runs the devcontainer CLI it carries", c do
+      assert Config.devcontainer_cli(c.release, nil) == c.cli
     end
 
-    test "outside a release, both come from PATH" do
-      assert Config.tools(nil, %{}) == %{devcontainer: "devcontainer", node: "node"}
+    test "outside a release the CLI comes from PATH" do
+      assert Config.devcontainer_cli(nil, nil) == "devcontainer"
     end
 
     test "a release without tools falls back to PATH rather than a path that isn't there",
          %{tmp_dir: tmp} do
-      assert Config.tools(Path.join(tmp, "elsewhere"), %{}) ==
-               %{devcontainer: "devcontainer", node: "node"}
+      assert Config.devcontainer_cli(Path.join(tmp, "elsewhere"), nil) == "devcontainer"
     end
 
     test "an override wins over what the release carries", c do
-      assert Config.tools(c.release, %{devcontainer: "/opt/cli/devcontainer", node: "/opt/node"}) ==
-               %{devcontainer: "/opt/cli/devcontainer", node: "/opt/node"}
+      assert Config.devcontainer_cli(c.release, "/opt/cli/devcontainer") ==
+               "/opt/cli/devcontainer"
     end
 
     test "an empty override counts as none", c do
-      assert Config.tools(c.release, %{devcontainer: "", node: ""}) ==
-               %{devcontainer: c.cli, node: c.node}
+      assert Config.devcontainer_cli(c.release, "") == c.cli
     end
 
     # Install scripts before the bundled CLI installed one with npm and
@@ -49,8 +42,8 @@ defmodule ForemanAgent.ConfigTest do
     test "the CLI old install scripts set up gives way to the release's", c do
       legacy = "/opt/foreman-agent/node/node_modules/.bin/devcontainer"
 
-      assert Config.tools(c.release, %{devcontainer: legacy}).devcontainer == c.cli
-      assert Config.tools(nil, %{devcontainer: legacy}).devcontainer == legacy
+      assert Config.devcontainer_cli(c.release, legacy) == c.cli
+      assert Config.devcontainer_cli(nil, legacy) == legacy
     end
   end
 end

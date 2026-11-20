@@ -41,7 +41,10 @@ defmodule ForemanWeb.BoxLive.Show do
 
     socket
     |> assign(:series, series)
-    |> assign(:env_series, Metrics.env_series(box.id, range))
+    |> assign(
+      :env_series,
+      Metrics.visible_env_series(socket.assigns.current_scope, box.id, range, series.until)
+    )
     |> assign(:fetched_at, series.until)
   end
 
@@ -71,17 +74,23 @@ defmodule ForemanWeb.BoxLive.Show do
 
   defp load(socket, box) do
     envs = Environments.live_for_box(box.id)
+    scope = socket.assigns.current_scope
+    admin? = Scope.admin?(scope)
+    visible = if admin?, do: envs, else: Enum.filter(envs, &(&1.user_id == scope.user.id))
 
     socket
     |> assign(:box, box)
     |> assign(:online, Boxes.online?(box.id))
-    |> assign(:envs, envs)
+    |> assign(:envs, visible)
     |> assign(:summary, Capacity.box_summary(box, envs))
     |> assign(
       :ops,
-      Operations.list_for_box(box.id, 10) |> Enum.filter(&is_nil(&1.environment_id))
+      if(admin?,
+        do: Operations.list_for_box(box.id, 10) |> Enum.filter(&is_nil(&1.environment_id)),
+        else: []
+      )
     )
-    |> assign(:orphans, Environments.orphans(box.id))
+    |> assign(:orphans, if(admin?, do: Environments.orphans(box.id), else: []))
     |> sync_form(box)
     |> assign(:target_version, Releases.target_version(box))
     |> assign(:fleet_version, box.arch && Releases.fleet_version(box.arch))

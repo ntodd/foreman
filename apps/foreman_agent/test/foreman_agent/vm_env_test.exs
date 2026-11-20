@@ -80,8 +80,9 @@ defmodule ForemanAgent.VMEnvTest do
         {output, status} = System.cmd("cp", args, stderr_to_stdout: true)
         {:ok, %{status: status, output: output}}
 
-      "node", [script, path, limit], _opts ->
-        {output, status} = System.cmd("node", [script, path, limit], stderr_to_stdout: true)
+      helper, ["trim-log", path, limit], _opts ->
+        assert helper == VM.file_helper()
+        {output, status} = System.cmd(helper, ["trim-log", path, limit], stderr_to_stdout: true)
         {:ok, %{status: status, output: output}}
 
       "sync", ["-f", _path], _opts ->
@@ -337,6 +338,35 @@ defmodule ForemanAgent.VMEnvTest do
     assert {:error, message} = Status.gc(ctx.ctx)
     assert message =~ "didn't finish it in time"
     refute File.exists?(stale)
+  end
+
+  test "only a host record can mark a VM as a prebuild", ctx do
+    paths = VM.paths(ctx.config, @env)
+    File.mkdir_p!(paths.dir)
+    File.write!(paths.legacy_meta, JSON.encode!(%{"slug" => "legacy", "kind" => "prebuild"}))
+
+    assert VM.list(ctx.config) == [@env]
+  end
+
+  test "the VM file helper requires a single-link regular file and bounds record reads", ctx do
+    path = Path.join(ctx.dir, "record")
+    helper = VM.file_helper()
+    File.write!(path, :binary.copy("x", 65_536))
+    assert {contents, 0} = System.cmd(helper, ["read-record", path])
+    assert byte_size(contents) == 65_536
+    File.write!(path, "x", [:append])
+    assert {"", 1} = System.cmd(helper, ["read-record", path])
+
+    File.write!(path, "original")
+    File.ln_s!(path, path <> ".symlink")
+    File.ln!(path, path <> ".hardlink")
+
+    for name <- [path <> ".symlink", path <> ".hardlink"] do
+      assert {"", 1} = System.cmd(helper, ["read-record", name])
+      assert {"", 1} = System.cmd(helper, ["trim-log", name, "1"])
+    end
+
+    assert File.read!(path) == "original"
   end
 
   test "a legacy VM gets its allocation from the start command", ctx do

@@ -112,6 +112,9 @@ defmodule ForemanAgent.Test.FakeMachine do
     :ets.lookup(@table, {:vm, env_id}) != []
   end
 
+  @impl true
+  def running(env_ids, config), do: Enum.filter(env_ids, &running?(&1, config))
+
   # Like Cloud Hypervisor's: the guest's state (here, its processes) is
   # kept, and the VM stops. A restore picks the same guest back up.
   @impl true

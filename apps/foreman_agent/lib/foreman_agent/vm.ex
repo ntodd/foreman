@@ -85,22 +85,27 @@ defmodule ForemanAgent.VM do
   """
   @spec list(Config.t(), :environments | :all) :: [String.t()]
   def list(config, which \\ :environments) do
-    all =
-      case File.ls(config.vm_root) do
-        {:ok, names} ->
-          Enum.filter(names, fn id ->
-            p = paths(config, id)
-            id =~ @uuid and (File.regular?(p.meta) or File.regular?(p.legacy_meta))
-          end)
-
-        {:error, _} ->
-          []
-      end
-
-    if which == :all, do: all, else: Enum.reject(all, &prebuild?(config, &1))
+    case File.ls(config.vm_root) do
+      {:ok, names} -> Enum.filter(names, &(&1 =~ @uuid and listed?(paths(config, &1), which)))
+      {:error, _} -> []
+    end
   end
 
-  defp prebuild?(config, id), do: match?({:ok, %{"kind" => "prebuild"}}, read_meta(config, id))
+  defp listed?(paths, which) do
+    case File.lstat(paths.meta) do
+      {:ok, %{type: :regular}} ->
+        which == :all or
+          not match?({:ok, %{"kind" => "prebuild"}}, decode_record(File.read(paths.meta)))
+
+      {:error, :enoent} ->
+        # Only a host-owned record can mark a prebuild. Listing an old VM
+        # doesn't need to start the protected reader to inspect its contents.
+        match?({:ok, %{type: :regular}}, File.lstat(paths.legacy_meta))
+
+      _ ->
+        false
+    end
+  end
 
   @doc "What the agent recorded about an environment's VM."
   @spec read_meta(Config.t(), String.t()) :: {:ok, map()} | {:error, :none}
@@ -109,7 +114,7 @@ defmodule ForemanAgent.VM do
 
     case File.lstat(paths.meta) do
       {:ok, %{type: :regular}} -> decode_record(File.read(paths.meta))
-      {:error, :enoent} -> legacy_record(config, paths.legacy_meta)
+      {:error, :enoent} -> legacy_record(paths.legacy_meta)
       _ -> {:error, :none}
     end
   end
@@ -125,12 +130,10 @@ defmodule ForemanAgent.VM do
 
   # Keep inventory and image references during upgrades. Neither resource
   # limits nor authority to delete an abandoned prebuild come from this file.
-  defp legacy_record(config, path) do
-    script = Application.app_dir(:foreman_agent, "priv/vm/read-legacy-record.cjs")
-
+  defp legacy_record(path) do
     with {:ok, %{type: :regular}} <- File.lstat(path),
          {:ok, %{status: 0, output: json}} <-
-           Local.run(config.node, [script, path], timeout: 5_000),
+           Local.run(file_helper(), ["read-record", path], timeout: 5_000),
          {:ok, record} <- decode_record({:ok, json}) do
       record =
         Map.reject(record, fn {key, value} ->
@@ -148,6 +151,9 @@ defmodule ForemanAgent.VM do
       _ -> {:error, :none}
     end
   end
+
+  @doc false
+  def file_helper, do: Application.app_dir(:foreman_agent, "priv/vm/vm-file")
 
   @doc "The CPU and memory recorded by the host at cold boot."
   def boot_size(%{"booted" => %{"cpus" => cpus, "memory_mb" => mb}})

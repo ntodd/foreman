@@ -63,6 +63,12 @@ defmodule ForemanAgent.PortsTest do
       assert [%{inode: 4}] = Ports.parse(text)
     end
 
+    test "a short row cannot borrow the next row's inode" do
+      short = "  0: 0100007F:0FA1 00000000:0000 0A"
+      valid = line("0100007F:0FA0", "0A", 42) |> String.replace(" ", "\t")
+      assert [%{port: 4000, inode: 42}] = Ports.parse(short <> "\n" <> valid)
+    end
+
     test "ignores lines it can't read, and empty input" do
       assert Ports.parse("") == []
       assert Ports.parse(@header) == []

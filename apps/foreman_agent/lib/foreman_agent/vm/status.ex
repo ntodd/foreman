@@ -27,7 +27,7 @@ defmodule ForemanAgent.VM.Status do
 
     envs =
       config
-      |> VM.list()
+      |> VM.list(:all)
       |> Task.async_stream(&entry(&1, config, machine),
         max_concurrency: 8,
         timeout: @query_timeout * 3,
@@ -45,6 +45,9 @@ defmodule ForemanAgent.VM.Status do
 
   defp entry(env_id, config, machine) do
     case VM.read_meta(config, env_id) do
+      {:ok, %{"kind" => "prebuild"}} ->
+        nil
+
       {:ok, %{"slug" => slug} = record} ->
         base = %{env_id: env_id, slug: slug, containers: []}
 
@@ -88,7 +91,7 @@ defmodule ForemanAgent.VM.Status do
 
     config
     |> VM.list()
-    |> Enum.filter(&machine.running?(&1, config))
+    |> machine.running(config)
     |> Task.async_stream(&{&1, Link.query(Links.get(&1, config), "ports", @query_timeout)},
       max_concurrency: 8,
       timeout: @query_timeout * 3,
@@ -119,7 +122,7 @@ defmodule ForemanAgent.VM.Status do
     machine = Machine.impl(config)
     box = VM.box_size(config.proc)
     {disk_mb, free_mb} = Stats.disk(ctx)
-    running = config |> VM.list() |> Enum.filter(&machine.running?(&1, config))
+    running = machine.running(VM.list(config), config)
     trim_consoles(ctx, running)
 
     before = machine.usage(running, config)
@@ -170,7 +173,7 @@ defmodule ForemanAgent.VM.Status do
 
     failures =
       envs
-      |> Enum.filter(&machine.running?(&1, config))
+      |> machine.running(config)
       |> Task.async_stream(
         fn env_id ->
           {:ok, cmd} = Command.new("box.gc", %{})
@@ -283,7 +286,6 @@ defmodule ForemanAgent.VM.Status do
 
   defp trim_consoles(ctx, env_ids) do
     config = ctx.config
-    script = Application.app_dir(:foreman_agent, "priv/vm/trim-log.cjs")
 
     for env_id <- env_ids,
         path <- [
@@ -291,7 +293,9 @@ defmodule ForemanAgent.VM.Status do
           Path.join(VM.paths(config, env_id).dir, "ch.log")
         ],
         match?({:ok, %{type: :regular, size: size}} when size > @console_max, File.lstat(path)) do
-      ctx.runner.run(config.node, [script, path, Integer.to_string(@console_max)], timeout: 5_000)
+      ctx.runner.run(VM.file_helper(), ["trim-log", path, Integer.to_string(@console_max)],
+        timeout: 5_000
+      )
     end
 
     :ok
