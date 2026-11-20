@@ -85,6 +85,22 @@ defmodule Foreman.PrebuildsTest do
       assert Repo.reload!(prebuild).repos == [ctx.repo.name]
     end
 
+    test "its token and record take in the extra repos set on the repo's owner", ctx do
+      online(ctx.box)
+      ctx.repo.owner |> Ecto.Changeset.change(extra_repos: ["shared-config"]) |> Repo.update!()
+      repo = Repo.get!(Foreman.Repos.Repo, ctx.repo.id)
+      name = repo.name
+
+      expect(ClientMock, :repo_read_token, fn _, _, [^name, "shared-config"] ->
+        {:ok, "ghs_readonly"}
+      end)
+
+      assert {:ok, prebuild} = Prebuilds.build(ctx.scope, repo, ctx.box)
+      assert_receive {:dispatch, %Command{type: "box.prebuild"}}
+      # Whoever starts from it has to read the owner's extra repos too.
+      assert Repo.reload!(prebuild).repos == [name, "shared-config"]
+    end
+
     test "without a token from GitHub, it builds anyway (a public repo still clones)", ctx do
       online(ctx.box)
       expect(ClientMock, :repo_read_token, fn _, _, _ -> {:error, :boom} end)

@@ -1,7 +1,8 @@
 defmodule Foreman.Repos.Owner do
   @moduledoc """
   A GitHub account (org or user) whose repos Foreman knows about, with the
-  GitHub App installation and the registry credential for private images.
+  GitHub App installation, the registry credential for private images and
+  the extra repos every one of its repos' scoped tokens reach.
   """
   use Foreman.Schema
 
@@ -18,6 +19,7 @@ defmodule Foreman.Repos.Owner do
     field :registry_scopes, :string
     field :registry_checked_at, :utc_datetime_usec
     field :registry_error, :string
+    field :extra_repos, {:array, :string}, default: []
     has_many :repos, Foreman.Repos.Repo
     timestamps()
   end
@@ -43,5 +45,16 @@ defmodule Foreman.Repos.Owner do
     ])
     |> validate_format(:registry_host, ~r/\A[a-z0-9.-]+(:\d+)?\z/)
     |> validate_format(:registry_username, ~r/\A[A-Za-z0-9-]{1,39}\z/)
+  end
+
+  def extra_repos_changeset(owner, attrs) do
+    owner
+    |> cast(attrs, [:extra_repos])
+    |> update_change(:extra_repos, &Enum.uniq/1)
+    |> validate_change(:extra_repos, fn :extra_repos, repos ->
+      if Enum.all?(repos, &Foreman.Repos.Repo.name?/1),
+        do: [],
+        else: [extra_repos: {"must be repo names under %{owner}", owner: owner.login}]
+    end)
   end
 end

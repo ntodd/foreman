@@ -220,6 +220,34 @@ defmodule Foreman.Repos do
     if attrs[key] == "", do: Map.put(attrs, key, nil), else: attrs
   end
 
+  @doc """
+  The extra repos `repo`'s scoped token reaches besides the repo itself:
+  its own, then the ones set on its owner for all of the owner's repos.
+  """
+  def extra_repos(%GitRepo{} = repo) do
+    repo = Repo.preload(repo, :owner)
+    Enum.uniq(repo.extra_repos ++ repo.owner.extra_repos)
+  end
+
+  @doc "Every repo `repo`'s scoped token reaches: the repo, then its `extra_repos/1`."
+  def token_repos(%GitRepo{} = repo), do: Enum.uniq([repo.name | extra_repos(repo)])
+
+  @doc """
+  Sets the extra repos every one of `owner`'s repos' scoped tokens reach:
+  a list of names, or one string of them separated by commas or spaces.
+  """
+  def update_owner_extra_repos(%Scope{} = scope, %Owner{} = owner, repos)
+      when is_binary(repos) or is_list(repos) do
+    %{"extra_repos" => repos} = split_list(%{"extra_repos" => repos}, "extra_repos")
+
+    with :ok <- authorize_admin(scope),
+         {:ok, owner} <-
+           owner |> Owner.extra_repos_changeset(%{extra_repos: repos}) |> Repo.update() do
+      Audit.log(scope, "owner.extra_repos", owner, %{"extra_repos" => owner.extra_repos})
+      {:ok, owner}
+    end
+  end
+
   def update_registry(%Scope{} = scope, %Owner{} = owner, attrs) do
     with :ok <- authorize_admin(scope),
          {:ok, owner} <- owner |> Owner.registry_changeset(attrs) |> Repo.update() do

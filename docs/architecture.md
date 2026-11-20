@@ -434,7 +434,7 @@ A GitHub App, installed on your account for a personal deployment or on the org 
 By default, each environment gets a scoped user token from `POST /applications/{client_id}/token/scoped`.
 
 - **Scope:**
-  - **Repos:** the environment's repo plus any extra repos configured on it.
+  - **Repos:** the environment's repo plus any extra repos configured on it, then any configured on its owner, which every one of the owner's repos gets.
   - **Permissions:** configured per repo, defaulting to `contents:write`, `pull_requests:write`, `issues:write` and `metadata:read`.
 - **Identity:** the token acts as the user, so commits are pushed and PRs opened as you, not as a bot. On a team that keeps "can't approve your own PR" rules meaningful.
 - **Refresh:** scoped tokens come without a refresh token. An Oban job refreshes the parent token and re-scopes it every few hours, then sends the new file through `env.secrets.write`. An environment is only handed a token with at least five hours left, and the job also catches users whose token would expire before its next run. A refresh runs in its own process, so a closed tab or a crash can't lose the rotated refresh token. Refreshing rotates the user's token (GitHub revokes the old one), so a refresh also queues fresh tokens for every running environment of that user.
@@ -625,7 +625,7 @@ What a repo needs to work well under Foreman:
 
 - `users`: GitHub id and login, encrypted user and refresh tokens, role, default git identity and dotfiles, and their own devcontainer features (ref => options).
 - `user_repo_settings`: user, repo, and optional git name, git email, dotfiles repo, dotfiles install command and dotfiles clone path. Unset fields fall back to the user's defaults. Also the user's features turned off for the repo, by ref without a version.
-- `owners`: GitHub org or user account, plus installation id.
+- `owners`: GitHub org or user account, plus installation id and the extra repos all of its repos' tokens reach.
 - `repos`:
   - owner, full name, default branch, devcontainer path
   - token mode (`scoped` / `broad`), extra repos, token permissions

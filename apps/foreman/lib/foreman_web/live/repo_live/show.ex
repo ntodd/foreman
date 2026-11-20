@@ -330,6 +330,16 @@ defmodule ForemanWeb.RepoLive.Show do
             label="Extra repos the scoped token can reach"
             placeholder="shared-config, design-system"
           />
+          <p
+            :if={@repo.owner.extra_repos != []}
+            id="owner-extra-repos"
+            class="-mt-2 text-xs text-ink-3"
+          >
+            It also reaches <span class="font-mono">{Enum.join(@repo.owner.extra_repos, ", ")}</span>, set for every {@repo.owner.login} repo in <.link
+              navigate={~p"/admin"}
+              class="underline"
+            >Deployment</.link>.
+          </p>
           <.input
             field={@settings_form[:tailscale_tags]}
             label="Extra Tailscale tags"
@@ -513,7 +523,7 @@ defmodule ForemanWeb.RepoLive.Show do
     <fieldset id="token-permissions">
       <legend class="label">What the scoped token can do</legend>
       <p class="mb-3 text-xs text-ink-3">
-        On this repo and its extra repos. Metadata (read) is always included. The broad token ignores these.
+        On this repo and its extra repos, its owner's included. Metadata (read) is always included. The broad token ignores these.
       </p>
       <div class="grid gap-x-8 gap-y-2 sm:grid-cols-2">
         <div

@@ -42,6 +42,19 @@ defmodule ForemanWeb.RepoTokenPermissionsTest do
     refute has_element?(view, "#permission-contents [data-role='not-granted']")
   end
 
+  test "shows the extra repos the token gets from its owner beside the repo's own", %{conn: conn} do
+    owner =
+      owner_fixture(login: "acme")
+      |> Ecto.Changeset.change(extra_repos: ["shared-config"])
+      |> Repo.update!()
+
+    repo = repo_fixture(owner: owner)
+    {:ok, view, _html} = live(conn, ~p"/repos/#{repo.id}")
+
+    assert has_element?(view, "#owner-extra-repos", "shared-config")
+    assert has_element?(view, "#owner-extra-repos a[href='/admin']")
+  end
+
   test "members don't see the control", %{conn: conn} do
     repo = repo_fixture()
     {:ok, view, _html} = live(log_in(conn, user_fixture()), ~p"/repos/#{repo.id}")
