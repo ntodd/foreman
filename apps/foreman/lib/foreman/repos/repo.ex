@@ -76,7 +76,7 @@ defmodule Foreman.Repos.Repo do
     |> validate_number(:cpu_limit, greater_than: 0, less_than_or_equal_to: 512)
     |> validate_number(:memory_limit_mb, greater_than_or_equal_to: 256)
     |> validate_change(:extra_repos, fn :extra_repos, repos ->
-      if Enum.all?(repos, &Regex.match?(~r/\A[A-Za-z0-9._-]{1,100}\z/, &1)),
+      if Enum.all?(repos, &name?/1),
         do: [],
         else: [extra_repos: "must be repo names under the same owner"]
     end)
@@ -102,6 +102,9 @@ defmodule Foreman.Repos.Repo do
        do: force_change(changeset, :token_permissions, nil),
        else: changeset
   end
+
+  @doc "Whether `name` could be a repo's name on GitHub, without its owner."
+  def name?(name), do: is_binary(name) and Regex.match?(~r/\A[A-Za-z0-9._-]{1,100}\z/, name)
 
   def has_devcontainer?(%__MODULE__{devcontainer_path: path}), do: is_binary(path)
 end

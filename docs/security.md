@@ -436,10 +436,10 @@ These are accepted for now, or need someone to try them:
     leaks, change it ([upgrading.md](setup/upgrading.md#changing-the-encryption-key)).
 12. **Tokens in environments are usable by anything in them.** The
     scoped GitHub token can push to the environment's repo (and its
-    extra repos) as the user. That's the point, but a malicious
-    dependency, or a coding agent following injected instructions, gets
-    the same power. Branch protection and rulesets still apply, because
-    the token acts as the user.
+    extra repos, its own and its owner's) as the user. That's the point,
+    but a malicious dependency, or a coding agent following injected
+    instructions, gets the same power. Branch protection and rulesets
+    still apply, because the token acts as the user.
 13. **Environments reach the internet and the LAN.** (Before
     environment VMs this gap was the shared kernel: environments ran on
     the box's Docker, and a container escape landed on the box. Each

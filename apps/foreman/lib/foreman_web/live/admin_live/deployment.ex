@@ -1,8 +1,8 @@
 defmodule ForemanWeb.AdminLive.Deployment do
   @moduledoc """
   The deployment at a glance: Foreman's version and updates, GitHub and
-  Tailscale, the database, owners with their secrets and registry
-  credentials, and agent releases.
+  Tailscale, the database, owners with their secrets, registry
+  credentials and extra repos, and agent releases.
   """
   use ForemanWeb, :live_view
 
@@ -21,6 +21,8 @@ defmodule ForemanWeb.AdminLive.Deployment do
      |> assign(:page_title, "Deployment")
      |> assign(:registry_owner, nil)
      |> assign(:registry_form, nil)
+     |> assign(:extra_repos_owner, nil)
+     |> assign(:extra_repos_form, nil)
      |> assign(:checking, false)
      |> assign(:checking_updates, false)
      |> load()
@@ -102,6 +104,39 @@ defmodule ForemanWeb.AdminLive.Deployment do
       end)
 
     {:noreply, socket}
+  end
+
+  def handle_event("edit_extra_repos", %{"id" => id}, socket) do
+    owner = Repos.get_owner!(id)
+    form = to_form(%{"repos" => Enum.join(owner.extra_repos, ", ")}, as: :extra_repos)
+    {:noreply, assign(socket, extra_repos_owner: owner, extra_repos_form: form)}
+  end
+
+  def handle_event("cancel_extra_repos", _params, socket),
+    do: {:noreply, assign(socket, extra_repos_owner: nil, extra_repos_form: nil)}
+
+  def handle_event("save_extra_repos", %{"extra_repos" => params}, socket) do
+    owner = socket.assigns.extra_repos_owner
+
+    case Repos.update_owner_extra_repos(socket.assigns.current_scope, owner, params["repos"]) do
+      {:ok, owner} ->
+        {:noreply,
+         socket
+         |> assign(extra_repos_owner: nil, extra_repos_form: nil)
+         |> put_flash(
+           :info,
+           "Saved. Running environments of #{owner.login} repos get a token with the new scope when they next start, or within four hours."
+         )
+         |> load()}
+
+      {:error, %Ecto.Changeset{} = changeset} ->
+        errors = for {:extra_repos, error} <- changeset.errors, do: {:repos, error}
+        form = to_form(params, as: :extra_repos, errors: errors)
+        {:noreply, assign(socket, :extra_repos_form, form)}
+
+      {:error, :unauthorized} ->
+        {:noreply, socket}
+    end
   end
 
   def handle_event("update_foreman", _params, socket) do
@@ -383,6 +418,43 @@ defmodule ForemanWeb.AdminLive.Deployment do
               <.button size="sm" phx-click="edit_registry" phx-value-id={owner.id}>{if owner.registry_token,
                 do: "Replace",
                 else: "Add"}</.button>
+            </div>
+          <% end %>
+        </.panel>
+
+        <.panel title="Extra repos for scoped tokens">
+          <:subtitle>
+            Every {owner.login} repo's scoped token reaches these as well as the repo itself, with that repo's permissions: for a private repo a shared devcontainer feature or hook clones. A repo's own extra repos are on its page.
+          </:subtitle>
+          <%= if @extra_repos_owner && @extra_repos_owner.id == owner.id do %>
+            <.form
+              for={@extra_repos_form}
+              id="extra-repos-form"
+              phx-submit="save_extra_repos"
+              class="space-y-3"
+            >
+              <.input
+                field={@extra_repos_form[:repos]}
+                label={"Repos under #{owner.login}"}
+                placeholder="shared-config, design-system"
+              />
+              <div class="flex gap-2">
+                <.button type="submit" variant="primary" size="sm">Save</.button>
+                <.button type="button" size="sm" variant="ghost" phx-click="cancel_extra_repos">Cancel</.button>
+              </div>
+            </.form>
+          <% else %>
+            <div class="flex flex-wrap items-center justify-between gap-3">
+              <div class="text-sm">
+                <p :if={owner.extra_repos != []} class="font-mono text-ink">
+                  {Enum.join(owner.extra_repos, ", ")}
+                </p>
+                <p :if={owner.extra_repos == []} class="text-ink-3">None set.</p>
+              </div>
+              <.button size="sm" phx-click="edit_extra_repos" phx-value-id={owner.id}>{if owner.extra_repos ==
+                                                                                            [],
+                                                                                          do: "Add",
+                                                                                          else: "Edit"}</.button>
             </div>
           <% end %>
         </.panel>

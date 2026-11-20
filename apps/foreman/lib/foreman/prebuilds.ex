@@ -13,7 +13,7 @@ defmodule Foreman.Prebuilds do
   """
   import Ecto.Query
 
-  alias Foreman.{Agents, Boxes, GitHub, Operations, Repo, Scope, Tailscale}
+  alias Foreman.{Agents, Boxes, GitHub, Operations, Repo, Repos, Scope, Tailscale}
   alias Foreman.Operations.{Operation, Redactions}
   alias Foreman.Prebuilds.Prebuild
   alias ForemanProtocol.Command
@@ -110,7 +110,7 @@ defmodule Foreman.Prebuilds do
       box_id: box.id,
       branch: repo.default_branch,
       config_path: config_path(repo),
-      repos: Enum.uniq([repo.name | repo.extra_repos])
+      repos: Repos.token_repos(repo)
     }
 
     # The command is made before anything is recorded, and the prebuild and

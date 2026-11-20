@@ -715,6 +715,28 @@ defmodule Foreman.EnvironmentsTest do
       assert target == repo.owner.login
     end
 
+    test "the scoped token also reaches the extra repos set on the repo's owner", %{
+      scope: scope,
+      repo: repo,
+      box: box
+    } do
+      repo.owner |> Ecto.Changeset.change(extra_repos: ["shared-config"]) |> Repo.update!()
+      repo = Repo.update!(Ecto.Changeset.change(repo, extra_repos: ["storefront-assets"]))
+      connect_agent(box)
+      test_pid = self()
+
+      expect(Foreman.GitHub.ClientMock, :scope_user_token, fn _, _, _, repos, _ ->
+        send(test_pid, {:scoped, repos})
+        {:ok, %{token: "ghs_scoped", expires_at: nil}}
+      end)
+
+      {:ok, _} =
+        Environments.create_environment(scope, %{"repo_id" => repo.id, "box_id" => box.id})
+
+      assert_receive {:dispatch, _cmd}
+      assert_receive {:scoped, ["storefront", "storefront-assets", "shared-config"]}
+    end
+
     test "broad repos get the user's own token", %{scope: scope, repo: repo, box: box} do
       repo = Repo.update!(Ecto.Changeset.change(repo, token_mode: "broad"))
       connect_agent(box)

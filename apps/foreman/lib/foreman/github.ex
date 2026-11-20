@@ -8,10 +8,10 @@ defmodule Foreman.GitHub do
 
   By default an environment gets the user's token narrowed with
   `POST /applications/{client_id}/token/scoped` to its repo (plus any
-  extra repos configured) and the repo's permissions. Scoped tokens act
-  as the user, so pushes and PRs are theirs, and they can't be refreshed:
-  Foreman re-scopes a fresh parent token every few hours. A repo set to
-  `broad` gets the user's unscoped token instead.
+  extra repos configured on it or its owner) and the repo's permissions.
+  Scoped tokens act as the user, so pushes and PRs are theirs, and they
+  can't be refreshed: Foreman re-scopes a fresh parent token every few
+  hours. A repo set to `broad` gets the user's unscoped token instead.
 
   User tokens last 8 hours; refresh tokens 6 months and are single use.
   Refreshes for a user are serialized so two can't burn the same refresh
@@ -246,9 +246,9 @@ defmodule Foreman.GitHub do
 
   @doc """
   The GitHub token for an environment of `repo` owned by `user`: scoped to
-  the repo (and its extra repos) by default, the user's own token when the
-  repo is set to `broad`. The token lasts until the environment's next
-  scheduled one.
+  the repo and its extra repos (`Repos.token_repos/1`) by default, the
+  user's own token when the repo is set to `broad`. The token lasts until
+  the environment's next scheduled one.
   """
   def environment_token(%User{} = user, %Repos.Repo{} = repo) do
     repo = Foreman.Repo.preload(repo, :owner)
@@ -259,7 +259,7 @@ defmodule Foreman.GitHub do
           {:ok, token}
 
         _scoped ->
-          repos = Enum.uniq([repo.name | repo.extra_repos])
+          repos = Repos.token_repos(repo)
 
           permissions =
             Repos.TokenPermissions.request(
@@ -294,19 +294,19 @@ defmodule Foreman.GitHub do
         client().repo_read_token(
           app(),
           repo.owner.installation_id,
-          Enum.uniq([repo.name | repo.extra_repos])
+          Repos.token_repos(repo)
         )
     end
   end
 
   @doc """
   Whether `token` reads `repo` and each of `names` (repos of the same
-  owner; by default the repo's extra repos), by asking GitHub for each.
+  owner; by default `Repos.extra_repos/1`), by asking GitHub for each.
   Anything but a yes (an error, GitHub not answering) is a no.
   """
   def can_read?(token, %Repos.Repo{} = repo, names \\ nil) when is_binary(token) do
     repo = Foreman.Repo.preload(repo, :owner)
-    names = names || repo.extra_repos
+    names = names || Repos.extra_repos(repo)
     others = Enum.map(names, &"#{repo.owner.login}/#{&1}")
 
     Enum.all?(

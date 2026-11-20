@@ -44,6 +44,13 @@ Checks and statuses stay read-only by default so code in an environment
 can't mark a required check as passed. Admins change any of these per
 repo under **Repo settings**.
 
+Extra repos set on an owner, under **Deployment → *your org* → Extra
+repos for scoped tokens**, go into the token of every one of that
+owner's repos, after the repo's own. Use it for a private repo that a
+devcontainer feature or hook shared by all of them clones, so each repo
+doesn't have to list it. The token has the environment's repo's
+permissions on them too, and prebuilds read them.
+
 Foreman records what each installation was actually granted at every
 sync and never asks for more, so a missing permission leaves it out of
 the token instead of breaking it. The repo page flags permissions the
