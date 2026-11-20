@@ -1,6 +1,6 @@
 [Unit]
 Description=Foreman guest agent
-After=foreman-guest-disks.service docker.service
+After=foreman-guest-disks.service
 Requires=foreman-guest-disks.service
 Wants=docker.service
 

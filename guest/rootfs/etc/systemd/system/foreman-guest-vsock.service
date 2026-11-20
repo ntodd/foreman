@@ -1,6 +1,7 @@
 [Unit]
 Description=Join vsock port 1024 to the Foreman guest agent
-After=foreman-guest-agent.service systemd-modules-load.service
+# Start the agent alongside Docker, then expose it when both have started.
+After=docker.service foreman-guest-agent.service systemd-modules-load.service
 
 [Service]
 ExecStart=/usr/bin/socat VSOCK-LISTEN:1024,reuseaddr,fork UNIX-CONNECT:/run/foreman-guest/agent.sock
