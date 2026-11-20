@@ -286,7 +286,6 @@ defmodule ForemanAgent.VM.Status do
 
   defp trim_consoles(ctx, env_ids) do
     config = ctx.config
-    script = Application.app_dir(:foreman_agent, "priv/vm/trim-log.cjs")
 
     for env_id <- env_ids,
         path <- [
@@ -294,7 +293,9 @@ defmodule ForemanAgent.VM.Status do
           Path.join(VM.paths(config, env_id).dir, "ch.log")
         ],
         match?({:ok, %{type: :regular, size: size}} when size > @console_max, File.lstat(path)) do
-      ctx.runner.run(config.node, [script, path, Integer.to_string(@console_max)], timeout: 5_000)
+      ctx.runner.run(VM.file_helper(), ["trim-log", path, Integer.to_string(@console_max)],
+        timeout: 5_000
+      )
     end
 
     :ok

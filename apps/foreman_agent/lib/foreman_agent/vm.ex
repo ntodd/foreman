@@ -114,7 +114,7 @@ defmodule ForemanAgent.VM do
 
     case File.lstat(paths.meta) do
       {:ok, %{type: :regular}} -> decode_record(File.read(paths.meta))
-      {:error, :enoent} -> legacy_record(config, paths.legacy_meta)
+      {:error, :enoent} -> legacy_record(paths.legacy_meta)
       _ -> {:error, :none}
     end
   end
@@ -130,12 +130,10 @@ defmodule ForemanAgent.VM do
 
   # Keep inventory and image references during upgrades. Neither resource
   # limits nor authority to delete an abandoned prebuild come from this file.
-  defp legacy_record(config, path) do
-    script = Application.app_dir(:foreman_agent, "priv/vm/read-legacy-record.cjs")
-
+  defp legacy_record(path) do
     with {:ok, %{type: :regular}} <- File.lstat(path),
          {:ok, %{status: 0, output: json}} <-
-           Local.run(config.node, [script, path], timeout: 5_000),
+           Local.run(file_helper(), ["read-record", path], timeout: 5_000),
          {:ok, record} <- decode_record({:ok, json}) do
       record =
         Map.reject(record, fn {key, value} ->
@@ -153,6 +151,9 @@ defmodule ForemanAgent.VM do
       _ -> {:error, :none}
     end
   end
+
+  @doc false
+  def file_helper, do: Application.app_dir(:foreman_agent, "priv/vm/vm-file")
 
   @doc "The CPU and memory recorded by the host at cold boot."
   def boot_size(%{"booted" => %{"cpus" => cpus, "memory_mb" => mb}})
