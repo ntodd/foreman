@@ -1,5 +1,7 @@
 [Unit]
 Description=Forward a box connection to the Foreman guest agent
+# Release the per-connection unit even if its peer disconnects mid-write.
+CollectMode=inactive-or-failed
 Requires=foreman-guest-agent.service
 After=foreman-guest-agent.service docker.service
 

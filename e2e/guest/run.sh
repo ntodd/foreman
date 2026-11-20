@@ -103,8 +103,12 @@ check() {
   cat > "$dir/check.exs" <<EXS
 alias ForemanAgent.VM.Link
 fail = fn what -> IO.puts("e2e/guest: FAIL #{what}"); System.halt(1) end
-{:ok, link} = Link.start_link(socket: "$dir/run/vsock.sock", config: %{"allowed_git_hosts" => ["github.com"]})
-Enum.find(1..600, fn _ -> Process.sleep(100); Link.connected?(link) end) || fail.("never connected")
+connect = fn ->
+  {:ok, link} = Link.start_link(socket: "$dir/run/vsock.sock", config: %{"allowed_git_hosts" => ["github.com"]})
+  Enum.find(1..600, fn _ -> Process.sleep(100); Link.connected?(link) end) || fail.("never connected")
+  link
+end
+link = connect.()
 version = :sys.get_state(link).guest_version || (Process.sleep(500); :sys.get_state(link).guest_version)
 if version != ForemanAgent.Identity.version(), do: fail.("guest agent #{inspect(version)}")
 {:ok, []} = Link.query(link, "inventory")
@@ -125,7 +129,10 @@ case Link.reclaim(link, 0) do
       "(#{r}, #{done.reclaim_ms} ms), compacted (#{done.compact_ms} ms), drained (#{done.drain_ms} ms)")
   other -> fail.("reclaim: #{inspect(other)}")
 end
-IO.puts("e2e/guest: the guest agent (#{version}) answers")
+# Each box connection has its own socket-activated forwarder.
+GenServer.stop(link)
+{:ok, []} = Link.query(connect.(), "inventory")
+IO.puts("e2e/guest: the guest agent (#{version}) answers and reconnects")
 EXS
   "$dir/rel/bin/foreman_agent" eval "$(cat "$dir/check.exs")"
 }
