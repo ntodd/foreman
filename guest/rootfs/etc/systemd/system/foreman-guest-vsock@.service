@@ -1,0 +1,10 @@
+[Unit]
+Description=Forward a box connection to the Foreman guest agent
+Requires=foreman-guest-agent.service
+After=foreman-guest-agent.service docker.service
+
+[Service]
+# Type=simple starts the agent before its Unix socket is bound.
+ExecStart=/usr/bin/socat STDIO UNIX-CONNECT:/run/foreman-guest/agent.sock,retry=40,interval=0.1
+StandardInput=socket
+StandardOutput=inherit
