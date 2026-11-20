@@ -137,6 +137,18 @@ EXS
   "$dir/rel/bin/foreman_agent" eval "$(cat "$dir/check.exs")"
 }
 
+# Anonymous reclaim needs at least 96 MiB on the anonymous LRU. An idle
+# guest can boot below that threshold. Give the zram boot 160 MiB of
+# swap-backed tmpfs pages before the agent starts, on this test image only.
+dropin=/etc/systemd/system/foreman-guest-zram.service.d
+cat > "$dir/workload.conf" <<'EOF'
+[Service]
+ExecStartPost=/bin/dd if=/dev/zero of=/dev/shm/foreman-reclaim-test bs=1M count=160
+EOF
+debugfs -w -R "mkdir $dropin" "$dir/run/root.raw"
+debugfs -w -R "write $dir/workload.conf $dropin/workload.conf" "$dir/run/root.raw"
+debugfs -R "cat $dropin/workload.conf" "$dir/run/root.raw" | cmp - "$dir/workload.conf"
+
 for n in 1 2; do
   echo "e2e/guest: boot $n"
   start=$(date +%s)
