@@ -22,6 +22,7 @@ Environment=RELEASE_MODE=interactive
 # may run as the agent.
 Environment=HOME=/run/foreman-agent/home
 Environment=FOREMAN_AGENT_DATA_DIR=/var/lib/foreman-agent
+Environment=ERL_CRASH_DUMP=/var/lib/foreman-agent/erl_crash.dump
 Environment=RELEASE_TMP=/run/foreman-agent
 # Secrets live in /run/foreman (tmpfs), and outlive a restart of the agent.
 RuntimeDirectory=foreman foreman-guest foreman-agent foreman-agent/home
