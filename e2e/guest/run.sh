@@ -45,13 +45,14 @@ mkfs.ext4 -q -F -L fm-data -d "$dir/seed" "$dir/run/data.raw" 8G
 uuid=$(blkid -p -s UUID -o value "$dir/run/data.raw")
 
 # Boot the offline initializer with an independent copy and inspect its
-# filesystem before using the normal guest boot path.
+# filesystem before using the normal guest boot path. Keep any panic on
+# the serial console so a later reboot cannot hide a failed first boot.
 mkdir -p "$dir/fixture/docker/volumes/test" "$dir/fixture/srv"
 echo old-volume > "$dir/fixture/docker/volumes/test/canary"
 echo keep > "$dir/fixture/srv/clone"
 mkfs.ext4 -q -F -d "$dir/fixture" "$dir/run/adopt.raw" 64M
 timeout 90 "$ch" --kernel "$dir/guest/vmlinuz" \
-  --cmdline "console=ttyS0 root=/dev/vda ro quiet panic=1 init=/usr/local/lib/foreman-guest/adopt fm.env=$env_id" \
+  --cmdline "console=ttyS0 root=/dev/vda ro quiet panic=0 init=/usr/local/lib/foreman-guest/adopt fm.env=$env_id" \
   --disk "path=$dir/run/root.raw,image_type=raw,readonly=on,serial=fm-root" \
   --disk "path=$dir/run/adopt.raw,image_type=raw,serial=fm-data" \
   --cpus boot=1 --memory size=256M --serial "file=$dir/run/adopt.log" --console off \

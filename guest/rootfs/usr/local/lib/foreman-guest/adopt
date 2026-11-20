@@ -2,8 +2,9 @@
 # PID 1 only in an offline provisioning VM. vda is the pristine read-only
 # guest image and vdb a private prebuild copy. No normal services run.
 set -eu
-# Power off even on an error. Only the success line permits publication.
-trap 'echo o > /proc/sysrq-trigger' EXIT
+# SysRq queues the power-off. Keep PID 1 alive until it runs, including
+# on error. Exiting sooner panics the kernel and reboots the initializer.
+trap 'echo o > /proc/sysrq-trigger; exec sleep infinity' EXIT
 echo "foreman-adopt: starting"
 mountpoint -q /proc || mount -t proc proc /proc
 [ -b /dev/vdb ] || mount -t devtmpfs devtmpfs /dev
