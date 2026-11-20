@@ -434,7 +434,7 @@ defmodule ForemanWeb.PagesTest do
 
     assert has_element?(
              view,
-             "#box-card-#{bare.id} [data-role=firewall-alert]",
+             "#fleet-attention-#{bare.id} [data-role=firewall-alert]",
              "Firewall unconfirmed"
            )
   end

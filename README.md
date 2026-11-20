@@ -9,7 +9,7 @@ publish a port.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/images/environments-dark.png">
-  <img alt="The Environments page: three boxes with CPU and memory bars, a state filter and a box filter, and nine environments in a table, the signed-in user's under My environments and the rest under Others, each with its owner's avatar, box and state" src="docs/images/environments-light.png">
+  <img alt="The Environments page: a capacity summary of the boxes online and the CPU and memory provisioned on them, a state filter and a box filter, and nine environments in a table, the signed-in user's under My environments and the rest under Others, each with its owner's avatar, box and state" src="docs/images/environments-light.png">
 </picture>
 
 ## How it works
@@ -114,7 +114,7 @@ The Boxes page puts live CPU and memory trends next to what's provisioned.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/images/boxes-dark.png">
-  <img alt="The Boxes page: three online boxes, each with a live CPU and memory trend line and provisioned CPU and memory bars" src="docs/images/boxes-light.png">
+  <img alt="The Boxes page: totals for the boxes online, their cores, memory and environments, then three online boxes, each with a live CPU and memory trend line and provisioned CPU and memory bars" src="docs/images/boxes-light.png">
 </picture>
 
 A box over the last day. CPU and memory stack each environment's share

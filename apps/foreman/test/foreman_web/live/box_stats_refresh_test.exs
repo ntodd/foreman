@@ -69,7 +69,7 @@ defmodule ForemanWeb.BoxStatsRefreshTest do
   end
 
   for {name, path, card} <- [
-        {"home page", "/", "box-card-"},
+        {"home page", "/", "fleet-attention-"},
         {"boxes page", "/boxes", "box-"}
       ],
       who <- [:admin, :dev] do

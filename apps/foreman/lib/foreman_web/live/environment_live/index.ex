@@ -1,10 +1,14 @@
 defmodule ForemanWeb.EnvironmentLive.Index do
-  @moduledoc "The home page: your environments, live, and the boxes they run on."
+  @moduledoc """
+  The home page: what the boxes offer and hold, any box that needs a
+  look, and your environments, live.
+  """
   use ForemanWeb, :live_view
 
   import ForemanWeb.ForemanComponents
 
   alias Foreman.{Boxes, Capacity, Environments, Repos}
+  alias ForemanWeb.Fleet
 
   # States, grouped the way the filter offers them.
   @state_groups %{
@@ -53,6 +57,7 @@ defmodule ForemanWeb.EnvironmentLive.Index do
 
     socket
     |> assign(:environments, envs)
+    |> assign(:env_counts, state_counts(envs))
     |> assign(:boxes, Enum.map(Boxes.usable_boxes(scope), &box_card(socket, &1, envs_by_box)))
     |> derive_list()
   end
@@ -68,10 +73,7 @@ defmodule ForemanWeb.EnvironmentLive.Index do
     box = if Enum.any?(list_boxes, &(&1.id == filters.box)), do: filters.box
     on_box = if box, do: Enum.filter(envs, &(&1.box_id == box)), else: envs
 
-    counts =
-      Map.new(@state_groups, fn {group, states} ->
-        {group, Enum.count(on_box, &(&1.observed_state in states))}
-      end)
+    counts = state_counts(on_box)
 
     shown =
       if filters.state,
@@ -88,6 +90,12 @@ defmodule ForemanWeb.EnvironmentLive.Index do
     |> assign(:sectioned, Enum.any?(envs, &(&1.user_id != me)))
     |> assign(:mine, mine)
     |> assign(:others, Enum.sort_by(others, &{&1.user.login, &1.slug}))
+  end
+
+  defp state_counts(envs) do
+    Map.new(@state_groups, fn {group, states} ->
+      {group, Enum.count(envs, &(&1.observed_state in states))}
+    end)
   end
 
   defp filter_path(filters) do
@@ -292,6 +300,152 @@ defmodule ForemanWeb.EnvironmentLive.Index do
     """
   end
 
+  attr :boxes, :list, required: true
+  attr :environments, :integer, required: true
+  attr :states, :map, required: true
+
+  # What the online boxes offer and hold, then the boxes that need a look:
+  # the Boxes page has each machine and its history.
+  defp fleet_overview(assigns) do
+    attention =
+      for card <- assigns.boxes, issues = Fleet.issues(card), issues != [], do: {card, issues}
+
+    states =
+      for {group, label} <- @state_order, (n = assigns.states[group]) > 0 do
+        case group do
+          "attention" -> "#{n} #{if n == 1, do: "needs", else: "need"} attention"
+          _ -> "#{n} #{String.downcase(label)}"
+        end
+      end
+
+    assigns =
+      assign(assigns,
+        fleet: Fleet.totals(assigns.boxes),
+        attention: attention,
+        urgent:
+          Enum.any?(attention, fn {_, issues} -> Enum.any?(issues, &(&1.level == :danger)) end),
+        states: Enum.join(states, " · ")
+      )
+
+    ~H"""
+    <section id="fleet" class="fleet-overview overflow-hidden rounded-2xl border border-line">
+      <div class="flex items-center justify-between gap-2 px-5 pt-4">
+        <h2 class="flex items-center gap-2 text-sm font-semibold text-ink">
+          <.icon name="hero-server-stack" class="size-5 text-accent" /> Capacity
+        </h2>
+        <.link
+          navigate={~p"/boxes"}
+          class="inline-flex items-center gap-1 text-xs font-medium text-ink-2 hover:text-accent-ink"
+        >
+          View boxes <.icon name="hero-arrow-right-micro" class="size-3.5" />
+        </.link>
+      </div>
+      <div class="grid grid-cols-2 gap-4 px-5 py-4 xl:grid-cols-4">
+        <div id="fleet-online">
+          <p class="text-xs font-medium text-ink-2">Boxes online</p>
+          <p class="fleet-figure">{@fleet.online}<span> / {@fleet.boxes}</span></p>
+          <p :if={@fleet.attention == 0} class="mt-1 text-xs text-ink-2">All healthy</p>
+          <p :if={@fleet.attention > 0} class="mt-1 text-xs text-warning">
+            {@fleet.attention} {if @fleet.attention == 1, do: "needs", else: "need"} attention
+          </p>
+        </div>
+        <.allocation
+          id="fleet-cpu"
+          label="CPU provisioned"
+          used={Fleet.cores(@fleet.provisioned_cpus)}
+          total={Fleet.cores(@fleet.cpus) <> " cores"}
+          ratio={Fleet.percent(@fleet.provisioned_cpus, @fleet.cpus)}
+        />
+        <.allocation
+          id="fleet-memory"
+          label="Memory provisioned"
+          used={gib(@fleet.provisioned_memory_mb)}
+          total={gib(@fleet.memory_mb) <> " GiB"}
+          ratio={Fleet.percent(@fleet.provisioned_memory_mb, @fleet.memory_mb)}
+        />
+        <div id="fleet-environments">
+          <p class="text-xs font-medium text-ink-2">Environments</p>
+          <p class="fleet-figure">{@environments}</p>
+          <p class="mt-1 text-xs text-ink-2">{if @states == "", do: "None yet", else: @states}</p>
+        </div>
+      </div>
+      <div class="flex flex-wrap items-center gap-x-6 gap-y-2 border-t border-line bg-raised/60 px-5 py-3 text-xs text-ink-2">
+        <span>CPU in use <b class="ml-1 text-ink">{share(@fleet.used_cpus, @fleet.cpus)}</b></span>
+        <span>
+          Memory in use <b class="ml-1 text-ink">{share(@fleet.used_memory_mb, @fleet.memory_mb)}</b>
+        </span>
+        <span>
+          Disk free
+          <b class="ml-1 text-ink">
+            {if @fleet.disk_free_mb, do: gib(@fleet.disk_free_mb) <> " GiB", else: "—"}
+          </b>
+        </span>
+        <span class="text-ink-3 sm:ml-auto">
+          <%= if @fleet.online > 0 do %>
+            {@fleet.reporting} of {@fleet.online} online {if @fleet.online == 1,
+              do: "box",
+              else: "boxes"} reporting usage
+          <% else %>
+            No boxes online
+          <% end %>
+        </span>
+      </div>
+    </section>
+
+    <.callout
+      :if={@attention != []}
+      id="fleet-attention"
+      kind={if @urgent, do: "danger", else: "warning"}
+      icon="hero-exclamation-triangle-mini"
+    >
+      <p class="font-medium">
+        {length(@attention)} {if length(@attention) == 1,
+          do: "box needs",
+          else: "boxes need"} attention
+      </p>
+      <ul class="mt-1 space-y-0.5">
+        <li :for={{card, issues} <- @attention} id={"fleet-attention-#{card.box.id}"}>
+          <.link navigate={~p"/boxes/#{card.box.id}"} class="font-medium underline">{card.box.name}</.link>:
+          <span :for={{issue, i} <- Enum.with_index(issues)} data-role={issue.role}>
+            {if i > 0, do: "· "}{issue.label}
+          </span>
+        </li>
+      </ul>
+    </.callout>
+    """
+  end
+
+  attr :id, :string, required: true
+  attr :label, :string, required: true
+  attr :used, :string, required: true
+  attr :total, :string, required: true
+  attr :ratio, :any, required: true, doc: "provisioned, as a percentage of what's offered"
+
+  defp allocation(assigns) do
+    ~H"""
+    <div id={@id}>
+      <p class="text-xs font-medium text-ink-2">{@label}</p>
+      <p class="fleet-figure">{@used}<span> / {@total}</span></p>
+      <progress
+        :if={@ratio}
+        aria-label={@label}
+        value={min(@ratio, 100)}
+        max="100"
+        class={["bar mt-2", @ratio > 100 && "bar-danger", @ratio in 91..100 && "bar-warning"]}
+      >
+        {@ratio}%
+      </progress>
+    </div>
+    """
+  end
+
+  defp share(part, total) do
+    case Fleet.percent(part, total) do
+      nil -> "—"
+      pct -> "#{pct}%"
+    end
+  end
+
   @impl true
   def render(assigns) do
     ~H"""
@@ -300,6 +454,7 @@ defmodule ForemanWeb.EnvironmentLive.Index do
       current_scope={@current_scope}
       current_path={@current_path}
       width="full"
+      content_class="card-grid grid-cols-1"
     >
       <:breadcrumb>Environments</:breadcrumb>
       <:actions>
@@ -310,56 +465,12 @@ defmodule ForemanWeb.EnvironmentLive.Index do
 
       <.start_warning :if={@start_warning} warning={@start_warning} />
 
-      <section :if={@boxes != []} id="box-strip" class="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
-        <.link
-          :for={card <- @boxes}
-          navigate={~p"/boxes/#{card.box.id}"}
-          id={"box-card-#{card.box.id}"}
-          class={[
-            "group rounded-xl border bg-raised p-4 shadow-xs transition-shadow hover:shadow-raised",
-            if(Foreman.Boxes.vm_problem(card.box) == nil,
-              do: "border-line",
-              else: "border-danger/50 ring-1 ring-danger/30"
-            )
-          ]}
-        >
-          <div class="mb-3 flex items-center justify-between gap-2">
-            <div class="flex min-w-0 items-center gap-2">
-              <.icon name="hero-server-mini" class="size-4 shrink-0 text-ink-3" />
-              <span class="truncate text-sm font-semibold text-ink">{card.box.name}</span>
-            </div>
-            <div class="flex items-center gap-1.5">
-              <.box_vm_badge box={card.box} />
-              <.box_firewall_badge box={card.box} />
-              <.box_reboot_badge box={card.box} />
-              <.badge :if={card.summary.contention} color="amber" size="sm">Contention</.badge>
-              <.box_status online={card.online} />
-            </div>
-          </div>
-          <div class="space-y-2.5">
-            <.capacity_bar
-              label="CPU"
-              value={card.summary.provisioned_cpus}
-              used={card.summary.used_cpus}
-              max={card.summary.cpus}
-              unit=" cores"
-              threshold={card.box.cpu_threshold}
-            />
-            <.capacity_bar
-              label="Memory"
-              value={card.summary.provisioned_memory_mb}
-              used={card.summary.used_memory_mb}
-              max={card.summary.memory_mb}
-              unit=" GiB"
-              format={&gib/1}
-              threshold={card.box.memory_threshold}
-            />
-          </div>
-          <p class="mt-3 text-xs text-ink-3">
-            {card.count} {if card.count == 1, do: "environment", else: "environments"}
-          </p>
-        </.link>
-      </section>
+      <.fleet_overview
+        :if={@boxes != []}
+        boxes={@boxes}
+        environments={length(@environments)}
+        states={@env_counts}
+      />
 
       <section :if={@environments != []} id="environments" class="space-y-3">
         <div class="flex flex-wrap items-center justify-between gap-3">
