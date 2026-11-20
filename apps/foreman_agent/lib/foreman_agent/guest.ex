@@ -35,14 +35,23 @@ defmodule ForemanAgent.Guest do
 
   @doc "The queries the host can make of the guest."
   def queries do
+    # The session owns the table. Each poll runs in a fresh query task.
+    names = :ets.new(:port_names, [:set, :public])
+
     %{
       "inventory" => fn ->
         with {:ok, envs} <- Handler.inventory(), do: {:ok, stringify(envs)}
       end,
       "ports" => fn ->
-        case Ports.collect(Handler.ctx(fn _, _ -> :ok end), %{}) do
-          {:error, message} -> {:error, message}
-          {report, _names} -> {:ok, stringify(report)}
+        cache = :ets.lookup_element(names, :cache, 2, %{})
+
+        case Ports.collect(Handler.ctx(fn _, _ -> :ok end), cache) do
+          {:error, message} ->
+            {:error, message}
+
+          {report, cache} ->
+            :ets.insert(names, {:cache, cache})
+            {:ok, stringify(report)}
         end
       end,
       "reclaim" => &Reclaim.run/1
