@@ -139,22 +139,15 @@ defmodule ForemanAgent.Guest.Reclaim do
   defp memory(proc) do
     case File.read(Path.join(proc, "meminfo")) do
       {:ok, text} ->
-        kb = fn key ->
-          case Regex.run(~r/^#{Regex.escape(key)}:\s+(\d+) kB$/m, text) do
-            [_, n] -> String.to_integer(n) * 1024
-            nil -> nil
-          end
-        end
-
-        case {kb.("Active(file)"), kb.("Inactive(file)"), kb.("MemFree")} do
+        case {bytes(text, "Active(file)"), bytes(text, "Inactive(file)"), bytes(text, "MemFree")} do
           {active, inactive, free}
           when is_integer(active) and is_integer(inactive) and is_integer(free) ->
             {:ok,
              %{
                file: active + inactive,
                free: free,
-               anon: (kb.("Active(anon)") || 0) + (kb.("Inactive(anon)") || 0),
-               swap_free: kb.("SwapFree") || 0
+               anon: bytes(text, "Active(anon)", 0) + bytes(text, "Inactive(anon)", 0),
+               swap_free: bytes(text, "SwapFree", 0)
              }}
 
           _ ->
@@ -163,6 +156,13 @@ defmodule ForemanAgent.Guest.Reclaim do
 
       {:error, reason} ->
         {:error, "couldn't read the guest's memory: #{:file.format_error(reason)}"}
+    end
+  end
+
+  defp bytes(text, key, default \\ nil) do
+    case Regex.run(~r/^#{Regex.escape(key)}:\s+(\d+) kB$/m, text) do
+      [_, n] -> String.to_integer(n) * 1024
+      nil -> default
     end
   end
 
