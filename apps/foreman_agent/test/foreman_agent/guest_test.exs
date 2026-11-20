@@ -2,7 +2,46 @@ defmodule ForemanAgent.GuestTest do
   # configure/1 changes the cached config, so not async.
   use ExUnit.Case, async: false
 
-  alias ForemanAgent.{Config, Guest}
+  import Mox
+
+  alias ForemanAgent.{Config, DockerMock, Guest}
+
+  @tag :tmp_dir
+  test "port polls share names across query tasks until the guest session ends", %{tmp_dir: proc} do
+    saved = Config.get()
+    docker = Application.fetch_env(:foreman_agent, :docker)
+
+    on_exit(fn ->
+      Config.put(saved)
+
+      case docker do
+        {:ok, impl} -> Application.put_env(:foreman_agent, :docker, impl)
+        :error -> Application.delete_env(:foreman_agent, :docker)
+      end
+    end)
+
+    Config.put(%{saved | proc: proc})
+    Application.put_env(:foreman_agent, :docker, DockerMock)
+    id = "aaa111aaa111"
+    env = ForemanProtocol.uuid()
+    labels = %{"foreman.env_id" => env, "foreman.devcontainer" => "true"}
+    container = %{"Id" => id, "State" => "running", "Labels" => labels}
+    stub(DockerMock, :list_containers, fn _ -> {:ok, [container]} end)
+    stub(DockerMock, :inspect_container, fn ^id -> {:ok, %{"State" => %{"Pid" => 7}}} end)
+    File.mkdir_p!(Path.join(proc, "7/net"))
+    File.write!(Path.join(proc, "7/net/tcp"), "0: 00000000:0FA0 0 0A 0 0 0 1000 0 1\n")
+
+    # An unnamed listener is cached too. Reconnecting must do a fresh lookup.
+    expect(DockerMock, :top, 2, fn ^id -> {:ok, []} end)
+    first = Guest.queries()["ports"]
+    second = Guest.queries()["ports"]
+
+    for poll <- [first, first, second] do
+      assert {:ok, %{^env => [%{"port" => 4000}]}} = poll |> Task.async() |> Task.await()
+    end
+
+    verify!()
+  end
 
   describe "sync_clock/2" do
     test "leaves a clock within two seconds alone" do

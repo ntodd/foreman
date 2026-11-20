@@ -223,9 +223,12 @@ expect "says when a VM has no tap" "tap $env2" "error the environment has no add
 expect "refuses a tap request without an id" "tap not-an-id" "error tap takes ENV_ID"
 expect "a VM that's running isn't started twice" "start $env1 2 2048 $guest 1.2.3" "ok running"
 printf 'nameserver 100.100.100.100\n' > "$work/resolv.conf"
+check "a VM uses the hypervisor's default THP setting" grep -Fxq 'size=2048M' "$work/last-run"
+export FOREMAN_VM_THP=0
 export FOREMAN_VM_ZRAM=1
 expect "a second VM gets the next address" "start $env2 1 1024 $guest 1.2.3" "ok started fm-vm1 10.250.0.6"
-unset FOREMAN_VM_ZRAM
+unset FOREMAN_VM_ZRAM FOREMAN_VM_THP
+check "a box can disable host THP for a cold boot" grep -Fxq 'size=1024M,thp=off' "$work/last-run"
 grep -q ' fm.zram=1$' "$work/last-run" || fail "the opt-in did not reach the guest command line"
 check "a box with only MagicDNS gives its guests 1.1.1.1" grep -q "fm.dns=1.1.1.1 " "$work/last-run"
 

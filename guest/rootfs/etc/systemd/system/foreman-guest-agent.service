@@ -1,6 +1,6 @@
 [Unit]
 Description=Foreman guest agent
-After=foreman-guest-disks.service docker.service
+After=foreman-guest-disks.service
 Requires=foreman-guest-disks.service
 Wants=docker.service
 
@@ -14,17 +14,22 @@ Group=foreman
 SupplementaryGroups=docker
 AmbientCapabilities=CAP_SYS_TIME
 Environment=FOREMAN_AGENT_MODE=guest
+# Load release modules as the guest uses them. The same release also
+# contains the box agent, whose VM and control-plane code stays unused.
+Environment=RELEASE_MODE=interactive
 # HOME on tmpfs: a disk made from a prebuild has whatever the prebuild's
 # code left on it, and nothing there (a docker CLI plugin, a git config)
 # may run as the agent.
 Environment=HOME=/run/foreman-agent/home
 Environment=FOREMAN_AGENT_DATA_DIR=/var/lib/foreman-agent
+Environment=ERL_CRASH_DUMP=/var/lib/foreman-agent/erl_crash.dump
 Environment=RELEASE_TMP=/run/foreman-agent
 # Secrets live in /run/foreman (tmpfs), and outlive a restart of the agent.
 RuntimeDirectory=foreman foreman-guest foreman-agent foreman-agent/home
 RuntimeDirectoryMode=0711
 RuntimeDirectoryPreserve=yes
-WorkingDirectory=/var/lib/foreman-agent
+# Keep the BEAM's current directory on the read-only release disk.
+WorkingDirectory=/opt/foreman-agent
 ExecStart=/opt/foreman-agent/bin/foreman_agent start
 Restart=always
 RestartSec=1

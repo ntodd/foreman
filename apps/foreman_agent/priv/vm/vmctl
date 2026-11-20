@@ -280,6 +280,8 @@ cmd_start() { # env_id cpus memory_mb guest_sha256 agent_version
   queues=$cpus
   [ "$queues" -gt 4 ] && queues=4
   dns=$(resolvers)
+  memory_arg="size=${memory}M"
+  [ "${FOREMAN_VM_THP:-1}" = 0 ] && memory_arg="$memory_arg,thp=off"
   zram=""
   [ "${FOREMAN_VM_ZRAM:-0}" = 1 ] && zram=" fm.zram=1"
   # What the guests' firewall lets through under --block-lan: kept for its
@@ -294,7 +296,7 @@ cmd_start() { # env_id cpus memory_mb guest_sha256 agent_version
     --disk "path=$vm/root.raw,image_type=raw,direct=on,num_queues=$queues,serial=fm-root" \
     --disk "path=$vm/data.raw,image_type=raw,direct=on,num_queues=$queues,serial=fm-data" \
     --disk "path=$agent_disk,image_type=raw,readonly=on,serial=fm-agent" \
-    --cpus "boot=$cpus" --memory "size=${memory}M" \
+    --cpus "boot=$cpus" --memory "$memory_arg" \
     --balloon size=0,free_page_reporting=on,deflate_on_oom=on \
     --net "tap=$tap,mac=$mac" \
     --vsock "cid=3,socket=$vm/vsock.sock" \
