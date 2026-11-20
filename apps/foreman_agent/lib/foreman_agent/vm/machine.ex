@@ -26,6 +26,10 @@ defmodule ForemanAgent.VM.Machine do
 
   @callback stop_adoption(String.t(), Config.t()) :: :ok | {:error, String.t()}
 
+  @doc "VM unit state and, for a retained OOM kill, the Unix time of its exit."
+  @callback inventory_state(String.t(), Config.t()) ::
+              :running | :stopped | {:oom_kill, integer()}
+
   @doc "Boots the VM from its disks."
   @callback boot(env_id :: String.t(), spec(), Config.t()) :: :ok | {:error, String.t()}
 

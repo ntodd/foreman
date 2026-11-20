@@ -484,6 +484,16 @@ printf '# Written by install.sh: a re-run keeps these unless it is given others.
   "$block_lan_setting" "$VM_SUBNET" > "$SETTINGS"
 chmod 0644 "$SETTINGS"
 
+# The parent limit applies to all VMs together, including prebuilds. Local
+# overrides in foreman.slice.d survive installer reruns.
+cat > /etc/systemd/system/foreman.slice <<'EOF'
+[Unit]
+Description=Foreman environment VMs
+
+[Slice]
+MemoryMax=90%
+EOF
+
 cat > /etc/systemd/system/foreman-vmctl.socket <<'EOF'
 [Unit]
 Description=Foreman VM helper socket

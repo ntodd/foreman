@@ -18,7 +18,10 @@ tarball=${1:?usage: $0 path/to/foreman_agent.tar.gz}
 # Docker Hub's official images, from a mirror: ECR Public's, or Google's
 # when ECR refuses (it limits anonymous pulls by IP, and runners share IPs).
 images="ubuntu:22.04 ubuntu:24.04 debian:12 debian:13"
-mirrors="public.ecr.aws/docker/library mirror.gcr.io/library"
+mirrors="public.ecr.aws/docker/library"
+if [ "${E2E_CREW_CACHE:-}" != 1 ]; then
+  mirrors="$mirrors mirror.gcr.io/library"
+fi
 
 # Prints the reference it pulled.
 pull() {

@@ -65,8 +65,8 @@ grep -aq "^foreman-adopted $env_id" "$dir/run/adopt.log" ||
 [ -z "$(debugfs -R 'cat /docker/volumes/test/canary' "$dir/run/adopt.raw" 2>/dev/null)" ] || fail "inherited volume"
 
 boot() {
-  rm -f "$dir/run/api.sock" "$dir/run/vsock.sock"
   serial="$dir/run/serial-$1.log"
+  rm -f "$dir/run/api.sock" "$dir/run/vsock.sock"
   zram=""
   [ "$1" = 2 ] && zram=" fm.zram=1"
   "$ch" --kernel "$dir/guest/vmlinuz" --cmdline "console=ttyS0 root=/dev/vda rw net.ifnames=0 fm.env=$env_id$zram" \
@@ -82,19 +82,18 @@ boot() {
 }
 
 power_off() {
-  # A rejected data disk reports its error early in boot. logind must
-  # be listening before we send the one-shot ACPI power button event.
-  i=0
-  until grep -aq 'Started .*systemd-logind\.service' "$serial"; do
-    i=$((i + 1))
-    [ "$i" -lt 120 ] || fail "logind did not start on $serial"
-    sleep 0.5
-  done
-  curl -fsS --unix-socket "$dir/run/api.sock" -X PUT http://localhost/api/v1/vm.power-button
   i=0
   while kill -0 "$pid" 2>/dev/null; do
+    # A failed disk check can appear on the console before logind starts
+    # listening for ACPI events. A button press in that window is lost.
+    if [ $((i % 20)) -eq 0 ]; then
+      if ! curl -fsS --unix-socket "$dir/run/api.sock" -X PUT http://localhost/api/v1/vm.power-button; then
+        if kill -0 "$pid" 2>/dev/null; then fail "couldn't send the power button"; fi
+        break
+      fi
+    fi
     i=$((i + 1))
-    [ "$i" -lt 120 ] || fail "the VM didn't power off within a minute"
+    [ "$i" -lt 120 ] || { tail -n 60 "$serial" >&2; fail "the VM didn't power off within a minute"; }
     sleep 0.5
   done
   pid=""

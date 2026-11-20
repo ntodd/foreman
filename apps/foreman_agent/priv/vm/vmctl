@@ -163,11 +163,12 @@ run_unit() { # env_id cpus memory_mb vm_dir ch args...
   # Room for Cloud Hypervisor itself on top of the guest's memory.
   # The offline initializer must finish before its copy can be published.
   if [ "${unit_prefix:-}" = foreman-adopt ]; then
-    set -- --wait -p RuntimeMaxSec=90 -p PrivateNetwork=yes -- "$ch" --log-file "$vm/ch.log" "$@"
+    set -- --collect --wait -p RuntimeMaxSec=90 -p PrivateNetwork=yes -- "$ch" --log-file "$vm/ch.log" "$@"
   else
     set -- -p "DeviceAllow=/dev/net/tun rw" -- "$ch" --log-file "$vm/ch.log" "$@"
   fi
-  systemd-run --unit="$unit" --slice=foreman.slice --collect --quiet \
+  # Keep failed VM units until the next start so the agent can read Result.
+  systemd-run --unit="$unit" --slice=foreman.slice --quiet \
     --uid="$AGENT_USER" --gid="$vm_group" -p SupplementaryGroups=kvm -p ProtectProc=ptraceable -p RestrictNamespaces=yes \
     -p "MemoryMax=$((memory + 512))M" -p MemorySwapMax=0 -p "CPUQuota=$((cpus * 100))%" \
     -p TasksMax=1024 -p UMask=0077 -p NoNewPrivileges=yes -p ProtectSystem=strict \

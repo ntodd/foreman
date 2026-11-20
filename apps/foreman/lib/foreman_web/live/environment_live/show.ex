@@ -583,6 +583,14 @@ defmodule ForemanWeb.EnvironmentLive.Show do
 
       <.start_warning :if={@start_warning} warning={@start_warning} />
 
+      <.callout :if={@env.last_vm_oom_at} kind="warning" id="vm-oom">
+        <p class="font-medium">The box stopped this VM under memory pressure.</p>
+        <p>
+          Last out-of-memory kill on {@env.box.name}:
+          <.local_time id="vm-oom-at" at={@env.last_vm_oom_at} />.
+        </p>
+      </.callout>
+
       <%!-- Also after a failed stop or secrets write, which leave the state as it was. --%>
       <.callout
         :if={@env.status_message && not busy?(@env.observed_state)}

@@ -480,6 +480,33 @@ defmodule ForemanAgent.VMEnvTest do
       :ok
     end
 
+    test "reports a host OOM separately from ordinary stopped inventory", ctx do
+      :ok = FakeMachine.kill(@env, ctx.config)
+      FakeMachine.configure(oom_killed_at: 1_798_800_000)
+
+      assert {:ok, [%{state: "stopped", oom_killed_at: 1_798_800_000}]} =
+               Status.inventory(ctx.config)
+
+      :ok = ForemanAgent.Outbox.attach(self())
+      reporter = start_supervised!(ForemanAgent.Reporter)
+      send(reporter, :inventory)
+
+      assert_receive {:outbox_deliver,
+                      %{type: "box.vm_oom", payload: %{environments: %{@env => 1_798_800_000}}},
+                      _},
+                     2000
+
+      assert_receive {:outbox_deliver, %{type: "box.inventory", payload: %{environments: [wire]}},
+                      _},
+                     2000
+
+      refute Map.has_key?(wire, :oom_killed_at)
+
+      FakeMachine.configure([])
+      assert {:ok, [entry]} = Status.inventory(ctx.config)
+      refute Map.has_key?(entry, :oom_killed_at)
+    end
+
     test "saves the VM and stops it; the box reports it suspended", ctx do
       assert {:ok, %{"suspended" => true, "vm_size" => result_size}} =
                run(command("env.suspend"), ctx)

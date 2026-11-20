@@ -1,0 +1,4 @@
+services:
+  firewall:
+    image: public.ecr.aws/docker/library/docker:29-dind
+    privileged: true
