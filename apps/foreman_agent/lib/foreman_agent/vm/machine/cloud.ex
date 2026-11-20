@@ -61,6 +61,29 @@ defmodule ForemanAgent.VM.Machine.Cloud do
   end
 
   @impl true
+  def running([id], config), do: if(running?(id, config), do: [id], else: [])
+
+  def running(env_ids, config) do
+    # Bound argv and the time spent in a single systemd query on large boxes.
+    env_ids |> Enum.chunk_every(64) |> Enum.flat_map(&running_batch(&1, config))
+  end
+
+  defp running_batch(ids, config) do
+    args = ["is-active" | Enum.map(ids, &unit/1)]
+
+    # Without --quiet, systemctl prints one state per explicit unit, in order.
+    # A failed or incomplete call mustn't shift one VM's state onto another.
+    with {:ok, %{status: status, output: text}} when status in [0, 3, 4] <-
+           ForemanAgent.Runner.run("systemctl", args, timeout: 2_000),
+         states = String.split(text, "\n", trim: true),
+         true <- length(states) == length(ids) do
+      for {id, state} <- Enum.zip(ids, states), state in ~w(active reloading refreshing), do: id
+    else
+      _ -> Enum.filter(ids, &running?(&1, config))
+    end
+  end
+
+  @impl true
   def inventory_state(env_id, _config) do
     args = ["show", "--property=ActiveState,Result,ExecMainExitTimestamp", unit(env_id)]
     opts = [env: %{"TZ" => "UTC", "LC_ALL" => "C"}, timeout: 2_000]

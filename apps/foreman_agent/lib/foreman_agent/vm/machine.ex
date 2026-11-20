@@ -36,6 +36,9 @@ defmodule ForemanAgent.VM.Machine do
   @doc "Whether the VM is running."
   @callback running?(env_id :: String.t(), Config.t()) :: boolean()
 
+  @doc "The running subset of the given VM ids, for periodic box reports."
+  @callback running([String.t()], Config.t()) :: [String.t()]
+
   @doc """
   Pauses the VM, writes its memory and device state to `dir` (which
   mustn't exist yet), and stops it. On failure the VM carries on running.

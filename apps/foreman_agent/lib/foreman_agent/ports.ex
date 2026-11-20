@@ -25,7 +25,10 @@ defmodule ForemanAgent.Ports do
 
   require Logger
 
-  @listen "0A"
+  # sl, local address, remote address, TCP state, queues, timer, retransmits,
+  # uid, timeout, inode. Capture only the local endpoint and inode of LISTEN
+  # rows. Horizontal whitespace keeps a short row from consuming the next.
+  @listener ~r/^\h*\S+\h+(\S+)\h+\S+\h+0A\h+(?:\S+\h+){5}(\S+)/m
   # More than anyone runs by hand; keeps a misbehaving container from
   # filling the report.
   @max_ports 100
@@ -166,19 +169,13 @@ defmodule ForemanAgent.Ports do
   """
   @spec parse(String.t()) :: [map()]
   def parse(text) do
-    text
-    |> String.split("\n", trim: true)
-    |> Enum.flat_map(fn line ->
-      with [_sl, local, _remote, @listen, _, _, _, _, _, inode | _] <- String.split(line),
-           [addr, port] <- String.split(local, ":"),
-           {:ok, address} <- address(addr),
-           {port, ""} when port in 1..65_535 <- Integer.parse(port, 16),
-           {inode, ""} <- Integer.parse(inode) do
-        [%{address: address, port: port, inode: inode}]
-      else
-        _ -> []
-      end
-    end)
+    for [local, inode] <- Regex.scan(@listener, text, capture: :all_but_first),
+        [addr, port] <- [:binary.split(local, ":")],
+        {:ok, address} <- [address(addr)],
+        {port, ""} when port in 1..65_535 <- [Integer.parse(port, 16)],
+        {inode, ""} <- [Integer.parse(inode)] do
+      %{address: address, port: port, inode: inode}
+    end
   end
 
   defp address(hex) when byte_size(hex) in [8, 32] do

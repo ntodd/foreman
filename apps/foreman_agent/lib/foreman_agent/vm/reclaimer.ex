@@ -323,7 +323,7 @@ defmodule ForemanAgent.VM.Reclaimer do
     with {:ok, text} <- File.read(Path.join(config.proc, "meminfo")),
          [_, total] <- Regex.run(~r/^MemTotal:\s+(\d+) kB$/m, text),
          [_, available] <- Regex.run(~r/^MemAvailable:\s+(\d+) kB$/m, text) do
-      running = config |> VM.list() |> Enum.filter(&machine.running?(&1, config))
+      running = machine.running(VM.list(config), config)
 
       {:ok,
        %{

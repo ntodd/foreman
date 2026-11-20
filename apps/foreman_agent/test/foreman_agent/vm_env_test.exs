@@ -339,6 +339,18 @@ defmodule ForemanAgent.VMEnvTest do
     refute File.exists?(stale)
   end
 
+  test "listing a legacy VM needs no helper and only a host record can mark a prebuild", ctx do
+    paths = VM.paths(ctx.config, @env)
+    File.mkdir_p!(paths.dir)
+    File.write!(paths.legacy_meta, JSON.encode!(%{"slug" => "legacy", "kind" => "prebuild"}))
+
+    reader = Path.join(ctx.dir, "reader")
+    File.write!(reader, "#!/bin/sh\ntouch \"$0.called\"\n")
+    File.chmod!(reader, 0o700)
+    assert VM.list(%{ctx.config | node: reader}) == [@env]
+    refute File.exists?(reader <> ".called")
+  end
+
   test "a legacy VM gets its allocation from the start command", ctx do
     {:ok, _} = run(create(), ctx)
     {:ok, _} = run(command("env.stop"), ctx)

@@ -85,22 +85,27 @@ defmodule ForemanAgent.VM do
   """
   @spec list(Config.t(), :environments | :all) :: [String.t()]
   def list(config, which \\ :environments) do
-    all =
-      case File.ls(config.vm_root) do
-        {:ok, names} ->
-          Enum.filter(names, fn id ->
-            p = paths(config, id)
-            id =~ @uuid and (File.regular?(p.meta) or File.regular?(p.legacy_meta))
-          end)
-
-        {:error, _} ->
-          []
-      end
-
-    if which == :all, do: all, else: Enum.reject(all, &prebuild?(config, &1))
+    case File.ls(config.vm_root) do
+      {:ok, names} -> Enum.filter(names, &(&1 =~ @uuid and listed?(paths(config, &1), which)))
+      {:error, _} -> []
+    end
   end
 
-  defp prebuild?(config, id), do: match?({:ok, %{"kind" => "prebuild"}}, read_meta(config, id))
+  defp listed?(paths, which) do
+    case File.lstat(paths.meta) do
+      {:ok, %{type: :regular}} ->
+        which == :all or
+          not match?({:ok, %{"kind" => "prebuild"}}, decode_record(File.read(paths.meta)))
+
+      {:error, :enoent} ->
+        # Only a host-owned record can mark a prebuild. Listing an old VM
+        # doesn't need to start the protected reader to inspect its contents.
+        match?({:ok, %{type: :regular}}, File.lstat(paths.legacy_meta))
+
+      _ ->
+        false
+    end
+  end
 
   @doc "What the agent recorded about an environment's VM."
   @spec read_meta(Config.t(), String.t()) :: {:ok, map()} | {:error, :none}
