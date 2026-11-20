@@ -264,8 +264,8 @@ defmodule ForemanWeb.BoxLive.Show do
         <ForemanWeb.BoxCharts.usage box={@box} series={@series} envs={@env_series} latest={@latest} />
       </section>
 
-      <div class="grid gap-6 lg:grid-cols-[minmax(0,1fr)_20rem]">
-        <div class="min-w-0 space-y-6">
+      <div class="card-grid grid-cols-1 lg:grid-cols-[minmax(0,1fr)_20rem]">
+        <div class="card-grid min-w-0 grid-cols-1 content-start">
           <.panel title="Capacity">
             <:subtitle>
               <%= if @box.vm && @box.vm["default_cpus"] do %>
@@ -399,7 +399,7 @@ defmodule ForemanWeb.BoxLive.Show do
           </.panel>
         </div>
 
-        <aside class="space-y-6">
+        <aside class="card-grid min-w-0 grid-cols-1 content-start">
           <.panel title="Settings">
             <%= if Scope.admin?(@current_scope) do %>
               <.form for={@form} id="box-settings" phx-submit="save" class="space-y-4">

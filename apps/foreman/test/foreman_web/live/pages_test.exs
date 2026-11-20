@@ -28,8 +28,15 @@ defmodule ForemanWeb.PagesTest do
           "/admin/users",
           "/admin/audit"
         ] do
-      {:ok, _view, html} = live(conn, path)
+      {:ok, view, html} = live(conn, path)
       assert html =~ "Foreman", "#{path} didn't render"
+
+      # One gutter between a page's sections, and none of the older, wider ones.
+      assert has_element?(view, "main > div.card-grid"), "#{path} isn't on the card grid"
+
+      for wide <- ~w(space-y-6 gap-6) do
+        refute has_element?(view, "main .#{wide}"), "#{path} still has a #{wide} gutter"
+      end
     end
   end
 

@@ -194,7 +194,7 @@ defmodule ForemanWeb.EnvironmentLive.New do
         id="new-environment"
         phx-change="change"
         phx-submit="create"
-        class="space-y-6"
+        class="card-grid grid-cols-1"
       >
         <.panel>
           <div class="space-y-5">

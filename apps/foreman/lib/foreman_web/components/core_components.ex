@@ -801,7 +801,7 @@ defmodule ForemanWeb.CoreComponents do
 
   def header(assigns) do
     ~H"""
-    <header class={["flex flex-wrap items-end justify-between gap-x-6 gap-y-3 pb-4", @class]}>
+    <header class={["flex flex-wrap items-end justify-between gap-x-6 gap-y-3", @class]}>
       <div class="min-w-0">
         <h1 class="text-2xl/8 font-semibold tracking-[-0.02em] text-ink">
           {render_slot(@inner_block)}

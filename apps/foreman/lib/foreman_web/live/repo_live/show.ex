@@ -215,7 +215,7 @@ defmodule ForemanWeb.RepoLive.Show do
 
       <.callout :if={@repo.devcontainer_error} kind="warning">{@repo.devcontainer_error}</.callout>
 
-      <div class="grid items-start gap-6 lg:grid-cols-2">
+      <div class="card-grid grid-cols-1 items-start lg:grid-cols-2">
         <.panel title="Environments">
           <ul :if={@environments != []} class="-m-5 divide-y divide-line">
             <li

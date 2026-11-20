@@ -19,8 +19,6 @@ defmodule ForemanWeb.Layouts do
     values: ~w(narrow wide full),
     doc: "content width; full suits logs and tables"
 
-  attr :content_class, :string, default: "space-y-6", doc: "layout of signed-in page sections"
-
   slot :breadcrumb do
     attr :navigate, :string
   end
@@ -155,7 +153,7 @@ defmodule ForemanWeb.Layouts do
 
         <main class="flex-1 px-4 py-6 sm:px-6 sm:py-8 lg:px-8">
           <div class={[
-            @content_class,
+            "card-grid grid-cols-1",
             @width == "narrow" && "mx-auto max-w-2xl",
             @width == "wide" && "mx-auto max-w-5xl",
             @width == "full" && "w-full"

@@ -648,7 +648,7 @@ progress.bar.bar-muted { color: var(--color-line-strong); }
   box-shadow: var(--shadow-xs);
 }
 
-/* One gutter for rows, columns and nested stacks on the fleet pages. */
+/* One gutter for rows, columns and nested stacks on every page. */
 @utility card-grid {
   display: grid;
   gap: --spacing(4);

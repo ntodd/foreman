@@ -187,11 +187,10 @@ defmodule ForemanWeb.BoxLive.Index do
       current_scope={@current_scope}
       current_path={@current_path}
       width="full"
-      content_class="card-grid grid-cols-1"
     >
       <:breadcrumb>Boxes</:breadcrumb>
 
-      <.header class="pb-0!">
+      <.header>
         Boxes
         <:subtitle>
           Machines running the Foreman agent. The agent dials out, so boxes need no open ports.

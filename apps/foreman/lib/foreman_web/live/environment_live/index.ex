@@ -454,7 +454,6 @@ defmodule ForemanWeb.EnvironmentLive.Index do
       current_scope={@current_scope}
       current_path={@current_path}
       width="full"
-      content_class="card-grid grid-cols-1"
     >
       <:breadcrumb>Environments</:breadcrumb>
       <:actions>
