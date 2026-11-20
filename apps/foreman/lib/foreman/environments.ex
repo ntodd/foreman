@@ -1167,6 +1167,19 @@ defmodule Foreman.Environments do
 
   defp reconcile(_env, _observed), do: :ok
 
+  @doc "Remembers the most recent VM out-of-memory kill reported by its box."
+  def record_vm_oom(box_id, env_id, unix) do
+    with {:ok, at} <- DateTime.from_unix(unix) do
+      query =
+        from e in Environment,
+          where: e.id == ^env_id and e.box_id == ^box_id and is_nil(e.destroyed_at),
+          where: is_nil(e.last_vm_oom_at) or e.last_vm_oom_at < ^at
+
+      if {1, nil} == Repo.update_all(query, set: [last_vm_oom_at: at]),
+        do: broadcast(%{id: env_id})
+    end
+  end
+
   @doc "Records a state change an agent noticed (a container stopped, say)."
   def observe(box_id, env_id, state) do
     case Repo.get(Environment, env_id) do

@@ -458,8 +458,9 @@ These are accepted for now, or need someone to try them:
     limits, so one runaway environment can't take the whole box (before
     environment VMs there were no limits by default). Their sum can
     still be more than the box has: the box's capacity setting decides
-    whether placement allows that, and a box that runs out of memory has
-    the kernel kill a process to make room, quite likely a VM. Data disks
+    whether placement allows that. The VM slice defaults to 90% of host
+    RAM. The kernel can kill a VM under pressure within that budget;
+    the environment page records the last OOM kill reported by the box. Data disks
     are sparse, so they can promise more than `/srv/foreman` holds. Some
     of the box's shared resources have no per-VM limit at all, the
     connection tracking table among them.

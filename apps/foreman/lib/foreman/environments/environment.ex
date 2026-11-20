@@ -20,6 +20,7 @@ defmodule Foreman.Environments.Environment do
     field :branch, :string
     field :desired_state, :string, default: "running"
     field :observed_state, :string, default: "pending"
+    field :last_vm_oom_at, :utc_datetime
     field :status_message, :string
     field :vm_size, :map
     field :cpu_limit, :float

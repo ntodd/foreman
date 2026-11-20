@@ -61,6 +61,40 @@ defmodule ForemanAgent.VM.Machine.Cloud do
   end
 
   @impl true
+  def inventory_state(env_id, _config) do
+    args = ["show", "--property=ActiveState,Result,ExecMainExitTimestamp", unit(env_id)]
+    opts = [env: %{"TZ" => "UTC", "LC_ALL" => "C"}, timeout: 2_000]
+
+    case ForemanAgent.Runner.run("systemctl", args, opts) do
+      {:ok, %{status: 0, output: text}} -> unit_state(text)
+      _ -> :stopped
+    end
+  end
+
+  defp unit_state(text) do
+    properties = String.split(text, "\n")
+
+    cond do
+      "ActiveState=active" in properties or "ActiveState=reloading" in properties -> :running
+      "Result=oom-kill" in properties -> oom_exit(text)
+      true -> :stopped
+    end
+  end
+
+  defp oom_exit(text) do
+    with [_, date, time] <-
+           Regex.run(
+             ~r/^ExecMainExitTimestamp=\w+ (\d{4}-\d{2}-\d{2}) (\d{2}:\d{2}:\d{2}) UTC$/m,
+             text
+           ),
+         {:ok, at, 0} <- DateTime.from_iso8601("#{date}T#{time}Z") do
+      {:oom_kill, DateTime.to_unix(at)}
+    else
+      _ -> :stopped
+    end
+  end
+
+  @impl true
   def snapshot(env_id, dir, config) do
     # Paused already by a suspend that was cut short: pausing again fails.
     _ = unpause(env_id, config)

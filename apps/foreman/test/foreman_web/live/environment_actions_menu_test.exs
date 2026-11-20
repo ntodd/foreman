@@ -14,6 +14,18 @@ defmodule ForemanWeb.EnvironmentActionsMenuTest do
     %{env: env, box: box}
   end
 
+  test "the last VM OOM remains visible after the VM is running again", %{
+    conn: conn,
+    env: env,
+    box: box
+  } do
+    {:ok, view, _} = live(conn, ~p"/environments/#{env.id}")
+    refute has_element?(view, "#vm-oom")
+    Foreman.Environments.record_vm_oom(box.id, env.id, 1_735_689_600)
+    assert has_element?(view, "#vm-oom", "memory pressure")
+    assert has_element?(view, "#vm-oom-at[datetime='2025-01-01T00:00:00Z']")
+  end
+
   test "offers both rebuilds and says what each does", %{conn: conn, env: env} do
     {:ok, view, _html} = live(conn, ~p"/environments/#{env.id}")
 

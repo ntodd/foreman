@@ -115,10 +115,18 @@ defmodule ForemanAgent.Reporter do
     %{state | cpu: cpu}
   end
 
+  # Keep the existing inventory readable by older control planes. Deliver
+  # the cause before reconciliation can restart the VM and reset its unit.
+  defp report_inventory(envs) do
+    kills = for %{env_id: id, oom_killed_at: at} <- envs, into: %{}, do: {id, at}
+    if map_size(kills) > 0, do: push("box.vm_oom", %{environments: kills})
+    push("box.inventory", %{environments: Enum.map(envs, &Map.delete(&1, :oom_killed_at))})
+  end
+
   defp inventory(state) do
     case Handler.inventory() do
       {:ok, envs} ->
-        if envs != state.last, do: push("box.inventory", %{environments: envs})
+        if envs != state.last, do: report_inventory(envs)
 
         states = Map.new(envs, &{&1.env_id, &1.state})
 

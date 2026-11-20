@@ -25,6 +25,10 @@ export E2E_CP_IMAGE="$project-cp" E2E_BOX_IMAGE="$project-box"
 mkdir -p "$work"
 touch "$work/env"
 compose="docker compose -p $project -f e2e/linux/compose.yml --env-file $work/env"
+if [ "${E2E_CREW_CACHE:-}" = 1 ]; then
+  sh e2e/crew-cache.sh box > "$work/crew-cache.yml"
+  compose="$compose -f $work/crew-cache.yml"
+fi
 
 case "${1:-}" in
   --down)
