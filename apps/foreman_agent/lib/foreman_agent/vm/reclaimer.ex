@@ -277,10 +277,10 @@ defmodule ForemanAgent.VM.Reclaimer do
       )
 
   defp log(id, {:error, reason}) when is_binary(reason),
-    do: Logger.warning("couldn't reclaim #{id}'s page cache: #{reason}")
+    do: Logger.warning("couldn't reclaim memory from #{id}: #{reason}")
 
   defp log(id, {:error, reason}),
-    do: Logger.warning("couldn't reclaim #{id}'s page cache: #{inspect(reason)}")
+    do: Logger.warning("couldn't reclaim memory from #{id}: #{inspect(reason)}")
 
   @doc """
   Takes outcomes in at `now`. A VM that reclaimed settles, and nothing
