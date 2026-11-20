@@ -10,8 +10,9 @@ defmodule Foreman.Metrics do
   """
   import Ecto.Query
 
+  alias Foreman.Environments.Environment
   alias Foreman.Metrics.{BoxMetric, EnvMetric}
-  alias Foreman.Repo
+  alias Foreman.{Repo, Scope}
 
   @ranges [
     {"15m", 15 * 60},
@@ -137,12 +138,31 @@ defmodule Foreman.Metrics do
   Each series is `%{env_id, slug, cpu: [{at, percent}], memory: [{at, mb}]}`.
   """
   def env_series(box_id, range, now \\ System.system_time(:second)) do
+    env_series(EnvMetric, box_id, range, now)
+  end
+
+  @doc "History visible on a box's page, including a member's own destroyed environments."
+  def visible_env_series(%Scope{} = scope, box_id, range, now) do
+    query =
+      if Scope.admin?(scope) do
+        EnvMetric
+      else
+        from m in EnvMetric,
+          join: e in Environment,
+          on: e.id == m.env_id and e.box_id == m.box_id,
+          where: e.user_id == ^Scope.user_id(scope)
+      end
+
+    env_series(query, box_id, range, now)
+  end
+
+  defp env_series(query, box_id, range, now) do
     # Environment samples come every 30 seconds.
     step = max(step(range), 30)
     since = now - range_seconds(range)
 
     rows =
-      from(m in EnvMetric,
+      from(m in query,
         where: m.box_id == ^box_id and m.at > ^since,
         group_by: [m.env_id, fragment("bucket")],
         order_by: fragment("bucket"),
