@@ -625,8 +625,8 @@ defmodule ForemanWeb.EnvironmentLive.Show do
         {warning}
       </.callout>
 
-      <div class="grid gap-6 lg:grid-cols-[minmax(0,1fr)_20rem]">
-        <div class="min-w-0 space-y-6">
+      <div class="card-grid grid-cols-1 lg:grid-cols-[minmax(0,1fr)_20rem]">
+        <div class="card-grid min-w-0 grid-cols-1 content-start">
           <.panel title="Connect" id="connect">
             <div :if={@env.remote_user} class="space-y-4">
               <.command
@@ -727,7 +727,7 @@ defmodule ForemanWeb.EnvironmentLive.Show do
           />
         </div>
 
-        <aside class="space-y-6">
+        <aside class="card-grid min-w-0 grid-cols-1 content-start">
           <.panel title="Details">
             <dl class="space-y-2.5">
               <.fact term="Owner">{@env.user.login}</.fact>

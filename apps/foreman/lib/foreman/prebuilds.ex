@@ -52,6 +52,25 @@ defmodule Foreman.Prebuilds do
   end
 
   @doc """
+  For each of `repos`, on how many of the boxes `box_ids` a new
+  environment of its default branch starts from a prebuild, by repo id.
+  A repo with none is left out.
+  """
+  def ready_box_counts([], _box_ids), do: %{}
+
+  def ready_box_counts(repos, box_ids) do
+    by_id = Map.new(repos, &{&1.id, &1})
+
+    from(p in Prebuild,
+      where: p.repo_id in ^Map.keys(by_id) and p.box_id in ^box_ids and p.status == "ready"
+    )
+    |> Repo.all()
+    |> Enum.filter(&is_nil(unused_because(by_id[&1.repo_id], &1)))
+    |> Enum.uniq_by(&{&1.repo_id, &1.box_id})
+    |> Enum.frequencies_by(& &1.repo_id)
+  end
+
+  @doc """
   Why new environments of `repo`'s default branch won't start from a
   prebuild: `{:config, path}` when it's of a devcontainer config the repo
   no longer uses, `{:branch, branch}` when it's of another branch, and nil

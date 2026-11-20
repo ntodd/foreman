@@ -108,7 +108,13 @@ defmodule ForemanWeb.SettingsLive do
         </:subtitle>
       </.header>
 
-      <.form for={@form} id="preferences" phx-change="validate" phx-submit="save" class="space-y-6">
+      <.form
+        for={@form}
+        id="preferences"
+        phx-change="validate"
+        phx-submit="save"
+        class="card-grid grid-cols-1"
+      >
         <.panel title="Git identity">
           <:subtitle>
             Written to /run/foreman/gitconfig, which every process in the environment reads.
@@ -147,7 +153,12 @@ defmodule ForemanWeb.SettingsLive do
         </div>
       </.form>
 
-      <.form for={@features_form} id="features" phx-submit="save_features" class="mt-6">
+      <.form
+        for={@features_form}
+        id="features"
+        phx-submit="save_features"
+        class="card-grid grid-cols-1"
+      >
         <.panel title="Devcontainer features">
           <:subtitle>
             Added to every environment you create, in any repo, as devcontainer.json's
@@ -168,7 +179,7 @@ defmodule ForemanWeb.SettingsLive do
           </p>
         </.panel>
 
-        <div class="mt-6 flex justify-end">
+        <div class="flex justify-end">
           <.button type="submit" variant="primary">Save features</.button>
         </div>
       </.form>

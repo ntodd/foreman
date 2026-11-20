@@ -1,11 +1,15 @@
 defmodule ForemanWeb.BoxLive.Index do
-  @moduledoc "Boxes: their status and capacity, and (admins) adding new ones."
+  @moduledoc """
+  Boxes: the fleet's totals, a card per box with its status, its last
+  half hour of CPU and memory and what's provisioned on it, and (admins)
+  adding new ones.
+  """
   use ForemanWeb, :live_view
 
   import ForemanWeb.ForemanComponents
 
   alias Foreman.{Accounts, Boxes, Capacity, Environments, Metrics, Scope}
-  alias ForemanWeb.BoxCharts
+  alias ForemanWeb.{BoxCharts, Fleet}
 
   # The cards' trend lines cover the last half hour, redrawn this often.
   @trend_range "30m"
@@ -191,111 +195,36 @@ defmodule ForemanWeb.BoxLive.Index do
         <:subtitle>
           Machines running the Foreman agent. The agent dials out, so boxes need no open ports.
         </:subtitle>
+        <:actions>
+          <span
+            :if={@boxes != []}
+            id="boxes-live"
+            class="mr-1 inline-flex items-center gap-1.5 text-xs text-ink-3"
+            title="Usage updates as the boxes report it"
+          >
+            <span class="size-1.5 rounded-full bg-success motion-safe:animate-status-pulse" /> Live
+          </span>
+          <.button
+            :if={Scope.admin?(@current_scope)}
+            href="#add-box"
+            variant="primary"
+            size="sm"
+            icon="hero-plus"
+          >
+            Add box
+          </.button>
+        </:actions>
       </.header>
 
-      <div :if={@boxes != []} class="grid gap-4 md:grid-cols-2 2xl:grid-cols-3">
-        <.link
-          :for={card <- @boxes}
-          navigate={~p"/boxes/#{card.box.id}"}
-          id={"box-#{card.box.id}"}
-          class={[
-            "rounded-xl border bg-raised p-5 shadow-xs transition-shadow hover:shadow-raised",
-            if(Foreman.Boxes.vm_problem(card.box) == nil,
-              do: "border-line",
-              else: "border-danger/50 ring-1 ring-danger/30"
-            )
-          ]}
-        >
-          <div class="mb-4 flex items-start justify-between gap-3">
-            <div class="min-w-0">
-              <p class="truncate text-[15px] font-semibold text-ink">{card.box.name}</p>
-              <p class="truncate text-xs text-ink-3">
-                {card.box.hostname || "never connected"}<span :if={card.box.agent_version}> · agent {card.box.agent_version}</span><span :if={
-                  card.box.owner_user
-                }> · {card.box.owner_user.login}</span>
-              </p>
-            </div>
-            <div class="flex items-center gap-1.5">
-              <.box_vm_badge box={card.box} />
-              <.box_firewall_badge box={card.box} />
-              <.box_reboot_badge box={card.box} />
-              <.badge :if={card.summary.contention} color="amber" size="sm">Contention</.badge>
-              <.box_status online={card.online} />
-            </div>
-          </div>
-          <div :if={card.latest} class="mb-4 grid gap-4 sm:grid-cols-2">
-            <div data-metric="cpu">
-              <p class="flex items-baseline justify-between gap-2 text-xs">
-                <span class="text-ink-2">CPU</span>
-                <span class="font-semibold text-ink">{BoxCharts.pct(card.latest.cpu)}</span>
-              </p>
-              <ForemanWeb.Charts.sparkline
-                points={Enum.map(card.trend.points, &{&1.at, &1.cpu})}
-                since={card.trend.since}
-                until={card.trend.until}
-                ymax={cpu_scale(card.trend.points)}
-                gap={card.trend.step * 3}
-                class="mt-1.5 h-10 w-full"
-              />
-            </div>
-            <div data-metric="memory">
-              <p class="flex items-baseline justify-between gap-2 text-xs">
-                <span class="text-ink-2">Memory</span>
-                <span class="font-semibold text-ink">
-                  {:erlang.float_to_binary(card.latest.memory_used / 1024, decimals: 1)} of {BoxCharts.gib(
-                    card.latest.memory_total
-                  )}
-                </span>
-              </p>
-              <ForemanWeb.Charts.sparkline
-                points={Enum.map(card.trend.points, &{&1.at, &1.memory_used})}
-                since={card.trend.since}
-                until={card.trend.until}
-                ymax={max(card.latest.memory_total, 1)}
-                gap={card.trend.step * 3}
-                class="mt-1.5 h-10 w-full"
-              />
-            </div>
-          </div>
-          <div class="grid gap-3 sm:grid-cols-2">
-            <.capacity_bar
-              :if={is_nil(card.latest)}
-              label="CPU used"
-              value={card.summary.used_cpus}
-              max={card.summary.cpus}
-              unit=" cores"
-              threshold={Capacity.used_threshold(card.box.cpu_threshold)}
-            />
-            <.capacity_bar
-              label="CPU provisioned"
-              value={card.summary.provisioned_cpus}
-              max={card.summary.cpus}
-              unit=" cores"
-              threshold={card.box.cpu_threshold}
-            />
-            <.capacity_bar
-              :if={is_nil(card.latest)}
-              label="Memory used"
-              value={card.summary.used_memory_mb}
-              max={card.summary.memory_mb}
-              unit=" GiB"
-              format={&gib/1}
-              threshold={Capacity.used_threshold(card.box.memory_threshold)}
-            />
-            <.capacity_bar
-              label="Memory provisioned"
-              value={card.summary.provisioned_memory_mb}
-              max={card.summary.memory_mb}
-              unit=" GiB"
-              format={&gib/1}
-              threshold={card.box.memory_threshold}
-            />
-          </div>
-          <p class="mt-4 text-xs text-ink-3">
-            {card.count} {if card.count == 1, do: "environment", else: "environments"} · placement: {card.box.capacity_policy}
-          </p>
-        </.link>
-      </div>
+      <section :if={@boxes != []} id="fleet" aria-label="Fleet" class="@container">
+        <.totals totals={Fleet.totals(@boxes)} />
+      </section>
+
+      <section :if={@boxes != []} aria-label="Boxes" class="@container">
+        <div id="boxes-grid" class={["card-grid", grid_cols(length(@boxes))]}>
+          <.box_card :for={card <- @boxes} card={card} />
+        </div>
+      </section>
 
       <.panel :if={@boxes == []}>
         <.empty_state id="no-boxes" icon="hero-server-stack" title="No boxes yet">
@@ -420,6 +349,203 @@ defmodule ForemanWeb.BoxLive.Index do
         <% end %>
       </.panel>
     </Layouts.app>
+    """
+  end
+
+  # -- the fleet ----------------------------------------------------------------------
+
+  attr :totals, :map, required: true
+
+  defp totals(assigns) do
+    ~H"""
+    <div class="card-grid grid-cols-2 @4xl:grid-cols-4">
+      <.stat_card icon="hero-server-stack" id="fleet-boxes" label="Boxes online">
+        {@totals.online} <span class="text-base font-medium text-ink-3">of {@totals.boxes}</span>
+        <:note>
+          <span :if={@totals.attention > 0} class="inline-flex items-center gap-1 text-warning">
+            <.icon name="hero-exclamation-triangle-micro" class="size-3.5" />
+            {@totals.attention} {if @totals.attention == 1, do: "needs", else: "need"} attention
+          </span>
+          <span :if={@totals.attention == 0} class="inline-flex items-center gap-1 text-success">
+            <.icon name="hero-check-circle-micro" class="size-3.5" /> All healthy
+          </span>
+        </:note>
+      </.stat_card>
+      <.stat_card icon="hero-cpu-chip" id="fleet-cores" label="Cores">
+        {Fleet.cores(@totals.cpus)}
+        <:detail>
+          <span>
+            <span class="font-medium tabular-nums text-ink">{Fleet.cores(@totals.provisioned_cpus)}</span>
+            provisioned
+          </span>
+          <span>
+            <span class="font-medium tabular-nums text-ink">{Fleet.cores(@totals.used_cpus)}</span>
+            in use
+          </span>
+        </:detail>
+        <:note>On the online boxes</:note>
+      </.stat_card>
+      <.stat_card icon="hero-square-3-stack-3d" id="fleet-memory" label="Memory">
+        {gib(@totals.memory_mb)} <span class="text-base font-medium text-ink-3">GiB</span>
+        <:detail>
+          <span>
+            <span class="font-medium tabular-nums text-ink">{gib(@totals.provisioned_memory_mb)} GiB</span>
+            provisioned
+          </span>
+          <span>
+            <span class="font-medium tabular-nums text-ink">{gib(@totals.used_memory_mb)} GiB</span>
+            in use
+          </span>
+        </:detail>
+        <:note>On the online boxes</:note>
+      </.stat_card>
+      <.stat_card icon="hero-cube" id="fleet-environments" label="Environments">
+        {@totals.environments}
+        <:detail :if={@totals.disk_free_mb}>
+          <span>
+            <span class="font-medium tabular-nums text-ink">{gib(@totals.disk_free_mb)} GiB</span>
+            of disk free
+          </span>
+        </:detail>
+        <:note>
+          On {@totals.boxes} {if @totals.boxes == 1, do: "box", else: "boxes"}
+        </:note>
+      </.stat_card>
+    </div>
+    """
+  end
+
+  # -- a box ---------------------------------------------------------------------------
+
+  # Three or four boxes fill a row on a wide screen; one or two get wider
+  # cards, which lay out their trends beside what's provisioned.
+  defp grid_cols(1), do: "grid-cols-1"
+  defp grid_cols(2), do: "grid-cols-1 @3xl:grid-cols-2"
+  defp grid_cols(3), do: "grid-cols-1 @2xl:grid-cols-2 @5xl:grid-cols-3"
+  defp grid_cols(4), do: "grid-cols-1 @2xl:grid-cols-2 @7xl:grid-cols-4"
+  defp grid_cols(_), do: "grid-cols-1 @2xl:grid-cols-2 @5xl:grid-cols-3 @[100rem]:grid-cols-4"
+
+  attr :card, :map, required: true
+
+  defp box_card(assigns) do
+    # Being offline is the status badge's to say; the rest get a row of their own.
+    alerts = Enum.any?(Fleet.issues(assigns.card), &(&1.role != "offline"))
+    assigns = assign(assigns, id: "box-#{assigns.card.box.id}", alerts: alerts)
+
+    ~H"""
+    <.link
+      navigate={~p"/boxes/#{@card.box.id}"}
+      id={@id}
+      class={[
+        "@container flex flex-col rounded-xl border bg-raised shadow-xs transition-colors",
+        if(Foreman.Boxes.vm_problem(@card.box) == nil,
+          do: "border-line hover:border-line-strong",
+          else: "border-danger/50 ring-1 ring-danger/30"
+        )
+      ]}
+    >
+      <div class="flex items-start justify-between gap-3 px-5 pt-4">
+        <div class="min-w-0">
+          <p class="truncate font-semibold text-ink">{@card.box.name}</p>
+          <p class="mt-0.5 truncate text-xs text-ink-3">
+            {@card.box.hostname || "never connected"}<span :if={@card.box.agent_version}> · agent {@card.box.agent_version}</span><span :if={
+              @card.box.owner_user
+            }> · {@card.box.owner_user.login}</span>
+          </p>
+        </div>
+        <.box_status online={@card.online} />
+      </div>
+
+      <div :if={@alerts} id={"#{@id}-issues"} class="mt-3 flex flex-wrap items-center gap-1.5 px-5">
+        <.box_vm_badge box={@card.box} />
+        <.box_firewall_badge box={@card.box} />
+        <.box_reboot_badge box={@card.box} />
+        <.badge :if={@card.summary.contention} color="amber" size="sm">Contention</.badge>
+      </div>
+
+      <div class="grid flex-1 content-start gap-x-8 gap-y-4 px-5 py-4 @3xl:grid-cols-[minmax(0,3fr)_minmax(0,2fr)]">
+        <div :if={@card.latest} class="grid grid-cols-2 gap-4">
+          <div data-metric="cpu">
+            <p class="flex items-baseline justify-between gap-2 text-xs">
+              <span class="text-ink-2">CPU</span>
+              <span class="font-semibold tabular-nums text-ink">{BoxCharts.pct(@card.latest.cpu)}</span>
+            </p>
+            <ForemanWeb.Charts.sparkline
+              points={Enum.map(@card.trend.points, &{&1.at, &1.cpu})}
+              since={@card.trend.since}
+              until={@card.trend.until}
+              ymax={cpu_scale(@card.trend.points)}
+              gap={@card.trend.step * 3}
+              class="mt-2 h-12 w-full @3xl:h-20"
+            />
+          </div>
+          <div data-metric="memory">
+            <p class="flex items-baseline justify-between gap-2 text-xs">
+              <span class="text-ink-2">Memory</span>
+              <span class="truncate font-semibold tabular-nums text-ink">
+                {:erlang.float_to_binary(@card.latest.memory_used / 1024, decimals: 1)}
+                <span class="font-normal text-ink-3">of {BoxCharts.gib(@card.latest.memory_total)}</span>
+              </span>
+            </p>
+            <ForemanWeb.Charts.sparkline
+              points={Enum.map(@card.trend.points, &{&1.at, &1.memory_used})}
+              since={@card.trend.since}
+              until={@card.trend.until}
+              ymax={max(@card.latest.memory_total, 1)}
+              gap={@card.trend.step * 3}
+              class="mt-2 h-12 w-full @3xl:h-20"
+            />
+          </div>
+        </div>
+        <%!-- A box that hasn't sent host metrics shows what its environments use instead. --%>
+        <div :if={is_nil(@card.latest)} class="grid grid-cols-2 gap-4">
+          <.capacity_bar
+            label="CPU used"
+            value={@card.summary.used_cpus}
+            max={@card.summary.cpus}
+            unit=" cores"
+            threshold={Capacity.used_threshold(@card.box.cpu_threshold)}
+          />
+          <.capacity_bar
+            label="Memory used"
+            value={@card.summary.used_memory_mb}
+            max={@card.summary.memory_mb}
+            unit=" GiB"
+            format={&gib/1}
+            threshold={Capacity.used_threshold(@card.box.memory_threshold)}
+          />
+        </div>
+
+        <div class="space-y-3">
+          <.capacity_bar
+            label="CPU provisioned"
+            value={@card.summary.provisioned_cpus}
+            max={@card.summary.cpus}
+            unit=" cores"
+            threshold={@card.box.cpu_threshold}
+          />
+          <.capacity_bar
+            label="Memory provisioned"
+            value={@card.summary.provisioned_memory_mb}
+            max={@card.summary.memory_mb}
+            unit=" GiB"
+            format={&gib/1}
+            threshold={@card.box.memory_threshold}
+          />
+        </div>
+      </div>
+
+      <p id={"#{@id}-summary"} class="border-t border-line px-5 py-2.5 text-xs text-ink-3">
+        {Fleet.cores(@card.summary.cpus)} cores · {gib(@card.summary.memory_mb)} GiB · {@card.count} {if @card.count ==
+                                                                                                           1,
+                                                                                                         do:
+                                                                                                           "environment",
+                                                                                                         else:
+                                                                                                           "environments"} · placement: {@card.box.capacity_policy}<span :if={
+          is_number(@card.summary.disk_free_mb)
+        }> · {gib(@card.summary.disk_free_mb)} GiB of disk free</span>
+      </p>
+    </.link>
     """
   end
 

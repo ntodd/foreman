@@ -262,6 +262,28 @@ if personal do
   Repo.delete_all(from b in Box, where: b.owner_user_id in ^others)
 end
 
+# Prebuilds: storefront is ready on mona's box and building on jordan's,
+# and api is ready on both of the others.
+prebuild = fn repo, b, status, minutes, size_mb ->
+  Repo.insert!(%Foreman.Prebuilds.Prebuild{
+    repo_id: repo.id,
+    box_id: b.id,
+    branch: repo.default_branch,
+    config_path: repo.devcontainer_path,
+    status: status,
+    size_mb: size_mb,
+    built_at: if(status == "ready", do: ago.(minutes))
+  })
+end
+
+prebuild.(storefront, desktop, "ready", 60 * 20, 3_890)
+
+if not personal do
+  prebuild.(storefront, box_a, "building", 3, nil)
+  prebuild.(api, box_a, "ready", 60 * 50, 1_420)
+  prebuild.(api, box_b, "ready", 60 * 49, 1_390)
+end
+
 # Stand-in agents: registered like a connected agent's channel process, so
 # the boxes show as online. They drop whatever is sent to them.
 for b <- if(personal, do: [desktop], else: [desktop, box_a, box_b]) do

@@ -153,7 +153,7 @@ defmodule ForemanWeb.Layouts do
 
         <main class="flex-1 px-4 py-6 sm:px-6 sm:py-8 lg:px-8">
           <div class={[
-            "space-y-6",
+            "card-grid grid-cols-1",
             @width == "narrow" && "mx-auto max-w-2xl",
             @width == "wide" && "mx-auto max-w-5xl",
             @width == "full" && "w-full"

@@ -1,15 +1,17 @@
 defmodule ForemanWeb.RepoLive.Show do
   @moduledoc """
-  One repo: its environments, your git identity and dotfiles overrides
-  for it, which of your own devcontainer features go on it, and (admins)
-  its token scope, Tailscale tags, default limits, repo-level secrets and
-  prebuilds.
+  One repo: a summary of its environments, their size, its token and its
+  prebuilds, then its environments and (admins) its token scope,
+  Tailscale tags, default limits, prebuilds and repo-level secrets.
+  Beside them: its details, your git identity and dotfiles overrides for
+  it, and which of your own devcontainer features go on it.
   """
   use ForemanWeb, :live_view
 
   import ForemanWeb.ForemanComponents
 
   alias Foreman.{Accounts, Boxes, Environments, Prebuilds, Repos, Scope}
+  alias ForemanWeb.Fleet
   alias Foreman.Repos.TokenPermissions
   alias ForemanProtocol.Feature
 
@@ -18,8 +20,7 @@ defmodule ForemanWeb.RepoLive.Show do
     repo = Repos.get_repo!(id)
     user = socket.assigns.current_scope.user
     setting = Accounts.get_repo_setting(user, repo)
-    admin? = Scope.admin?(socket.assigns.current_scope)
-    if admin? and connected?(socket), do: Prebuilds.subscribe(repo.id)
+    if connected?(socket), do: Prebuilds.subscribe(repo.id)
 
     {:ok,
      socket
@@ -37,13 +38,11 @@ defmodule ForemanWeb.RepoLive.Show do
        Environments.list_environments(socket.assigns.current_scope)
        |> Enum.filter(&(&1.repo_id == repo.id))
      )
-     |> assign_prebuilds(admin?)}
+     |> assign_prebuilds()}
   end
 
-  defp assign_prebuilds(socket, admin? \\ true)
-  defp assign_prebuilds(socket, false), do: assign(socket, prebuild_boxes: [], prebuilds: %{})
-
-  defp assign_prebuilds(socket, true) do
+  # Everyone sees how many of their boxes have a prebuild; admins manage them.
+  defp assign_prebuilds(socket) do
     socket
     |> assign(:prebuild_boxes, Boxes.list_boxes(socket.assigns.current_scope))
     |> assign(:prebuilds, Prebuilds.by_box(socket.assigns.repo))
@@ -190,7 +189,12 @@ defmodule ForemanWeb.RepoLive.Show do
   @impl true
   def render(assigns) do
     ~H"""
-    <Layouts.app flash={@flash} current_scope={@current_scope} current_path={@current_path}>
+    <Layouts.app
+      flash={@flash}
+      current_scope={@current_scope}
+      current_path={@current_path}
+      width="full"
+    >
       <:breadcrumb navigate={~p"/repos"}>Repos</:breadcrumb>
       <:breadcrumb>{@repo.full_name}</:breadcrumb>
       <:actions>
@@ -215,187 +219,334 @@ defmodule ForemanWeb.RepoLive.Show do
 
       <.callout :if={@repo.devcontainer_error} kind="warning">{@repo.devcontainer_error}</.callout>
 
-      <div class="grid items-start gap-6 lg:grid-cols-2">
-        <.panel title="Environments">
-          <ul :if={@environments != []} class="-m-5 divide-y divide-line">
-            <li
-              :for={env <- @environments}
-              class="flex items-center justify-between gap-2 px-5 py-2.5"
-            >
-              <.link
-                navigate={~p"/environments/#{env.id}"}
-                class="font-mono text-sm font-medium text-ink hover:text-accent-ink"
-              >{env.slug}</.link>
-              <.state_badge state={env.observed_state} size="sm" />
-            </li>
-          </ul>
-          <p :if={@environments == []} class="text-sm text-ink-3">None of yours.</p>
-        </.panel>
-
-        <.panel title="Your git identity and dotfiles here">
-          <:subtitle>
-            Overrides your defaults for this repo only. Empty fields use the defaults from Settings.
-          </:subtitle>
-          <.form for={@override_form} id="override-form" phx-submit="save_override" class="space-y-3">
-            <div class="grid gap-3 sm:grid-cols-2">
-              <.input
-                field={@override_form[:git_name]}
-                label="Git name"
-                placeholder={@current_scope.user.git_name || @current_scope.user.name}
-              />
-              <.input
-                field={@override_form[:git_email]}
-                label="Git email"
-                placeholder={@current_scope.user.git_email}
-              />
-            </div>
-            <.input
-              field={@override_form[:dotfiles_repository]}
-              label="Dotfiles repo"
-              placeholder={
-                @current_scope.user.dotfiles_repository || "https://github.com/you/dotfiles.git"
-              }
-            />
-            <.input
-              field={@override_form[:dotfiles_install_command]}
-              label="Dotfiles install command"
-              placeholder="./install.sh"
-            />
-            <.input
-              field={@override_form[:dotfiles_target_path]}
-              label="Clone dotfiles to"
-              placeholder={@current_scope.user.dotfiles_target_path || "~/dotfiles"}
-            />
-            <.button type="submit" size="sm">Save</.button>
-          </.form>
-          <p :if={user_features(@current_scope) == []} class="mt-4 text-xs text-ink-3">
-            You can add your own devcontainer features in <.link
-              navigate={~p"/settings"}
-              class="underline"
-            >Settings</.link>.
-          </p>
-        </.panel>
-
-        <.panel :if={user_features(@current_scope) != []} title="Your devcontainer features here">
-          <:subtitle>
-            From your Settings. Untick one to leave it out of your environments of this repo. Changes apply on the next rebuild.
-          </:subtitle>
-          <.form
-            for={%{}}
-            as={:repo_features}
-            id="repo-features"
-            phx-submit="save_features"
-            class="space-y-3"
-          >
-            <input type="hidden" name="repo_features[on][]" value="" />
-            <label
-              :for={ref <- user_features(@current_scope)}
-              class="flex items-center gap-2 font-mono text-sm text-ink"
-            >
-              <input
-                type="checkbox"
-                class="checkbox"
-                name="repo_features[on][]"
-                value={Feature.base(ref)}
-                checked={Feature.base(ref) not in @disabled_features}
-              />
-              {ref}
-            </label>
-            <.button type="submit" size="sm">Save</.button>
-          </.form>
-        </.panel>
-      </div>
-
-      <.panel :if={Scope.admin?(@current_scope)} title="Repo settings">
-        <.form for={@settings_form} id="repo-settings" phx-submit="save_settings" class="space-y-4">
-          <div class="grid gap-4 sm:grid-cols-2">
-            <.input
-              field={@settings_form[:token_mode]}
-              type="select"
-              label="Environment GitHub token"
-              options={[
-                {"Scoped to this repo (recommended)", "scoped"},
-                {"The user's own token (broad)", "broad"}
-              ]}
-            />
-            <.input field={@settings_form[:default_branch]} label="Default branch" />
-          </div>
-          <.token_permissions
-            choices={@token_choices}
-            granted={@repo.owner.installation_permissions}
-            owner={@repo.owner.login}
-          />
-          <.input
-            field={@settings_form[:extra_repos]}
-            label="Extra repos the scoped token can reach"
-            placeholder="shared-config, design-system"
-          />
-          <p
-            :if={@repo.owner.extra_repos != []}
-            id="owner-extra-repos"
-            class="-mt-2 text-xs text-ink-3"
-          >
-            It also reaches <span class="font-mono">{Enum.join(@repo.owner.extra_repos, ", ")}</span>, set for every {@repo.owner.login} repo in <.link
-              navigate={~p"/admin"}
-              class="underline"
-            >Deployment</.link>.
-          </p>
-          <.input
-            field={@settings_form[:tailscale_tags]}
-            label="Extra Tailscale tags"
-            placeholder="tag:staging-access"
-          />
-          <div class="grid gap-4 sm:grid-cols-2">
-            <.input
-              field={@settings_form[:cpu_limit]}
-              type="number"
-              step="0.5"
-              label="Default CPU limit"
-              placeholder="None"
-            />
-            <.input
-              field={@settings_form[:memory_limit_mb]}
-              type="number"
-              step="256"
-              label="Default memory limit (MB)"
-              placeholder="None"
-            />
-          </div>
-          <.button type="submit" size="sm">Save settings</.button>
-        </.form>
-      </.panel>
-
-      <.panel
-        :if={Scope.admin?(@current_scope)}
-        id="prebuilds"
-        title="Prebuilds"
-        padded={false}
-      >
-        <:subtitle>
-          A new environment of {@repo.default_branch} on a box with a ready prebuild starts from it, with the clone and the devcontainer's images already there. Build again after the devcontainer changes.
-        </:subtitle>
-        <ul class="divide-y divide-line">
-          <.prebuild_box
-            :for={box <- @prebuild_boxes}
-            box={box}
-            repo={@repo}
-            prebuilds={@prebuilds[box.id] || []}
-          />
-        </ul>
-        <p :if={@prebuild_boxes == []} class="px-5 py-4 text-sm text-ink-3">No boxes yet.</p>
-      </.panel>
-
-      <.live_component
-        :if={Scope.admin?(@current_scope)}
-        module={ForemanWeb.SecretsComponent}
-        id="repo-secrets"
-        title="Repo secrets"
-        description="Every environment of this repo gets these. User and environment secrets override them."
-        scope_name="repo"
-        subject={@repo}
-        current_scope={@current_scope}
+      <.summary
+        repo={@repo}
+        environments={@environments}
+        boxes={@prebuild_boxes}
+        prebuilds={@prebuilds}
       />
+
+      <div class="card-grid grid-cols-1 xl:grid-cols-[minmax(0,1fr)_22rem]">
+        <div class="card-grid min-w-0 grid-cols-1 content-start">
+          <.panel id="repo-environments" title="Environments" padded={false}>
+            <ul :if={@environments != []} class="divide-y divide-line">
+              <li
+                :for={env <- @environments}
+                class="flex items-center justify-between gap-3 px-5 py-2.5"
+              >
+                <div class="min-w-0">
+                  <.link
+                    navigate={~p"/environments/#{env.id}"}
+                    class="block truncate font-mono text-sm font-medium text-ink hover:text-accent-ink"
+                  >{env.slug}</.link>
+                  <p class="truncate text-xs text-ink-3">
+                    <span class="font-mono">{env.branch}</span>
+                    · {env.box.name}<span :if={env.user_id != @current_scope.user.id}> · {env.user.login}</span>
+                  </p>
+                </div>
+                <.state_badge state={env.observed_state} size="sm" />
+              </li>
+            </ul>
+            <p :if={@environments == []} class="px-5 py-4 text-sm text-ink-3">None of yours.</p>
+          </.panel>
+
+          <.panel :if={Scope.admin?(@current_scope)} title="Repo settings">
+            <.form
+              for={@settings_form}
+              id="repo-settings"
+              phx-submit="save_settings"
+              class="@container space-y-4"
+            >
+              <div class="grid gap-4 @xl:grid-cols-2">
+                <.input
+                  field={@settings_form[:token_mode]}
+                  type="select"
+                  label="Environment GitHub token"
+                  options={[
+                    {"Scoped to this repo (recommended)", "scoped"},
+                    {"The user's own token (broad)", "broad"}
+                  ]}
+                />
+                <.input field={@settings_form[:default_branch]} label="Default branch" />
+              </div>
+              <.token_permissions
+                choices={@token_choices}
+                granted={@repo.owner.installation_permissions}
+                owner={@repo.owner.login}
+              />
+              <.input
+                field={@settings_form[:extra_repos]}
+                label="Extra repos the scoped token can reach"
+                placeholder="shared-config, design-system"
+              />
+              <p
+                :if={@repo.owner.extra_repos != []}
+                id="owner-extra-repos"
+                class="-mt-2 text-xs text-ink-3"
+              >
+                It also reaches <span class="font-mono">{Enum.join(@repo.owner.extra_repos, ", ")}</span>, set for every {@repo.owner.login} repo in <.link
+                  navigate={~p"/admin"}
+                  class="underline"
+                >Deployment</.link>.
+              </p>
+              <.input
+                field={@settings_form[:tailscale_tags]}
+                label="Extra Tailscale tags"
+                placeholder="tag:staging-access"
+              />
+              <div class="grid gap-4 @xl:grid-cols-2">
+                <.input
+                  field={@settings_form[:cpu_limit]}
+                  type="number"
+                  step="0.5"
+                  label="Default CPU limit"
+                  placeholder="None"
+                />
+                <.input
+                  field={@settings_form[:memory_limit_mb]}
+                  type="number"
+                  step="256"
+                  label="Default memory limit (MB)"
+                  placeholder="None"
+                />
+              </div>
+              <.button type="submit" size="sm">Save settings</.button>
+            </.form>
+          </.panel>
+
+          <.panel
+            :if={Scope.admin?(@current_scope)}
+            id="prebuilds"
+            title="Prebuilds"
+            padded={false}
+          >
+            <:subtitle>
+              A new environment of {@repo.default_branch} on a box with a ready prebuild starts from it, with the clone and the devcontainer's images already there. Build again after the devcontainer changes.
+            </:subtitle>
+            <ul class="divide-y divide-line">
+              <.prebuild_box
+                :for={box <- @prebuild_boxes}
+                box={box}
+                repo={@repo}
+                prebuilds={@prebuilds[box.id] || []}
+              />
+            </ul>
+            <p :if={@prebuild_boxes == []} class="px-5 py-4 text-sm text-ink-3">No boxes yet.</p>
+          </.panel>
+
+          <.live_component
+            :if={Scope.admin?(@current_scope)}
+            module={ForemanWeb.SecretsComponent}
+            id="repo-secrets"
+            title="Repo secrets"
+            description="Every environment of this repo gets these. User and environment secrets override them."
+            scope_name="repo"
+            subject={@repo}
+            current_scope={@current_scope}
+          />
+        </div>
+
+        <aside class="card-grid min-w-0 grid-cols-1 content-start">
+          <.panel id="repo-details" title="Details">
+            <dl class="space-y-2.5">
+              <.fact term="Owner">{@repo.owner.login}</.fact>
+              <.fact term="Visibility">{if @repo.private, do: "Private", else: "Public"}</.fact>
+              <.fact term="Default branch">
+                <span class="truncate font-mono text-xs">{@repo.default_branch}</span>
+              </.fact>
+              <.fact :if={@repo.devcontainer_path} term="Devcontainer">
+                <span class="truncate font-mono text-xs" title={@repo.devcontainer_path}>
+                  {@repo.devcontainer_path}
+                </span>
+              </.fact>
+              <.fact term="From">
+                {if @repo.manual, do: "Added by hand", else: "The GitHub App"}
+              </.fact>
+              <.fact :if={@repo.devcontainer_checked_at} term="Checked">
+                <.local_time
+                  id="repo-checked"
+                  at={@repo.devcontainer_checked_at}
+                  format="relative"
+                />
+              </.fact>
+            </dl>
+          </.panel>
+
+          <.panel title="Your git identity and dotfiles here">
+            <:subtitle>
+              Overrides your defaults for this repo only. Empty fields use the defaults from Settings.
+            </:subtitle>
+            <.form
+              for={@override_form}
+              id="override-form"
+              phx-submit="save_override"
+              class="space-y-3"
+            >
+              <div class="grid gap-3">
+                <.input
+                  field={@override_form[:git_name]}
+                  label="Git name"
+                  placeholder={@current_scope.user.git_name || @current_scope.user.name}
+                />
+                <.input
+                  field={@override_form[:git_email]}
+                  label="Git email"
+                  placeholder={@current_scope.user.git_email}
+                />
+              </div>
+              <.input
+                field={@override_form[:dotfiles_repository]}
+                label="Dotfiles repo"
+                placeholder={
+                  @current_scope.user.dotfiles_repository || "https://github.com/you/dotfiles.git"
+                }
+              />
+              <.input
+                field={@override_form[:dotfiles_install_command]}
+                label="Dotfiles install command"
+                placeholder="./install.sh"
+              />
+              <.input
+                field={@override_form[:dotfiles_target_path]}
+                label="Clone dotfiles to"
+                placeholder={@current_scope.user.dotfiles_target_path || "~/dotfiles"}
+              />
+              <.button type="submit" size="sm">Save</.button>
+            </.form>
+            <p :if={user_features(@current_scope) == []} class="mt-4 text-xs text-ink-3">
+              You can add your own devcontainer features in <.link
+                navigate={~p"/settings"}
+                class="underline"
+              >Settings</.link>.
+            </p>
+          </.panel>
+
+          <.panel :if={user_features(@current_scope) != []} title="Your devcontainer features here">
+            <:subtitle>
+              From your Settings. Untick one to leave it out of your environments of this repo. Changes apply on the next rebuild.
+            </:subtitle>
+            <.form
+              for={%{}}
+              as={:repo_features}
+              id="repo-features"
+              phx-submit="save_features"
+              class="space-y-3"
+            >
+              <input type="hidden" name="repo_features[on][]" value="" />
+              <label
+                :for={ref <- user_features(@current_scope)}
+                class="flex items-center gap-2 font-mono text-sm text-ink"
+              >
+                <input
+                  type="checkbox"
+                  class="checkbox"
+                  name="repo_features[on][]"
+                  value={Feature.base(ref)}
+                  checked={Feature.base(ref) not in @disabled_features}
+                />
+                {ref}
+              </label>
+              <.button type="submit" size="sm">Save</.button>
+            </.form>
+          </.panel>
+        </aside>
+      </div>
     </Layouts.app>
+    """
+  end
+
+  attr :repo, :map, required: true
+  attr :environments, :list, required: true
+  attr :boxes, :list, required: true
+  attr :prebuilds, :map, required: true
+
+  # The repo at a glance: its environments, the size they get, the token
+  # they get, and on how many boxes a new one starts from a prebuild.
+  defp summary(assigns) do
+    %{repo: repo, prebuilds: prebuilds} = assigns
+
+    prebuilt =
+      Enum.count(assigns.boxes, fn box ->
+        Enum.any?(
+          prebuilds[box.id] || [],
+          &(&1.status == "ready" and is_nil(Prebuilds.unused_because(repo, &1)))
+        )
+      end)
+
+    assigns =
+      assign(assigns,
+        running: Enum.count(assigns.environments, &(&1.observed_state == "running")),
+        limited: repo.cpu_limit != nil or repo.memory_limit_mb != nil,
+        extra: length(Repos.extra_repos(repo)),
+        prebuilt: prebuilt
+      )
+
+    ~H"""
+    <section id="repo-summary" aria-label="Summary" class="card-grid grid-cols-2 xl:grid-cols-4">
+      <.stat_card icon="hero-cube" id="stat-environments" label="Environments">
+        {length(@environments)}
+        <:detail :if={@environments != []}>
+          <span>
+            <span class="font-medium tabular-nums text-ink">{@running}</span> running
+          </span>
+        </:detail>
+        <:note>{if @environments == [], do: "None of yours", else: "On this repo"}</:note>
+      </.stat_card>
+      <.stat_card icon="hero-cpu-chip" id="stat-size" label="Environment size">
+        <%= cond do %>
+          <% @repo.cpu_limit -> %>
+            {Fleet.cores(@repo.cpu_limit)}
+            <span class="text-base font-medium text-ink-3">
+              {if @repo.cpu_limit == 1, do: "CPU", else: "CPUs"}
+            </span>
+          <% @repo.memory_limit_mb -> %>
+            {gib(@repo.memory_limit_mb)} <span class="text-base font-medium text-ink-3">GiB</span>
+          <% true -> %>
+            Box default
+        <% end %>
+        <:detail :if={@repo.cpu_limit && @repo.memory_limit_mb}>
+          <span>
+            <span class="font-medium tabular-nums text-ink">{gib(@repo.memory_limit_mb)} GiB</span>
+            memory
+          </span>
+        </:detail>
+        <:note>
+          <%= cond do %>
+            <% @limited -> %>
+              The repo's limits
+            <% @repo.host_requirements -> %>
+              Wants {@repo.host_requirements["cpus"] || "?"} CPUs, {@repo.host_requirements["memory"] ||
+                "?"} memory
+            <% true -> %>
+              No repo limits
+          <% end %>
+        </:note>
+      </.stat_card>
+      <.stat_card icon="hero-key" id="stat-token" label="GitHub token">
+        {if @repo.token_mode == "broad", do: "Broad", else: "Scoped"}
+        <:note>
+          <span :if={@repo.token_mode == "broad"} class="text-warning">The user's own token</span>
+          <span :if={@repo.token_mode != "broad"}>
+            {if @extra == 0,
+              do: "To this repo only",
+              else: "This repo and #{@extra} more"}
+          </span>
+        </:note>
+      </.stat_card>
+      <.stat_card icon="hero-bolt" id="stat-prebuilds" label="Prebuilt boxes">
+        {@prebuilt} <span class="text-base font-medium text-ink-3">of {length(@boxes)}</span>
+        <:note>
+          <%= cond do %>
+            <% @boxes == [] -> %>
+              No boxes yet
+            <% @prebuilt == 0 -> %>
+              New environments build from scratch
+            <% true -> %>
+              New environments start from a prebuild
+          <% end %>
+        </:note>
+      </.stat_card>
+    </section>
     """
   end
 
@@ -525,7 +676,7 @@ defmodule ForemanWeb.RepoLive.Show do
       <p class="mb-3 text-xs text-ink-3">
         On this repo and its extra repos, its owner's included. Metadata (read) is always included. The broad token ignores these.
       </p>
-      <div class="grid gap-x-8 gap-y-2 sm:grid-cols-2">
+      <div class="grid gap-x-8 gap-y-2 @xl:grid-cols-2">
         <div
           :for={{name, label, _levels} <- TokenPermissions.catalog()}
           id={"permission-#{name}"}
