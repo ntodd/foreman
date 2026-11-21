@@ -190,17 +190,16 @@ create until it's moved onto a box that can.
 
 ## README screenshots
 
-`demo.exs` starts a dev control plane on its own database
-(`tmp/demo`) with made-up boxes, repos and environments. Stand-in agent
-processes keep the boxes online; nothing touches Docker, GitHub or a
-tailnet. `screenshots.mjs` captures five pages in light and dark at 2x
-and frames each in a browser window, writing `docs/images/`.
+Start the [local demo](../README.md#get-started) and wait for it to print
+`demo control plane on http://localhost:4100`. It seeds its own database
+in `tmp/demo` with sample boxes, repos, environments, and port reports.
 
-```sh
-cd apps/foreman
-PORT=4100 mix run --no-start ../../e2e/demo.exs &
-cd ../.. && node e2e/screenshots.mjs
-```
+In a second terminal, run `node e2e/screenshots.mjs` from the repo root.
+The script uses Microsoft Edge on macOS by default. Set `BROWSER` to the
+path of a Chromium-based browser executable to use another installation.
+It writes light and dark PNGs for the six README views to `docs/images/`.
+The new-environment form, editor and port links, and box charts are
+cropped to the controls shown in the guide.
 
 `DEMO=personal` seeds one person on one box instead, in `tmp/demo-personal`,
 for the simpler views a personal instance gets.
