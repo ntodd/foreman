@@ -5,7 +5,8 @@
 # the guest, a host-only command refused, and a page cache reclaim
 # through the guest's root helper, drain included. Then powers the VM
 # off, boots it again on the same data disk (which mustn't be formatted
-# twice), and checks no unit failed.
+# twice), and checks no unit failed, and that the console carries a kill
+# by the kernel's OOM killer the way the box reads it.
 #
 #   e2e/guest/run.sh GUEST_TAR AGENT_TARBALL
 #
@@ -149,6 +150,18 @@ debugfs -w -R "mkdir $dropin" "$dir/run/root.raw"
 debugfs -w -R "write $dir/workload.conf $dropin/workload.conf" "$dir/run/root.raw"
 debugfs -R "cat $dropin/workload.conf" "$dir/run/root.raw" | cmp - "$dir/workload.conf"
 
+# The same boot loses a process to the kernel's OOM killer: a unit held to
+# 32 MiB reads zeros until it's over. The box reads the kill from the
+# console, which has to carry it at the level a `quiet` boot leaves on
+# (environments boot quiet; these don't, so a failed boot can be read).
+cat > "$dir/oom.conf" <<'EOF'
+[Service]
+ExecStartPost=/bin/sh -c 'echo 4 > /proc/sys/kernel/printk'
+ExecStartPost=-/usr/bin/systemd-run --quiet --no-block -p MemoryMax=32M -p MemorySwapMax=0 -p OOMPolicy=continue /bin/sh -c 'tail /dev/zero; true'
+EOF
+debugfs -w -R "write $dir/oom.conf $dropin/oom.conf" "$dir/run/root.raw"
+debugfs -R "cat $dropin/oom.conf" "$dir/run/root.raw" | cmp - "$dir/oom.conf"
+
 for n in 1 2; do
   echo "e2e/guest: boot $n"
   start=$(date +%s)
@@ -159,6 +172,15 @@ for n in 1 2; do
   if grep -a -q "FAILED" "$dir/run/serial-$n.log"; then
     grep -a "FAILED" "$dir/run/serial-$n.log"
     fail "a unit failed on boot $n"
+  fi
+  if [ "$n" = 2 ]; then
+    killed=$("$dir/rel/bin/foreman_agent" eval \
+      "IO.inspect(ForemanAgent.VM.OomWatch.parse(File.read!(\"$dir/run/serial-2.log\")))")
+    case "$killed" in
+      *'"tail"'*) echo "e2e/guest: the console named the process the kernel killed: $killed" ;;
+      *) grep -a -i "memory" "$dir/run/serial-2.log" || true
+         fail "the console didn't carry the kernel's OOM kill: $killed" ;;
+    esac
   fi
 done
 

@@ -20,7 +20,11 @@ defmodule Foreman.Environments.Environment do
     field :branch, :string
     field :desired_state, :string, default: "running"
     field :observed_state, :string, default: "pending"
+    # The box stopped the whole VM.
     field :last_vm_oom_at, :utc_datetime
+    # The VM's own kernel killed something in it, and the VM kept running.
+    field :last_guest_oom_at, :utc_datetime
+    field :last_guest_oom_processes, {:array, :string}, default: []
     field :status_message, :string
     field :vm_size, :map
     field :cpu_limit, :float
@@ -48,6 +52,18 @@ defmodule Foreman.Environments.Environment do
     # files on the box still say have changed.
     field :stale_notice, :boolean, virtual: true, default: false
     timestamps()
+  end
+
+  @recent_oom_s 86_400
+
+  @doc """
+  Whether the environment ran out of memory in the last day: its VM was
+  stopped, or the kernel killed something inside it.
+  """
+  def recent_oom?(%{} = env, now \\ DateTime.utc_now()) do
+    Enum.any?([env.last_vm_oom_at, env.last_guest_oom_at], fn at ->
+      at != nil and DateTime.diff(now, at) < @recent_oom_s
+    end)
   end
 
   def desired_states, do: @desired

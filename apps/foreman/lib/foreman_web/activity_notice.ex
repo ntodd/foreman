@@ -39,6 +39,17 @@ defmodule ForemanWeb.ActivityNotice do
 
   def flash(%Activity{kind: :box_reboot_required} = e), do: {:info, notice(e, "Needs a reboot")}
 
+  def flash(%Activity{kind: :vm_oom} = e),
+    do: {:error, notice(e, "Out of memory: the box stopped its VM")}
+
+  def flash(%Activity{kind: :guest_oom} = e),
+    do: {:error, notice(e, "Out of memory: Linux killed #{killed(e.processes)}")}
+
+  defp killed([]), do: "a process"
+  defp killed([one]), do: one
+  defp killed([one, two]), do: "#{one} and #{two}"
+  defp killed([one, two | more]), do: "#{one}, #{two} and #{length(more)} more"
+
   defp done("create"), do: "Created and running"
   defp done("start"), do: "Started"
   defp done("stop"), do: "Stopped"

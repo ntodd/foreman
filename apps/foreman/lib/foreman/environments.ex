@@ -20,7 +20,7 @@ defmodule Foreman.Environments do
   alias Foreman.Environments.{Environment, Server}
   alias ForemanProtocol.Connect
   alias Foreman.Repos.Repo, as: GitRepo
-  alias Foreman.{Agents, Audit, Capacity, GitHub, Operations, Repo, Scope, Secrets}
+  alias Foreman.{Activity, Agents, Audit, Capacity, GitHub, Operations, Repo, Scope, Secrets}
 
   require Logger
 
@@ -1175,9 +1175,44 @@ defmodule Foreman.Environments do
           where: e.id == ^env_id and e.box_id == ^box_id and is_nil(e.destroyed_at),
           where: is_nil(e.last_vm_oom_at) or e.last_vm_oom_at < ^at
 
-      if {1, nil} == Repo.update_all(query, set: [last_vm_oom_at: at]),
-        do: broadcast(%{id: env_id})
+      if {1, nil} == Repo.update_all(query, set: [last_vm_oom_at: at]) do
+        broadcast(%{id: env_id})
+        Activity.out_of_memory(Repo.get!(Environment, env_id), :vm_oom)
+      end
     end
+  end
+
+  # A VM short of memory loses one process after another. The first is
+  # the news; the page keeps the latest.
+  @guest_oom_notice_every_s 300
+
+  @doc """
+  Remembers the most recent kills by the kernel inside an environment's
+  VM (`%{at, processes}`, from its box), which the VM survives. The time
+  is the box's, so one ahead of this clock counts as now.
+  """
+  def record_guest_oom(box_id, env_id, %{at: unix} = kill) do
+    processes = kill[:processes] || []
+
+    query =
+      from e in Environment,
+        where: e.id == ^env_id and e.box_id == ^box_id and is_nil(e.destroyed_at)
+
+    with {:ok, at} <- DateTime.from_unix(unix),
+         at = Enum.min([at, DateTime.utc_now(:second)], DateTime),
+         %Environment{last_guest_oom_at: last} = env <- Repo.one(query),
+         true <- is_nil(last) or DateTime.before?(last, at) do
+      Repo.update_all(query,
+        set: [last_guest_oom_at: at, last_guest_oom_processes: processes]
+      )
+
+      broadcast(env)
+
+      if is_nil(last) or DateTime.diff(at, last) >= @guest_oom_notice_every_s,
+        do: Activity.out_of_memory(env, :guest_oom, processes)
+    end
+
+    :ok
   end
 
   @doc "Records a state change an agent noticed (a container stopped, say)."

@@ -26,6 +26,37 @@ defmodule ForemanWeb.EnvironmentActionsMenuTest do
     assert has_element?(view, "#vm-oom-at[datetime='2025-01-01T00:00:00Z']")
   end
 
+  test "says what the kernel last killed inside the VM, and when", %{
+    conn: conn,
+    env: env,
+    box: box
+  } do
+    {:ok, view, _} = live(conn, ~p"/environments/#{env.id}")
+    refute has_element?(view, "#guest-oom")
+
+    Foreman.Environments.record_guest_oom(box.id, env.id, %{
+      at: 1_735_689_600,
+      processes: ["orca", "node"]
+    })
+
+    text =
+      view
+      |> element("#guest-oom")
+      |> render()
+      |> String.replace(~r/<[^>]+>/, "")
+      |> String.replace(~r/\s+/, " ")
+
+    assert text =~ "Linux killed orca, node in this VM when it ran out of memory."
+    assert has_element?(view, "#guest-oom [data-role=killed]", "orca, node")
+    assert has_element?(view, "#guest-oom-at[datetime='2025-01-01T00:00:00Z']")
+    # Its VM wasn't stopped.
+    refute has_element?(view, "#vm-oom")
+
+    Foreman.Environments.record_guest_oom(box.id, env.id, %{at: 1_735_689_700, processes: []})
+    assert has_element?(view, "#guest-oom", "a process")
+    refute has_element?(view, "#guest-oom [data-role=killed]")
+  end
+
   test "offers both rebuilds and says what each does", %{conn: conn, env: env} do
     {:ok, view, _html} = live(conn, ~p"/environments/#{env.id}")
 

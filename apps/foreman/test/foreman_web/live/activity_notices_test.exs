@@ -62,6 +62,75 @@ defmodule ForemanWeb.ActivityNoticesTest do
     refute has_element?(view, "#flash-info")
   end
 
+  describe "running out of memory" do
+    defp killed(env, ago, processes) do
+      Foreman.Environments.record_guest_oom(env.box_id, env.id, %{
+        at: System.os_time(:second) - ago,
+        processes: processes
+      })
+    end
+
+    test "a process killed inside a VM is news, with what it was", %{conn: conn, env: env} do
+      {:ok, view, _html} = live(conn, ~p"/settings")
+      killed(env, 1_000, ["orca", "node"])
+
+      html = notice(view, :error)
+      assert html =~ "storefront-1"
+      assert html =~ "Out of memory: Linux killed orca and node"
+      assert html =~ ~s(href="/environments/#{env.id}")
+    end
+
+    test "names two and counts the rest, or says a process when it has no name",
+         %{conn: conn, env: env} do
+      {:ok, view, _html} = live(conn, ~p"/settings")
+      killed(env, 2_000, ["a", "b", "c", "d"])
+      assert notice(view, :error) =~ "Linux killed a, b and 2 more"
+
+      killed(env, 1_000, [])
+      assert notice(view, :error) =~ "Linux killed a process"
+    end
+
+    # A VM short of memory loses one process after another.
+    test "more kills in the next few minutes aren't news again", %{conn: conn, env: env} do
+      {:ok, view, _html} = live(conn, ~p"/settings")
+      killed(env, 1_000, ["orca"])
+      assert notice(view, :error) =~ "orca"
+      view |> element("#flash-error") |> render_click()
+      refute has_element?(view, "#flash-error")
+
+      killed(env, 985, ["node"])
+      refute has_element?(view, "#flash-error")
+      assert Foreman.Repo.reload!(env).last_guest_oom_processes == ["node"]
+
+      killed(env, 300, ["node"])
+      assert notice(view, :error) =~ "Linux killed node"
+    end
+
+    test "the box stopping the whole VM is news too", %{conn: conn, env: env} do
+      {:ok, view, _html} = live(conn, ~p"/settings")
+      Foreman.Environments.record_vm_oom(env.box_id, env.id, System.os_time(:second) - 60)
+
+      html = notice(view, :error)
+      assert html =~ "storefront-1"
+      assert html =~ "Out of memory: the box stopped its VM"
+    end
+
+    test "the environment's own page shows it without a notice", %{conn: conn, env: env} do
+      {:ok, view, _html} = live(conn, ~p"/environments/#{env.id}")
+      killed(env, 60, ["orca"])
+
+      assert has_element?(view, "#guest-oom")
+      refute has_element?(view, "#flash-error")
+    end
+
+    test "someone else's isn't your news", %{conn: conn} do
+      {:ok, view, _html} = live(conn, ~p"/settings")
+      killed(environment_fixture(slug: "theirs-1"), 60, ["orca"])
+
+      refute has_element?(view, "#flash-error")
+    end
+  end
+
   test "a box coming back after a while", %{conn: conn, user: user} do
     box = box_fixture(owner_user_id: user.id, name: "dev")
 

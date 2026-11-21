@@ -228,6 +228,11 @@ defmodule Foreman.Agents do
     :ok
   end
 
+  def handle_event(box_id, %Event{type: "box.guest_oom", payload: %{environments: kills}}) do
+    Enum.each(kills, fn {env_id, kill} -> Environments.record_guest_oom(box_id, env_id, kill) end)
+    :ok
+  end
+
   def handle_event(box_id, %Event{type: "box.ports", payload: %{environments: envs}}) do
     Foreman.Ports.record(box_id, envs)
   end

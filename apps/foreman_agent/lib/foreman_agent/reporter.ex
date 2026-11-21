@@ -6,7 +6,8 @@ defmodule ForemanAgent.Reporter do
   between, the box's firewall when it changes from what the join said,
   whether the box needs a reboot (after every join and when it changes),
   and the ports listening in its environments (checked every 5 seconds,
-  sent when they change and every minute).
+  sent when they change and every minute), and the processes the kernel's
+  OOM killer ended inside its VMs (checked every 15 seconds).
   """
   use GenServer
 
@@ -24,6 +25,7 @@ defmodule ForemanAgent.Reporter do
   # Sent unchanged this often too, so a control plane that lost them
   # without the agent rejoining has them back.
   @ports_resend 60_000
+  @guest_oom_every 15_000
 
   def start_link(opts), do: GenServer.start_link(__MODULE__, opts, name: __MODULE__)
 
@@ -34,6 +36,7 @@ defmodule ForemanAgent.Reporter do
     Process.send_after(self(), :inventory, @inventory_every)
     Process.send_after(self(), :stats, @stats_every)
     Process.send_after(self(), :ports, @ports_every)
+    Process.send_after(self(), :guest_oom, @guest_oom_every)
     send(self(), :metrics)
 
     {:ok,
@@ -45,7 +48,8 @@ defmodule ForemanAgent.Reporter do
        reboot: nil,
        ports: nil,
        ports_sent_at: nil,
-       port_names: %{}
+       port_names: %{},
+       oom_cursors: %{}
      }}
   end
 
@@ -81,6 +85,11 @@ defmodule ForemanAgent.Reporter do
   def handle_info(:ports, state) do
     Process.send_after(self(), :ports, @ports_every)
     {:noreply, safely("ports", state, &ports/1)}
+  end
+
+  def handle_info(:guest_oom, state) do
+    Process.send_after(self(), :guest_oom, @guest_oom_every)
+    {:noreply, safely("out-of-memory kills", state, &guest_oom/1)}
   end
 
   def handle_info(:metrics, state) do
@@ -194,6 +203,29 @@ defmodule ForemanAgent.Reporter do
         else
           state
         end
+    end
+  end
+
+  # A VM whose kernel killed something keeps running, so its inventory
+  # says nothing. The time is when the box saw it: the console's own
+  # times count from the VM's boot. A control plane older than
+  # box.guest_oom refuses it, and the connection ignores the reply.
+  defp guest_oom(state) do
+    config = Config.get()
+
+    if config.mode == :host do
+      {kills, cursors} = VM.OomWatch.scan(config, state.oom_cursors)
+      at = System.os_time(:second)
+
+      if map_size(kills) > 0 do
+        push("box.guest_oom", %{
+          environments: Map.new(kills, fn {env_id, kill} -> {env_id, Map.put(kill, :at, at)} end)
+        })
+      end
+
+      %{state | oom_cursors: cursors}
+    else
+      state
     end
   end
 

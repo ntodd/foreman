@@ -34,6 +34,29 @@ defmodule ForemanWeb.EnvironmentListTest do
       refute has_element?(view, "[data-role=owner]")
     end
 
+    test "marks an environment that ran out of memory in the last day", %{
+      conn: conn,
+      box: box,
+      running: r,
+      stopped: s
+    } do
+      now = System.os_time(:second)
+
+      s
+      |> Ecto.Changeset.change(last_vm_oom_at: DateTime.from_unix!(now - 3 * 86_400))
+      |> Foreman.Repo.update!()
+
+      {:ok, view, _html} = live(conn, ~p"/")
+      refute has_element?(view, "[data-role=oom]")
+
+      Foreman.Environments.record_guest_oom(box.id, r.id, %{at: now - 60, processes: ["orca"]})
+      assert has_element?(view, "#env-#{r.id} [data-role=oom]", "Out of memory")
+      refute has_element?(view, "#env-#{s.id} [data-role=oom]")
+
+      Foreman.Environments.record_vm_oom(box.id, s.id, now - 30)
+      assert has_element?(view, "#env-#{s.id} [data-role=oom]", "Out of memory")
+    end
+
     test "still filters by state, with counts", %{conn: conn, running: r, stopped: s} do
       {:ok, view, _html} = live(conn, ~p"/")
 
