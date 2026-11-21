@@ -1,7 +1,9 @@
 #!/bin/sh
-# Foreman feature entrypoint. The devcontainer CLI runs it on every
-# container start, including a plain `docker restart`, which a
-# postStartCommand would miss.
+# Foreman feature entrypoint. It runs on every container start,
+# including a plain `docker restart`, which a postStartCommand would
+# miss: whatever brings the devcontainer up makes it part of the
+# container's entrypoint. For Foreman that's the agent's own
+# implementation of the devcontainer CLI's `up`, not the CLI.
 #
 # It must never block or fail the container: the tailnet join runs in the
 # background and logs to /var/log/foreman-tailscale.log.

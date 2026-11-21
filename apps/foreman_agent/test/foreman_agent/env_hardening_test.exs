@@ -2,31 +2,19 @@ defmodule ForemanAgent.EnvHardeningTest do
   @moduledoc """
   Environment operations against odd but legitimate repos, partial
   failures, and compose features that would otherwise get past the policy.
-  Git, docker compose and the devcontainer CLI are stubbed.
+  Git and docker compose are stubbed; the devcontainer is, past finding
+  Foreman's feature.
   """
   use ExUnit.Case, async: true
 
   import Mox
 
-  alias ForemanAgent.{Config, DockerMock, Env, RunnerMock}
+  alias ForemanAgent.{Config, DevcontainerMock, DockerMock, Env, RunnerMock}
+  alias ForemanAgent.Devcontainer.Features
+  alias ForemanAgent.Devcontainer.Features.Registry
 
   @moduletag :tmp_dir
   @env_id "6f1c1d1e-9a3b-4c1f-8f5e-2d7a9b0c1e2f"
-
-  @resolved %{
-    "configuration" => %{},
-    "mergedConfiguration" => %{},
-    "featuresConfiguration" => %{
-      "featureSets" => [
-        %{
-          "sourceInformation" => %{"userFeatureId" => "./.foreman/feature"},
-          "features" => [%{"id" => "foreman"}]
-        }
-      ]
-    }
-  }
-
-  @success ~s({"outcome":"success","containerId":"c1","remoteUser":"vscode","remoteWorkspaceFolder":"/w"}\n)
 
   setup :verify_on_exit!
 
@@ -54,7 +42,15 @@ defmodule ForemanAgent.EnvHardeningTest do
     test_pid = self()
     log = fn stream, data -> send(test_pid, {:log, stream, data}) end
 
-    %{config: config, ctx: %{config: config, runner: RunnerMock, docker: DockerMock, log: log}}
+    ctx = %{
+      config: config,
+      runner: RunnerMock,
+      docker: DockerMock,
+      devcontainer: DevcontainerMock,
+      log: log
+    }
+
+    %{config: config, ctx: ctx}
   end
 
   defp payload(overrides \\ %{}) do
@@ -89,9 +85,36 @@ defmodule ForemanAgent.EnvHardeningTest do
 
   # `layout` writes the clone. `compose` is the parsed `config` output, or
   # `{:fail, output}`; it's a function so a test can change it between calls.
-  defp stub_tools(layout, compose, opts \\ []) do
+  defp stub_tools(layout, compose) do
     test_pid = self()
-    devcontainer_missing = Keyword.get(opts, :devcontainer_missing, false)
+    # The devcontainer comes up, once Foreman's own feature is found from
+    # the config the way the real one finds it.
+    stub(DevcontainerMock, :up, fn params, _ctx ->
+      send(test_pid, {:run, "devcontainer", params})
+
+      dst =
+        Path.join(System.tmp_dir!(), "foreman-hardening-#{System.unique_integer([:positive])}")
+
+      features =
+        Features.prepare(params.config, params.additional_features, dst,
+          workspace: params.workspace,
+          config_path: params.config_path,
+          local_roots: params.local_feature_roots,
+          registry: Registry.new()
+        )
+
+      File.rm_rf!(dst)
+
+      with {:ok, [%{id: "foreman"}]} <- features do
+        {:ok,
+         %{
+           container_id: "c1",
+           remote_user: "vscode",
+           remote_workspace_folder: "/w",
+           compose_project: nil
+         }}
+      end
+    end)
 
     stub(RunnerMock, :run, fn command, args, _run_opts ->
       send(test_pid, {:run, command, args})
@@ -105,15 +128,6 @@ defmodule ForemanAgent.EnvHardeningTest do
 
         {"docker", ["compose" | rest]} ->
           fake_compose(rest, compose.())
-
-        {"devcontainer", _} when devcontainer_missing ->
-          {:error, {:not_found, "devcontainer"}}
-
-        {"devcontainer", ["read-configuration" | _]} ->
-          {:ok, %{status: 0, output: JSON.encode!(@resolved) <> "\n"}}
-
-        {"devcontainer", _} ->
-          {:ok, %{status: 0, output: @success}}
 
         {"docker", ["exec", "-u", "0", _container, "tailscale" | _]} ->
           {:ok, %{status: 0, output: ~s({"BackendState":"Running","Self":{"ID":"nTest1CNTRL"}})}}
@@ -211,6 +225,39 @@ defmodule ForemanAgent.EnvHardeningTest do
       assert File.read!(Path.join(clone, ".git/info/exclude")) =~ ~r{^/\.foreman/$}m
     end
 
+    test "a root-level .devcontainer.json keeps its hidden lock file", %{ctx: ctx} do
+      layout = fn dest ->
+        File.write!(
+          Path.join(dest, ".devcontainer.json"),
+          ~s({"dockerComposeFile": "docker-compose.yml", "service": "app"})
+        )
+
+        File.write!(Path.join(dest, "docker-compose.yml"), "services: {}\n")
+        File.write!(Path.join(dest, ".devcontainer-lock.json"), "{}")
+      end
+
+      stub_tools(layout, app_only())
+
+      assert {:ok, _} =
+               Env.run("env.create", payload(%{"config_path" => ".devcontainer.json"}), ctx)
+
+      assert_received {:run, "devcontainer", %{lockfile: true}}
+    end
+
+    # Whether it can be read is for bringing the devcontainer up to say:
+    # deciding here that there's no lock file would drop the repo's pins.
+    test "a lock file that's a link out of the repo is still a lock file", %{ctx: ctx} do
+      layout = fn dest ->
+        standard_layout().(dest)
+        File.ln_s!("/etc/hosts", Path.join(dest, ".devcontainer/devcontainer-lock.json"))
+      end
+
+      stub_tools(layout, app_only())
+
+      assert {:ok, _} = Env.run("env.create", payload(), ctx)
+      assert_received {:run, "devcontainer", %{lockfile: true}}
+    end
+
     test "a .devcontainer that links to a directory in the repo", %{ctx: ctx, config: config} do
       layout = fn dest ->
         standard_layout().(Path.join(dest, "tools"))
@@ -260,13 +307,6 @@ defmodule ForemanAgent.EnvHardeningTest do
   end
 
   describe "failures that used to crash" do
-    test "a box without the devcontainer CLI gets an error", %{ctx: ctx} do
-      stub_tools(standard_layout(), app_only(), devcontainer_missing: true)
-
-      assert {:error, message} = Env.run("env.create", payload(), ctx)
-      assert message =~ "devcontainer is not installed"
-    end
-
     test "git status with no output is an error, not a crash", %{ctx: ctx} do
       stub_tools(standard_layout(), app_only())
       assert {:ok, _} = Env.run("env.create", payload(), ctx)

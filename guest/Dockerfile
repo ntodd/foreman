@@ -23,8 +23,11 @@ RUN apt-get update \
     systemd-sysv udev kmod dbus iproute2 iptables ca-certificates curl git socat e2fsprogs \
     util-linux docker.io docker-compose-v2 docker-buildx linux-image-virtual-hwe-24.04 \
   && rm -rf /var/lib/apt/lists/* /var/cache/apt/*
-# The devcontainer CLI maps the remote user to this account. UID 1000
-# is the usual developer UID. Ubuntu's unused image user occupies it.
+# The agent maps the remote user to this account when it brings a
+# devcontainer up. It does that itself (ForemanAgent.Devcontainer, its
+# own implementation of the devcontainer CLI's `up`), so there's no CLI
+# or Node in this image. UID 1000 is the usual developer UID. Ubuntu's
+# unused image user occupies it.
 RUN userdel --remove ubuntu \
   && groupadd --gid 1000 foreman \
   && useradd --uid 1000 --gid foreman --groups docker --no-create-home \

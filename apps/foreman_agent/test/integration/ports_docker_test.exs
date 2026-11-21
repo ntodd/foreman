@@ -60,7 +60,9 @@ defmodule ForemanAgent.Integration.PortsDockerTest do
   end
 
   # A running container labelled like an environment's, as the agent's
-  # uid and gid: what the devcontainer CLI does with the remote user.
+  # uid and gid: what the agent does with the remote user when it brings
+  # a devcontainer up (its own implementation of the devcontainer CLI's
+  # `up`).
   defp start(env_id, opts \\ []) do
     {uid, gid} = uid_gid()
     devcontainer = if Keyword.get(opts, :devcontainer, true), do: "true", else: ""

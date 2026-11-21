@@ -226,7 +226,8 @@ cat > "$work/overlay/.devcontainer/probe.sh" <<EOF
 #!/bin/bash
 try() { timeout 4 bash -c "exec 3<>/dev/tcp/\$2/\$3" 2>/dev/null; echo "PROBE \$1 \$?"; }
 echo "PROBE user \$(id -un)"
-# The devcontainer CLI gives the container's user the guest agent's uid, so
+# The agent brings the devcontainer up itself (its own implementation of
+# the devcontainer CLI's \`up\`) and gives the container's user its uid, so
 # the 0600 secrets and the clone are the user's own.
 [ "\$(stat -c %u /run/foreman/secrets.env)" = "\$(id -u)" ] && echo "PROBE secrets-owner self" || echo "PROBE secrets-owner other"
 touch .probe-write 2>/dev/null; echo "PROBE workspace-writable \$?"

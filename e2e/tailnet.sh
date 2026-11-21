@@ -78,14 +78,6 @@ if docker ps -aq --filter "label=com.docker.compose.project=$slug" | grep -q . |
 fi
 if "$ts" status | grep -qw "$slug"; then fail "a tailnet device named $slug already exists; run again"; fi
 
-devcontainer_cli=$root/.tools/node_modules/.bin/devcontainer
-if [ ! -x "$devcontainer_cli" ]; then
-  say "installing the devcontainer CLI into .tools"
-  mkdir -p .tools
-  cp apps/foreman_agent/rel/tools/devcontainer/package.json apps/foreman_agent/rel/tools/devcontainer/package-lock.json .tools/
-  npm ci --prefix .tools --omit=dev --ignore-scripts --no-fund --no-audit --silent
-fi
-
 if command -v mise >/dev/null 2>&1; then
   mix() { mise x -- mix "$@"; }
   mix="mise x -- mix"
@@ -163,7 +155,6 @@ cd "$root/apps/foreman_agent"
 bg env FOREMAN_URL=http://localhost:$port FOREMAN_JOIN_TOKEN="$token" \
   FOREMAN_AGENT_DATA_DIR="$work/agent" FOREMAN_ENVS_ROOT="$work/envs" \
   FOREMAN_SECRETS_ROOT="$work/run" FOREMAN_RELEASE_ROOT="$work/opt" \
-  FOREMAN_DEVCONTAINER_CLI="$devcontainer_cli" \
   FOREMAN_ALLOWED_GIT_HOSTS=127.0.0.1 FOREMAN_INSECURE_GIT_HOSTS=127.0.0.1 \
   sh -c "$mix run --no-halt >'$work/agent.log' 2>&1"
 wait_for "agent joined" 180 grep -q "joined (" "$work/cp.log"

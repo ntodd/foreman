@@ -3,7 +3,7 @@ defmodule ForemanAgent.EnvTest do
 
   import Mox
 
-  alias ForemanAgent.{Config, DockerMock, Env, RunnerMock}
+  alias ForemanAgent.{Config, DevcontainerMock, DockerMock, Env, RunnerMock}
 
   @moduletag :tmp_dir
 
@@ -52,7 +52,15 @@ defmodule ForemanAgent.EnvTest do
     test_pid = self()
     log = fn stream, data -> send(test_pid, {:log, stream, data}) end
 
-    %{config: config, ctx: %{config: config, runner: RunnerMock, docker: DockerMock, log: log}}
+    ctx = %{
+      config: config,
+      runner: RunnerMock,
+      docker: DockerMock,
+      devcontainer: DevcontainerMock,
+      log: log
+    }
+
+    %{config: config, ctx: ctx}
   end
 
   defp payload(overrides \\ %{}) do
@@ -77,15 +85,6 @@ defmodule ForemanAgent.EnvTest do
     cmd.payload
   end
 
-  # What read-configuration reports for the feature the agent adds.
-  defp foreman_feature_set do
-    %{
-      "sourceInformation" => %{"type" => "file-path", "userFeatureId" => "./.foreman/feature"},
-      "features" => [%{"id" => "foreman", "capAdd" => ["NET_ADMIN", "NET_RAW"]}]
-    }
-  end
-
-  # A runner that behaves like git, docker compose and the devcontainer CLI.
   defp eventually(fun, tries \\ 50) do
     cond do
       fun.() -> true
@@ -94,6 +93,8 @@ defmodule ForemanAgent.EnvTest do
     end
   end
 
+  # A runner that behaves like git and docker compose, and a devcontainer
+  # that comes up.
   defp stub_tools(opts \\ []) do
     test_pid = self()
     compose = Keyword.get(opts, :compose, %{"services" => %{"app" => %{}, "db" => %{}}})
@@ -105,12 +106,14 @@ defmodule ForemanAgent.EnvTest do
     containers = fake_containers()
     stub_engine(docker_info, containers, opts)
 
-    resolved =
-      Keyword.get(opts, :resolved, %{
-        "configuration" => %{},
-        "mergedConfiguration" => %{"capAdd" => ["NET_ADMIN", "NET_RAW"]},
-        "featuresConfiguration" => %{"featureSets" => [foreman_feature_set()]}
-      })
+    stub(DevcontainerMock, :up, fn params, ctx ->
+      up_opts = [env: params.env, timeout: params.timeout]
+      send(test_pid, {:run, "devcontainer", params, up_opts})
+      Keyword.get(opts, :before_up, fn _ -> :ok end).(up_opts)
+      container = fake_up(containers, params)
+      ctx.log.("info", "Building image\n")
+      up_result(outcome, container)
+    end)
 
     stub(RunnerMock, :run, fn command, args, run_opts ->
       send(test_pid, {:run, command, args, run_opts})
@@ -121,33 +124,6 @@ defmodule ForemanAgent.EnvTest do
 
         {"docker", ["compose" | _] = args} ->
           fake_docker(args, compose, containers, opts)
-
-        {"devcontainer", ["read-configuration" | _]} ->
-          log = ~s({"type":"text","level":3,"timestamp":1,"text":"Resolving features"}\n)
-          {:ok, %{status: 0, output: log <> JSON.encode!(resolved) <> "\n"}}
-
-        {"devcontainer", args} ->
-          Keyword.get(opts, :before_up, fn _ -> :ok end).(run_opts)
-          container = fake_up(containers, args)
-
-          run_opts[:on_output].(
-            ~s({"type":"text","level":3,"timestamp":1,"text":"Building image"}\n)
-          )
-
-          run_opts[:on_output].(
-            ~s({"type":"text","level":2,"timestamp":1,"text":"debug noise"}\n)
-          )
-
-          # The CLI logs the merged compose config, interpolated secrets and all.
-          run_opts[:on_output].(
-            ~s({"type":"text","level":3,"timestamp":1,"text":"name: storefront-2\\nservices:\\n  app:\\n    environment:\\n      NEON_API_KEY: neon_secret"}\n)
-          )
-
-          run_opts[:on_output].(
-            ~s({"type":"raw","level":3,"timestamp":1,"text":"\\u001b[1m\\u001b[31mColored\\u001b[39m\\u001b[22m\\n"}\n)
-          )
-
-          up_result(outcome, run_opts, container)
 
         {"docker", ["pull" | _]} ->
           {:ok, %{status: 0, output: ""}}
@@ -194,8 +170,8 @@ defmodule ForemanAgent.EnvTest do
     end
   end
 
-  defp fake_up(containers, args) do
-    overlay = args |> arg("--override-config") |> Path.dirname() |> Path.join("overlay.yml")
+  defp fake_up(containers, params) do
+    overlay = List.last(params.config["dockerComposeFile"])
 
     label =
       case Regex.run(~r/"foreman.feature_version": "([^"]+)"/, File.read!(overlay)) do
@@ -203,7 +179,7 @@ defmodule ForemanAgent.EnvTest do
         nil -> nil
       end
 
-    remove? = "--remove-existing-container" in args
+    remove? = params.remove_existing
 
     Agent.get_and_update(containers, fn
       %{} = c when not remove? ->
@@ -224,44 +200,18 @@ defmodule ForemanAgent.EnvTest do
   # What happens to the container outside the agent.
   defp update_container(fun), do: Agent.update(fake_containers(), fun)
 
-  defp up_result(:success, _run_opts, container) do
-    result =
-      ~s({"outcome":"success","containerId":"#{container}","composeProjectName":"storefront-2","remoteUser":"vscode","remoteWorkspaceFolder":"/workspaces/storefront"}\n)
-
-    {:ok, %{status: 0, output: result}}
-  end
-
-  # The runner reads stderr and stdout through one pipe, so a long log
-  # line on stderr can be split by the outcome the CLI writes to stdout.
-  defp up_result(:interleaved, run_opts, container) do
-    {:ok, %{output: outcome}} = up_result(:success, run_opts, container)
-    log = raw_log([String.duplicate("Compiling 214 files (.ex)\n", 3000)])
-    [head, tail] = split_at(log, 40_000)
-    stream = head <> outcome <> tail
-    run_opts[:on_output].(stream)
-    {:ok, %{status: 0, output: stream}}
-  end
-
-  defp up_result(:error, _run_opts, _container) do
+  defp up_result(:success, container) do
     {:ok,
      %{
-       status: 1,
-       output:
-         ~s({"outcome":"error","message":"build failed","description":"An error occurred"}\n)
+       container_id: container,
+       remote_user: "vscode",
+       remote_workspace_folder: "/workspaces/storefront",
+       compose_project: "storefront-2"
      }}
   end
 
-  defp up_result({:error, message}, _run_opts, _container) do
-    failure = %{"outcome" => "error", "message" => message, "description" => ""}
-    {:ok, %{status: 1, output: JSON.encode!(failure) <> "\n"}}
-  end
-
-  # The CLI exits without writing an outcome line: what it printed streams
-  # to the log, and the runner keeps the same bytes.
-  defp up_result({:exit, status, stream}, run_opts, _container) do
-    run_opts[:on_output].(stream)
-    {:ok, %{status: status, output: stream}}
-  end
+  defp up_result(:error, _container), do: {:error, "build failed"}
+  defp up_result({:error, message}, _container), do: {:error, message}
 
   # The feature check lists the environment's containers by its label,
   # the bridge check the project's; :containers stands in for the latter.
@@ -342,7 +292,7 @@ defmodule ForemanAgent.EnvTest do
     receive_all([])
   end
 
-  # The last devcontainer CLI run; asking Tailscale for the node comes after.
+  # The last time the devcontainer was brought up; asking Tailscale for the node comes after.
   defp last_devcontainer do
     runs() |> Enum.filter(&match?({"devcontainer", _, _}, &1)) |> List.last()
   end
@@ -355,15 +305,6 @@ defmodule ForemanAgent.EnvTest do
       0 -> []
     end
   end
-
-  # The devcontainer CLI's --log-format json output for lines a lifecycle
-  # command printed.
-  defp raw_log(lines) do
-    Enum.map_join(lines, &(JSON.encode!(%{"type" => "raw", "level" => 3, "text" => &1}) <> "\n"))
-  end
-
-  defp split_at(binary, at),
-    do: [binary_part(binary, 0, at), binary_part(binary, at, byte_size(binary) - at)]
 
   defp receive_all(acc) do
     receive do
@@ -410,16 +351,16 @@ defmodule ForemanAgent.EnvTest do
       assert Enum.any?(git_args, &String.starts_with?(&1, "credential.helper=" <> meta))
       refute Map.has_key?(git_opts[:env], "NEON_API_KEY")
 
-      {"devcontainer", up_args, up_opts} = up
-      assert ["up", "--workspace-folder", ^clone | _] = up_args
-      assert arg(up_args, "--override-config") == Path.join(meta, "devcontainer.json")
-      assert arg(up_args, "--id-label") == "foreman.env_id=#{@env_id}"
+      {"devcontainer", up_params, up_opts} = up
+      assert up_params.workspace == clone
+      assert up_params.config_path == Path.join(clone, ".devcontainer/devcontainer.json")
+      assert up_params.id_labels == ["foreman.env_id=#{@env_id}"]
+      assert up_params.additional_features == %{"./.foreman/feature" => %{"tailscale" => true}}
+      assert up_params.state_dir == Path.join(meta, "devcontainer")
+      assert up_params.remove_existing == false
+      assert up_params.dotfiles == nil
 
-      assert JSON.decode!(arg(up_args, "--additional-features")) == %{
-               "./.foreman/feature" => %{"tailscale" => true}
-             }
-
-      refute Enum.any?(up_args, &(&1 =~ "neon_secret"))
+      refute inspect(Map.delete(up_params, :env)) =~ "neon_secret"
       assert up_opts[:env]["NEON_API_KEY"] == "neon_secret"
       assert up_opts[:env]["COMPOSE_PROJECT_NAME"] == "storefront-2"
 
@@ -431,10 +372,12 @@ defmodule ForemanAgent.EnvTest do
       {_, _, services_opts} = services
       refute Map.has_key?(services_opts[:env], "COMPOSE_REMOVE_ORPHANS")
 
-      # The environment's VM is the boundary, so it runs where the CLI
-      # runs it: in the VM, outside the containers.
-      override = meta |> Path.join("devcontainer.json") |> File.read!() |> JSON.decode!()
+      # The environment's VM is the boundary, so the initialize command
+      # runs in the VM, outside the containers.
+      override = up_params.config
       assert override["initializeCommand"] == "touch /tmp/pwned"
+      assert override["workspaceFolder"] == "/workspaces/${localWorkspaceFolderBasename}"
+      refute File.exists?(Path.join(meta, "devcontainer.json"))
 
       assert override["dockerComposeFile"] == [
                Path.join(clone, ".devcontainer/docker-compose.yml"),
@@ -452,10 +395,8 @@ defmodule ForemanAgent.EnvTest do
 
       assert File.read!(Path.join(clone, ".git/info/exclude")) =~ "/.devcontainer/.foreman/"
 
+      assert_received {:log, "info", "Starting the devcontainer\n"}
       assert_received {:log, "info", "Building image\n"}
-      assert_received {:log, "info", "Colored\n"}
-      refute_received {:log, _, "debug noise\n"}
-      refute_received {:log, _, "name: storefront-2" <> _}
     end
 
     test "reports the node the environment joined the tailnet as", %{ctx: ctx} do
@@ -533,17 +474,17 @@ defmodule ForemanAgent.EnvTest do
     test "doesn't leave a feature lockfile behind unless the repo keeps one", %{ctx: ctx} do
       stub_tools()
       assert {:ok, _} = Env.run("env.create", payload(), ctx)
-      {"devcontainer", args, _} = last_devcontainer()
-      assert "--no-lockfile" in args
+      {"devcontainer", params, _} = last_devcontainer()
+      refute params.lockfile
 
       clone = Path.join([ctx.config.envs_root, @env_id, "workspace", "storefront"])
       File.write!(Path.join(clone, ".devcontainer/devcontainer-lock.json"), "{}")
       assert {:ok, _} = Env.run("env.rebuild", payload(), ctx)
-      {"devcontainer", args, _} = last_devcontainer()
-      refute "--no-lockfile" in args
+      {"devcontainer", params, _} = last_devcontainer()
+      assert params.lockfile
     end
 
-    test "passes dotfiles to the devcontainer CLI", %{ctx: ctx} do
+    test "passes dotfiles on to the devcontainer", %{ctx: ctx} do
       stub_tools()
 
       dotfiles = %{
@@ -553,9 +494,10 @@ defmodule ForemanAgent.EnvTest do
 
       assert {:ok, _} = Env.run("env.create", payload(%{"dotfiles" => dotfiles}), ctx)
 
-      {"devcontainer", args, _} = last_devcontainer()
-      assert arg(args, "--dotfiles-repository") == "https://github.com/mona/dotfiles.git"
-      assert arg(args, "--dotfiles-install-command") == "./install.sh"
+      {"devcontainer", params, _} = last_devcontainer()
+      assert params.dotfiles.repository == "https://github.com/mona/dotfiles.git"
+      assert params.dotfiles.install_command == "./install.sh"
+      assert params.dotfiles[:target_path] == nil
     end
 
     test "adds the user's features alongside Foreman's", %{ctx: ctx} do
@@ -569,7 +511,7 @@ defmodule ForemanAgent.EnvTest do
       expected =
         Map.put(orca, "./.foreman/feature", %{"tailscale" => true})
 
-      assert JSON.decode!(arg(up_args, "--additional-features")) == expected
+      assert up_args.additional_features == expected
     end
 
     test "skips a user feature the repo already declares, whatever its version or case", %{
@@ -594,7 +536,7 @@ defmodule ForemanAgent.EnvTest do
 
       {"devcontainer", up_args, _} = last_devcontainer()
 
-      assert JSON.decode!(arg(up_args, "--additional-features")) == %{
+      assert up_args.additional_features == %{
                "ghcr.io/ntodd/devcontainer-features/orca:1" => %{},
                "./.foreman/feature" => %{"tailscale" => true}
              }
@@ -652,93 +594,18 @@ defmodule ForemanAgent.EnvTest do
       assert message =~ "outside the repository"
     end
 
-    test "reports devcontainer CLI failures", %{ctx: ctx} do
+    test "reports a devcontainer that didn't come up", %{ctx: ctx} do
       stub_tools(outcome: :error)
-      assert {:error, message} = Env.run("env.create", payload(), ctx)
-      assert message =~ "build failed"
+
+      assert Env.run("env.create", payload(), ctx) ==
+               {:error, "devcontainer up failed: build failed"}
     end
 
-    test "finds the outcome when it lands inside a long log line", %{ctx: ctx} do
-      stub_tools(outcome: :interleaved)
+    test "reports one that ran out of time in its own words", %{ctx: ctx} do
+      timed_out = "devcontainer up timed out after 165 minutes and was stopped"
+      stub_tools(outcome: {:error, timed_out})
 
-      assert {:ok, result} = Env.run("env.create", payload(), ctx)
-      assert result["remote_user"] == "vscode"
-      assert result["remote_workspace_folder"] == "/workspaces/storefront"
-    end
-
-    test "says when devcontainer up exits without reporting a result", %{ctx: ctx} do
-      stub_tools(outcome: {:exit, 1, raw_log(["Running postCreateCommand"])})
-
-      assert {:error, message} = Env.run("env.create", payload(), ctx)
-
-      assert message =~
-               "devcontainer up exited with status 1 without reporting a result. " <>
-                 "Its last output is below."
-
-      assert message =~ "Running postCreateCommand"
-      refute message =~ ~s("type":)
-    end
-
-    test "names the signal that stopped devcontainer up", %{ctx: ctx} do
-      stub_tools(outcome: {:exit, 137, raw_log(["Running postCreateCommand"])})
-
-      assert {:error, message} = Env.run("env.create", payload(), ctx)
-
-      assert message =~
-               "devcontainer up was killed by SIGKILL (status 137) without reporting a result"
-    end
-
-    test "collapses spinner frames and cursor redraws in the log and the error", %{ctx: ctx} do
-      frames =
-        for i <- 0..39 do
-          glyph = Enum.at(~w(◐ ◓ ◑ ◒), rem(i, 4))
-          dots = String.duplicate(".", div(i, 10))
-          "\e[1G\e[J#{glyph}  Cloning repository…#{dots}"
-        end
-
-      lines =
-        ["◇  Source: https://github.com/stablyai/orca.git"] ++
-          Enum.take(frames, 20) ++ ["\e[1D", "\e[0K"] ++ Enum.drop(frames, 20)
-
-      stub_tools(outcome: {:exit, 1, raw_log(lines)})
-
-      assert {:error, message} = Env.run("env.create", payload(), ctx)
-      assert message =~ "Source: https://github.com/stablyai/orca.git"
-      assert length(String.split(message, "Cloning repository")) == 2
-
-      logged = logged()
-      assert Enum.count(logged, &(&1 =~ "Cloning repository")) == 1
-      assert "◐  Cloning repository…\n" in logged
-      refute "\n" in logged
-    end
-
-    test "collapses spinner frames that arrive in one log entry", %{ctx: ctx} do
-      frames =
-        for i <- 0..19, do: "#{Enum.at(~w(◐ ◓ ◑ ◒), rem(i, 4))}  Cloning repository…\n"
-
-      stub_tools(outcome: {:exit, 1, raw_log([Enum.join(["Source: repo\n" | frames])])})
-
-      assert {:error, message} = Env.run("env.create", payload(), ctx)
-      assert message =~ "Source: repo"
-      assert length(String.split(message, "Cloning repository")) == 2
-    end
-
-    test "shows only the last of frames redrawn on one line", %{ctx: ctx} do
-      redraws =
-        Enum.map_join(0..19, fn i ->
-          "\e[1G\e[J#{Enum.at(~w(◐ ◓ ◑ ◒), rem(i, 4))}  Cloning repository…"
-        end)
-
-      lines = ["Source: repo\n" <> redraws, "\r", "\e[1G\e[J◐  Cloning repository…."]
-      stub_tools(outcome: {:exit, 1, raw_log(lines)})
-
-      assert {:error, message} = Env.run("env.create", payload(), ctx)
-      assert message =~ "Source: repo\n◒  Cloning repository…"
-      assert length(String.split(message, "Cloning repository")) == 2
-
-      logged = logged()
-      assert Enum.count(logged, &(&1 =~ "Cloning repository")) == 1
-      refute "\n" in logged
+      assert Env.run("env.create", payload(), ctx) == {:error, timed_out}
     end
 
     test "cleans up a tool's own spinner, cursor movement and links", %{ctx: ctx} do
@@ -772,20 +639,6 @@ defmodule ForemanAgent.EnvTest do
       assert "remote: Check the URL.\n" in logged
       refute Enum.any?(logged, &(&1 =~ "50%"))
       refute "\n" in logged
-    end
-
-    test "the devcontainer CLI never adds GPUs of its own", %{ctx: ctx} do
-      # hostRequirements.gpu (in devcontainer.json or an image's metadata)
-      # makes the CLI reserve GPUs after the policy has checked compose.
-      stub_tools(
-        devcontainer:
-          ~s({"dockerComposeFile": "docker-compose.yml", "service": "app", "hostRequirements": {"gpu": true}})
-      )
-
-      assert {:ok, _} = Env.run("env.create", payload(), ctx)
-      {"devcontainer", up_args, _} = last_devcontainer()
-      assert ["up" | _] = up_args
-      assert arg(up_args, "--gpu-availability") == "none"
     end
 
     test "a device driver failure without a GPU request is reported as it is", %{ctx: ctx} do
@@ -830,6 +683,7 @@ defmodule ForemanAgent.EnvTest do
 
       allow(RunnerMock, test_pid, pid)
       allow(DockerMock, test_pid, pid)
+      allow(DevcontainerMock, test_pid, pid)
       send(pid, :go)
 
       assert_receive {:up, docker_config}, 5_000
@@ -864,7 +718,7 @@ defmodule ForemanAgent.EnvTest do
 
       [{"devcontainer", args, opts}] = Enum.filter(runs(), &match?({"devcontainer", _, _}, &1))
 
-      refute Enum.any?(args, &(&1 =~ "ghp_registry"))
+      refute inspect(args) =~ "ghp_registry"
       docker_config = opts[:env]["DOCKER_CONFIG"]
       assert is_binary(docker_config)
       refute File.exists?(docker_config)
@@ -1147,8 +1001,8 @@ defmodule ForemanAgent.EnvTest do
     test "removes the existing container", %{ctx: ctx} do
       stub_tools()
       assert {:ok, _} = Env.run("env.rebuild", payload(), ctx)
-      {"devcontainer", args, _} = last_devcontainer()
-      assert "--remove-existing-container" in args
+      {"devcontainer", params, _} = last_devcontainer()
+      assert params.remove_existing
     end
   end
 
@@ -1186,7 +1040,7 @@ defmodule ForemanAgent.EnvTest do
           do: args |> Enum.drop_while(&(&1 != "core.fsmonitor=false")) |> tl()
     end
 
-    defp up_runs(runs), do: for({"devcontainer", ["up" | args], _} <- runs, do: args)
+    defp up_runs(runs), do: for({"devcontainer", params, _} <- runs, do: params)
 
     test "fast-forwards the clone inside the container, then rebuilds", %{ctx: ctx} do
       stub_tools(git: git())
@@ -1209,11 +1063,11 @@ defmodule ForemanAgent.EnvTest do
       refute Enum.any?(runs, &match?({"git", _, _}, &1))
 
       merged = Enum.find_index(runs, fn {_, args, _} -> "merge" in args end)
-      up = Enum.find_index(runs, &match?({"devcontainer", ["up" | _], _}, &1))
+      up = Enum.find_index(runs, &match?({"devcontainer", _, _}, &1))
       assert merged < up, "the new config is used after the pull"
 
       assert [up] = up_runs(runs)
-      assert "--remove-existing-container" in up
+      assert up.remove_existing
       assert_received {:log, "info", "Fast-forward\n"}
     end
 
@@ -1311,10 +1165,10 @@ defmodule ForemanAgent.EnvTest do
       runs = runs()
 
       assert [start, rebuild] = up_runs(runs)
-      refute "--remove-existing-container" in start
-      assert "--remove-existing-container" in rebuild
+      refute start.remove_existing
+      assert rebuild.remove_existing
 
-      started = Enum.find_index(runs, &match?({"devcontainer", ["up" | _], _}, &1))
+      started = Enum.find_index(runs, &match?({"devcontainer", _, _}, &1))
       fetched = Enum.find_index(runs, fn {_, args, _} -> "fetch" in args end)
       assert started < fetched
     end
@@ -1342,7 +1196,7 @@ defmodule ForemanAgent.EnvTest do
                )
 
       {"devcontainer", args, opts} = last_devcontainer()
-      refute "--remove-existing-container" in args
+      refute args.remove_existing
       assert opts[:env]["X"] == "1"
     end
 
@@ -1364,7 +1218,7 @@ defmodule ForemanAgent.EnvTest do
     # devcontainer up resolves the repo's features again, and a private one
     # needs the registry credentials a create had.
     for {type, extra} <- [{"env.start", %{}}, {"env.restart", %{mode: "all", changed: []}}] do
-      test "#{type} hands registry credentials to the devcontainer CLI", %{ctx: ctx} do
+      test "#{type} hands registry credentials to devcontainer up", %{ctx: ctx} do
         stub_tools()
         {:ok, _} = Env.run("env.create", payload(), ctx)
         _ = runs()
@@ -1380,7 +1234,7 @@ defmodule ForemanAgent.EnvTest do
 
         [{"devcontainer", args, opts}] = Enum.filter(runs(), &match?({"devcontainer", _, _}, &1))
 
-        refute Enum.any?(args, &(&1 =~ "ghp_registry"))
+        refute inspect(args) =~ "ghp_registry"
         assert is_binary(opts[:env]["DOCKER_CONFIG"])
       end
     end
@@ -1421,8 +1275,8 @@ defmodule ForemanAgent.EnvTest do
       do: %{env_id: @env_id, slug: "storefront-2", mode: mode, changed: changed, compose_env: %{}}
 
     defp rebuilt? do
-      {"devcontainer", args, _} = last_devcontainer()
-      "--remove-existing-container" in args
+      {"devcontainer", params, _} = last_devcontainer()
+      params.remove_existing
     end
 
     test "is read from the feature the agent ships", %{config: config, tmp_dir: tmp} do
@@ -1586,7 +1440,7 @@ defmodule ForemanAgent.EnvTest do
 
       assert {:error, message} = Env.run("env.start", start_payload(), ctx)
       assert message =~ "couldn't check"
-      refute Enum.any?(runs(), &match?({"devcontainer", ["up" | _], _}, &1))
+      refute Enum.any?(runs(), &match?({"devcontainer", _, _}, &1))
     end
 
     test "restart affected rebuilds below the floor even when the devcontainer isn't affected",
@@ -1623,9 +1477,9 @@ defmodule ForemanAgent.EnvTest do
       assert {:ok, %{"feature_version" => "1.1.0"}} =
                Env.run("env.rebuild", Map.put(payload(), :pull, true), ctx)
 
-      assert [start, rebuild] = for({"devcontainer", ["up" | args], _} <- runs(), do: args)
-      refute "--remove-existing-container" in start
-      assert "--remove-existing-container" in rebuild
+      assert [start, rebuild] = for({"devcontainer", params, _} <- runs(), do: params)
+      refute start.remove_existing
+      assert rebuild.remove_existing
     end
   end
 
@@ -1708,7 +1562,7 @@ defmodule ForemanAgent.EnvTest do
       {"docker", args, opts} =
         Enum.find(runs(), fn {cmd, args, _} -> cmd == "docker" and "--force-recreate" in args end)
 
-      refute Enum.any?(args, &(&1 =~ "ghp_registry"))
+      refute inspect(args) =~ "ghp_registry"
       docker_config = opts[:env]["DOCKER_CONFIG"]
       assert is_binary(docker_config)
       refute File.exists?(docker_config)
@@ -2183,10 +2037,6 @@ defmodule ForemanAgent.EnvTest do
          }
        ]}
     end)
-  end
-
-  defp arg(args, flag) do
-    args |> Enum.drop_while(&(&1 != flag)) |> Enum.at(1)
   end
 
   defp mode(path) do

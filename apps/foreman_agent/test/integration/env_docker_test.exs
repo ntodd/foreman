@@ -1,12 +1,11 @@
 defmodule ForemanAgent.Integration.EnvDockerTest do
   @moduledoc """
-  Runs the agent's environment operations against a real Docker daemon and
-  the real devcontainer CLI. Slow (it builds images); run with:
+  Runs the agent's environment operations against a real Docker daemon.
+  Slow (it builds images); run with:
 
       mix test --only docker
 
-  Needs Docker, git and the devcontainer CLI (FOREMAN_DEVCONTAINER_CLI, or
-  ../../.tools/node_modules/.bin/devcontainer).
+  Needs Docker and git.
   """
   use ExUnit.Case, async: false
 
@@ -39,9 +38,6 @@ defmodule ForemanAgent.Integration.EnvDockerTest do
       envs_root: Path.join(root, "envs"),
       secrets_root: Path.join(root, "run"),
       release_root: Path.join(root, "opt"),
-      devcontainer:
-        System.get_env("FOREMAN_DEVCONTAINER_CLI") ||
-          Path.expand("../../../../.tools/node_modules/.bin/devcontainer", __DIR__),
       docker_socket: docker_socket(),
       allowed_git_hosts: ["127.0.0.1"],
       insecure_git_hosts: ["127.0.0.1"],

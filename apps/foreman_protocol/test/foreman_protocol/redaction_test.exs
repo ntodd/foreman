@@ -80,4 +80,29 @@ defmodule ForemanProtocol.RedactionTest do
 
     assert best < 20, "#{Float.round(best, 1)} µs per line"
   end
+
+  describe "env_values/1" do
+    test "is an environment's values" do
+      assert Enum.sort(Redaction.env_values(%{"A" => "first-value", "B" => "second-value"})) ==
+               ["first-value", "second-value"]
+
+      assert Redaction.env_values(%{}) == []
+    end
+
+    # The agent reads registry credentials out of this one, a token at a
+    # time; a token on its own in a log isn't the whole value.
+    test "and each credential in DEVCONTAINERS_OCI_AUTH" do
+      values =
+        Redaction.env_values(%{
+          "DEVCONTAINERS_OCI_AUTH" => "ghcr.io|me|token-one,r.example.com|you|token-two"
+        })
+
+      assert "ghcr.io|me|token-one,r.example.com|you|token-two" in values
+      assert "token-one" in values
+      assert "token-two" in values
+
+      prepared = Redaction.prepare(values)
+      assert Redaction.redact(prepared, "pulling with token-two") == "pulling with [redacted]"
+    end
+  end
 end

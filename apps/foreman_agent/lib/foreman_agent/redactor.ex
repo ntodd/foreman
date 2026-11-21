@@ -3,9 +3,8 @@ defmodule ForemanAgent.Redactor do
   Scrubs a command's secret values out of the logs and errors the agent
   sends back.
 
-  Secrets are write-only in the UI, but build output can echo them: the
-  devcontainer CLI logs the merged compose config with interpolated
-  values, and a lifecycle script can print its environment. The agent
+  Secrets are write-only in the UI, but build output can echo them: a
+  build can print its arguments, and a lifecycle script its environment. The agent
   knows every value a command carried, so it replaces each one before
   anything leaves the box (see `ForemanProtocol.Redaction`).
   """
@@ -24,7 +23,7 @@ defmodule ForemanAgent.Redactor do
       |> Map.drop(["secrets.env", "gitconfig", "notices"])
       |> Map.values()
 
-    env = payload |> Map.get(:compose_env, %{}) |> Map.values()
+    env = payload |> Map.get(:compose_env, %{}) |> Redaction.env_values()
     registry = payload |> Map.get(:registry_auth, []) |> Kernel.||([]) |> Enum.map(& &1.token)
 
     agent = ForemanAgent.Identity.secrets()

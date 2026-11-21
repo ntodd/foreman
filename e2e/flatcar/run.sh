@@ -236,8 +236,8 @@ box 'grep -qx REBOOT_STRATEGY=off /etc/flatcar/update.conf' || fail "Flatcar's r
 box 'test ! -e /etc/foreman-box/provision.env && test ! -e /etc/foreman-box/tailscale-authkey' ||
   fail "the join token was left on the box"
 box '! command -v node' >/dev/null || fail "the box has a Node of its own"
-box 'ls /opt/foreman-agent/current/lib/foreman_agent-*/priv/tools/bin/devcontainer' >/dev/null ||
-  fail "the agent release has no devcontainer CLI"
+box '! ls -d /opt/foreman-agent/current/lib/foreman_agent-*/priv/tools/node 2>/dev/null' >/dev/null ||
+  fail "the agent release carries a Node"
 if [ -n "${FOREMAN_TAILSCALE_CLIENT_ID:-}" ]; then
   box 'tailscale status --json' | grep -q '"BackendState": *"Running"' || fail "the box isn't on the tailnet"
   echo "ok: on the tailnet as $(box 'tailscale status --json' | sed -n 's/.*"DNSName": *"\([^"]*\)".*/\1/p' | head -1)"

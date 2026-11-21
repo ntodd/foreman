@@ -387,6 +387,53 @@ defmodule ForemanAgent.VMEnvTest do
     assert Path.dirname(paths.meta) != paths.dir
   end
 
+  describe "a record an old release left in the VM's own directory" do
+    setup ctx do
+      paths = VM.paths(ctx.config, @env)
+      File.mkdir_p!(paths.dir)
+      File.write!(paths.legacy_meta, ~s({"slug":"hello-1","guest":"g","cpus":64}))
+      %{legacy_meta: paths.legacy_meta}
+    end
+
+    test "gives the slug and images, and nothing else", ctx do
+      assert VM.read_meta(ctx.config, @env) ==
+               {:ok, %{"slug" => "hello-1", "guest" => "g", "legacy" => true, "booted" => %{}}}
+    end
+
+    test "isn't read while it has a second hard link", ctx do
+      other = Path.join(ctx.dir, "other.json")
+      File.ln!(ctx.legacy_meta, other)
+      assert VM.read_meta(ctx.config, @env) == {:error, :none}
+
+      File.rm!(other)
+      assert {:ok, %{"slug" => "hello-1"}} = VM.read_meta(ctx.config, @env)
+    end
+
+    test "isn't read when it's longer than a record gets", ctx do
+      File.write!(
+        ctx.legacy_meta,
+        JSON.encode!(%{slug: "hello-1", pad: :binary.copy("a", 65_536)})
+      )
+
+      assert VM.read_meta(ctx.config, @env) == {:error, :none}
+    end
+
+    test "isn't read through a symlink", ctx do
+      elsewhere = Path.join(ctx.dir, "elsewhere.json")
+      File.rename!(ctx.legacy_meta, elsewhere)
+      File.ln_s!(elsewhere, ctx.legacy_meta)
+
+      assert VM.read_meta(ctx.config, @env) == {:error, :none}
+    end
+
+    test "isn't waited for when it's a FIFO", ctx do
+      File.rm!(ctx.legacy_meta)
+      {_, 0} = System.cmd("mkfifo", [ctx.legacy_meta])
+
+      assert VM.read_meta(ctx.config, @env) == {:error, :none}
+    end
+  end
+
   test "the VM's record isn't written through a symlink the VM left beside it", ctx do
     {:ok, _} = run(create(), ctx)
     {:ok, _} = run(command("env.stop"), ctx)
@@ -950,7 +997,16 @@ defmodule ForemanAgent.VMEnvTest do
       serial = VM.paths(ctx.config, @env).serial
       File.write!(serial, :binary.copy("x", 17 * 1024 * 1024))
       assert {:ok, _} = Status.stats(ctx.ctx)
-      assert File.stat!(serial).size < 1024 * 1024
+      assert File.read!(serial) == "[foreman: the console passed 16 MB and was cut]\n"
+    end
+
+    test "a console with a second hard link is left as it is", ctx do
+      serial = VM.paths(ctx.config, @env).serial
+      File.write!(serial, :binary.copy("x", 17 * 1024 * 1024))
+      File.ln!(serial, Path.join(ctx.dir, "other.log"))
+
+      assert {:ok, _} = Status.stats(ctx.ctx)
+      assert File.stat!(serial).size == 17 * 1024 * 1024
     end
 
     test "gc removes what an interrupted download or build left, and keeps what's in use", ctx do

@@ -3,7 +3,7 @@ defmodule ForemanAgent.Runner.Tree do
   Kills the processes a command started, all the way down.
 
   MuonTrap kills its direct child when its port closes, but without cgroups
-  that's all: the devcontainer CLI's `docker compose up`, or git's
+  that's all: what `docker compose up` starts, or git's
   `git-remote-https`, would keep running after a cancel or a timeout and
   race the next operation. This finds every descendant of the MuonTrap
   processes an Erlang process owns, asks them to stop, and kills whatever
@@ -18,13 +18,59 @@ defmodule ForemanAgent.Runner.Tree do
 
   @poll 100
 
-  @doc "OS pids of the external programs (ports) `pid` owns."
+  @doc """
+  OS pids of the external programs (ports) `pid` owns, and of those owned
+  by tasks it started: commands an operation runs side by side are each
+  run from a task of their own.
+  """
   @spec os_pids(pid()) :: [non_neg_integer()]
   def os_pids(pid) do
     for port <- Port.list(),
-        Port.info(port, :connected) == {:connected, pid},
+        {:connected, owner} <- [Port.info(port, :connected)],
+        owner == pid or started_by?(owner, pid),
         {:os_pid, os_pid} <- [Port.info(port, :os_pid)],
         do: os_pid
+  end
+
+  @doc """
+  Suspends the processes `pid` started (and theirs), so none of them
+  starts a command once `os_pids/1` has been asked what to stop. They're
+  found by their links: a process started with a link has it from the
+  moment it exists, before it has run at all. `except` are the processes
+  `pid` is linked to that it didn't start (whoever started it). `pid`
+  itself is the caller's to suspend, first. Returns what was suspended.
+  """
+  @spec freeze(pid(), [pid()]) :: [pid()]
+  def freeze(pid, except), do: freeze([pid], [pid | except], [])
+
+  defp freeze([], _seen, frozen), do: frozen
+
+  defp freeze([pid | rest], seen, frozen) do
+    linked =
+      case Process.info(pid, :links) do
+        {:links, links} ->
+          for link <- links, is_pid(link), link not in seen, suspend(link), do: link
+
+        nil ->
+          []
+      end
+
+    freeze(rest ++ linked, seen ++ linked, frozen ++ linked)
+  end
+
+  defp suspend(pid) do
+    :erlang.suspend_process(pid)
+    true
+  catch
+    :error, :badarg -> false
+  end
+
+  # Task records who started it, and who started them.
+  defp started_by?(owner, pid) do
+    case Process.info(owner, :dictionary) do
+      {:dictionary, dictionary} -> pid in List.wrap(dictionary[:"$callers"])
+      nil -> false
+    end
   end
 
   @doc """

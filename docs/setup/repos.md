@@ -19,8 +19,8 @@ You don't add any of this to the repo; the agent layers it on:
 - `COMPOSE_PROJECT_NAME` set to the environment's name, so every named
   volume is per copy
 
-`initializeCommand` runs where the devcontainer CLI runs it, outside the
-containers, which is the environment's own VM.
+`initializeCommand` runs outside the containers, which is the
+environment's own VM.
 
 ## What an environment can do
 
@@ -75,8 +75,8 @@ daemon's memory and disk:
 ## GPUs
 
 Environments can't use a box's GPUs. A VM gets none of the box's
-devices, Foreman doesn't pass GPUs through, and the devcontainer CLI
-runs with `--gpu-availability none`. A compose service that reserves a
+devices, Foreman doesn't pass GPUs through, and it never reserves one
+for a `hostRequirements.gpu`. A compose service that reserves a
 GPU fails to start. Before environment VMs, a box could let
 environments share its NVIDIA GPUs (`FOREMAN_POLICY=gpu=allow`); that
 went with shared Docker.
@@ -189,8 +189,9 @@ also deletes any prebuild disk the control plane no longer knows about.
 Each of these broke a real repo moving onto Foreman. None of them shows
 up as an error from Foreman.
 
-- **The remote user doesn't run as the uid you set.** The devcontainer CLI
-  changes the remote user's uid and gid to the host user's that runs it,
+- **The remote user doesn't run as the uid you set.** The agent changes
+  the remote user's uid and gid to those of the user it runs as (the
+  devcontainer spec's `updateRemoteUserUID`),
   which is the guest agent's own user in the VM (`foreman`, UID and GID
   1000 on new disks). Disks initialized by 0.6.0 or 0.6.1 keep their
   original 997:993 ownership so existing workspaces and volumes remain

@@ -28,6 +28,15 @@ defmodule ForemanAgent.Docker.Engine do
       else: {:error, :invalid_id}
   end
 
+  # An image by name, tag or digest: every character a reference can have,
+  # and nothing a path could be built from.
+  @impl true
+  def inspect_image(name) do
+    if Regex.match?(~r/\A[\w][\w.\-:\/@]{0,511}\z/, name) and not String.contains?(name, ".."),
+      do: get("/images/#{name}/json", []),
+      else: {:error, :invalid_name}
+  end
+
   @doc "The host pids of a container's processes."
   @impl true
   def top(id) do

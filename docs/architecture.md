@@ -78,7 +78,7 @@ The same release runs in two modes. On the box (host mode):
 In an environment's VM (guest mode, `FOREMAN_AGENT_MODE=guest`), it runs the environment code that ran on the box before VMs:
 
 - It uses the VM's own Docker through the Engine API (unix socket) for inventory, start/stop, logs and stats, and Docker labels in the VM record what exists (`foreman.env_id`, `foreman.repo`, `foreman.owner`).
-- It shells out to `@devcontainers/cli` only for `up` and builds. The release carries the CLI and the Node it runs on (`priv/tools`, pinned in `rel/tools`), so neither the box nor the guest image needs them, and the signed release covers both.
+- It brings devcontainers up itself (`ForemanAgent.Devcontainer`), following what `@devcontainers/cli`'s `up` does for a compose-based devcontainer: features, image metadata, the compose overrides, the remote user's uid, lifecycle commands and dotfiles. An environment made by one can be taken over by the other. There is no Node in the release, on the box or in the guest image. It leaves out what Foreman never used: devcontainers that aren't compose-based, Podman, builds without BuildKit, GPU reservations, and the two feature formats the CLI calls deprecated (GitHub-release features and `devcontainer-features.json`).
 - It takes commands from the box's agent, never from the control plane, and refuses the ones that belong to the box (updates, reboots).
 
 In both modes it runs child processes under MuonTrap. Cancelling an operation, or a command running past its timeout, kills the command's whole process tree (found through `/proc`), and the environment's next operation waits until it's gone. Every command has a timeout: three hours for `devcontainer up`, 30 minutes for the rest.
@@ -114,7 +114,7 @@ Each environment runs in a Cloud Hypervisor VM, with its own kernel, Docker and 
 - **Compressed guest swap (opt-in per box).** Set `Environment=FOREMAN_VM_ZRAM=1` in the `[Service]` section of a systemd drop-in for `foreman-vmctl@.service`. Reload systemd after changing the drop-in. The updated helper passes the setting on the next cold boot. Resuming a snapshot keeps the original setting. The guest uses LZ4 and keeps swap in RAM, with a logical size of half its RAM capped at 16 GiB. When the box asks a quiet guest for memory, it reclaims excess file cache first. A separate request compresses up to two thirds of resident anonymous pages, limited to 2.5 GiB and the remaining swap space. The helper then compacts and drains once. Removing the drop-in disables the feature on subsequent cold boots.
 - **The channel** between the box's agent and the guest agent is Cloud Hypervisor's hybrid vsock. The box connects to the VM's `vsock.sock` and asks for port 1024, where `socat` in the guest joins it to the guest agent's unix socket; the box always connects, the guest never does, and no network is involved. Frames are JSON with a four-byte length, at most 4 MiB from the box and 1 MiB from the guest, which the box reads no faster than a per-link byte-rate limit and decodes under a memory and time bound (a hostile guest otherwise spends the box's CPU outside its cgroup). The box sends `hello` (its time, and the clone hosts the box allows), `cmd` (a protocol command with the control plane's op id), `cancel`, `ack` and `query` (inventory, ports, or a reclaim of the guest's page cache); the guest sends `hello`, `event` (`op.accepted`, `op.log`, `op.result`, acknowledged as the control plane acknowledges them) and `reply`. A command resent after a reconnect gets the guest's stored result, so it runs once. The guest steps its clock to the box's when it's more than two seconds out.
 - **The guest is hostile.** Anything in the environment can take the VM over, so the box's agent checks every frame: an oversized one closes the connection, and anything that isn't a valid hello, event or reply, an event for an operation the box didn't send, or an inventory or ports reply about another environment, is dropped.
-- **The guest agent** runs as its own unprivileged user in the VM, in Docker's group, with `CAP_SYS_TIME` for the clock and nothing else. The devcontainer CLI gives the container's user that user's uid, so the clone and the 0600 secrets are the container user's own. Giving back page cache needs writes as root (`memory.reclaim` at the guest's root cgroup, then `compact_memory`, then a drain of the per-CPU free lists through `percpu_pagelist_high_fraction` and `stat_refresh` and a second compaction), so a root helper in the guest image does them: `foreman-guest-reclaim`, socket-activated on `/run/foreman-reclaim.sock` (root and the agent's group), one request line (the bytes to reclaim) and one answer line.
+- **The guest agent** runs as its own unprivileged user in the VM, in Docker's group, with `CAP_SYS_TIME` for the clock and nothing else. It gives the container's remote user its own uid (the devcontainer spec's `updateRemoteUserUID`), so the clone and the 0600 secrets are the container user's own. Giving back page cache needs writes as root (`memory.reclaim` at the guest's root cgroup, then `compact_memory`, then a drain of the per-CPU free lists through `percpu_pagelist_high_fraction` and `stat_refresh` and a second compaction), so a root helper in the guest image does them: `foreman-guest-reclaim`, socket-activated on `/run/foreman-reclaim.sock` (root and the agent's group), one request line (the bytes to reclaim) and one answer line.
 
 ### Flatcar boxes
 
@@ -278,7 +278,7 @@ The feature goes into the image, and the CLI builds the image only when it creat
   - Installs `tailscale` and `tailscaled` from the static tarball, with a checksum check.
   - Its `entrypoint` starts tailscaled and runs `tailscale up --ssh --auth-key=file:/run/foreman/ts-authkey --hostname=$TS_HOSTNAME …`.
   - tailscaled always uses userspace networking, so the devcontainer gets no TUN device and no `NET_ADMIN`, and tailscaled never touches its routes, firewall or DNS. Connections into the environment (Tailscale SSH, its ports, `tailscale serve`) work as usual; connections out to other tailnet machines go through a SOCKS5 and HTTP proxy on `127.0.0.2:1055` (not 127.0.0.1, which tailscaled forwards tailnet connections to). In this mode tailscaled hands connections from the tailnet to `127.0.0.1:<port>`, so servers bound only to localhost are reachable from the tailnet too, and see every tailnet peer as 127.0.0.1.
-  - Because it is an entrypoint, it runs on every container start, including `docker restart`. A `postStartCommand` only runs when the devcontainer CLI starts the container.
+  - Because it is an entrypoint, it runs on every container start, including `docker restart`. A `postStartCommand` only runs when the agent brings the devcontainer up.
 - **Secrets hook:** installs `/etc/profile.d/foreman.sh`, which sources `/run/foreman/secrets.env`. A zsh equivalent goes in `/etc/zsh/zprofile`. The hook also prints `/run/foreman/notices` when it isn't empty.
 - **Container environment over SSH:** Tailscale SSH (and VS Code over SSH) starts a clean login shell, without the container's environment: compose `environment:`, `containerEnv`, or a `PATH` the image set. The entrypoint saves that environment to `/etc/foreman/container.env` on every start, and the hook loads it before the secrets, so an SSH shell sees what `docker exec` would.
 - **Git:**
@@ -396,7 +396,7 @@ Secrets reach a running environment in three ways:
 | Compose interpolation (`${VAR}` in compose files) | sidecars such as Neon Local | After the affected services are recreated |
 | GitHub token file | git, `gh` | On the next use; no restart needed |
 
-Foreman doesn't use `--secrets-file` or `--remote-env`. The devcontainer CLI passes those values as `-e NAME=VALUE` on the host's `docker exec` command line, where any user on that host can read them with `ps` ([devcontainers/cli#1317](https://github.com/devcontainers/cli/issues/1317), open).
+Foreman has nothing like the devcontainer CLI's `--secrets-file` or `--remote-env`. Those values go on the host's `docker exec` command line as `-e NAME=VALUE`, where any user on that host can read them with `ps` ([devcontainers/cli#1317](https://github.com/devcontainers/cli/issues/1317), open).
 
 The same issue covers environment variables probed from login shells during lifecycle hooks, and those include sourced secrets. The CLI's host is now the environment's VM, so they show in the VM's process list and not the box's. Before environment VMs, the advice for shared boxes was to mount `/proc` with `hidepid=2`.
 
@@ -459,7 +459,7 @@ GHCR only accepts classic PATs; GitHub App tokens and fine-grained PATs can log 
 - **Expiry tracking:** Foreman reads the token's `GitHub-Authentication-Token-Expiration` header and warns admins 14 days before it lapses.
 - **Detection:** if a repo's devcontainer.json references a private `ghcr.io/<owner>/…` feature or image and no credential is set, the repo page links the runbook. The build doesn't run and fail.
 - **Agent use:**
-  - The agent in the environment's VM supplies the credential to both Docker (image pulls) and the devcontainer CLI's own registry client (feature pulls).
+  - The agent in the environment's VM supplies the credential to both Docker (image pulls) and its own registry client (feature pulls).
   - It never puts the token on a command line or leaves it on disk. For example, it uses `docker login --password-stdin` into a throwaway `DOCKER_CONFIG` per build.
   - Spike 6 confirms which credential source the CLI reads.
 - **Runbook:** `docs/setup/ghcr-machine-user.md` covers:
@@ -496,7 +496,7 @@ Each user can keep a list of devcontainer features that go on every environment 
 
 - **Private:** only that user's environments get them, and only they see them in their settings. Admins see everyone's on the People page, since a feature runs code in the environment.
 - **Per repo:** each repo's page has a box per feature; unticking one leaves it out of the user's environments of that repo. The opt-out is by ref without a version, so moving from `:1` to `:2` keeps it off.
-- **Delivery:** the command carries them as `features`. The agent adds them to the `--additional-features` it passes for the Foreman feature, so the devcontainer CLI resolves and installs them like the repo's. An error about one names it as "your feature … (from your Foreman settings)".
+- **Delivery:** the command carries them as `features`. The agent adds them to the features it installs besides the repo's (the Foreman feature is one), so they're resolved and installed like the repo's. An error about one names it as "your feature … (from your Foreman settings)".
 - **Conflicts:** a feature the repo's devcontainer.json already declares, at any version, is skipped (the operation log says so) and the repo's copy installs. Nothing can use the Foreman feature's id.
 - **Refs:** OCI refs only. A local path would resolve against the repo's devcontainer folder, and a tarball URL skips the registry. Tags are accepted and aren't locked: a user feature has no lock file, so each rebuild gets what the tag points to then.
 - **Registries:** a build's registry credentials are the repo owner's. A private user feature only pulls if those credentials can read it.
@@ -582,7 +582,7 @@ Until environments moved into VMs (2026-11-16), environments ran on the box's sh
 | Option | Why |
 |---|---|
 | Sysbox | Incompatible with `--privileged` and therefore with the official `docker-in-docker` feature; open nested-buildx breakage on Docker 28.5+ ([nestybox/sysbox#973](https://github.com/nestybox/sysbox/issues/973)) |
-| Podman | devcontainer CLI + compose + features is still broken ([devcontainers/cli#863](https://github.com/devcontainers/cli/issues/863)) |
+| Podman | The agent's devcontainer code is written for Docker, BuildKit and Compose (and the devcontainer CLI's own compose + features on Podman was broken, [devcontainers/cli#863](https://github.com/devcontainers/cli/issues/863)) |
 | Kata / Firecracker | No network namespace sharing, so `network_mode: service:x` fails; Docker 28 broke Kata networking |
 | Rootless Docker | Nested privileged dind is unverified, and Ubuntu 24.04's user namespace restrictions get in the way |
 
@@ -664,7 +664,7 @@ docs/
 ### Testing
 
 - `foreman_protocol` gets contract tests, so the control plane and agent agree on every message.
-- The agent's Docker and devcontainer CLI calls sit behind behaviours, with fakes for unit tests. VMs sit behind one too (`ForemanAgent.VM.Machine`), with a fake machine that runs a guest agent in the test node over a stand-in for vsock.
+- The agent's Docker calls, and bringing a devcontainer up, sit behind behaviours, with fakes for unit tests. The devcontainer code's own tests compare what it generates with files the devcontainer CLI wrote for the same project (`test/fixtures/devcontainer/oracle`). VMs sit behind one too (`ForemanAgent.VM.Machine`), with a fake machine that runs a guest agent in the test node over a stand-in for vsock.
 - Integration tests against real Docker are tagged `:docker` and run on a Linux box or in CI. They drive the environment code a guest agent runs.
 - `e2e/guest/run.sh` boots the guest image under Cloud Hypervisor; `e2e/vm/run.sh` runs environment VMs for real on a throwaway machine with KVM; `e2e/vmctl/test.sh` checks the root helper with stand-ins.
 - Control plane tests use a fake agent that joins the Channel.
@@ -775,8 +775,8 @@ the plan above, the build wins.
     writes waits for other writers instead of failing with "database is
     locked".
 - **Secrets on the box:** 0600 files in a 0700 tmpfs directory, owned by
-  the agent user. On Linux the devcontainer CLI maps the container's
-  user to the agent's uid, so the environment can read them. Since
+  the agent user. On Linux the agent maps the container's remote
+  user to its own uid, so the environment can read them. Since
   environment VMs, that's the guest agent's user and the VM's tmpfs; the
   box keeps its own copy, which no environment sees.
 - **Redaction:** secret values are scrubbed from operation logs and

@@ -38,8 +38,8 @@ VM of its own, with its own kernel, Docker and Compose. The agent on the
 box runs unprivileged. A small root helper gives each VM its network tap
 and a systemd unit with CPU and memory limits, and the agent relays the
 control plane's commands over vsock to the same agent release running
-inside the VM, which brings the environment up with `git`,
-`docker compose` and the devcontainer CLI. The box itself needs neither
+inside the VM, which brings the environment up with `git` and
+`docker compose`. The box itself needs neither
 Docker nor git.
 
 On top of each repo's own config, Foreman adds a devcontainer feature

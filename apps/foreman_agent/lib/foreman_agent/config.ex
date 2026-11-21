@@ -15,8 +15,6 @@ defmodule ForemanAgent.Config do
             data_dir: "/var/lib/foreman-agent",
             envs_root: "/srv/foreman/envs",
             secrets_root: "/run/foreman/envs",
-            # load/0 resolves the bundled CLI.
-            devcontainer: "devcontainer",
             docker: "docker",
             git: "git",
             docker_socket: "/var/run/docker.sock",
@@ -91,7 +89,6 @@ defmodule ForemanAgent.Config do
     |> Map.put(:guest_sha256, present(env[:guest_sha256_override]) || present(@guest_sha256))
     |> Map.update!(:feature_dir, &(&1 || default_feature_dir()))
     |> Map.update!(:firewall_rules, &(&1 || default_firewall_rules()))
-    |> Map.put(:devcontainer, devcontainer_cli(default_tools_dir(), env[:devcontainer]))
   end
 
   @doc "The loaded config. Loaded on first use and cached."
@@ -110,36 +107,6 @@ defmodule ForemanAgent.Config do
 
   def put(%__MODULE__{} = config), do: :persistent_term.put(__MODULE__, config)
 
-  # Where install scripts before the bundled CLI put the one they installed
-  # with npm, and what they wrote to agent.env: a self-update keeps that
-  # file, and the release's own CLI replaces it.
-  @legacy_cli "/opt/foreman-agent/node/node_modules/.bin/devcontainer"
-
-  @doc """
-  Resolves the devcontainer CLI from its override, the release, or PATH.
-  The release's CLI takes precedence over the legacy installer path.
-  """
-  @spec devcontainer_cli(Path.t() | nil, String.t() | nil) :: String.t()
-  def devcontainer_cli(dir, configured) do
-    bundled_cli = bundled(dir, "bin/devcontainer")
-
-    case override(configured) do
-      @legacy_cli when is_binary(bundled_cli) -> bundled_cli
-      nil -> bundled_cli || "devcontainer"
-      path -> path
-    end
-  end
-
-  defp override(path) when is_binary(path) and path != "", do: path
-  defp override(_path), do: nil
-
-  defp bundled(nil, _rel), do: nil
-
-  defp bundled(root, rel) do
-    path = Path.join(root, rel)
-    if File.regular?(path), do: path
-  end
-
   @doc "The version of the Foreman feature this agent installs, or nil if it can't be read."
   @spec feature_version(t()) :: String.t() | nil
   def feature_version(%__MODULE__{feature_dir: dir}) do
@@ -155,8 +122,6 @@ defmodule ForemanAgent.Config do
   @doc "Paths no environment may ever bind-mount."
   def protected_paths(%__MODULE__{} = c),
     do: [c.data_dir, c.envs_root, c.secrets_root, c.release_root, c.vm_root]
-
-  defp default_tools_dir, do: Application.app_dir(:foreman_agent, "priv/tools")
 
   defp default_firewall_rules,
     do: Application.app_dir(:foreman_agent, "priv/firewall/foreman.nft")

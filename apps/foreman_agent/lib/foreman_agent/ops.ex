@@ -266,7 +266,14 @@ defmodule ForemanAgent.Ops do
         :error, :badarg -> false
       end
 
-    roots = if suspended?, do: Tree.os_pids(pid), else: []
+    # Its tasks too (commands it runs side by side), before asking what
+    # they've started: one still about to start its command never does.
+    # This process started the operation; everything else linked to it,
+    # the operation started.
+    frozen = if suspended?, do: Tree.freeze(pid, [self()]), else: []
+
+    roots =
+      if suspended?, do: Enum.uniq(Enum.flat_map([pid | frozen], &Tree.os_pids/1)), else: []
 
     {reaper, _ref} =
       spawn_monitor(fn ->

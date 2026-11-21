@@ -127,7 +127,7 @@ defmodule ForemanWeb.SettingsLive do
 
         <.panel title="Dotfiles">
           <:subtitle>
-            A public git repo the devcontainer CLI clones and installs when an environment is built.
+            A public git repo that's cloned and installed when an environment is built.
           </:subtitle>
           <div class="space-y-4">
             <.input
