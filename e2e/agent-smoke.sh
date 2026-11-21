@@ -2,8 +2,8 @@
 # Starts an agent release on each system it's built to run on. The release
 # bundles ERTS, which links the build image's glibc and OpenSSL, so a newer
 # build image makes an agent that won't start on older boxes; the e2e box
-# is Debian 13 and wouldn't notice. It also carries Node and the
-# devcontainer CLI, which have to run on systems that have no Node.
+# is Debian 13 and wouldn't notice. It also carries a helper built for
+# it in C (priv/vm/vm-file), which links that glibc too.
 #
 #   e2e/agent-smoke.sh path/to/foreman_agent.tar.gz
 #
@@ -61,15 +61,13 @@ for image in $images; do
     mkdir /opt/agent
     tar -xzf /agent.tar.gz -C /opt/agent
     /opt/agent/bin/foreman_agent eval "$1"
-    ! command -v node >/dev/null || { echo "this image has a Node of its own" >&2; exit 1; }
     echo record > /tmp/vm-record
     for helper in /opt/agent/lib/foreman_agent-*/priv/vm/vm-file; do
-      [ "$("$helper" read-record /tmp/vm-record)" = record ]
+      [ "$("$helper" read-record /tmp/vm-record)" = record ] || { echo "vm-file does not run here" >&2; exit 1; }
+      echo "ok: vm-file"
     done
-    for cli in /opt/agent/lib/foreman_agent-*/priv/tools/bin/devcontainer; do
-      version=$("$cli" --version)
-      echo "ok: devcontainer CLI $version"
-    done
+    ! ls -d /opt/agent/lib/foreman_agent-*/priv/tools/node >/dev/null 2>&1 ||
+      { echo "the release carries a Node" >&2; exit 1; }
   ' sh "$check")
   docker cp "$tarball" "$id:/agent.tar.gz"
   docker start -a "$id" || { echo "FAILED: the agent doesn't start on $image" >&2; exit 1; }

@@ -75,9 +75,6 @@ jobs:
         with:
           elixir-version: ${{ env.ELIXIR_VERSION }}
           otp-version: ${{ env.OTP_VERSION }}
-      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
-        with:
-          node-version: "22"
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
@@ -107,24 +104,14 @@ jobs:
         with:
           elixir-version: ${{ env.ELIXIR_VERSION }}
           otp-version: ${{ env.OTP_VERSION }}
-      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
-        with:
-          node-version: "22"
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             apps/foreman_agent/deps
             apps/foreman_agent/_build
           key: agent-${{ runner.arch }}-${{ env.ELIXIR_VERSION }}-${{ env.OTP_VERSION }}-${{ hashFiles('apps/foreman_agent/mix.lock') }}
-      - name: Install the devcontainer CLI the agent release carries
-        run: |
-          mkdir -p "$RUNNER_TEMP/devcontainer"
-          cp rel/tools/devcontainer/package.json rel/tools/devcontainer/package-lock.json "$RUNNER_TEMP/devcontainer/"
-          npm ci --prefix "$RUNNER_TEMP/devcontainer" --omit=dev --ignore-scripts --no-fund --no-audit
       - run: mix deps.get
       - run: mix test --only docker
-        env:
-          FOREMAN_DEVCONTAINER_CLI: ${{ runner.temp }}/devcontainer/node_modules/.bin/devcontainer
 
   control-plane:
     if: github.event_name != 'schedule'
@@ -188,7 +175,7 @@ jobs:
         with:
           node-version: "22"
       - name: ShellCheck
-        run: shellcheck -s sh guest/build.sh guest/rootfs/usr/local/lib/foreman-guest/* e2e/guest/run.sh e2e/vm/run.sh e2e/vmctl/test.sh apps/foreman_agent/priv/vm/guest-forward apps/foreman_agent/priv/vm/vmctl features/src/foreman/install.sh features/src/foreman/scripts/* apps/foreman/priv/agent/install.sh apps/foreman/priv/agent/vm.sh apps/foreman/priv/flatcar/*.sh apps/foreman_agent/rel/tools/bundle.sh apps/foreman_agent/rel/tools/devcontainer.sh scripts/publish-agent-release.sh e2e/*.sh e2e/firewall/test.sh e2e/linux/run.sh e2e/flatcar/run.sh e2e/linux/bin/gh docker/foreman-update e2e/updater/run.sh
+        run: shellcheck -s sh guest/build.sh guest/rootfs/usr/local/lib/foreman-guest/* e2e/guest/run.sh e2e/vm/run.sh e2e/vmctl/test.sh apps/foreman_agent/priv/vm/guest-forward apps/foreman_agent/priv/vm/vmctl features/src/foreman/install.sh features/src/foreman/scripts/* apps/foreman/priv/agent/install.sh apps/foreman/priv/agent/vm.sh apps/foreman/priv/flatcar/*.sh apps/foreman_agent/rel/tools/bundle.sh scripts/publish-agent-release.sh e2e/*.sh e2e/firewall/test.sh e2e/linux/run.sh e2e/flatcar/run.sh e2e/linux/bin/gh docker/foreman-update e2e/updater/run.sh
       - name: Test the VM helper
         run: sh e2e/vmctl/test.sh
       - name: Test the feature in a real devcontainer

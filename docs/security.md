@@ -107,10 +107,10 @@ gaps" section is the place to start.
   that escape the release directory are refused. The signing key lives
   only in CI, so a compromised control plane can't push agent code. A
   failing new release is rolled back by a systemd `OnFailure` unit.
-  The release carries the devcontainer CLI and the Node it runs on
-  (Node's official build, pinned by digest; the CLI from a lockfile) and
-  Cloud Hypervisor (its static build, pinned by digest), so the
-  signature covers them too, and a box runs no Node of its own. An amd64
+  The release carries Cloud Hypervisor (its static build, pinned by
+  digest), so the signature covers it too. The agent brings
+  devcontainers up itself: there's no Node and no devcontainer CLI in
+  the release, on a box or in a VM. An amd64
   release is built with the guest image's URL and SHA-256, so the
   signature covers which image its VMs boot: the agent checks the
   download against that digest, and unpacks only the three plain files
@@ -294,8 +294,8 @@ inside it, the environment can do as it likes.
   0600, owned by the agent user, which no environment sees. The agent
   writes them into the environment's VM after every boot and with every
   change, to the same layout on the VM's tmpfs, bind-mounted read-only
-  at `/run/foreman`. The devcontainer CLI gives the container's user the
-  guest agent's uid, so the environment reads them. Inside the
+  at `/run/foreman`. The guest agent gives the container's remote user
+  its own uid, so the environment reads them. Inside the
   environment, the container's own environment (which can include
   compose-interpolated secrets) is saved to `/etc/foreman/container.env`,
   mode 0644, so SSH shells get it; any user in that container can read
@@ -389,10 +389,10 @@ These are accepted for now, or need someone to try them:
    `CAP_DAC_OVERRIDE`, so it reads the secrets directory regardless of
    ownership. That's the environment's own secrets, by design, but also
    means "0600" isn't a boundary inside the environment.
-3. **Secrets in `ps` in the VM.** The devcontainer CLI puts probed
-   environment variables (which include sourced secrets) on the
-   `docker exec` command line during lifecycle hooks
-   (devcontainers/cli#1317). That runs in the environment's VM, so the
+3. **Secrets in `ps` in the VM.** The agent puts the remote user's
+   probed environment variables (which include sourced secrets) on the
+   `docker exec` command line during lifecycle hooks, as the
+   devcontainer CLI does (devcontainers/cli#1317). That runs in the environment's VM, so the
    box's process list doesn't show them, but anything in the VM that
    can see its processes can read them with `ps`. They're that
    environment's own secrets.

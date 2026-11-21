@@ -7,8 +7,8 @@ defmodule ForemanAgent.Env.Overlay do
     on tmpfs), labels every service with the environment (and the
     devcontainer as such, with the Foreman feature it's built with), and
     mounts the secrets directory and the Tailscale state volume
-  - an override devcontainer.json that appends the overlay to
-    `dockerComposeFile` (with absolute paths)
+  - the devcontainer.json to bring up, with the overlay appended to
+    `dockerComposeFile` (as absolute paths)
 
   The YAML is written by hand: the structure is fixed, every scalar is
   emitted as a JSON string (valid YAML), and compose's `!reset` tag has no
@@ -71,8 +71,8 @@ defmodule ForemanAgent.Env.Overlay do
     ])
   end
 
-  # Set when the container is created, which is when the CLI builds its
-  # image; a container the CLI reuses keeps its labels. Every other service
+  # Set when the container is created, which is when its image is built;
+  # a container that's reused keeps its labels. Every other service
   # gets an empty one, which overrides any label the repo gives it.
   defp feature_label(service, params) do
     version =
@@ -147,7 +147,7 @@ defmodule ForemanAgent.Env.Overlay do
   @doc """
   The override devcontainer.json: the repo's config with
   `dockerComposeFile` replaced by absolute paths plus the overlay.
-  `initializeCommand` stays: the devcontainer CLI runs it outside the
+  `initializeCommand` stays: it runs outside the
   containers, which is the environment's own VM.
   """
   @spec override_config(map(), keyword()) :: map()

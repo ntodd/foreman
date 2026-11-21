@@ -215,8 +215,17 @@ echo "foreman: refreshing root helpers from fleet agent $version"
 staged="$tmp/release"
 mkdir -m 0700 "$staged"
 tar -xzf "$tmp/agent.tar.gz" -C "$staged"
-set -- "$staged"/lib/foreman_agent-*/priv/tools/bin/devcontainer
-[ -x "$1" ] || fail "fleet agent $version doesn't carry the devcontainer CLI"
+# An agent brings devcontainers up itself, or (older ones) carries the
+# devcontainer CLI to do it. Older still needed one installed here.
+set -- "$staged"/lib/foreman_agent-*/priv/devcontainer/updateUID.Dockerfile
+if [ -f "$1" ]; then
+  # Built with that agent, for the files it reads in a VM's own directory.
+  set -- "$staged"/lib/foreman_agent-*/priv/vm/vm-file
+  { [ -f "$1" ] && [ -x "$1" ]; } || fail "fleet agent $version is missing its file helper"
+else
+  set -- "$staged"/lib/foreman_agent-*/priv/tools/bin/devcontainer
+  [ -x "$1" ] || fail "fleet agent $version can't bring devcontainers up on its own"
+fi
 set -- "$staged"/lib/foreman_agent-*/priv/vm/vmctl
 [ -f "$1" ] || fail "fleet agent $version doesn't run environment VMs"
 
@@ -243,7 +252,7 @@ fi
 # Install scripts before the release carried the devcontainer CLI put one
 # here with npm and named it in agent.env. A box pinned to an agent from
 # then is moved back to it after this script, and that agent still needs
-# both. An agent that carries its own CLI ignores this path.
+# both. Agents since then ignore this path.
 legacy_cli=/opt/foreman-agent/node/node_modules/.bin/devcontainer
 legacy_cli_env=""
 if [ -x "$legacy_cli" ]; then legacy_cli_env="FOREMAN_DEVCONTAINER_CLI=$legacy_cli"; fi

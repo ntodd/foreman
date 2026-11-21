@@ -1,0 +1,18 @@
+{
+  // oracle fixture
+  "name": "oracle",
+  "dockerComposeFile": ["docker-compose.yml"],
+  "service": "app",
+  "runServices": ["app"],
+  "workspaceFolder": "/workspaces/${localWorkspaceFolderBasename}",
+  "features": {
+    "./local-feature": {"greeting": "hi there", "loud": true},
+    "./second": {}
+  },
+  "remoteUser": "dev",
+  "containerEnv": {"FROM_CONFIG": "a $b \"c\"", "ID": "${devcontainerId}"},
+  "remoteEnv": {"REMOTE_ONE": "one", "WITH_PATH": "${containerEnv:PATH}:/extra"},
+  "postCreateCommand": "echo post-create && id -un && echo $REMOTE_ONE",
+  "postStartCommand": {"a": "echo start-a", "b": ["echo", "start-b"]},
+  "mounts": ["type=volume,source=oracle-data,target=/data"]
+}

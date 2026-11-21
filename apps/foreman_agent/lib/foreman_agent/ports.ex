@@ -17,7 +17,7 @@ defmodule ForemanAgent.Ports do
   Which process holds a socket comes from the box too, from the fds of
   the container's processes. Only processes running as the agent's own
   uid can be read that way, which on Linux is the remote user's: the
-  devcontainer CLI gives it the uid of the user that runs it. A listener
+  agent gives it its own uid when it brings the devcontainer up. A listener
   running as anyone else (root's sshd, say) goes unnamed.
   """
 

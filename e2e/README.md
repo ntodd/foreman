@@ -1,9 +1,13 @@
 # End-to-end runs
 
 The runs here use the real pieces wherever they can (Docker, Cloud
-Hypervisor, the devcontainer CLI) and the fixture repo in
+Hypervisor) and the fixture repo in
 `apps/foreman_agent/test/fixtures/repos/hello` (an app service and a
 sidecar that reads `${SIDECAR_TOKEN}`).
+
+The agent brings devcontainers up itself, with its own implementation of
+the devcontainer CLI's `up` (`ForemanAgent.Devcontainer`), so none of the
+runs needs the CLI.
 
 ## Through the UI (macOS or Linux)
 
@@ -33,7 +37,6 @@ R=$(cd ../.. && pwd)
 FOREMAN_URL=http://localhost:4100 FOREMAN_JOIN_TOKEN=fj_... \
   FOREMAN_AGENT_DATA_DIR=$R/tmp/e2e/agent FOREMAN_ENVS_ROOT=$R/tmp/e2e/envs \
   FOREMAN_SECRETS_ROOT=$R/tmp/e2e/run FOREMAN_RELEASE_ROOT=$R/tmp/e2e/opt \
-  FOREMAN_DEVCONTAINER_CLI=$R/.tools/node_modules/.bin/devcontainer \
   FOREMAN_ALLOWED_GIT_HOSTS=127.0.0.1 FOREMAN_INSECURE_GIT_HOSTS=127.0.0.1 \
   mix run --no-halt &
 

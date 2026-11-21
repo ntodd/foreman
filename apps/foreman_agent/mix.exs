@@ -71,20 +71,16 @@ defmodule ForemanAgent.MixProject do
     ]
   end
 
-  # Node and the devcontainer CLI, from rel/tools/bundle.sh, so a box
-  # needs neither (docker/box.Dockerfile sets FOREMAN_AGENT_TOOLS). They go
-  # in priv/tools, where ForemanAgent.Config looks. Without it the release
-  # runs the ones on PATH.
+  # What rel/tools/bundle.sh fetched for the release to carry (Cloud
+  # Hypervisor, for environment VMs): docker/box.Dockerfile sets
+  # FOREMAN_AGENT_TOOLS to where. It goes in priv/tools.
   defp copy_tools(release) do
     case System.get_env("FOREMAN_AGENT_TOOLS") do
       dir when dir in [nil, ""] ->
         release
 
       dir ->
-        for entry <- ["node/bin/node", "devcontainer", "bin/devcontainer"],
-            not File.exists?(Path.join(dir, entry)),
-            do: Mix.raise("#{Path.join(dir, entry)} is missing; run rel/tools/bundle.sh")
-
+        unless File.dir?(dir), do: Mix.raise("#{dir} is missing; run rel/tools/bundle.sh")
         target = Path.join([release.path, "lib", "foreman_agent-#{@version}", "priv", "tools"])
         File.rm_rf!(target)
         File.cp_r!(dir, target)

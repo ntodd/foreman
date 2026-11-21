@@ -1,0 +1,12 @@
+services:
+  app:
+    build:
+      dockerfile: {{BUILD}}/Dockerfile-with-features
+      args:
+        - BUILDKIT_INLINE_CACHE=1
+        - _DEV_CONTAINERS_BASE_IMAGE=dev_container_auto_added_stage_label
+        - _DEV_CONTAINERS_IMAGE_USER=root
+        - _DEV_CONTAINERS_FEATURE_CONTENT_SOURCE=dev_container_feature_content_temp
+      additional_contexts:
+        - dev_containers_feature_content_source={{BUILD}}
+

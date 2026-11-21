@@ -27,6 +27,22 @@ defmodule ForemanProtocol.Redaction do
           max_length: non_neg_integer()
         }
 
+  @doc """
+  The values to redact for an environment's variables: each value, and
+  each credential inside `DEVCONTAINERS_OCI_AUTH`
+  (`registry|user|token`, comma-separated), which is used a token at a
+  time.
+  """
+  @spec env_values(%{optional(String.t()) => String.t()}) :: [String.t()]
+  def env_values(env) do
+    tokens =
+      for entry <- String.split(env["DEVCONTAINERS_OCI_AUTH"] || "", ","),
+          [_registry, _user, token] <- [String.split(entry, "|")],
+          do: token
+
+    Map.values(env) ++ tokens
+  end
+
   @doc "Prepares a list of values for `redact/2`."
   @spec prepare([String.t()]) :: t()
   def prepare(values) do

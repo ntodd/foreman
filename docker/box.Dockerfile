@@ -20,11 +20,10 @@ ARG FOREMAN_GUEST_URL=
 ARG FOREMAN_GUEST_SHA256=
 ENV MIX_ENV=prod FOREMAN_AGENT_VERSION=${FOREMAN_AGENT_VERSION} FOREMAN_RELEASE_PUBLIC_KEY=${FOREMAN_RELEASE_PUBLIC_KEY} \
   FOREMAN_GUEST_URL=${FOREMAN_GUEST_URL} FOREMAN_GUEST_SHA256=${FOREMAN_GUEST_SHA256}
-RUN apt-get update -y && apt-get install -y --no-install-recommends build-essential git ca-certificates curl xz-utils \
+RUN apt-get update -y && apt-get install -y --no-install-recommends build-essential git ca-certificates curl \
   && rm -rf /var/lib/apt/lists/*
 RUN mix local.hex --force && mix local.rebar --force
-# Node and the devcontainer CLI ship inside the release, so boxes need
-# neither (see rel/tools/bundle.sh).
+# What the release carries besides its own code (see rel/tools/bundle.sh).
 COPY apps/foreman_agent/rel/tools /tools-src
 RUN /tools-src/bundle.sh /tools
 ENV FOREMAN_AGENT_TOOLS=/tools
@@ -48,7 +47,7 @@ COPY --from=agent /foreman_agent.tar.gz /
 FROM ${RUNTIME_IMAGE} AS box
 # What the install script expects of a box: systemd, Docker Engine with
 # Compose, nftables (for the box firewall) and git. No Node: the agent
-# release carries its own for the devcontainer CLI. Nothing of Foreman's:
+# brings devcontainers up itself. Nothing of Foreman's:
 # e2e/linux/run.sh installs the agent with the control plane's install
 # script, as on a real box.
 RUN apt-get update -y \

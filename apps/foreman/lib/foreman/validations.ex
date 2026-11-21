@@ -27,8 +27,8 @@ defmodule Foreman.Validations do
 
   @doc """
   Dotfiles must be a public https git URL; the install command is passed
-  as one argv entry. The devcontainer CLI puts the target path in its
-  clone script unquoted, so it's limited to a plain path under `~/` or
+  as one argv entry. The agent's clone script has the target path
+  unquoted (as the devcontainer CLI's does), so it's limited to a plain path under `~/` or
   an absolute one.
   """
   def validate_dotfiles(changeset) do

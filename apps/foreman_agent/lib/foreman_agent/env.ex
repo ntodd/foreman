@@ -21,6 +21,7 @@ defmodule ForemanAgent.Env do
 
   alias ForemanAgent.Config
   alias ForemanAgent.Env.{Affected, Overlay}
+  alias ForemanAgent.Runner.Logged
   alias ForemanAgent.SafeFS
   alias ForemanAgent.VM.Prebuild
   alias ForemanProtocol.{Connect, Feature, Jsonc}
@@ -134,7 +135,7 @@ defmodule ForemanAgent.Env do
   # A disk made from a prebuild (ForemanAgent.VM.Prebuild) has the
   # prebuild's clone, built images and saved spec under the prebuild's id.
   # The environment takes the clone over (refresh_clone/3 brings it up to
-  # date) and the CLI makes the environment's own containers from the
+  # date) and bringing the devcontainer up makes the environment's own containers from the
   # images already there. The prebuild's spec goes, so nothing starts this
   # environment as the prebuild before its own is saved, and so do the
   # prebuild's containers and volumes: the environment's are its own,
@@ -700,7 +701,7 @@ defmodule ForemanAgent.Env do
 
   # -- prepare -------------------------------------------------------------
 
-  # Every profile: the CLI starts the services runServices names, and
+  # Every profile: bringing the devcontainer up starts the services runServices names, and
   # compose starts a profiled service it's asked for by name, so the
   # overlay covers them all.
   @check_args [profiles: :all]
@@ -709,7 +710,7 @@ defmodule ForemanAgent.Env do
     config_dir = config_dir(spec.config_path)
     files_config = &compose_config(ctx, spec.slug, &1, &2, paths.meta, @check_args)
 
-    with {:ok, config} <- read_devcontainer(paths.clone, spec.config_path),
+    with {:ok, config, key_order} <- read_devcontainer(paths.clone, spec.config_path),
          {:ok, features} <- user_features(spec, config, ctx),
          {:ok, rel_files, service} <- compose_spec(config),
          {:ok, compose_files} <- resolve_compose_files(paths.clone, config_dir, rel_files),
@@ -720,8 +721,6 @@ defmodule ForemanAgent.Env do
          :ok <- check_run_services(config["runServices"], services),
          overlay_path = Path.join(paths.meta, "overlay.yml"),
          :ok <- write_overlay(overlay_path, paths, spec, services, service, ctx),
-         override_path = Path.join(paths.meta, "devcontainer.json"),
-         :ok <- write_override(override_path, config, compose_files, overlay_path),
          :ok <- install_feature(paths.clone, config_dir, ctx) do
       {:ok,
        %{
@@ -729,7 +728,12 @@ defmodule ForemanAgent.Env do
          compose_files: compose_files,
          builds: builds(base),
          overlay_path: overlay_path,
-         override_path: override_path,
+         override:
+           Overlay.override_config(config,
+             compose_files: compose_files,
+             overlay_path: overlay_path
+           ),
+         key_order: key_order,
          services: services,
          devcontainer_service: service,
          features: features,
@@ -740,7 +744,8 @@ defmodule ForemanAgent.Env do
 
   # The features a user adds to their own environments, less any the repo
   # already declares at whatever version: the repo's copy is the one that
-  # installs. None can take the Foreman feature's id. The CLI lowercases
+  # installs. None can take the Foreman feature's id. Refs are lowercased
+  # when they're resolved
   # refs, so a repo's are compared that way (a user's already are).
   defp user_features(spec, config, ctx) do
     features = Map.get(spec, :features, %{})
@@ -772,8 +777,11 @@ defmodule ForemanAgent.Env do
     case SafeFS.read(clone, rel, max_bytes: @max_config_bytes) do
       {:ok, content} ->
         case Jsonc.decode(content) do
-          {:ok, config} -> {:ok, config}
-          {:error, message} -> {:error, "#{rel}: #{message}"}
+          {:ok, config} ->
+            {:ok, config, %{"containerEnv" => Jsonc.key_order(content, ["containerEnv"])}}
+
+          {:error, message} ->
+            {:error, "#{rel}: #{message}"}
         end
 
       {:error, :enoent} ->
@@ -902,14 +910,7 @@ defmodule ForemanAgent.Env do
     SafeFS.write_atomic(path, yaml, 0o600)
   end
 
-  defp write_override(path, config, compose_files, overlay_path) do
-    override =
-      Overlay.override_config(config, compose_files: compose_files, overlay_path: overlay_path)
-
-    SafeFS.write_atomic(path, JSON.encode!(override), 0o600)
-  end
-
-  # The CLI resolves local features against the repo's devcontainer
+  # Local features are resolved against the repo's devcontainer
   # folder, so the feature is copied in there (and excluded from git).
   defp install_feature(clone, config_dir, ctx) do
     case SafeFS.ensure_dir(clone, Path.join(config_dir, ".foreman")) do
@@ -937,7 +938,7 @@ defmodule ForemanAgent.Env do
   # -- feature version -----------------------------------------------------
 
   # The overlay labels the devcontainer with the feature version when the
-  # container is created, which is when the CLI builds its image. The CLI
+  # container is created, which is when its image is built. Bringing it up
   # starts a container that exists without recreating it, so the label is
   # the feature that's in it.
   defp put_feature_version(result, ctx, env_id, service) do
@@ -947,7 +948,7 @@ defmodule ForemanAgent.Env do
     end
   end
 
-  # With no container the CLI builds one anyway, so only one it would
+  # With no container one is built anyway, so only one that would be
   # reuse is rebuilt: one without a label was made before the agent set it.
   defp feature_rebuild(ctx, env_id, prepared, opts) do
     with true <- Keyword.get(opts, :feature_rebuild, true),
@@ -997,197 +998,79 @@ defmodule ForemanAgent.Env do
     with_docker_config(paths, Map.get(p, :registry_auth), fn docker_config ->
       # COMPOSE_REMOVE_ORPHANS: a service the repo dropped from its compose
       # files would otherwise leave its container behind, and the
-      # environment would read as partial. Only here, where the CLI passes
-      # every compose file; a compose run with fewer would count the
-      # services it doesn't see as orphans.
+      # environment would read as partial. Only here, where every compose
+      # file is passed; a compose run with fewer would count the services
+      # it doesn't see as orphans.
       env =
         ctx
         |> compose_env(spec.slug, Map.get(p, :compose_env, %{}))
         |> Map.put("COMPOSE_REMOVE_ORPHANS", "true")
         |> then(&if(docker_config, do: Map.put(&1, "DOCKER_CONFIG", docker_config), else: &1))
 
-      config_args = [
-        "--workspace-folder",
-        paths.clone,
-        "--config",
-        Path.join(paths.clone, spec.config_path),
-        "--override-config",
-        prepared.override_path,
-        "--additional-features",
-        JSON.encode!(
-          Map.put(prepared.features, @feature_ref, Overlay.feature_options(spec.tailscale))
-        ),
-        "--log-format",
-        "json",
-        "--oci-auth-hardening"
-      ]
+      params = %{
+        workspace: paths.clone,
+        config_path: Path.join(paths.clone, spec.config_path),
+        config: prepared.override,
+        key_order: prepared.key_order,
+        # A tmpfs, for the moment compose's resolved project is on disk.
+        scratch_dir: ctx.config.secrets_root,
+        additional_features:
+          Map.put(prepared.features, @feature_ref, Overlay.feature_options(spec.tailscale)),
+        # Where install_feature/3 puts Foreman's own, which isn't in a
+        # .devcontainer folder when the config is at the repo's root.
+        local_feature_roots: [Path.join(config_dir(spec.config_path), ".foreman")],
+        id_labels: ["foreman.env_id=#{spec.env_id}"],
+        remove_existing: opts[:rebuild] == true,
+        lockfile: lockfile?(paths.clone, spec.config_path),
+        dotfiles: Map.get(spec, :dotfiles),
+        env: env,
+        state_dir: Path.join(paths.meta, "devcontainer"),
+        timeout: @up_timeout
+      }
 
-      with {:ok, result} <- up(paths, spec, prepared, config_args, env, ctx, opts) do
-        {:ok, put_feature_version(result, ctx, spec.env_id, prepared.devcontainer_service)}
+      ctx.log.("info", "Starting the devcontainer\n")
+
+      case devcontainer(ctx).up(params, ctx) do
+        {:ok, up} ->
+          result = %{
+            "container_id" => up.container_id,
+            "remote_user" => up.remote_user,
+            "remote_workspace_folder" => up.remote_workspace_folder,
+            "compose_project" => up.compose_project || spec.slug,
+            "services" => prepared.services,
+            "devcontainer_service" => prepared.devcontainer_service,
+            "warnings" => prepared.warnings,
+            "host_requirements" => prepared.config["hostRequirements"]
+          }
+
+          {:ok, put_feature_version(result, ctx, spec.env_id, prepared.devcontainer_service)}
+
+        # Its own words for running out of time.
+        {:error, "devcontainer up " <> _ = message} ->
+          {:error, message}
+
+        {:error, message} ->
+          {:error, "devcontainer up failed: #{message}"}
       end
     end)
   end
 
-  defp up(paths, spec, prepared, config_args, env, ctx, opts) do
-    args =
-      ["up" | config_args] ++
-        [
-          "--id-label",
-          "foreman.env_id=#{spec.env_id}",
-          "--skip-post-attach",
-          # Environment VMs have no GPUs to hand out.
-          "--gpu-availability",
-          "none"
-        ] ++
-        lockfile_args(paths.clone, spec.config_path) ++
-        dotfiles_args(Map.get(spec, :dotfiles)) ++
-        if(opts[:rebuild], do: ["--remove-existing-container"], else: [])
+  defp devcontainer(ctx), do: Map.get(ctx, :devcontainer, ForemanAgent.Devcontainer)
 
-    ctx.log.("info", "Starting the devcontainer\n")
+  # A devcontainer-lock.json is kept up for repos that commit one;
+  # otherwise it'd be an untracked file in every workspace.
+  defp lockfile?(clone, config_path) do
+    relative = ForemanAgent.Devcontainer.lockfile_path(config_path)
 
-    with {:ok, %{status: status, output: output}} <-
-           run_tool(
-             ctx,
-             ctx.config.devcontainer,
-             args,
-             [env: env, keep: 262_144, timeout: @up_timeout, label: "devcontainer up"],
-             &devcontainer_log/1
-           ) do
-      up_outcome(status, output, spec, prepared)
-    end
-  end
-
-  defp up_outcome(status, output, spec, prepared) do
-    case {status, find_outcome(output)} do
-      {0, %{"outcome" => "success"} = outcome} ->
-        {:ok,
-         %{
-           "container_id" => outcome["containerId"],
-           "remote_user" => outcome["remoteUser"],
-           "remote_workspace_folder" => outcome["remoteWorkspaceFolder"],
-           "compose_project" => outcome["composeProjectName"] || spec.slug,
-           "services" => prepared.services,
-           "devcontainer_service" => prepared.devcontainer_service,
-           "warnings" => prepared.warnings,
-           "host_requirements" => prepared.config["hostRequirements"]
-         }}
-
-      {_, %{"message" => message} = outcome} ->
-        {:error, "devcontainer up failed: #{message}#{describe(outcome)}"}
-
-      {status, nil} ->
-        {:error,
-         "#{exited("devcontainer up", status)} without reporting a result. " <>
-           output_below(last_lines(output, &devcontainer_log/1))}
-
-      {_, _} ->
-        {:error, "devcontainer up failed: #{last_lines(output, &devcontainer_log/1)}"}
-    end
-  end
-
-  @signals %{
-    1 => "SIGHUP",
-    2 => "SIGINT",
-    6 => "SIGABRT",
-    9 => "SIGKILL",
-    11 => "SIGSEGV",
-    13 => "SIGPIPE",
-    15 => "SIGTERM"
-  }
-
-  # MuonTrap reports a command killed by a signal as 128 + the signal.
-  defp exited(label, status) do
-    case @signals[status - 128] do
-      nil -> "#{label} exited with status #{status}"
-      signal -> "#{label} was killed by #{signal} (status #{status})"
-    end
-  end
-
-  defp output_below(""), do: "It printed nothing."
-  defp output_below(tail), do: "Its last output is below.\n" <> tail
-
-  # The CLI writes devcontainer-lock.json next to the config. Keep that
-  # behaviour for repos that commit one; otherwise it'd leave an untracked
-  # file in every workspace.
-  defp lockfile_args(clone, config_path) do
-    lockfile = Path.join(Path.dirname(config_path), "devcontainer-lock.json")
-
-    case SafeFS.resolve(clone, lockfile) do
-      {:ok, _} -> []
-      {:error, _} -> ["--no-lockfile"]
-    end
-  end
-
-  defp describe(%{"description" => d}) when is_binary(d) and d != "", do: " (#{d})"
-  defp describe(_), do: ""
-
-  defp dotfiles_args(nil), do: []
-
-  defp dotfiles_args(dotfiles) do
-    ["--dotfiles-repository", dotfiles.repository] ++
-      if(dotfiles[:install_command],
-        do: ["--dotfiles-install-command", dotfiles.install_command],
-        else: []
-      ) ++
-      if(dotfiles[:target_path], do: ["--dotfiles-target-path", dotfiles.target_path], else: [])
-  end
-
-  defp find_outcome(output) do
-    output
-    |> String.split("\n")
-    |> Enum.reverse()
-    |> Enum.find_value(&outcome_in/1)
-  end
-
-  # The CLI writes its outcome to stdout as a line of its own, but stderr
-  # comes through the same pipe, so a long log line can be split around
-  # it. The outcome still ends the line it lands in.
-  defp outcome_in(line) do
-    with [_ | _] = matches <- :binary.matches(line, ~s({"outcome":)),
-         {at, _} = List.last(matches),
-         {:ok, %{"outcome" => _} = outcome} <-
-           JSON.decode(binary_part(line, at, byte_size(line) - at)) do
-      outcome
+    # There if anything is at that name, a link included: whether it can
+    # be read is for bringing the devcontainer up to say. Taking one that
+    # leads nowhere good for no lock file would drop the repo's pins.
+    with {:ok, dir} <- SafeFS.resolve(clone, Path.dirname(relative)),
+         {:ok, _stat} <- File.lstat(Path.join(dir, Path.basename(relative))) do
+      true
     else
-      _ -> outcome_line(line)
+      _ -> false
     end
-  end
-
-  defp outcome_line("{" <> _ = line) do
-    case JSON.decode(line) do
-      {:ok, %{"outcome" => _} = outcome} -> outcome
-      _ -> nil
-    end
-  end
-
-  defp outcome_line(_line), do: nil
-
-  # The CLI's --log-format json lines carry a "text" field; anything else
-  # (build output from docker) passes through as is. Debug-level entries
-  # are dropped, and so are the CLI's dumps of the merged compose config,
-  # which carry interpolated secret values.
-  defp devcontainer_log(line) do
-    case JSON.decode(line) do
-      {:ok, %{"outcome" => _}} ->
-        nil
-
-      {:ok, %{"type" => "text", "level" => level, "text" => text}} when level >= 3 ->
-        unless compose_dump?(text), do: text
-
-      {:ok, %{"type" => "raw", "text" => text}} ->
-        text
-
-      {:ok, %{}} ->
-        nil
-
-      _ ->
-        line
-    end
-  end
-
-  defp compose_dump?(text) do
-    String.starts_with?(text, ["name: ", "services:", "Docker Compose override file"]) and
-      String.contains?(text, "services:")
   end
 
   # Registry credentials go in a throwaway DOCKER_CONFIG for the one
@@ -1329,7 +1212,7 @@ defmodule ForemanAgent.Env do
          rebuild = service in affected or outdated,
          :ok <- recreate_sidecars(ctx, paths, spec.slug, files, env, sidecars, p),
          {:ok, _} <- compose(ctx, spec.slug, ["stop", service]),
-         # Recreating the devcontainer itself means the CLI has to do it,
+         # Recreating the devcontainer itself is ForemanAgent.Devcontainer's to do,
          # since it owns the image and labels.
          {:ok, result} <- devcontainer_up(paths, spec, prepared, p, ctx, rebuild: rebuild) do
       {:ok,
@@ -1344,7 +1227,7 @@ defmodule ForemanAgent.Env do
   end
 
   # The recreate pulls a sidecar's image if the box doesn't have it, so it
-  # gets the registry credentials the CLI's up does.
+  # gets the registry credentials bringing the devcontainer up does.
   defp recreate_sidecars(ctx, paths, slug, files, env, sidecars, p) do
     with_docker_config(paths, Map.get(p, :registry_auth), fn docker_config ->
       env = if docker_config, do: Map.put(env, "DOCKER_CONFIG", docker_config), else: env
@@ -1732,133 +1615,10 @@ exit 0)
     end
   end
 
-  # run_lines/5, with a tool that couldn't be run as an error message.
-  defp run_tool(ctx, command, args, opts, mapper) do
-    case run_lines(ctx, command, args, opts, mapper) do
-      {:ok, %{status: :timeout}} ->
-        {:error, timed_out(opts[:label] || Path.basename(command), opts[:timeout])}
+  defp run_tool(ctx, command, args, opts, mapper),
+    do: Logged.run(ctx, command, args, opts, mapper)
 
-      {:ok, result} ->
-        {:ok, result}
+  defp timed_out(label, timeout), do: Logged.timed_out(label, timeout)
 
-      {:error, {:not_found, command}} ->
-        {:error, "#{command} is not installed on this box"}
-
-      {:error, reason} ->
-        {:error, "couldn't run #{command}: #{inspect(reason)}"}
-    end
-  end
-
-  # Runs a command, re-chunking its output into lines. Each line goes
-  # through `mapper` (nil drops it) to the operation log.
-  defp run_lines(ctx, command, args, opts, mapper) do
-    key = {__MODULE__, :pending, make_ref()}
-    spinner = {__MODULE__, :spinner, make_ref()}
-
-    emit = fn lines ->
-      {texts, last} = log_lines(lines, mapper, Process.get(spinner))
-      Process.put(spinner, last)
-
-      for text <- texts do
-        ctx.log.("info", if(String.ends_with?(text, "\n"), do: text, else: text <> "\n"))
-      end
-    end
-
-    on_output = fn chunk ->
-      parts = String.split(Process.get(key, "") <> chunk, "\n")
-      Process.put(key, List.last(parts))
-      emit.(Enum.drop(parts, -1))
-      :ok
-    end
-
-    try do
-      ctx.runner.run(
-        command,
-        args,
-        opts |> Keyword.delete(:label) |> Keyword.put(:on_output, on_output)
-      )
-    after
-      case Process.delete(key) do
-        rest when is_binary(rest) and rest != "" -> emit.([rest])
-        _ -> :ok
-      end
-
-      Process.delete(spinner)
-    end
-  end
-
-  # What the operation log shows for lines of a command's output: each
-  # line through `mapper` (nil drops it), split into the lines it shows,
-  # without colors or cursor movement. Lines that were only cursor
-  # movement go, and so do spinner frames that redraw the one before
-  # (clack and ora print one every 80 ms). `last` is the kept spinner
-  # line's text, carried across chunks.
-  defp log_lines(lines, mapper, last) do
-    Enum.flat_map_reduce(lines, last, fn line, last ->
-      case mapper.(line) do
-        text when is_binary(text) -> text |> shown_lines() |> Enum.flat_map_reduce(last, &frame/2)
-        _ -> {[], last}
-      end
-    end)
-  end
-
-  defp shown_lines(text) do
-    lines = String.split(text, "\n")
-    if String.ends_with?(text, "\n"), do: Enum.drop(lines, -1), else: lines
-  end
-
-  defp frame(line, last) do
-    clean = line |> redrawn() |> strip_ansi()
-
-    if blank?(clean) and String.contains?(line, ["\e", "\r"]) do
-      {[], last}
-    else
-      case spinner_text(clean) do
-        nil -> {[clean], nil}
-        ^last -> {[], last}
-        spinner -> {[clean], spinner}
-      end
-    end
-  end
-
-  # What's left on a line a CLI keeps redrawing (a progress count, a
-  # spinner): the last text written after a return to the first column.
-  # A return on its own erases nothing; an erase after it clears the line.
-  @column_one ~r/\r|\e\[[01]?G/
-  @erase ~r/\e\[[02]?[JK]/
-  defp redrawn(line) do
-    @column_one
-    |> Regex.split(line)
-    |> Enum.reverse()
-    |> Enum.find("", &(not blank?(strip_ansi(&1)) or Regex.match?(@erase, &1)))
-  end
-
-  defp blank?(text), do: String.trim(text) == ""
-
-  # A line that starts with a spinner frame, as the text after it with any
-  # animated trailing dots left off.
-  @spinner ~r/^\s*[\x{2800}-\x{28FF}◐◓◑◒◴◷◶◵◰◳◲◱◢◣◤◥◜◠◝◞◡◟▖▘▝▗✶✷✸✹✺]+\s+(.*?)[.…]*\s*$/u
-  defp spinner_text(text) do
-    case Regex.run(@spinner, text) do
-      [_, rest] -> rest
-      nil -> nil
-    end
-  end
-
-  defp timed_out(label, timeout),
-    do: "#{label} timed out after #{div(timeout || 0, 60_000)} minutes and was stopped"
-
-  # Colors and cursor movement from CLIs, which a log view can't use.
-  @ansi ~r/\e\[[0-9;?]*[ -\/]*[@-~]|\e\][^\a\e]*(\a|\e\\)|\r(?!\n)/
-  defp strip_ansi(text), do: Regex.replace(@ansi, text, "")
-
-  # The end of a command's output as the operation log shows it.
-  defp last_lines(output, mapper \\ & &1) do
-    {texts, _} = log_lines(String.split(output, "\n"), mapper, nil)
-
-    texts
-    |> Enum.reject(&blank?/1)
-    |> Enum.take(-15)
-    |> Enum.join("\n")
-  end
+  defp last_lines(output, mapper \\ & &1), do: Logged.last_lines(output, mapper)
 end

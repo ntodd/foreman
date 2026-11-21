@@ -1,5 +1,6 @@
 Mox.defmock(ForemanAgent.RunnerMock, for: ForemanAgent.Runner)
 Mox.defmock(ForemanAgent.DockerMock, for: ForemanAgent.Docker)
+Mox.defmock(ForemanAgent.DevcontainerMock, for: ForemanAgent.Devcontainer)
 
 # A release loads every module as it boots, but `mix test` loads each one
 # the first time something calls it. That load waits on the code server,

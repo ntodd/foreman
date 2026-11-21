@@ -31,6 +31,39 @@ defmodule ForemanProtocol.Jsonc do
     end
   end
 
+  @doc """
+  The keys of the object at `path` (a list of keys from the top), in the
+  order they're written. A decoded map doesn't keep that order, and for
+  some objects it matters: environment variables that build on each other.
+  Empty when there's no object there.
+  """
+  @spec key_order(binary(), [String.t()]) :: [String.t()]
+  def key_order(input, path) when is_binary(input) and is_list(path) do
+    cleaned = input |> strip_comments() |> strip_trailing_commas()
+
+    decoders = %{
+      object_push: fn key, value, acc -> [{key, value} | acc] end,
+      object_finish: fn acc, old_acc -> {{:object, Enum.reverse(acc)}, old_acc} end
+    }
+
+    case :json.decode(cleaned, :ok, decoders) do
+      {value, :ok, rest} -> if String.trim(rest) == "", do: keys_at(value, path), else: []
+    end
+  rescue
+    ErlangError -> []
+  end
+
+  defp keys_at({:object, pairs}, []), do: Enum.map(pairs, &elem(&1, 0))
+
+  defp keys_at({:object, pairs}, [key | rest]) do
+    case List.keyfind(pairs, key, 0) do
+      {_, value} -> keys_at(value, rest)
+      nil -> []
+    end
+  end
+
+  defp keys_at(_value, _path), do: []
+
   # Replaces comments with spaces so byte positions in errors still line up.
   defp strip_comments(input), do: strip_comments(input, :code, [])
 

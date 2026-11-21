@@ -5,9 +5,10 @@ Requires=foreman-guest-disks.service
 Wants=docker.service
 
 [Service]
-# Not root: the devcontainer CLI gives the container's user the uid of
-# whoever runs it, which is how the clone and the 0600 secrets are the
-# container user's own. Docker's group to run environments, and the
+# Not root: the agent brings devcontainers up itself (its own
+# implementation of the devcontainer CLI's `up`) and, as the CLI does,
+# gives the container's user the uid of whoever runs it, which is how
+# the clone and the 0600 secrets are the container user's own. Docker's group to run environments, and the
 # clock (the host's time after a VM is resumed) and nothing else.
 User=foreman
 Group=foreman

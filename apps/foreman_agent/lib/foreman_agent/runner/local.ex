@@ -53,6 +53,17 @@ defmodule ForemanAgent.Runner.Local do
   @base ~w(PATH HOME LANG LC_ALL TZ DOCKER_HOST SSL_CERT_FILE SSL_CERT_DIR
            HTTPS_PROXY HTTP_PROXY NO_PROXY https_proxy http_proxy no_proxy)
 
+  @doc """
+  The environment a command given `env` runs with: `env` over the small
+  base that's inherited.
+  """
+  @spec visible_env(map()) :: %{String.t() => String.t()}
+  def visible_env(env) do
+    inherited = System.get_env() |> Map.take(@base)
+    given = for {name, value} <- child_env(env), is_binary(value), into: %{}, do: {name, value}
+    Map.merge(inherited, given)
+  end
+
   @doc false
   # Unsets everything inherited except a small base, then applies `env`.
   def child_env(env) do

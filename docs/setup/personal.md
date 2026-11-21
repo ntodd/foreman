@@ -22,8 +22,7 @@ environment runs in a VM of its own on the desktop.
 On a fresh Ubuntu machine, install Docker from
 [Docker's apt repository](https://docs.docker.com/engine/install/ubuntu/)
 and Tailscale with `curl -fsSL https://tailscale.com/install.sh | sh`.
-The agent brings its own Node for the devcontainer CLI, and Cloud
-Hypervisor for the VMs; the VMs have their own Docker and git.
+The agent brings Cloud Hypervisor for the VMs; the VMs have their own Docker and git.
 
 If you have more than one Tailscale account, check the box joined the
 tailnet your laptops are on before going further:
@@ -195,8 +194,8 @@ curl -fsSL https://desktop.tail1234.ts.net/agent/install.sh | sudo sh -s -- --to
 ```
 
 The script checks the prerequisites, creates an unprivileged `foreman`
-user (not in the `docker` group), installs the agent (which carries the
-devcontainer CLI, the Node it runs on and Cloud Hypervisor), writes a
+user (not in the `docker` group), installs the agent (which carries
+Cloud Hypervisor), writes a
 systemd unit (with a rollback unit for failed updates), and waits for
 the agent to enroll. It then deletes the spent token from the agent's
 settings. It also installs:

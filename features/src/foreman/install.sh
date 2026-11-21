@@ -46,8 +46,11 @@ quote() {
 chmod 0644 "$share/options"
 
 # --- shell hooks ------------------------------------------------------------
-# Login shells (Tailscale SSH sessions, the devcontainer CLI's env probe)
-# read /etc/profile.d; interactive non-login bash reads bash.bashrc.
+# Login shells (Tailscale SSH sessions, the env probe run when the
+# devcontainer is brought up) read /etc/profile.d; interactive non-login
+# bash reads bash.bashrc. Foreman's agent does the bringing up with its
+# own implementation of the devcontainer CLI's `up`; the CLI itself
+# probes the same way.
 mkdir -p /etc/profile.d
 ln -sf "$share/profile.sh" /etc/profile.d/zz-foreman.sh
 

@@ -243,7 +243,8 @@ defmodule Foreman.AccountsTest do
       assert %{dotfiles_target_path: "/home/mona/dots"} = Accounts.effective_identity(user, repo)
     end
 
-    # The devcontainer CLI puts the path in its clone script unquoted.
+    # The agent's clone script has the path unquoted. It's the devcontainer
+    # CLI's script, run by the agent's own implementation of `up`.
     test "the dotfiles path is a plain home or absolute path" do
       scope = Scope.for_user(user_fixture())
 

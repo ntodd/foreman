@@ -1,0 +1,25 @@
+services:
+  'app':
+    entrypoint: ["/bin/sh", "-c", "echo Container started\n
+trap \"exit 0\" 15\n
+/usr/local/share/local-entry.sh\n
+exec \"$$@\"\n
+while sleep 1 & wait $$!; do :; done", "-"]
+    init: true
+    environment:
+      - 'FROM_CONFIG=a $$b "c"'
+      - 'ID=00p43hv7kvpt6ukvcaq9p4nibjrirlta6qtdfgfqdrjplstb733g'
+    cap_add:
+      - SYS_PTRACE
+    security_opt:
+      - seccomp=unconfined
+    labels:
+      - 'oracle=1'
+    volumes:
+      - feature-vol-00p43hv7kvpt6ukvcaq9p4nibjrirlta6qtdfgfqdrjplstb733g:/feature-vol
+      - oracle-data:/data
+volumes:
+  
+  feature-vol-00p43hv7kvpt6ukvcaq9p4nibjrirlta6qtdfgfqdrjplstb733g:
+  
+  oracle-data:

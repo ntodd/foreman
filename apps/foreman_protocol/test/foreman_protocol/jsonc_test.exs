@@ -48,4 +48,30 @@ defmodule ForemanProtocol.JsoncTest do
   test "rejects a top level that is not an object" do
     assert {:error, _} = Jsonc.decode("[1]")
   end
+
+  describe "key_order/2" do
+    @ordered """
+    {
+      // written this way on purpose
+      "z": 1,
+      "a": {"PATH": "${HOME}/bin", "HOME": "/opt", "nested": {"y": 1, "x": 2}},
+      "list": [{"b": 1, "a": 2}],
+      "m": "text",
+    }
+    """
+
+    test "is an object's keys in the order they're written" do
+      assert Jsonc.key_order(@ordered, []) == ["z", "a", "list", "m"]
+      assert Jsonc.key_order(@ordered, ["a"]) == ["PATH", "HOME", "nested"]
+      assert Jsonc.key_order(@ordered, ["a", "nested"]) == ["y", "x"]
+    end
+
+    test "is empty for what isn't an object, isn't there, or isn't JSON" do
+      assert Jsonc.key_order(@ordered, ["m"]) == []
+      assert Jsonc.key_order(@ordered, ["list"]) == []
+      assert Jsonc.key_order(@ordered, ["nope", "deeper"]) == []
+      assert Jsonc.key_order("{oops", []) == []
+      assert Jsonc.key_order("[1]", []) == []
+    end
+  end
 end

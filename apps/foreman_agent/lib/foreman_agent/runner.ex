@@ -1,6 +1,6 @@
 defmodule ForemanAgent.Runner do
   @moduledoc """
-  Runs external commands (git, docker, the devcontainer CLI).
+  Runs external commands (git, docker).
 
   Commands get an argv, never a shell string, and a clean environment:
   only what the caller passes plus a small base, so nothing from the

@@ -1,0 +1,20 @@
+{
+  "id": "local-feature",
+  "version": "1.0.0",
+  "name": "Local 'Feature'",
+  "description": "It's a test",
+  "documentationURL": "https://example.com/docs",
+  "options": {
+    "zeta": {"type": "string", "default": "z"},
+    "greeting": {"type": "string", "default": "hello"},
+    "loud": {"type": "boolean", "default": false}
+  },
+  "containerEnv": {"ZED_HOME": "/opt/zed", "PATH": "${ZED_HOME}/bin:${PATH}", "QUOTED": "a \"q\" \\ $x"},
+  "entrypoint": "/usr/local/share/local-entry.sh",
+  "capAdd": ["SYS_PTRACE"],
+  "securityOpt": ["seccomp=unconfined"],
+  "init": true,
+  "mounts": [{"type": "volume", "source": "feature-vol-${devcontainerId}", "target": "/feature-vol"}],
+  "postCreateCommand": "echo feature-post-create",
+  "installsAfter": ["./second"]
+}

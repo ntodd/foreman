@@ -26,9 +26,9 @@ defmodule Foreman.Operations.Redactions do
       |> Map.drop(["secrets.env", "gitconfig", "notices"])
       |> Map.values()
 
-    compose = payload |> Map.get(:compose_env, %{}) |> Map.values()
+    compose = payload |> Map.get(:compose_env, %{}) |> Redaction.env_values()
     registry = (payload[:registry_auth] || []) |> Enum.map(& &1.token)
-    resolved = env |> Secrets.resolve() |> Map.values()
+    resolved = env |> Secrets.resolve() |> Redaction.env_values()
 
     :ets.insert(@table, {op_id, Redaction.prepare(files ++ compose ++ registry ++ resolved)})
     :ok
@@ -108,7 +108,7 @@ defmodule Foreman.Operations.Redactions do
             %Operation{environment_id: env_id} when is_binary(env_id) ->
               case Repo.get(Environment, env_id) do
                 nil -> []
-                env -> env |> Secrets.resolve() |> Map.values() |> Redaction.prepare()
+                env -> env |> Secrets.resolve() |> Redaction.env_values() |> Redaction.prepare()
               end
 
             _ ->

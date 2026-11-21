@@ -3,8 +3,9 @@
 # to /etc/foreman/container.env, as root.
 #
 # On a Linux box /run/foreman belongs to the agent's uid, which the
-# devcontainer CLI also gives the devcontainer's user, so the file is 0600
-# and theirs: other users in the container can't read what compose put
+# agent also gives the devcontainer's user when it brings the
+# devcontainer up (its own implementation of the devcontainer CLI's `up`
+# and its uid update), so the file is 0600 and theirs: other users in the container can't read what compose put
 # there. Where /run/foreman shows as root's (Docker Desktop's bind mounts),
 # there's no telling who the user is, and the file is 0644.
 set -eu

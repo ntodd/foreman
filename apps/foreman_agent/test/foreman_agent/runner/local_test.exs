@@ -102,8 +102,10 @@ defmodule ForemanAgent.Runner.LocalTest do
 
   describe "stdin" do
     # MuonTrap's own stdin carries the acks that let it forward more output.
-    # The devcontainer CLI reads stdin during lifecycle commands, and a
-    # command that inherited it would swallow them and stall its output.
+    # `docker exec -i`, which the agent's own implementation of the
+    # devcontainer CLI's `up` runs lifecycle commands with, reads stdin,
+    # and a command that inherited it would swallow them and stall its
+    # output.
     test "a command that reads stdin gets none and its output keeps flowing" do
       # sh gives a background job /dev/null for stdin, so the reader is the
       # foreground one.
@@ -122,6 +124,26 @@ defmodule ForemanAgent.Runner.LocalTest do
       {:chunk, chunk} -> collect([chunk | acc])
     after
       100 -> Enum.reverse(acc)
+    end
+  end
+
+  describe "visible_env/1" do
+    test "is the environment a command really gets" do
+      given = %{"A" => "1", "HOME" => "/somewhere/else"}
+      {:ok, %{status: 0, output: output}} = Local.run("env", [], env: given)
+
+      seen =
+        for line <- String.split(output, "\n", trim: true),
+            [name, value] <- [String.split(line, "=", parts: 2)],
+            # What the shell that runs the command sets for itself.
+            name not in ["PWD", "OLDPWD", "SHLVL", "_"],
+            into: %{},
+            do: {name, value}
+
+      assert Local.visible_env(given) == seen
+      assert seen["A"] == "1"
+      assert seen["HOME"] == "/somewhere/else"
+      assert is_binary(seen["PATH"])
     end
   end
 end
