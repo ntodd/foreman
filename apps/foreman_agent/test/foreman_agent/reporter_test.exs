@@ -209,6 +209,65 @@ defmodule ForemanAgent.ReporterTest do
     end
   end
 
+  describe "kills inside a VM" do
+    @e1 "6f1c1d1e-9a3b-4c1f-8f5e-2d7a9b0c1e2f"
+
+    setup do
+      tmp = Path.join(System.tmp_dir!(), "reporter-oom-#{System.unique_integer([:positive])}")
+      previous = ForemanAgent.Config.get()
+      config = %{previous | mode: :host, vm_root: Path.join(tmp, "vms")}
+      ForemanAgent.Config.put(config)
+
+      File.mkdir_p!(ForemanAgent.VM.paths(config, @e1).dir)
+      ForemanAgent.VM.write_meta(config, @e1, %{"slug" => "a-1"})
+      serial = ForemanAgent.VM.paths(config, @e1).serial
+      File.write!(serial, "[    0.000000] Linux version 6.8.0\r\n")
+
+      stub(RunnerMock, :run, fn _cmd, _args, _opts -> {:ok, %{status: 0, output: ""}} end)
+      :ok = ForemanAgent.Outbox.attach(self())
+      _ = oom_events()
+
+      on_exit(fn ->
+        ForemanAgent.Config.put(previous)
+        File.rm_rf!(tmp)
+      end)
+
+      %{serial: serial}
+    end
+
+    defp oom_events do
+      receive do
+        {:outbox_deliver, %{type: "box.guest_oom", payload: payload}, _} ->
+          [payload | oom_events()]
+
+        {:outbox_deliver, _, _} ->
+          oom_events()
+      after
+        200 -> []
+      end
+    end
+
+    test "are reported once, with when the box saw them", %{serial: serial} do
+      pid = start_supervised!(Reporter)
+      send(pid, :guest_oom)
+      assert oom_events() == []
+
+      File.write!(
+        serial,
+        "[ 99.000000] Out of memory: Killed process 4321 (orca) total-vm:1kB, anon-rss:1kB\r\n",
+        [:append]
+      )
+
+      before = System.os_time(:second)
+      send(pid, :guest_oom)
+      assert [%{environments: %{@e1 => %{at: at, processes: ["orca"]}}}] = oom_events()
+      assert at in before..(before + 5)
+
+      send(pid, :guest_oom)
+      assert oom_events() == []
+    end
+  end
+
   describe "the box firewall" do
     setup do
       tmp = Path.join(System.tmp_dir!(), "reporter-fw-#{System.unique_integer([:positive])}")

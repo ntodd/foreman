@@ -89,6 +89,15 @@ defmodule ForemanProtocol.Event do
     ],
     # VM unit exits that systemd attributed to the OOM killer, in Unix seconds.
     "box.vm_oom" => [environments: {{:map_of, :uuid, :integer}, required: true}],
+    # Processes the kernel's OOM killer ended inside an environment's VM,
+    # which keeps running: when the box saw them on the VM's console (Unix
+    # seconds), and the names (comm) it could read there.
+    "box.guest_oom" => [
+      environments:
+        {{:map_of, :uuid,
+          {:object, at: {:integer, required: true}, processes: {{:list, :process}, default: []}}},
+         required: true}
+    ],
     # Host-wide usage, sampled every few seconds. `at` is the agent's
     # Unix time in seconds; cpu_percent is of the whole box (0-100).
     "box.metrics" => [

@@ -509,6 +509,9 @@ These are accepted for now, or need someone to try them:
     serial console to `serial.log` in the VM's directory on the box, with
     no size limit and no rotation, and root in the guest can write to its
     console for as long as it likes, until `/srv/foreman` is full.
+    The box also reads the console for the kernel's out-of-memory
+    kills, so root in a guest can write that line itself. All it gets
+    is a false out-of-memory notice on its own environment.
 19. **The guest image and Cloud Hypervisor need keeping current.** The
     guest's kernel, Docker and the rest come from the guest image a
     release names, and Cloud Hypervisor from the version pinned in the

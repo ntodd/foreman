@@ -244,7 +244,10 @@ defmodule ForemanWeb.RepoLive.Show do
                     · {env.box.name}<span :if={env.user_id != @current_scope.user.id}> · {env.user.login}</span>
                   </p>
                 </div>
-                <.state_badge state={env.observed_state} size="sm" />
+                <div class="flex shrink-0 flex-wrap items-center justify-end gap-1.5">
+                  <.state_badge state={env.observed_state} size="sm" />
+                  <.oom_badge env={env} />
+                </div>
               </li>
             </ul>
             <p :if={@environments == []} class="px-5 py-4 text-sm text-ink-3">None of yours.</p>

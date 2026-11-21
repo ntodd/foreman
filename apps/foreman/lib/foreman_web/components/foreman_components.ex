@@ -23,6 +23,25 @@ defmodule ForemanWeb.ForemanComponents do
 
   def busy?(state), do: state in ~w(pending creating starting stopping suspending destroying)
 
+  @doc """
+  Marks an environment that ran out of memory in the last day, beside its
+  state. Its page says what happened.
+  """
+  attr :env, :map, required: true
+
+  def oom_badge(assigns) do
+    ~H"""
+    <.badge
+      :if={Foreman.Environments.Environment.recent_oom?(@env)}
+      color="rose"
+      size="sm"
+      data-role="oom"
+    >
+      Out of memory
+    </.badge>
+    """
+  end
+
   defp state_color("running"), do: "emerald"
   defp state_color("partial"), do: "amber"
   defp state_color("error"), do: "rose"

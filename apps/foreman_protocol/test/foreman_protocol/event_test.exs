@@ -158,6 +158,42 @@ defmodule ForemanProtocol.EventTest do
     end
   end
 
+  describe "box.guest_oom" do
+    test "says when the box saw the kills in each VM, and the processes it could name" do
+      payload = %{
+        "environments" => %{@env_id => %{"at" => 1_798_800_000, "processes" => ["orca", "node"]}}
+      }
+
+      assert {:ok, event} = Event.new("box.guest_oom", payload)
+
+      assert event.payload == %{
+               environments: %{@env_id => %{at: 1_798_800_000, processes: ["orca", "node"]}}
+             }
+
+      assert {:ok, ^event} =
+               event |> Event.to_wire() |> JSON.encode!() |> JSON.decode!() |> Event.from_wire()
+    end
+
+    test "a kill the box couldn't name has no processes" do
+      assert {:ok, %{payload: %{environments: %{@env_id => %{at: 1, processes: []}}}}} =
+               Event.new("box.guest_oom", %{environments: %{@env_id => %{at: 1}}})
+    end
+
+    test "needs a time, and refuses names that would draw on a terminal" do
+      assert {:error, _} = Event.new("box.guest_oom", %{})
+      assert {:error, _} = Event.new("box.guest_oom", %{environments: %{@env_id => %{}}})
+      assert {:error, _} = Event.new("box.guest_oom", %{environments: %{"nope" => %{at: 1}}})
+
+      for bad <- ["", "a\e[31m", String.duplicate("a", 65)] do
+        assert {:error, _} =
+                 Event.new("box.guest_oom", %{
+                   environments: %{@env_id => %{at: 1, processes: [bad]}}
+                 }),
+               "accepted #{inspect(bad)}"
+      end
+    end
+  end
+
   describe "box.reboot" do
     test "says whether the box needs a reboot, what for, and whether a livepatch is in" do
       assert {:ok, ev} =

@@ -346,7 +346,12 @@ defmodule ForemanWeb.BoxLive.Show do
                         class="font-mono font-medium text-ink hover:text-accent-ink"
                       >{env.slug}</.link>
                     </td>
-                    <td class="px-3 py-2.5"><.state_badge state={env.observed_state} size="sm" /></td>
+                    <td class="px-3 py-2.5">
+                      <div class="flex flex-wrap items-center gap-1.5">
+                        <.state_badge state={env.observed_state} size="sm" />
+                        <.oom_badge env={env} />
+                      </div>
+                    </td>
                     <% p = Capacity.provisioned(env, env.repo) %>
                     <td class="px-3 py-2.5 text-right tabular-nums">
                       {Float.round(p.cpus * 1.0, 1)}

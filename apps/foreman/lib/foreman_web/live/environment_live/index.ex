@@ -190,6 +190,7 @@ defmodule ForemanWeb.EnvironmentLive.Index do
     ~H"""
     <div class={["flex flex-wrap items-center gap-1.5", @class]}>
       <.state_badge state={@env.observed_state} size="sm" />
+      <.oom_badge env={@env} />
       <.badge :if={@env.pending_restart} color="amber" size="sm">Restart pending</.badge>
     </div>
     """

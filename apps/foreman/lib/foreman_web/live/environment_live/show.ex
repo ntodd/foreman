@@ -591,6 +591,21 @@ defmodule ForemanWeb.EnvironmentLive.Show do
         </p>
       </.callout>
 
+      <.callout :if={@env.last_guest_oom_at} kind="warning" id="guest-oom">
+        <p class="font-medium">
+          Linux killed <span :if={@env.last_guest_oom_processes == []}>a process</span>
+          <span :if={@env.last_guest_oom_processes != []} class="font-mono" data-role="killed">
+            {Enum.join(@env.last_guest_oom_processes, ", ")}
+          </span>
+          in this VM when it ran out of memory.
+        </p>
+        <p>
+          Last kill: <.local_time id="guest-oom-at" at={@env.last_guest_oom_at} />. The VM kept
+          running, so start what was killed again. If it keeps happening, give the VM more memory
+          under Resources.
+        </p>
+      </.callout>
+
       <%!-- Also after a failed stop or secrets write, which leave the state as it was. --%>
       <.callout
         :if={@env.status_message && not busy?(@env.observed_state)}

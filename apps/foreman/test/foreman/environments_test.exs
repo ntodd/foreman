@@ -660,6 +660,39 @@ defmodule Foreman.EnvironmentsTest do
       assert Repo.reload!(env).last_vm_oom_at == DateTime.from_unix!(at)
     end
 
+    test "records the latest kills inside a VM, and only for the reporting box", %{
+      env: env,
+      box: box
+    } do
+      at = System.os_time(:second) - 600
+
+      for {from, time, names} <- [
+            {box.id, at, ["orca", "node"]},
+            {box.id, at, ["again"]},
+            {box.id, at - 60, ["older"]},
+            {Ecto.UUID.generate(), at + 60, ["elsewhere"]}
+          ] do
+        event =
+          event!("box.guest_oom", %{environments: %{env.id => %{at: time, processes: names}}})
+
+        assert :ok = Agents.handle_event(from, event)
+      end
+
+      env = Repo.reload!(env)
+      assert env.last_guest_oom_at == DateTime.from_unix!(at)
+      assert env.last_guest_oom_processes == ["orca", "node"]
+    end
+
+    test "a box whose clock runs ahead doesn't put a kill in the future", %{env: env, box: box} do
+      ahead = System.os_time(:second) + 86_400
+      event = event!("box.guest_oom", %{environments: %{env.id => %{at: ahead}}})
+      assert :ok = Agents.handle_event(box.id, event)
+
+      env = Repo.reload!(env)
+      assert DateTime.diff(DateTime.utc_now(), env.last_guest_oom_at) in 0..5
+      assert env.last_guest_oom_processes == []
+    end
+
     test "starts a stopped environment that should be running (after a reboot)", %{
       env: env,
       box: box
