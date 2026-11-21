@@ -112,7 +112,15 @@ box = fn name, owner_user, hostname, arch, cpus, memory_gb, disk_gb, free_gb ->
     hostname: hostname,
     os: "linux",
     arch: arch,
-    vm: %{"ready" => true, "nested" => false, "reflink" => true},
+    vm: %{
+      "ready" => true,
+      "nested" => false,
+      "reflink" => true,
+      "default_cpus" => 4,
+      "default_memory_mb" => 8_192,
+      "host_cpus" => cpus,
+      "host_memory_mb" => memory_gb * 1024
+    },
     capacity: %{
       "cpus" => cpus,
       "memory_mb" => memory_gb * 1024,
@@ -125,7 +133,7 @@ end
 
 desktop = box.("desktop", mona, "mona-desktop", "x86_64", 16, 64, 1800, 1210)
 box_a = box.("box-a", jordan, "box-a", "x86_64", 8, 32, 450, 290)
-box_b = box.("box-b", sam, "box-b", "aarch64", 8, 32, 450, 310)
+box_b = box.("box-b", sam, "box-b", "x86_64", 8, 32, 450, 310)
 
 env = fn repo, index, owner_user, box, branch, state, minutes, extra ->
   services = Map.get(extra, :services, ["app", "db"])
@@ -300,6 +308,11 @@ usage = %{
 }
 
 Tracker.record(desktop.id, %{capacity: desktop.capacity, environments: usage})
+
+Foreman.Ports.record(desktop.id, %{
+  sf1.id => [%{port: 3000, process: "node"}],
+  sf2.id => [%{port: 3000, process: "node"}]
+})
 
 for {b, envs} <- [
       {box_a, %{cpu_percent: 230.0, memory_mb: 6_900}},
