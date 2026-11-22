@@ -341,15 +341,42 @@ defmodule Foreman.PrebuildsTest do
 
     {:ok, op} = Agents.run_box_command(ctx.scope, ctx.box, "box.gc")
 
-    assert_receive {:dispatch, %Command{type: "box.gc", payload: %{prebuilds: ids}}}
+    assert_receive {:dispatch, %Command{type: "box.gc", payload: %{check_prebuilds: ids}}}
     assert Enum.sort(ids) == Enum.sort([ready.id, failed.id, building.id])
-    assert op.args["prebuilds"] == ids
+    assert op.args["check_prebuilds"] == ids
   end
 
   test "pruning a box without prebuilds says it should have none", ctx do
     online(ctx.box)
     {:ok, _} = Agents.run_box_command(ctx.scope, ctx.box, "box.gc")
-    assert_receive {:dispatch, %Command{type: "box.gc", payload: %{prebuilds: []}}}
+    assert_receive {:dispatch, %Command{type: "box.gc", payload: %{check_prebuilds: []}}}
+  end
+
+  test "a delayed prune confirms candidates against the current records", ctx do
+    online(ctx.box)
+    {:ok, gc} = Agents.run_box_command(ctx.scope, ctx.box, "box.gc")
+    assert_receive {:dispatch, %Command{type: "box.gc"}}
+    new = prebuild_fixture(ctx.repo, ctx.box, %{})
+    orphan = Ecto.UUID.generate()
+
+    report(ctx.box, gc.id, %{
+      status: "ok",
+      result: %{"orphan_prebuilds" => [new.id, orphan, orphan, "unknown"]}
+    })
+
+    assert_receive {:dispatch,
+                    %Command{type: "box.prebuild.delete", payload: %{prebuild_id: ^orphan}}}
+
+    refute_received {:dispatch, %Command{type: "box.prebuild.delete"}}
+    assert Repo.get!(Prebuild, new.id).status == "ready"
+  end
+
+  test "pruning on older agents omits the destructive disk inventory", ctx do
+    box = box_fixture(protocol_version: 8)
+    online(box)
+    {:ok, _} = Agents.run_box_command(ctx.scope, box, "box.gc")
+    assert_receive {:dispatch, %Command{type: "box.gc", payload: payload}}
+    assert payload == %{}
   end
 
   describe "on the repo's page" do

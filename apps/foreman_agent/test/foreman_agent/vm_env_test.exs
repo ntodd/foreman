@@ -1306,7 +1306,7 @@ defmodule ForemanAgent.VMEnvTest do
       assert_received {:machine, {:boot, %{memory_mb: 3072}}, @prebuild}
     end
 
-    test "box.gc deletes the prebuilds the control plane doesn't know, and only when it says",
+    test "box.gc reports candidate disks for confirmation and preserves new prebuilds",
          ctx do
       prebuilt(ctx.config, "kept")
       other = "5d4c3b2a-1f0e-4d9c-8b7a-6f5e4d3c2b1a"
@@ -1316,9 +1316,14 @@ defmodule ForemanAgent.VMEnvTest do
       assert {:ok, _} = Status.gc(ctx.ctx, %{})
       assert VM.Prebuild.exists?(ctx.config, other)
 
-      assert {:ok, _} = Status.gc(ctx.ctx, %{prebuilds: [@prebuild]})
+      assert {:ok, %{orphan_prebuilds: [^other]}} =
+               Status.gc(ctx.ctx, %{check_prebuilds: [@prebuild]})
+
       assert VM.Prebuild.exists?(ctx.config, @prebuild)
-      refute File.exists?(VM.Prebuild.dir(ctx.config, other))
+      assert VM.Prebuild.exists?(ctx.config, other)
+
+      assert {:ok, _} = Status.gc(ctx.ctx, %{prebuilds: [@prebuild]})
+      assert VM.Prebuild.exists?(ctx.config, other)
     end
 
     test "at the agent's start, prebuild VMs nothing is building any more go", ctx do

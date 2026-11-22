@@ -15,14 +15,15 @@ defmodule ForemanProtocol.ProtocolV6Test do
     "arch" => "linux-amd64"
   }
 
-  test "this build speaks protocol 8 and accepts VM agents back to 6" do
-    assert ForemanProtocol.version() == 8
+  test "this build speaks protocol 9 and accepts VM agents back to 6" do
+    assert ForemanProtocol.version() == 9
     assert ForemanProtocol.oldest() == 6
     assert ForemanProtocol.compatible?(6)
     refute ForemanProtocol.compatible?(5)
     assert ForemanProtocol.compatible?(7)
     assert ForemanProtocol.compatible?(8)
-    refute ForemanProtocol.compatible?(9)
+    assert ForemanProtocol.compatible?(9)
+    refute ForemanProtocol.compatible?(10)
     refute ForemanProtocol.compatible?("6")
   end
 

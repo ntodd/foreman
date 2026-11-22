@@ -116,7 +116,7 @@ defmodule ForemanProtocol.Command do
     "box.stats" => [],
     # `prebuilds` (protocol 6): the prebuilds the control plane knows on
     # this box; the box deletes any others. Absent, it leaves them alone.
-    "box.gc" => [prebuilds: {{:list, :uuid}, []}],
+    "box.gc" => [prebuilds: {{:list, :uuid}, []}, check_prebuilds: {{:list, :uuid}, []}],
     # Protocol 6. Builds a prebuild: an environment's disk with the repo
     # cloned and its devcontainer built, that new environments start from.
     "box.prebuild" => @prebuild_spec,

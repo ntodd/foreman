@@ -282,6 +282,24 @@ defmodule Foreman.Prebuilds do
     end
   end
 
+  def record_result(%Operation{
+        action: "box.gc",
+        status: "succeeded",
+        box_id: box_id,
+        user_id: user_id,
+        args: %{"check_prebuilds" => _},
+        result: %{"orphan_prebuilds" => candidates}
+      })
+      when is_list(candidates) do
+    ids =
+      candidates |> Enum.take(256) |> Enum.filter(&ForemanProtocol.Schema.uuid?/1) |> Enum.uniq()
+
+    known =
+      Repo.all(from p in Prebuild, where: p.box_id == ^box_id and p.id in ^ids, select: p.id)
+
+    {:prebuilds, [], Enum.map(ids -- known, &delete_command(box_id, &1, user_id))}
+  end
+
   def record_result(_op), do: nil
 
   @doc "Sends what `record_result/1` left for after its transaction committed."
@@ -381,7 +399,7 @@ defmodule Foreman.Prebuilds do
 
   # The record goes now, and the box is told to delete its copy once that's
   # committed. A box that misses the delete keeps the disk until it's next
-  # pruned, which deletes every prebuild the control plane doesn't name
+  # pruned, which confirms unclaimed disks against the current records
   # (`Foreman.Agents.run_box_command/3`); nothing starts from a prebuild the
   # control plane doesn't name.
   defp forget(prebuild, user_id) do
