@@ -12,9 +12,13 @@ defmodule ForemanWeb.AgentChannel do
   require Logger
 
   @impl true
-  def join("agent:" <> box_id, payload, %{assigns: %{box_id: box_id}} = socket) do
+  def join(
+        "agent:" <> box_id,
+        payload,
+        %{assigns: %{box_id: box_id, authenticated_key: key}} = socket
+      ) do
     with {:ok, join} <- ForemanProtocol.cast_join(payload),
-         %Boxes.Box{revoked_at: nil} = box <- Boxes.get_box(box_id),
+         %Boxes.Box{revoked_at: nil, public_key: ^key} = box <- Boxes.get_box(box_id),
          true <- compatible(box, join) do
       # Before registering: once registered the box is online, and
       # Housekeeping would judge the operations about to be resent by when

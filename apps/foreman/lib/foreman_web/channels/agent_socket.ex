@@ -30,10 +30,10 @@ defmodule ForemanWeb.AgentSocket do
     key = "agent-connect-failed:#{ip}"
 
     with false <- RateLimit.exhausted?(key, @window, @max_failures),
-         {:ok, %{agent_id: agent_id, nonce: nonce}} <-
+         {:ok, %{agent_id: agent_id, nonce: nonce, public_key: authenticated_key}} <-
            Auth.verify_connect_headers(headers, &Foreman.Boxes.public_key/1),
          :ok <- NonceCache.check(nonce) do
-      {:ok, assign(socket, :box_id, agent_id)}
+      {:ok, assign(socket, box_id: agent_id, authenticated_key: authenticated_key)}
     else
       true ->
         if RateLimit.failed(key, @window, @max_failures) == :first_over,

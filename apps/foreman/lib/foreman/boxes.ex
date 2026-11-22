@@ -97,31 +97,35 @@ defmodule Foreman.Boxes do
   key. Re-enrolling an existing box name replaces its key.
   """
   def enroll(raw_token, attrs) when is_binary(raw_token) do
-    now = DateTime.utc_now()
-
-    Repo.transact(fn ->
-      with %JoinToken{} = token <- enrollment_token(raw_token),
-           true <- is_nil(token.used_at) and DateTime.compare(token.expires_at, now) == :gt,
-           {:ok, public_key} <- decode_key(attrs["public_key"]),
-           {:ok, box} <- upsert_enrolled_box(token, public_key, attrs) do
-        # The box's Tailscale key was for its first boot, which this is.
-        token
-        |> Ecto.Changeset.change(used_at: now, box_id: box.id, tailscale_auth_key: nil)
-        |> Repo.update!()
-
-        Audit.log(nil, "box.enroll", box, %{"hostname" => attrs["hostname"]})
-        disconnect(box)
-        {:ok, box}
-      else
-        {:error, %Ecto.Changeset{} = changeset} -> {:error, changeset}
-        {:error, :revoked} -> {:error, :revoked}
-        {:error, :bad_key} -> {:error, :bad_key}
-        _ -> {:error, :invalid_token}
-      end
-    end)
+    with {:ok, box} <- Repo.transact(fn -> enroll_box(raw_token, attrs) end) do
+      disconnect(box)
+      {:ok, box}
+    end
   end
 
   def enroll(_, _), do: {:error, :invalid_token}
+
+  defp enroll_box(raw_token, attrs) do
+    now = DateTime.utc_now()
+
+    with %JoinToken{} = token <- enrollment_token(raw_token),
+         true <- is_nil(token.used_at) and DateTime.compare(token.expires_at, now) == :gt,
+         {:ok, public_key} <- decode_key(attrs["public_key"]),
+         {:ok, box} <- upsert_enrolled_box(token, public_key, attrs) do
+      # The box's Tailscale key was for its first boot, which this is.
+      token
+      |> Ecto.Changeset.change(used_at: now, box_id: box.id, tailscale_auth_key: nil)
+      |> Repo.update!()
+
+      Audit.log(nil, "box.enroll", box, %{"hostname" => attrs["hostname"]})
+      {:ok, box}
+    else
+      {:error, %Ecto.Changeset{} = changeset} -> {:error, changeset}
+      {:error, :revoked} -> {:error, :revoked}
+      {:error, :bad_key} -> {:error, :bad_key}
+      _ -> {:error, :invalid_token}
+    end
+  end
 
   @doc """
   The first-boot config (Ignition) for a Flatcar box that enrolls with

@@ -51,7 +51,7 @@ defmodule ForemanProtocol.Auth do
   returned nonce must be checked against a short-lived seen-set.
   """
   @spec verify_connect_headers(map(), (String.t() -> {:ok, binary()} | :error), keyword()) ::
-          {:ok, %{agent_id: String.t(), nonce: String.t(), ts: integer()}}
+          {:ok, %{agent_id: String.t(), nonce: String.t(), ts: integer(), public_key: binary()}}
           | {:error, :malformed | :clock_skew | :unknown_agent | :bad_signature}
   def verify_connect_headers(headers, lookup, opts \\ []) do
     now = Keyword.get_lazy(opts, :now, fn -> System.os_time(:second) end)
@@ -60,7 +60,7 @@ defmodule ForemanProtocol.Auth do
          :ok <- check_skew(ts, now),
          {:ok, public} <- lookup_key(lookup, agent_id),
          :ok <- verify(connect_message(agent_id, ts, nonce), sig, public) do
-      {:ok, %{agent_id: agent_id, nonce: nonce, ts: ts}}
+      {:ok, %{agent_id: agent_id, nonce: nonce, ts: ts, public_key: public}}
     end
   end
 
