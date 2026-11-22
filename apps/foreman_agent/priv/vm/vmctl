@@ -43,7 +43,7 @@ set -u
 # Byte ranges in the request's patterns, whatever the locale.
 export LC_ALL=C
 
-VERSION=3
+VERSION=4
 
 SRV=/srv/foreman
 AGENT_ROOT=/opt/foreman-agent
@@ -75,9 +75,32 @@ int_between() { # value, min, max
   [ "${#1}" -le 7 ] && [ "$1" -ge "$2" ] && [ "$1" -le "$3" ]
 }
 
+# A pre-upgrade pool may already have recycled an address on this boot.
+# Until the kernel table resets, verify each new assignment in that pool.
+prepare_pool() {
+  generation=$STATE/pool-generation
+  if [ ! -f "$generation" ]; then
+    first=clean
+    if [ -d "$STATE/nets" ]; then
+      first=$(cat /proc/sys/kernel/random/boot_id) || answer "error could not identify host boot"
+      uuid_ok "$first" || answer "error invalid boot id"
+    fi
+    printf '%s\n' "$first" > "$generation.new" || answer "error could not write pool generation"
+    mv "$generation.new" "$generation" || answer "error could not record pool generation"
+  fi
+  born=$(cat "$generation") || answer "error could not read pool generation"
+  legacy=0
+  if [ "$born" != clean ]; then
+    uuid_ok "$born" || answer "error invalid address pool generation"
+    boot=$(cat /proc/sys/kernel/random/boot_id) || answer "error could not identify host boot"
+    uuid_ok "$boot" || answer "error invalid boot id"
+    [ "$born" != "$boot" ] || legacy=1
+  fi
+}
+
 # The index of an environment's /30, allocated on first use.
 net_index() {
-  mkdir -p "$STATE/nets"
+  mkdir -p "$STATE/nets" || return 1
   for f in "$STATE"/nets/*; do
     [ -f "$f" ] || continue
     if [ "$(cat "$f")" = "$1" ]; then
@@ -87,9 +110,14 @@ net_index() {
   done
   i=0
   while [ "$i" -lt 16384 ]; do
-    if [ ! -e "$RETIRED/$i" ] && (set -C && printf '%s\n' "$1" > "$STATE/nets/$i") 2>/dev/null; then
-      echo "$i"
-      return 0
+    if [ ! -e "$RETIRED/$i" ] && [ ! -e "$STATE/nets/$i" ]; then
+      if [ "$legacy" = 1 ] && ! clear_flows "$POOL.$((i / 64)).$((4 * (i % 64) + 2))"; then
+        return 2
+      fi
+      if (set -C && printf '%s\n' "$1" > "$STATE/nets/$i") 2>/dev/null; then
+        echo "$i"
+        return 0
+      fi
     fi
     i=$((i + 1))
   done
@@ -276,7 +304,11 @@ cmd_start() { # env_id cpus memory_mb guest_sha256 agent_version
   need_landlock
   systemctl is-active --quiet "foreman-vm-$id.service" && answer "ok running"
   ch=$(ch_binary) || answer "error the agent release has no cloud-hypervisor"
-  n=$(net_index "$id") || answer "error no addresses left"
+  prepare_pool
+  n=$(net_index "$id") || {
+    [ "$?" != 2 ] || answer "error the existing address pool needs conntrack verification or a host reboot before reuse"
+    answer "error no addresses left"
+  }
   net_up "$n"
   queues=$cpus
   [ "$queues" -gt 4 ] && queues=4

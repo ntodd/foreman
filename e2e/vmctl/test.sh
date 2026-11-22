@@ -117,7 +117,7 @@ check "failed locks never touch networking or units" test ! -e "$work/calls"
 check "failed locks never launch a unit" test ! -e "$work/last-run"
 
 # -- refusals --------------------------------------------------------------
-expect "says its version" "version" "ok 3"
+expect "says its version" "version" "ok 4"
 nonce=0123456789abcdef0123456789abcdef
 stage=$work/srv/vms/.adopt-$nonce
 expect "refuses a published VM id as an adoption stage" "adopt $env1 $env1 $guest" "error invalid adoption stage"
@@ -294,6 +294,14 @@ expect "restores a VM on the address it had" "restore $env2 1 1024" "ok restored
 check "from its own snapshot" grep -qxF -- \
   "source_url=file://$work/srv/vms/$env2/snapshot,memory_restore_mode=copyonwrite,resume=true" "$work/last-run"
 expect "stops a VM" "stop $env2" "ok"
+
+# An older helper may have already freed slots on this boot.
+rm -f "$work/state/pool-generation"
+touch "$work/fail-conntrack"
+expect "releases another slot during an upgrade" "release $env1" "ok"
+expect "requires verification for a previously used pool" "start $env1 1 1024 $guest 1.2.3" "error .*conntrack.*reboot.*"
+rm "$work/fail-conntrack"
+expect "clears a legacy slot before allocating it" "start $env1 1 1024 $guest 1.2.3" "ok started fm-vm3 10.250.0.14"
 
 [ "$failures" -eq 0 ] || { echo "$failures check(s) failed" >&2; exit 1; }
 echo "all checks passed"

@@ -358,7 +358,9 @@ table for guests, `inet foreman_guests`, that works on each VM's tap
 Destroying a VM removes its tap before clearing connection tracking for its guest
 address. If the box lacks `conntrack` or cannot confirm the cleanup, it reserves
 that address until the host reboots. Installing `conntrack` allows flushed
-addresses to return to the pool immediately.
+addresses to return to the pool immediately. On existing boxes, re-run the box
+installer to get the updated helper. For a pool used by an older helper,
+new leases on the upgrade boot require a working `conntrack` or a host reboot.
 
 What's left goes out through the box's NAT. The box's other table,
 `inet foreman`, also rejects anything arriving on an `fm-` interface,
