@@ -8,6 +8,8 @@ defmodule ForemanWeb.EnvironmentLive.Index do
   import ForemanWeb.ForemanComponents
 
   alias Foreman.{Boxes, Capacity, Environments, Repos}
+  alias ForemanWeb.EnvironmentConnection
+
   alias ForemanWeb.Fleet
 
   # States, grouped the way the filter offers them.
@@ -260,7 +262,7 @@ defmodule ForemanWeb.EnvironmentLive.Index do
         </td>
         <td class="hidden truncate py-3 pr-3 2xl:table-cell">
           <code
-            :if={env.observed_state == "running" and env.remote_user}
+            :if={env.observed_state == "running" and EnvironmentConnection.account?(env.remote_user)}
             class="command text-xs text-ink-2"
           >
             ssh {env.remote_user}@{env.slug}

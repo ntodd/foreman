@@ -220,17 +220,25 @@ wait_for "agent rejoined" 180 joined_more box1 "$n"
 echo "ok: rejoined after a reboot"
 
 say "a shared-Docker install without a VM helper can recover to the fleet agent"
+n=$(joins box1 0.1.0)
 box rm /etc/foreman-agent/vmctl
 install_agent | tee "$work/migrate.log"
 grep -q "migrating the box" "$work/migrate.log" || fail "legacy migration was skipped"
 grep -qx "foreman: installing agent 0.1.1" "$work/migrate.log" || fail "migration did not fetch the fleet release"
 box test -x /etc/foreman-agent/vmctl || fail "legacy migration did not install the VM helper"
 
+# Migration installed fleet 0.1.1, but this box still desires 0.1.0.
+# Finish that transition before exercising the forward self-update.
+wait_for "agent back on pinned 0.1.0" 240 joined_more box1 "$n" 0.1.0
+current_is 0.1.0 || fail "migration didn't return to the pinned release"
+wait_for "rollback state cleared for pinned release" 60 no_rollback_state
+
 say "self-update to 0.1.1"
+n=$(joins box1 0.1.1)
 cp_eval 'E2E.desire_version("0.1.1")'
 # The running control plane sends the update on the agent's next connect.
 box systemctl restart foreman-agent
-wait_for "agent on 0.1.1" 240 joined_more box1 0 0.1.1
+wait_for "agent on 0.1.1" 240 joined_more box1 "$n" 0.1.1
 current_is 0.1.1 || fail "current isn't 0.1.1"
 # Once the new release has joined, the agent clears the rollback state, so
 # a crash much later can't roll it back to a stale release.
