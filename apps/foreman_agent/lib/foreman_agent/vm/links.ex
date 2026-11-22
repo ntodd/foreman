@@ -36,7 +36,7 @@ defmodule ForemanAgent.VM.Links do
              [
                [
                  name: {:via, Registry, {@registry, env_id}},
-                 socket: VM.paths(config, env_id).vsock,
+                 socket: fn -> VM.pin_socket(config, env_id, :vsock) end,
                  config: hello_config(config),
                  alive?: fn -> machine.running?(env_id, config) end
                ]

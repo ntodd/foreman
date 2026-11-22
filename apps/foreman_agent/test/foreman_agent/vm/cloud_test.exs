@@ -36,6 +36,29 @@ defmodule ForemanAgent.VM.Machine.CloudTest do
     %{config: config, config_json: Path.join(snapshot, "config.json"), saved: saved}
   end
 
+  test "a pinned management endpoint survives removal of its VM directory entry", ctx do
+    source = ForemanAgent.VM.paths(ctx.config, @env).api
+    {:ok, listener} = :gen_tcp.listen(0, [:binary, ifaddr: {:local, source}, active: false])
+    on_exit(fn -> :gen_tcp.close(listener) end)
+
+    assert {:ok, pin} = ForemanAgent.VM.pin_socket(ctx.config, @env, :api)
+    refute String.starts_with?(pin, Path.dirname(source) <> "/")
+    assert {:ok, ^pin} = ForemanAgent.VM.pin_socket(ctx.config, @env, :api)
+
+    File.rm!(source)
+    assert {:ok, client} = :gen_tcp.connect({:local, pin}, 0, [:binary], 500)
+    :gen_tcp.close(client)
+    File.write!(source, "ordinary file")
+    assert {:error, _} = ForemanAgent.VM.pin_socket(ctx.config, @env, :api)
+  end
+
+  test "snapshot scratch directories are private at creation", ctx do
+    path = Path.join(Path.dirname(ctx.config_json), "scratch")
+    assert :ok = ForemanAgent.VM.mkdir_private(path)
+    assert Bitwise.band(File.stat!(path).mode, 0o777) == 0o700
+    assert {:error, _} = ForemanAgent.VM.mkdir_private(path)
+  end
+
   test "asks the helper to restore a VM whose snapshot is the one start gave it", ctx do
     File.write!(ctx.config_json, ctx.saved)
     assert Cloud.restore(@env, @vm, ctx.config) == :ok

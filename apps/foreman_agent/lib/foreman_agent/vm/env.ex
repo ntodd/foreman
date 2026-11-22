@@ -88,9 +88,8 @@ defmodule ForemanAgent.VM.Env do
       machine.running?(p.env_id, ctx.config) ->
         log.("info", "Saving the environment's VM to disk\n")
         tmp = paths.snapshot <> ".tmp"
-        File.rm_rf!(tmp)
-        File.mkdir_p!(tmp)
-        File.chmod!(tmp, 0o700)
+        VM.remove_tree!(tmp)
+        :ok = VM.mkdir_private(tmp)
 
         case machine.snapshot(p.env_id, tmp, ctx.config) do
           :ok ->
@@ -104,7 +103,7 @@ defmodule ForemanAgent.VM.Env do
             suspend_result(ctx.config, p.env_id)
 
           {:error, message} ->
-            File.rm_rf(tmp)
+            VM.remove_tree(tmp)
             {:error, message}
         end
 
@@ -250,7 +249,7 @@ defmodule ForemanAgent.VM.Env do
 
     for env_id <- VM.list(config) do
       paths = VM.paths(config, env_id)
-      File.rm_rf(paths.snapshot <> ".tmp")
+      VM.remove_tree(paths.snapshot <> ".tmp")
       remove_discarded(paths, runner)
 
       cond do
@@ -319,7 +318,7 @@ defmodule ForemanAgent.VM.Env do
 
       leftovers ->
         sync_path!(paths.dir, runner)
-        Enum.each(leftovers, &File.rm_rf!/1)
+        Enum.each(leftovers, &VM.remove_tree!/1)
     end
   end
 
