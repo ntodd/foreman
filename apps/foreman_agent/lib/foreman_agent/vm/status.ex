@@ -232,13 +232,15 @@ defmodule ForemanAgent.VM.Status do
     known = MapSet.new(known)
 
     candidates =
-      with {:ok, names} <- File.ls(config.prebuilds_root) do
-        names
-        |> Stream.filter(&ForemanProtocol.Schema.uuid?/1)
-        |> Stream.reject(&MapSet.member?(known, &1))
-        |> Enum.take(256)
-      else
-        {:error, _} -> []
+      case File.ls(config.prebuilds_root) do
+        {:ok, names} ->
+          names
+          |> Stream.filter(&ForemanProtocol.Schema.uuid?/1)
+          |> Stream.reject(&MapSet.member?(known, &1))
+          |> Enum.take(256)
+
+        {:error, _} ->
+          []
       end
 
     %{orphan_prebuilds: candidates}
