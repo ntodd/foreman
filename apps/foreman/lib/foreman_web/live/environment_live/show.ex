@@ -109,17 +109,40 @@ defmodule ForemanWeb.EnvironmentLive.Show do
 
   # -- events ------------------------------------------------------------------
 
-  defp run_action(:confirmed_start, scope, env), do: Environments.start(scope, env, true)
-  defp run_action("start", scope, env), do: Environments.start(scope, env)
-  defp run_action("retry", scope, env), do: Environments.retry(scope, env)
-  defp run_action("stop", scope, env), do: Environments.stop(scope, env)
-  defp run_action("suspend", scope, env), do: Environments.suspend(scope, env)
-  defp run_action("rebuild", scope, env), do: Environments.rebuild(scope, env)
-  defp run_action("pull_rebuild", scope, env), do: Environments.pull_rebuild(scope, env)
-  defp run_action("restart_affected", scope, env), do: Environments.restart(scope, env, :affected)
-  defp run_action("restart_all", scope, env), do: Environments.restart(scope, env, :all)
-  defp run_action("logs", scope, env), do: Environments.logs(scope, env)
-  defp run_action(_, _scope, _env), do: {:error, "That isn't something an environment can do."}
+  defp perform_action(socket, action, confirmed?) do
+    %{current_scope: scope, env: env} = socket.assigns
+    socket = assign(socket, :start_warning, nil)
+
+    case run_action(action, scope, env, confirmed?) do
+      {:confirm, message} ->
+        {:noreply,
+         assign(socket, :start_warning, %{slug: env.slug, message: message, action: action})}
+
+      {:ok, op} ->
+        {:noreply, socket |> load() |> watch_op(op.id)}
+
+      {:error, reason} ->
+        {:noreply, put_flash(socket, :error, error_message(reason))}
+    end
+  end
+
+  defp run_action("start", scope, env, confirmed?), do: Environments.start(scope, env, confirmed?)
+  defp run_action("retry", scope, env, confirmed?), do: Environments.retry(scope, env, confirmed?)
+  defp run_action("stop", scope, env, _), do: Environments.stop(scope, env)
+  defp run_action("suspend", scope, env, _), do: Environments.suspend(scope, env)
+
+  defp run_action("rebuild", scope, env, confirmed?),
+    do: Environments.rebuild(scope, env, confirmed?)
+
+  defp run_action("pull_rebuild", scope, env, confirmed?),
+    do: Environments.pull_rebuild(scope, env, confirmed?)
+
+  defp run_action("restart_affected", scope, env, _),
+    do: Environments.restart(scope, env, :affected)
+
+  defp run_action("restart_all", scope, env, _), do: Environments.restart(scope, env, :all)
+  defp run_action("logs", scope, env, _), do: Environments.logs(scope, env)
+  defp run_action(_, _scope, _env, _), do: {:error, "That isn't something an environment can do."}
 
   @impl true
   def handle_event("dismiss_start", _, socket),
@@ -129,24 +152,9 @@ defmodule ForemanWeb.EnvironmentLive.Show do
     do: {:noreply, socket}
 
   def handle_event("confirm_start", _, socket),
-    do: handle_event("action", %{"do" => :confirmed_start}, socket)
+    do: perform_action(socket, socket.assigns.start_warning.action, true)
 
-  def handle_event("action", %{"do" => action}, socket) do
-    %{current_scope: scope, env: env} = socket.assigns
-
-    socket = assign(socket, :start_warning, nil)
-
-    case run_action(action, scope, env) do
-      {:confirm, message} ->
-        {:noreply, assign(socket, :start_warning, %{slug: env.slug, message: message})}
-
-      {:ok, op} ->
-        {:noreply, socket |> load() |> watch_op(op.id)}
-
-      {:error, reason} ->
-        {:noreply, put_flash(socket, :error, error_message(reason))}
-    end
-  end
+  def handle_event("action", %{"do" => action}, socket), do: perform_action(socket, action, false)
 
   def handle_event("later", _params, socket), do: {:noreply, assign(socket, :later, true)}
 

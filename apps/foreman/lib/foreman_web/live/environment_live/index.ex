@@ -143,31 +143,42 @@ defmodule ForemanWeb.EnvironmentLive.Index do
     {:noreply, push_patch(socket, to: filter_path(filters))}
   end
 
-  def handle_event("start", %{"id" => id}, socket),
-    do: act(socket, id, &Environments.start/2, "Starting")
+  def handle_event(action, %{"id" => id}, socket) when action in ["start", "retry", "stop"],
+    do: act(socket, id, action, false)
 
-  def handle_event("confirm_start", _, %{assigns: %{start_warning: %{id: id}}} = socket),
-    do: act(socket, id, &Environments.start(&1, &2, true), "Starting")
+  def handle_event(
+        "confirm_start",
+        _,
+        %{assigns: %{start_warning: %{id: id, action: action}}} = socket
+      ),
+      do: act(socket, id, action, true)
 
   def handle_event("confirm_start", _, socket), do: {:noreply, socket}
 
   def handle_event("dismiss_start", _, socket),
     do: {:noreply, assign(socket, :start_warning, nil)}
 
-  def handle_event("stop", %{"id" => id}, socket),
-    do: act(socket, id, &Environments.stop/2, "Stopping")
-
-  def handle_event("retry", %{"id" => id}, socket),
-    do: act(socket, id, &Environments.retry/2, "Retrying")
-
-  defp act(socket, id, fun, verb) do
-    env = Environments.get_environment!(socket.assigns.current_scope, id)
-
+  defp act(socket, id, action, confirmed?) do
+    scope = socket.assigns.current_scope
+    env = Environments.get_environment!(scope, id)
     socket = assign(socket, :start_warning, nil)
 
-    case fun.(socket.assigns.current_scope, env) do
+    {verb, result} =
+      case action do
+        "start" -> {"Starting", Environments.start(scope, env, confirmed?)}
+        "retry" -> {"Retrying", Environments.retry(scope, env, confirmed?)}
+        "stop" -> {"Stopping", Environments.stop(scope, env)}
+      end
+
+    case result do
       {:confirm, message} ->
-        {:noreply, assign(socket, :start_warning, %{id: id, slug: env.slug, message: message})}
+        {:noreply,
+         assign(socket, :start_warning, %{
+           id: id,
+           slug: env.slug,
+           message: message,
+           action: action
+         })}
 
       {:ok, _} ->
         {:noreply, socket |> put_flash(:info, "#{verb} #{env.slug}…") |> load()}

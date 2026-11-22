@@ -270,15 +270,17 @@ defmodule Foreman.Environments do
 
   # -- actions -----------------------------------------------------------------------
 
-  def start(scope, env, confirmed? \\ false) do
+  def start(scope, env, confirmed? \\ false), do: boot_action(scope, env, :start, confirmed?)
+
+  defp boot_action(scope, env, action, confirmed?) do
     with :ok <- authorize(scope, env),
          {:ok, op} <-
            with_box_lock(env.box_id, fn _box ->
              env = get!(env.id)
 
-             with :ok <- allowed?(env, :start),
+             with :ok <- allowed?(env, action),
                   :ok <- admit_start(env, confirmed?) do
-               queue_action(scope, env, :start, %{})
+               queue_action(scope, env, action, %{})
              end
            end) do
       Server.kick(env.id)
@@ -300,17 +302,17 @@ defmodule Foreman.Environments do
   stops, and a start resumes it where it was, processes and all.
   """
   def suspend(scope, env), do: action(scope, env, :suspend)
-  def rebuild(scope, env), do: action(scope, env, :rebuild)
+  def rebuild(scope, env, confirmed? \\ false), do: boot_action(scope, env, :rebuild, confirmed?)
 
   @doc """
   Fast-forwards the clone to its branch, then rebuilds. The agent refuses
   (and leaves the environment running) if the clone has uncommitted
   changes or commits the branch doesn't.
   """
-  def pull_rebuild(scope, env) do
+  def pull_rebuild(scope, env, confirmed? \\ false) do
     with :ok <- authorize(scope, env),
          :ok <- can_pull?(env),
-         do: action(scope, env, :pull_rebuild)
+         do: boot_action(scope, env, :pull_rebuild, confirmed?)
   end
 
   # Protocol 3 added `pull` to env.rebuild; an older agent refuses it.
@@ -392,7 +394,7 @@ defmodule Foreman.Environments do
   defp offer_topic(op_id), do: "connect_offer:" <> op_id
 
   @doc "Runs the create again, for an environment whose first create failed."
-  def retry(scope, env), do: action(scope, env, :create)
+  def retry(scope, env, confirmed? \\ false), do: boot_action(scope, env, :create, confirmed?)
 
   def logs(scope, env, service \\ nil) do
     action(scope, env, :logs, %{"service" => service, "tail" => 300})
