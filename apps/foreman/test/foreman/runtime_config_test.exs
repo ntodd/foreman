@@ -21,7 +21,7 @@ defmodule Foreman.RuntimeConfigTest do
         ["FOREMAN_DB", "FOREMAN_TAILSCALE_DEPLOYMENT_TAG", "FOREMAN_ENCRYPTION_KEYS_RETIRED"] ++
         ["FOREMAN_TRUSTED_PROXIES", "DATABASE_SSL", "FOREMAN_FORCE_SSL", "FOREMAN_SECURE_COOKIES"] ++
         ["FOREMAN_ALLOWED_ORG", "FOREMAN_BASE_URL", "FOREMAN_GITHUB_PRIVATE_KEY"] ++
-        ["FOREMAN_GITHUB_PRIVATE_KEY_FILE", "FOREMAN_UPDATE_CHECK"]
+        ["FOREMAN_GITHUB_PRIVATE_KEY_FILE", "FOREMAN_UPDATE_CHECK", "DATABASE_SSL_CACERTFILE"]
 
     saved_env = Map.new(keys, &{&1, System.get_env(&1)})
     saved_database = Application.get_env(:foreman, :database)
@@ -69,6 +69,15 @@ defmodule Foreman.RuntimeConfigTest do
         assert config[:force_ssl], "FOREMAN_FORCE_SSL=#{value}"
         assert config[:secure_cookies], "FOREMAN_SECURE_COOKIES=#{value}"
       end
+    end
+
+    test "a configured database CA bundle keeps hostname and peer verification" do
+      System.put_env("DATABASE_SSL_CACERTFILE", "/data/rds-bundle.pem")
+      ssl = read_repo_config()[:ssl]
+      assert ssl[:cacertfile] == ~c"/data/rds-bundle.pem"
+      assert ssl[:verify] == :verify_peer
+      assert ssl[:server_name_indication] == ~c"ep-example.us-east-2.aws.neon.tech"
+      refute Keyword.has_key?(ssl, :cacerts)
     end
 
     test "still turn off with false" do

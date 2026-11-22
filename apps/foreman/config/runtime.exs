@@ -142,11 +142,13 @@ if config_env() == :prod do
     # TLS with certificate checks by default (Neon requires TLS).
     ssl =
       if flag.("DATABASE_SSL", true) do
-        [
-          verify: :verify_peer,
-          cacerts: :public_key.cacerts_get(),
-          server_name_indication: String.to_charlist(host)
-        ]
+        trust =
+          case present.("DATABASE_SSL_CACERTFILE") do
+            nil -> [cacerts: :public_key.cacerts_get()]
+            file -> [cacertfile: String.to_charlist(file)]
+          end
+
+        [verify: :verify_peer, server_name_indication: String.to_charlist(host)] ++ trust
       else
         false
       end
