@@ -83,13 +83,7 @@ defmodule ForemanWeb.BoxLive.Show do
     |> assign(:online, Boxes.online?(box.id))
     |> assign(:envs, visible)
     |> assign(:summary, Capacity.box_summary(box, envs))
-    |> assign(
-      :ops,
-      if(admin?,
-        do: Operations.list_for_box(box.id, 10) |> Enum.filter(&is_nil(&1.environment_id)),
-        else: []
-      )
-    )
+    |> assign(:ops, if(admin?, do: Operations.recent_box_operations(box.id, 10), else: []))
     |> assign(:orphans, if(admin?, do: Environments.orphans(box.id), else: []))
     |> sync_form(box)
     |> assign(:target_version, Releases.target_version(box))

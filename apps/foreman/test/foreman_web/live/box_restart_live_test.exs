@@ -36,6 +36,39 @@ defmodule ForemanWeb.BoxRestartLiveTest do
     assert render(view) =~ "Rebooting stale"
   end
 
+  test "recent environment activity leaves the box's own operations visible", context do
+    %{conn: conn, user: user} = context
+    box = box_fixture(owner_user_id: user.id)
+    env = environment_fixture(user: user, box: box)
+
+    Foreman.Operations.create!(%{
+      id: Ecto.UUID.generate(),
+      box_id: box.id,
+      action: "box.gc",
+      command: "box.gc",
+      status: "failed",
+      error: "Prune failed",
+      args: %{},
+      inserted_at: DateTime.add(DateTime.utc_now(), -60)
+    })
+
+    for _ <- 1..10 do
+      Foreman.Operations.create!(%{
+        id: Ecto.UUID.generate(),
+        box_id: box.id,
+        environment_id: env.id,
+        action: "rebuild",
+        command: "env.rebuild",
+        status: "succeeded",
+        args: %{}
+      })
+    end
+
+    {:ok, view, _html} = live(conn, ~p"/boxes/#{box.id}")
+    assert has_element?(view, "#box-operations li", "Prune failed")
+    refute has_element?(view, "#box-operations li", "Rebuild")
+  end
+
   test "Reboot is with the box's operations whether or not it needs one", %{
     conn: conn,
     user: user
