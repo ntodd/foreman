@@ -19,10 +19,14 @@ defmodule ForemanWeb.EnvironmentLogTest do
       })
 
     {:ok, view, _html} = live(conn, ~p"/environments/#{env.id}?op=#{op.id}")
-    send(view.pid, {:op_log, op.id, String.duplicate("━", 133_400) <> "x"})
-    render(view)
-    log = :sys.get_state(view.pid).socket.assigns.log
+    sequence = System.unique_integer([:monotonic, :positive])
+    send(view.pid, {:op_log, op.id, sequence, String.duplicate("━", 133_400) <> "x"})
+    assert_push_event view, "operation-log", %{text: log, cursor: cursor, reset: true}
     assert String.valid?(log)
     assert log == String.duplicate("━", 99_999) <> "x"
+
+    send(view.pid, {:op_log, op.id, sequence + 1, "next line"})
+    assert_push_event view, "operation-log", %{text: "next line", cursor: ^cursor, reset: false}
+    assert :sys.get_state(view.pid).socket.assigns.log == ""
   end
 end

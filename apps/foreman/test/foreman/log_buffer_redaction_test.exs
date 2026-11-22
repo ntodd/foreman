@@ -49,13 +49,52 @@ defmodule Foreman.LogBufferRedactionTest do
   # a busy machine the first chunk can take a while.
   defp broadcast_text(op_id, acc \\ [], wait \\ 2_000) do
     receive do
-      {:op_log, ^op_id, data} -> broadcast_text(op_id, [acc | data], 100)
+      {:op_log, ^op_id, _, data} -> broadcast_text(op_id, [acc | data], 100)
     after
       wait -> IO.iodata_to_binary(acc)
     end
   end
 
   defp stored(op), do: Operations.log(Repo.reload!(op))
+
+  test "separate flushes append rows and preserve existing output", %{op: op} do
+    op |> Ecto.Changeset.change(log: "before upgrade\n") |> Repo.update!()
+
+    for line <- ["first\n", "second\n"] do
+      LogBuffer.append(op.id, line)
+      LogBuffer.flush(op.id)
+    end
+
+    assert Operations.log(op) == "before upgrade\nfirst\nsecond\n"
+    assert Repo.aggregate("operation_log_chunks", :count) >= 2
+    assert Repo.one(from o in Operations.Operation, where: o.id == ^op.id, select: o.log) == nil
+  end
+
+  test "the tail and database retention stay bounded across flushes", %{op: op} do
+    text = String.duplicate("━", 120_000) <> "\n"
+
+    for _ <- 1..4 do
+      LogBuffer.append(op.id, text)
+      LogBuffer.flush(op.id)
+    end
+
+    assert Operations.log(op) ==
+             String.byte_slice(String.duplicate(text, 4), -1_048_576, 1_048_576)
+
+    assert Repo.reload!(op).log_truncated
+
+    sizes =
+      Repo.all(from c in Operations.LogStore, where: c.operation_id == ^op.id, select: c.data)
+
+    assert Enum.sum(Enum.map(sizes, &byte_size/1)) < 1_048_576 + 65_536
+
+    op
+    |> Ecto.Changeset.change(finished_at: DateTime.add(DateTime.utc_now(), -10))
+    |> Repo.update!()
+
+    assert Operations.prune_output(DateTime.utc_now()) == 1
+    assert Operations.log(op) == ""
+  end
 
   test "a secret split across two chunks is scrubbed from the broadcast and the stored log",
        %{op: op} do
@@ -95,7 +134,7 @@ defmodule Foreman.LogBufferRedactionTest do
   test "an idle boundary inside a complete match preserves overlap with the next read", %{op: op} do
     Redactions.put_values(op.id, ["abcdefabc", "abc-next"])
     LogBuffer.append(op.id, "one abcdefabc")
-    assert_receive {:op_log, _, "one [redacted]"}, 3_000
+    assert_receive {:op_log, _, _, "one [redacted]"}, 3_000
     LogBuffer.append(op.id, "-next done\n")
     LogBuffer.flush(op.id)
     assert stored(op) == "one [redacted] done\n"
@@ -106,7 +145,7 @@ defmodule Foreman.LogBufferRedactionTest do
     prefix = String.duplicate(".", 65_536)
     Redactions.put_values(op.id, ["abcabc"])
     LogBuffer.append(op.id, prefix <> "abcabc")
-    assert_receive {:op_log, _, shown}, 3_000
+    assert_receive {:op_log, _, _, shown}, 3_000
     assert shown == prefix <> "[redacted]"
     LogBuffer.append(op.id, "abc!\n")
     LogBuffer.flush(op.id)
@@ -161,7 +200,7 @@ defmodule Foreman.LogBufferRedactionTest do
   test "a partial line that sits for a while is shown without waiting for a newline",
        %{op: op} do
     LogBuffer.append(op.id, "Password: ")
-    assert_receive {:op_log, _, "Password: "}, 3_000
+    assert_receive {:op_log, _, _, "Password: "}, 3_000
   end
 
   test "an endless line is passed through once it's too long to hold", %{op: op} do

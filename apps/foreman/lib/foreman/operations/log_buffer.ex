@@ -15,15 +15,11 @@ defmodule Foreman.Operations.LogBuffer do
   """
   use GenServer
 
-  import Ecto.Query
-
-  alias Foreman.Operations.{Operation, Redactions}
-  alias Foreman.Repo
+  alias Foreman.Operations.{LogStore, Redactions}
 
   @flush_every 750
   @hold_partial_ms 500
   @max_partial 65_536
-  @max_log 1_048_576
 
   def start_link(_), do: GenServer.start_link(__MODULE__, nil, name: __MODULE__)
 
@@ -31,6 +27,13 @@ defmodule Foreman.Operations.LogBuffer do
 
   @doc "Text received but not written yet. A held-back partial line isn't included."
   def pending(op_id), do: GenServer.call(__MODULE__, {:pending, op_id})
+
+  def snapshot(op_id) do
+    case GenServer.call(__MODULE__, {:snapshot, op_id}, :infinity) do
+      {:ok, log, cursor} -> {log, cursor}
+      {:error, error} -> raise error
+    end
+  end
 
   @doc "Lets out the operation's held-back partial line and writes everything."
   def flush(op_id), do: GenServer.call(__MODULE__, {:flush, op_id})
@@ -53,6 +56,13 @@ defmodule Foreman.Operations.LogBuffer do
   @impl true
   def handle_call({:pending, op_id}, _from, state) do
     {:reply, state.chunks |> Map.get(op_id, []) |> Enum.reverse() |> IO.iodata_to_binary(), state}
+  end
+
+  def handle_call({:snapshot, op_id}, _from, state) do
+    pending = state.chunks |> Map.get(op_id, []) |> Enum.reverse()
+    {:reply, {:ok, LogStore.read(op_id, pending), sequence()}, state}
+  rescue
+    error -> {:reply, {:error, error}, state}
   end
 
   def handle_call({:flush, op_id}, _from, state) do
@@ -120,31 +130,23 @@ defmodule Foreman.Operations.LogBuffer do
   defp emit(state, _op_id, ""), do: state
 
   defp emit(state, op_id, text) do
-    Phoenix.PubSub.broadcast(Foreman.PubSub, "operation:" <> op_id, {:op_log, op_id, text})
+    Phoenix.PubSub.broadcast(
+      Foreman.PubSub,
+      "operation:" <> op_id,
+      {:op_log, op_id, sequence(), text}
+    )
+
     %{state | chunks: Map.update(state.chunks, op_id, [text], &[text | &1])}
   end
+
+  defp sequence, do: System.unique_integer([:positive, :monotonic])
 
   defp now, do: System.monotonic_time(:millisecond)
 
   defp write(op_id, chunks) do
     new = chunks |> Enum.reverse() |> IO.iodata_to_binary()
 
-    case Repo.one(from o in Operation, where: o.id == ^op_id, select: {o.log, o.log_truncated}) do
-      {existing, truncated} ->
-        combined = (existing || "") <> new
-
-        {log, truncated} =
-          if byte_size(combined) > @max_log,
-            do: {binary_part(combined, byte_size(combined) - @max_log, @max_log), true},
-            else: {combined, truncated}
-
-        Repo.update_all(from(o in Operation, where: o.id == ^op_id),
-          set: [log: scrub(log), log_truncated: truncated]
-        )
-
-      nil ->
-        :ok
-    end
+    LogStore.append(op_id, new)
   rescue
     # A write that fails (the operation's environment was just deleted, the
     # database busy past its timeout) shouldn't take the buffer down, and
@@ -154,7 +156,4 @@ defmodule Foreman.Operations.LogBuffer do
     # A connection that goes away mid-query exits rather than raises.
     :exit, _ -> :ok
   end
-
-  # Trimming can split a UTF-8 sequence at the start.
-  defp scrub(log), do: if(String.valid?(log), do: log, else: String.replace_invalid(log))
 end

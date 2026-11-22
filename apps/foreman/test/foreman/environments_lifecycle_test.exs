@@ -463,8 +463,8 @@ defmodule Foreman.EnvironmentsLifecycleTest do
 
       :ok = Foreman.Jobs.Housekeeping.perform(%Oban.Job{})
 
-      assert Operations.get!(finished.id).log == nil
-      assert Operations.get!(recent.id).log == "recent output"
+      assert Operations.log(finished) == ""
+      assert Operations.log(recent) == "recent output"
     end
 
     test "forgets what to redact for operations that are over", ctx do
