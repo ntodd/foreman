@@ -84,6 +84,35 @@ defmodule Foreman.LogBufferRedactionTest do
     assert length(String.split(log, "[redacted]")) - 1 == 3_000
   end
 
+  test "a complete value ending in its own prefix is masked on final flush", %{op: op} do
+    Redactions.put_values(op.id, ["sample-s"])
+    LogBuffer.append(op.id, "value=sample-s")
+    LogBuffer.flush(op.id)
+    assert stored(op) == "value=[redacted]"
+    assert broadcast_text(op.id) == stored(op)
+  end
+
+  test "an idle boundary inside a complete match preserves overlap with the next read", %{op: op} do
+    Redactions.put_values(op.id, ["abcdefabc", "abc-next"])
+    LogBuffer.append(op.id, "one abcdefabc")
+    assert_receive {:op_log, _, "one [redacted]"}, 3_000
+    LogBuffer.append(op.id, "-next done\n")
+    LogBuffer.flush(op.id)
+    assert stored(op) == "one [redacted] done\n"
+    assert broadcast_text(op.id) == " done\n"
+  end
+
+  test "a long line ending with a whole self-overlapping value is safe to emit", %{op: op} do
+    prefix = String.duplicate(".", 65_536)
+    Redactions.put_values(op.id, ["abcabc"])
+    LogBuffer.append(op.id, prefix <> "abcabc")
+    assert_receive {:op_log, _, shown}, 3_000
+    assert shown == prefix <> "[redacted]"
+    LogBuffer.append(op.id, "abc!\n")
+    LogBuffer.flush(op.id)
+    assert stored(op) == prefix <> "[redacted]!\n"
+  end
+
   test "a carriage return ends a line, so progress output isn't held back", %{op: op} do
     LogBuffer.append(op.id, "pulling 10%\rpulling 20%\r")
     assert broadcast_text(op.id) == "pulling 10%\rpulling 20%\r"

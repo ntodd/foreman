@@ -15,6 +15,19 @@ defmodule ForemanProtocol.RedactionTest do
     assert Redaction.redact(r, "saw secretline1") == "saw [redacted]"
   end
 
+  test "emitting any prefix and then its remainder masks a crossing interval once" do
+    values = Redaction.prepare(["abcdefabc", "abc-next", "next-value"])
+    text = "abc-next, abcdefabc-next-value and abcdefabc"
+    expected = Redaction.redact(values, text)
+
+    for cut <- 0..byte_size(text) do
+      {first, covered} = Redaction.redact_prefix(values, text, cut, 0)
+      tail = binary_part(text, cut, byte_size(text) - cut)
+      {rest, 0} = Redaction.redact_prefix(values, tail, byte_size(tail), covered)
+      assert first <> rest == expected
+    end
+  end
+
   test "nothing to redact leaves text alone" do
     assert Redaction.redact(Redaction.prepare([]), "text") == "text"
   end
