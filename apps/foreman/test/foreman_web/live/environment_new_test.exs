@@ -19,6 +19,33 @@ defmodule ForemanWeb.EnvironmentNewTest do
     |> render()
   end
 
+  test "the placement notice follows the memory override and clears when it fits", %{
+    conn: conn,
+    user: user
+  } do
+    online(
+      box_fixture(
+        owner_user_id: user.id,
+        capacity_policy: "refuse",
+        capacity: %{"cpus" => 8, "memory_mb" => 16_000},
+        vm: %{
+          "ready" => true,
+          "default_cpus" => 2,
+          "default_memory_mb" => 4096,
+          "host_cpus" => 8,
+          "host_memory_mb" => 16_000
+        }
+      )
+    )
+
+    {:ok, view, _html} = live(conn, ~p"/environments/new")
+    view |> form("#new-environment", environment: %{memory_limit_mb: "15900"}) |> render_change()
+    assert has_element?(view, "#placement-refuse")
+
+    view |> form("#new-environment", environment: %{memory_limit_mb: ""}) |> render_change()
+    refute has_element?(view, "#placement-refuse")
+  end
+
   test "an admin starts on their own box, not whichever sorts first", %{conn: conn, user: user} do
     other = user_fixture()
     online(box_fixture(owner_user_id: other.id, name: "alpha"))

@@ -29,11 +29,13 @@ defmodule Foreman.Operations do
     |> Repo.all()
   end
 
-  def list_for_box(box_id, limit \\ 20) do
+  @doc "Recent box-level operations, with just the fields the box page displays."
+  def recent_box_operations(box_id, limit) do
     from(o in Operation,
-      where: o.box_id == ^box_id,
+      where: o.box_id == ^box_id and is_nil(o.environment_id),
       order_by: [desc: o.inserted_at],
-      limit: ^limit
+      limit: ^limit,
+      select: map(o, [:action, :status, :error])
     )
     |> Repo.all()
   end

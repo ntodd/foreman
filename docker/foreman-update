@@ -170,6 +170,14 @@ prune_backups() {
   ls -1t "$DIR"/backups/foreman-data-*.tgz 2>/dev/null | tail -n +"$((KEEP_BACKUPS + 1))" | xargs -r rm -f --
 }
 
+# Write one value for the root-owned shell configuration. A single quote in
+# the value ends the quoted segment, adds a literal quote, then reopens it.
+conf_value() {
+  printf "'"
+  printf '%s' "$1" | sed "s/'/'\\\\''/g"
+  printf "'"
+}
+
 load_conf() {
   [ -f "$CONF" ] || die "$CONF is missing; run: foreman-update install /path/to/compose.yml"
   # shellcheck source=/dev/null
@@ -303,7 +311,7 @@ install_updater() {
   chmod 0755 "$tmp"
   mv -f "$tmp" "$BIN"
 
-  printf 'COMPOSE_FILE=%s\nSERVICE=%s\n' "$COMPOSE_FILE" "$SERVICE" > "$CONF"
+  printf 'COMPOSE_FILE=%s\nSERVICE=%s\n' "$(conf_value "$COMPOSE_FILE")" "$(conf_value "$SERVICE")" > "$CONF"
   chmod 0644 "$CONF"
 
   cat > "$UNITS/foreman-update.path" << EOF

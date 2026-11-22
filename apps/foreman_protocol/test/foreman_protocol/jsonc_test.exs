@@ -45,6 +45,17 @@ defmodule ForemanProtocol.JsoncTest do
     refute message =~ "hunter2"
   end
 
+  test "accepts a leading UTF-8 BOM for decoding and key ordering" do
+    json = <<0xEF, 0xBB, 0xBF>> <> ~s({"z": 1, "a": 2,})
+    assert {:ok, %{"z" => 1, "a" => 2}} = Jsonc.decode(json)
+    assert Jsonc.key_order(json, []) == ["z", "a"]
+  end
+
+  test "reports the original byte offset after a BOM, comment and trailing comma" do
+    prefix = <<0xEF, 0xBB, 0xBF>> <> ~s({/*é*/"list": [1,], "value": )
+    assert Jsonc.decode(prefix <> "@}") == {:error, "invalid JSON at byte #{byte_size(prefix)}"}
+  end
+
   test "rejects a top level that is not an object" do
     assert {:error, _} = Jsonc.decode("[1]")
   end

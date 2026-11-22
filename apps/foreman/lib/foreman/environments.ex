@@ -114,11 +114,16 @@ defmodule Foreman.Environments do
     end
   end
 
-  defp reserve_creation(scope, repo, box, attrs) do
-    limits = %{
+  @doc "Resource overrides used for both placement previews and environment creation."
+  def placement_limits(attrs) do
+    %{
       cpu_limit: number(attrs["cpu_limit"]),
       memory_limit_mb: integer(attrs["memory_limit_mb"])
     }
+  end
+
+  defp reserve_creation(scope, repo, box, attrs) do
+    limits = placement_limits(attrs)
 
     branch = blank(attrs["branch"]) || repo.default_branch
     confirmed? = attrs["confirm"] in ["true", true]

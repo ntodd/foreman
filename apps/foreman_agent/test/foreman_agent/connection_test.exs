@@ -46,6 +46,23 @@ defmodule ForemanAgent.ConnectionTest do
     end
   end
 
+  test "a refused upgrade logs the HTTP status without the response headers" do
+    reason =
+      {:error,
+       {:upgrade_failure, %{status_code: 403, resp_headers: [{"x-request-id", "request-detail"}]}}}
+
+    socket = Slipstream.Socket.assign(closed_socket(), :attempt, 0)
+
+    log =
+      ExUnit.CaptureLog.capture_log(fn ->
+        assert {:ok, socket} = Connection.handle_disconnect(reason, socket)
+        assert socket.assigns.attempt == 1
+      end)
+
+    assert log =~ "refused with HTTP 403"
+    refute log =~ "request-detail"
+  end
+
   test "a result the control plane refuses isn't redelivered on every connect" do
     {:ok, event} =
       Event.new("op.result", %{op_id: ForemanProtocol.uuid(), status: "ok"})

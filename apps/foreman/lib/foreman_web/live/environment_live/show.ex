@@ -364,13 +364,15 @@ defmodule ForemanWeb.EnvironmentLive.Show do
   # The destroy check and the page's own check can be the same operation:
   # a queued git status is shared.
   defp destroy_check_done(%{assigns: %{destroy_check: %{op_id: id}}} = socket, %{id: id} = op) do
-    status = if op.status == "succeeded", do: :done, else: :failed
+    {status, result} =
+      if op.status == "succeeded" do
+        {:done, op.result}
+      else
+        reason = if op.error in [nil, ""], do: op.status, else: op.error
+        {:failed, %{"error" => reason}}
+      end
 
-    update(
-      socket,
-      :destroy_check,
-      &%{&1 | status: status, result: op.result || %{"error" => op.error}}
-    )
+    update(socket, :destroy_check, &%{&1 | status: status, result: result})
   end
 
   defp destroy_check_done(socket, _op), do: socket
@@ -406,7 +408,7 @@ defmodule ForemanWeb.EnvironmentLive.Show do
   def handle_async(:branch_sync, _result, socket), do: {:noreply, assign(socket, :sync, nil)}
 
   defp trim_log(log) when byte_size(log) > 400_000,
-    do: binary_part(log, byte_size(log) - 300_000, 300_000)
+    do: String.byte_slice(log, -300_000, 300_000)
 
   defp trim_log(log), do: log
 

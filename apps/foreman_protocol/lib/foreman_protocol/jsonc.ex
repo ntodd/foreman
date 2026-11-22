@@ -11,7 +11,7 @@ defmodule ForemanProtocol.Jsonc do
 
   @spec decode(binary()) :: {:ok, map()} | {:error, String.t()}
   def decode(input) when is_binary(input) do
-    cleaned = input |> strip_comments() |> strip_trailing_commas()
+    cleaned = clean(input)
 
     case JSON.decode(cleaned) do
       {:ok, map} when is_map(map) ->
@@ -23,7 +23,7 @@ defmodule ForemanProtocol.Jsonc do
       {:error, {:unexpected_end, _}} ->
         {:error, "invalid JSON: unexpected end of input"}
 
-      {:error, {_reason, position}} when is_integer(position) ->
+      {:error, {_reason, position, _detail}} when is_integer(position) ->
         {:error, "invalid JSON at byte #{position}"}
 
       {:error, _} ->
@@ -39,7 +39,7 @@ defmodule ForemanProtocol.Jsonc do
   """
   @spec key_order(binary(), [String.t()]) :: [String.t()]
   def key_order(input, path) when is_binary(input) and is_list(path) do
-    cleaned = input |> strip_comments() |> strip_trailing_commas()
+    cleaned = clean(input)
 
     decoders = %{
       object_push: fn key, value, acc -> [{key, value} | acc] end,
@@ -53,6 +53,8 @@ defmodule ForemanProtocol.Jsonc do
     ErlangError -> []
   end
 
+  defp clean(input), do: input |> strip_comments() |> strip_trailing_commas()
+
   defp keys_at({:object, pairs}, []), do: Enum.map(pairs, &elem(&1, 0))
 
   defp keys_at({:object, pairs}, [key | rest]) do
@@ -64,7 +66,10 @@ defmodule ForemanProtocol.Jsonc do
 
   defp keys_at(_value, _path), do: []
 
-  # Replaces comments with spaces so byte positions in errors still line up.
+  # Replace comments and a leading UTF-8 BOM with spaces to keep byte offsets.
+  defp strip_comments(<<0xEF, 0xBB, 0xBF, rest::binary>>),
+    do: strip_comments(rest, :code, ["   "])
+
   defp strip_comments(input), do: strip_comments(input, :code, [])
 
   defp strip_comments(<<>>, _state, acc), do: acc |> Enum.reverse() |> IO.iodata_to_binary()

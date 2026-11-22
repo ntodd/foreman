@@ -60,12 +60,12 @@ defmodule ForemanWeb.EnvironmentLive.New do
 
     placement =
       if repo && box do
-        limits = %{
-          cpu_limit: number(params["cpu_limit"]),
-          memory_limit_mb: number(params["memory_limit_mb"])
-        }
-
-        Capacity.check_placement(box, Environments.live_for_box(box.id), repo, limits)
+        Capacity.check_placement(
+          box,
+          Environments.live_for_box(box.id),
+          repo,
+          Environments.placement_limits(params)
+        )
       end
 
     socket
@@ -123,16 +123,6 @@ defmodule ForemanWeb.EnvironmentLive.New do
     changeset
     |> Ecto.Changeset.traverse_errors(&translate_error/1)
     |> Enum.map_join("; ", fn {field, messages} -> "#{field} #{Enum.join(messages, ", ")}" end)
-  end
-
-  defp number(""), do: nil
-  defp number(nil), do: nil
-
-  defp number(value) do
-    case Float.parse(value) do
-      {n, _} -> n
-      :error -> nil
-    end
   end
 
   defp repo_options(repos) do

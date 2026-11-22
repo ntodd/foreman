@@ -440,6 +440,12 @@ jobs:
         with:
           elixir-version: ${{ env.ELIXIR_VERSION }}
           otp-version: ${{ env.OTP_VERSION }}
+      - name: Check for binaries tracked in agent release inputs
+        shell: bash
+        run: |
+          empty_tree=$(git hash-object -t tree /dev/null)
+          git diff --cached --numstat "$empty_tree" -- apps/foreman_agent/priv |
+            awk '$1 == "-" { print "Unexpected binary in agent release inputs: " $0; failed = 1 } END { exit failed }'
       - name: Audit Hex advisories and retirements
         if: ${{ !cancelled() }}
         run: |
