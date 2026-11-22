@@ -219,7 +219,7 @@ defmodule Foreman.Boxes do
 
   @doc "The public key an agent's connect headers must verify against."
   def public_key(agent_id) do
-    with {:ok, _} <- Ecto.UUID.cast(agent_id),
+    with {:ok, ^agent_id} <- Ecto.UUID.cast(agent_id),
          %Box{revoked_at: nil, public_key: key} when is_binary(key) <- Repo.get(Box, agent_id) do
       {:ok, key}
     else

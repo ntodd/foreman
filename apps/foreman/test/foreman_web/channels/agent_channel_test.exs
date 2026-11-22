@@ -18,6 +18,11 @@ defmodule ForemanWeb.AgentChannelTest do
       assert AgentSocket.id(socket) == "agent_socket:#{box.id}"
     end
 
+    test "box public keys are looked up only by canonical agent IDs", %{box: box} do
+      assert {:ok, _} = Foreman.Boxes.public_key(box.id)
+      assert :error = Foreman.Boxes.public_key(String.upcase(box.id))
+    end
+
     test "refuses a replayed connect", %{box: box} do
       info = signed_connect_info(box)
       assert {:ok, _} = connect(AgentSocket, %{}, connect_info: info)
