@@ -278,6 +278,7 @@ defmodule ForemanAgent.Connection do
       {:error, {:push_failed, Exception.format_banner(kind, reason)}}
   end
 
+  defp describe({:error, {:upgrade_failure, _} = reason}), do: describe(reason)
   defp describe({:upgrade_failure, %{status_code: status}}), do: "refused with HTTP #{status}"
   defp describe(reason), do: inspect(reason)
 
