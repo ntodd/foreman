@@ -275,12 +275,12 @@ defmodule Foreman.Environments.Commands do
   end
 
   # A new node needs an auth key on its first boot only; the node's state
-  # volume keeps its identity after that. Until the environment has come
-  # up once, a rebuild is a first boot too. A failed first build drops its
+  # volume keeps its identity after that. A rebuild can also be the first
+  # boot with Tailscale enabled. A failed build drops its
   # key (keys expire after a day), so the next attempt gets a fresh one.
   defp tailscale_key(env, action)
        when action == "create" or
-              (action in ["rebuild", "pull_rebuild"] and not env.created_once) do
+              (action in ["rebuild", "pull_rebuild"] and is_nil(env.tailscale_device_id)) do
     cond do
       not Tailscale.configured?() ->
         {:ok, nil, env}

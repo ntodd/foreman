@@ -927,7 +927,11 @@ defmodule Foreman.Environments do
          %{status: "failed", action: "pull_rebuild", result: %{"pull_failed" => true}} = op,
          _env
        ),
-       do: %{observed_state: "running", status_message: "Didn't pull: #{op.error}"}
+       do: %{
+         observed_state: "running",
+         status_message: "Didn't pull: #{op.error}",
+         ts_authkey: nil
+       }
 
   defp result_attrs(%{status: status, action: action, error: error} = op, env)
        when status in ["failed", "cancelled"] and action in @up do
@@ -936,7 +940,12 @@ defmodule Foreman.Environments do
     |> Map.merge(%{observed_state: "error", status_message: error || status})
     # It never came up, so its next build is a first boot and gets a
     # fresh Tailscale key; this one may have expired by then.
-    |> then(&if(env.created_once, do: &1, else: Map.put(&1, :ts_authkey, nil)))
+    |> then(
+      &if(action in @fresh_build or not env.created_once,
+        do: Map.put(&1, :ts_authkey, nil),
+        else: &1
+      )
+    )
   end
 
   # The environment is back where it was before the stop or destroy began.

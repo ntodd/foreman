@@ -1070,6 +1070,23 @@ defmodule Foreman.EnvironmentsTest do
       assert rebuild.payload.files["ts-authkey"] == "k2"
     end
 
+    test "an already-built environment without a tailnet node gets a key on rebuild", %{
+      scope: scope,
+      repo: repo,
+      box: box
+    } do
+      connect_agent(box)
+      env = environment_fixture(user: scope.user, repo: repo, box: box, created_once: true)
+
+      expect(Foreman.Tailscale.ClientMock, :create_auth_key, fn _, _ ->
+        {:ok, %{key: "k-new", id: "2"}}
+      end)
+
+      assert {:ok, _} = Environments.rebuild(scope, env)
+      assert_receive {:dispatch, %Command{type: "env.rebuild"} = rebuild}
+      assert rebuild.payload.files["ts-authkey"] == "k-new"
+    end
+
     test "records the node the environment joined as", %{scope: scope, repo: repo, box: box} do
       connect_agent(box)
 
