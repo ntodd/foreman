@@ -77,6 +77,21 @@ defmodule ForemanAgent.UpdaterTest do
     refute File.exists?(Path.join(config.release_root, "releases/0.2.0"))
   end
 
+  test "reports a destination write failure in a streamed download", %{tmp_dir: tmp} do
+    file = Path.join(tmp, "read-only-descriptor")
+    File.touch!(file)
+
+    File.open!(file, [:read, :binary], fn io ->
+      assert {:error, message} =
+               Updater.download_to(io, "https://foreman.example/release",
+                 plug: {Req.Test, Updater}
+               )
+
+      assert message =~ "download failed"
+      assert message =~ to_string(:file.format_error(:ebadf))
+    end)
+  end
+
   test "refuses a download that doesn't match the signed digest", %{
     config: config,
     private: private

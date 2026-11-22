@@ -47,7 +47,7 @@ defmodule ForemanAgent.Updater do
     else
       download = Path.join([root, "downloads", "#{payload.version}-#{target}.tar.gz"])
 
-      result =
+      try do
         with :ok <- verify_signature(payload, target, config.release_public_key),
              :ok <- clear_downloads(root),
              log.("info", "Downloading agent #{payload.version} for #{target}\n"),
@@ -60,9 +60,9 @@ defmodule ForemanAgent.Updater do
           log.("info", "Installed agent #{payload.version}; restarting\n")
           {:ok, %{"version" => payload.version, "restart" => true}}
         end
-
-      File.rm(download)
-      result
+      after
+        File.rm(download)
+      end
     end
   end
 
@@ -197,24 +197,52 @@ defmodule ForemanAgent.Updater do
     |> URI.to_string()
   end
 
-  defp fetch(url, path, req_options) do
-    File.rm(path)
-
-    result =
-      Req.get(
-        [url: url, into: File.stream!(path), retry: :transient, receive_timeout: 120_000] ++
-          req_options
-      )
-
-    case result do
-      {:ok, %Req.Response{status: 200}} -> :ok
-      {:ok, %Req.Response{status: status}} -> {:error, "download failed with HTTP #{status}"}
-      {:error, exception} -> {:error, "download failed: #{Exception.message(exception)}"}
+  defp fetch(url, path, opts) do
+    case File.open(path, [:write, :binary], &download_to(&1, url, opts)) do
+      {:ok, result} -> result
+      {:error, reason} -> write_failure(reason)
     end
-  rescue
-    # Writing the download can fail too (a full disk).
-    e in File.Error -> {:error, "download failed: #{Exception.message(e)}"}
   end
+
+  @doc false
+  def download_to(io, url, opts) do
+    # Each HTTP attempt starts at offset zero, even if a previous response
+    # wrote a prefix before disconnecting.
+    into = fn {:data, chunk}, {req, resp} ->
+      offset = Map.get(resp.private, :download_bytes, 0)
+
+      case :file.pwrite(io, offset, chunk) do
+        :ok ->
+          {:cont,
+           {req, Req.Response.put_private(resp, :download_bytes, offset + byte_size(chunk))}}
+
+        {:error, reason} ->
+          {:halt, {req, Req.Response.put_private(resp, :write_error, reason)}}
+      end
+    end
+
+    case Req.get([url: url, into: into, retry: :transient, receive_timeout: 120_000] ++ opts) do
+      {:ok, %{private: %{write_error: reason}}} ->
+        write_failure(reason)
+
+      {:ok, %{status: 200, private: info}} ->
+        with {:ok, _} <- :file.position(io, Map.get(info, :download_bytes, 0)),
+             :ok <- :file.truncate(io),
+             :ok <- :file.sync(io) do
+          :ok
+        else
+          {:error, reason} -> write_failure(reason)
+        end
+
+      {:ok, %{status: status}} ->
+        {:error, "download failed with HTTP #{status}"}
+
+      {:error, exception} ->
+        {:error, "download failed: #{Exception.message(exception)}"}
+    end
+  end
+
+  defp write_failure(reason), do: {:error, "download failed: #{:file.format_error(reason)}"}
 
   defp verify_digest(path, expected) do
     actual =
