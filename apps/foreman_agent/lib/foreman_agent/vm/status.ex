@@ -191,14 +191,17 @@ defmodule ForemanAgent.VM.Status do
         {:exit, reason} -> [{"a VM", inspect(reason)}]
       end)
 
-    in_flight = in_flight()
-
-    # Marked as a prebuild's, not merely missing from the list above: an
-    # environment made since that list was taken is no prebuild.
-    cleanup_failures =
+    # Admission registers an operation before it creates its VM. Read the
+    # candidate identities first so every one predates the ownership check.
+    candidates =
       for id <- VM.list(config, :all),
           {:ok, %{"kind" => "prebuild"} = meta} <- [VM.read_meta(config, id)],
-          meta["op_id"] not in in_flight do
+          do: {id, meta["op_id"]}
+
+    in_flight = in_flight()
+
+    cleanup_failures =
+      for {id, op_id} <- candidates, in_flight != :unknown, op_id not in in_flight do
         ctx.log.("info", "Removing the VM of a prebuild nothing is building (#{id})\n")
 
         case Prebuild.discard(config, id) do
@@ -250,7 +253,7 @@ defmodule ForemanAgent.VM.Status do
   defp in_flight do
     Ops.in_flight()
   catch
-    :exit, _ -> []
+    :exit, _ -> :unknown
   end
 
   # Work in progress is a dot-name (a download being unpacked, an agent
