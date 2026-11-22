@@ -19,7 +19,7 @@ defmodule ForemanProtocol.AuthTest do
     headers = Auth.connect_headers(@agent_id, private, now: 1_000)
     assert %{"x-foreman-agent-id" => @agent_id} = headers
 
-    assert {:ok, %{agent_id: @agent_id, nonce: nonce}} =
+    assert {:ok, %{agent_id: @agent_id, nonce: nonce, public_key: ^public}} =
              Auth.verify_connect_headers(headers, fn @agent_id -> {:ok, public} end, now: 1_030)
 
     assert byte_size(nonce) > 0

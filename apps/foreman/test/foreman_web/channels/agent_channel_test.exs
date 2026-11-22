@@ -14,6 +14,8 @@ defmodule ForemanWeb.AgentChannelTest do
   describe "connect" do
     test "accepts a correctly signed connect", %{box: box} do
       assert {:ok, socket} = connect(AgentSocket, %{}, connect_info: signed_connect_info(box))
+      assert socket.assigns[:authenticated_key] == box.public_key
+
       assert socket.assigns.box_id == box.id
       assert AgentSocket.id(socket) == "agent_socket:#{box.id}"
     end
