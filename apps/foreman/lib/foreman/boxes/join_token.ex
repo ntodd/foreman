@@ -4,6 +4,8 @@ defmodule Foreman.Boxes.JoinToken do
 
   schema "join_tokens" do
     field :token_hash, :binary, redact: true
+    field :enrollment_key_hash, :binary
+
     field :box_name, :string
     # For a Flatcar box's first-boot config (Foreman.Boxes.flatcar_ignition/2).
     field :tailscale_auth_key, Foreman.Encrypted.Binary, redact: true

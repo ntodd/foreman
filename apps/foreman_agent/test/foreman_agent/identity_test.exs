@@ -36,6 +36,22 @@ defmodule ForemanAgent.IdentityTest do
     assert Bitwise.band(mode, 0o777) == 0o600
   end
 
+  test "a lost enrollment response retries with the durable key", %{tmp_dir: tmp} do
+    config = %Config{url: "https://foreman.example", join_token: "jt_test", data_dir: tmp}
+    opts = [req_options: [plug: {Req.Test, Identity}]]
+
+    Req.Test.stub(Identity, fn conn ->
+      {:ok, body, conn} = Plug.Conn.read_body(conn)
+      send(self(), {:key, JSON.decode!(body)["public_key"]})
+      Plug.Conn.send_resp(conn, 503, "temporarily unavailable")
+    end)
+
+    assert {:error, _} = Identity.enroll(config, opts)
+    assert_received {:key, first}
+    assert {:error, _} = Identity.enroll(config, opts)
+    assert_received {:key, ^first}
+  end
+
   test "reports a refused join token", %{tmp_dir: tmp} do
     Req.Test.stub(Identity, fn conn ->
       conn

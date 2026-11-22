@@ -97,8 +97,8 @@ defmodule Foreman.Boxes do
   key. Re-enrolling an existing box name replaces its key.
   """
   def enroll(raw_token, attrs) when is_binary(raw_token) do
-    with {:ok, box} <- Repo.transact(fn -> enroll_box(raw_token, attrs) end) do
-      disconnect(box)
+    with {:ok, {box, changed?}} <- Repo.transact(fn -> enroll_box(raw_token, attrs) end) do
+      if changed?, do: disconnect(box)
       {:ok, box}
     end
   end
@@ -106,23 +106,40 @@ defmodule Foreman.Boxes do
   def enroll(_, _), do: {:error, :invalid_token}
 
   defp enroll_box(raw_token, attrs) do
-    now = DateTime.utc_now()
-
     with %JoinToken{} = token <- enrollment_token(raw_token),
-         true <- is_nil(token.used_at) and DateTime.compare(token.expires_at, now) == :gt,
-         {:ok, public_key} <- decode_key(attrs["public_key"]),
-         {:ok, box} <- upsert_enrolled_box(token, public_key, attrs) do
-      # The box's Tailscale key was for its first boot, which this is.
+         now = DateTime.utc_now(),
+         :gt <- DateTime.compare(token.expires_at, now),
+         {:ok, public_key} <- decode_key(attrs["public_key"]) do
+      spend_or_receipt(token, public_key, attrs, now)
+    else
+      {:error, :bad_key} -> {:error, :bad_key}
+      _ -> {:error, :invalid_token}
+    end
+  end
+
+  defp spend_or_receipt(%JoinToken{used_at: nil} = token, public_key, attrs, now) do
+    with {:ok, box} <- upsert_enrolled_box(token, public_key, attrs) do
       token
-      |> Ecto.Changeset.change(used_at: now, box_id: box.id, tailscale_auth_key: nil)
+      |> Ecto.Changeset.change(
+        used_at: now,
+        box_id: box.id,
+        enrollment_key_hash: hash(public_key),
+        tailscale_auth_key: nil
+      )
       |> Repo.update!()
 
       Audit.log(nil, "box.enroll", box, %{"hostname" => attrs["hostname"]})
-      {:ok, box}
+      {:ok, {box, true}}
+    end
+  end
+
+  # A lost reply can be recovered, but a receipt never changes the key, reactivates
+  # a revoked box, or disconnects an already running agent.
+  defp spend_or_receipt(token, public_key, _attrs, _now) do
+    with true <- token.enrollment_key_hash == hash(public_key),
+         %Box{revoked_at: nil, public_key: ^public_key} = box <- Repo.get(Box, token.box_id) do
+      {:ok, {box, false}}
     else
-      {:error, %Ecto.Changeset{} = changeset} -> {:error, changeset}
-      {:error, :revoked} -> {:error, :revoked}
-      {:error, :bad_key} -> {:error, :bad_key}
       _ -> {:error, :invalid_token}
     end
   end

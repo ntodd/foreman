@@ -42,7 +42,42 @@ defmodule ForemanAgent.Identity do
   """
   @spec enroll(ForemanAgent.Config.t(), keyword()) :: {:ok, t()} | {:error, String.t()}
   def enroll(config, opts \\ []) do
-    {public, private} = Auth.generate_keypair()
+    pending = Path.join(config.data_dir, "identity.pending")
+
+    with {:ok, private} <- pending_key(config, pending) do
+      remember(private)
+      post_enrollment(config, private, pending, opts)
+    end
+  end
+
+  defp pending_key(config, path) do
+    token_hash = :crypto.hash(:sha256, config.join_token)
+
+    case File.read(path) do
+      {:ok, <<^token_hash::binary-size(32), private::binary-size(32)>>} -> {:ok, private}
+      {:ok, _} -> create_pending(config.data_dir, path, token_hash)
+      {:error, :enoent} -> create_pending(config.data_dir, path, token_hash)
+      {:error, reason} -> storage_error(reason)
+    end
+  end
+
+  defp create_pending(dir, path, token_hash) do
+    {_, key} = Auth.generate_keypair()
+
+    with :ok <- File.mkdir_p(dir),
+         :ok <- File.chmod(dir, 0o700),
+         :ok <- ForemanAgent.SafeFS.write_atomic(path, token_hash <> key, 0o600) do
+      {:ok, key}
+    else
+      {:error, reason} -> storage_error(reason)
+    end
+  end
+
+  defp storage_error(reason),
+    do: {:error, "couldn't store agent identity: #{:file.format_error(reason)}"}
+
+  defp post_enrollment(config, private, pending, opts) do
+    public = Auth.public_key(private)
 
     body = %{
       "join_token" => config.join_token,
@@ -58,8 +93,15 @@ defmodule ForemanAgent.Identity do
     case Req.post([url: url, json: body, retry: false] ++ Keyword.get(opts, :req_options, [])) do
       {:ok, %Req.Response{status: 201, body: %{"agent_id" => agent_id}}} ->
         identity = %__MODULE__{agent_id: agent_id, private_key: private}
-        :ok = save(config.data_dir, identity)
-        {:ok, identity}
+
+        case save(config.data_dir, identity) do
+          :ok ->
+            File.rm(pending)
+            {:ok, identity}
+
+          {:error, reason} ->
+            storage_error(reason)
+        end
 
       {:ok, %Req.Response{status: status, body: body}} ->
         {:error, "enrollment refused (HTTP #{status}): #{error_message(body)}"}
@@ -84,8 +126,6 @@ defmodule ForemanAgent.Identity do
 
   def save(data_dir, %__MODULE__{} = identity) do
     remember(identity.private_key)
-    File.mkdir_p!(data_dir)
-    File.chmod!(data_dir, 0o700)
 
     json =
       JSON.encode!(%{
@@ -93,7 +133,9 @@ defmodule ForemanAgent.Identity do
         "private_key" => Base.encode64(identity.private_key)
       })
 
-    ForemanAgent.SafeFS.write_atomic(path(data_dir), json, 0o600)
+    with :ok <- File.mkdir_p(data_dir),
+         :ok <- File.chmod(data_dir, 0o700),
+         do: ForemanAgent.SafeFS.write_atomic(path(data_dir), json, 0o600)
   end
 
   defp path(data_dir), do: Path.join(data_dir, "identity.json")
