@@ -137,7 +137,7 @@ defmodule ForemanAgent.Devcontainer.Features.Control do
           Enum.filter(manifest.advisories, fn advisory ->
             from = version(advisory["introducedInVersion"])
             to = version(advisory["fixedInVersion"])
-            ((advisory["featureId"] == id and from) && to && parsed >= from) and parsed < to
+            advisory["featureId"] == id && from && to && parsed >= from && parsed < to
           end),
         found != [] do
       %{id: id, version: version, advisories: found}

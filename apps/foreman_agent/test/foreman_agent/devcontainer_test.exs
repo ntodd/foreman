@@ -492,6 +492,18 @@ defmodule ForemanAgent.DevcontainerTest do
       assert File.exists?(Path.join(params.workspace, ".devcontainer/devcontainer.json"))
     end
 
+    test "refuses malformed feature pins before building", %{params: params, ctx: ctx} do
+      path = Path.join(params.workspace, ".devcontainer/devcontainer-lock.json")
+
+      for features <- [[], %{"ghcr.io/o/f:1" => "bad"}] do
+        contents = JSON.encode!(%{"features" => features})
+        File.write!(path, contents)
+        assert {:error, reason} = Devcontainer.up(%{params | lockfile: true}, ctx)
+        assert reason =~ "fix or delete it"
+        assert File.read!(path) == contents
+      end
+    end
+
     test "starts a lock file that's there but empty", %{params: params, ctx: ctx} do
       path = Path.join(params.workspace, ".devcontainer/devcontainer-lock.json")
       File.write!(path, "\n")

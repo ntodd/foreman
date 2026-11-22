@@ -162,6 +162,15 @@ defmodule ForemanAgent.Devcontainer.Features.ControlTest do
              ]) == []
     end
 
+    test "ignores advisories with an unparseable range endpoint", %{manifest: manifest} do
+      advisory = hd(manifest.advisories)
+
+      for field <- ["introducedInVersion", "fixedInVersion"] do
+        broken = %{manifest | advisories: [Map.put(advisory, field, "next")]}
+        assert Control.advisories(broken, [set(advisory["featureId"], "1.1.9")]) == []
+      end
+    end
+
     test "as text for the log", %{manifest: manifest} do
       [found] = Control.advisories(manifest, [set("ghcr.io/o/features/hello", "1.1.0")])
 
