@@ -10,6 +10,8 @@ defmodule ForemanWeb.EnvironmentLive.Show do
   import ForemanWeb.ForemanComponents
 
   alias Foreman.{Boxes, Capacity, Environments, Operations, Ports}
+  alias ForemanWeb.EnvironmentConnection
+
   alias Foreman.Environments.Environment
 
   @impl true
@@ -471,11 +473,15 @@ defmodule ForemanWeb.EnvironmentLive.Show do
 
   # <.link> only takes http(s) and a few other schemes as strings.
   defp vscode_url(env) do
-    {:vscode, "//vscode-remote/ssh-remote+#{env.remote_user}@#{env.slug}#{env.workspace_folder}"}
+    {:vscode,
+     "//vscode-remote/ssh-remote+#{env.remote_user}@#{env.slug}#{EnvironmentConnection.editor_path(env.workspace_folder)}"}
   end
 
   # Zed's remote development, over the same Tailscale SSH.
-  defp zed_url(env), do: {:zed, "//ssh/#{env.remote_user}@#{env.slug}#{env.workspace_folder}"}
+  defp zed_url(env),
+    do:
+      {:zed,
+       "//ssh/#{env.remote_user}@#{env.slug}#{EnvironmentConnection.editor_path(env.workspace_folder)}"}
 
   # The box only reports a running environment's ports, but a box that
   # went offline can't say they stopped. nil: the box hasn't said (an
@@ -680,7 +686,7 @@ defmodule ForemanWeb.EnvironmentLive.Show do
       <div class="card-grid grid-cols-1 lg:grid-cols-[minmax(0,1fr)_20rem]">
         <div class="card-grid min-w-0 grid-cols-1 content-start">
           <.panel title="Connect" id="connect">
-            <div :if={@env.remote_user} class="space-y-4">
+            <div :if={EnvironmentConnection.account?(@env.remote_user)} class="space-y-4">
               <.command
                 :if={tailscale?()}
                 id="ssh-command"
@@ -688,13 +694,24 @@ defmodule ForemanWeb.EnvironmentLive.Show do
                 command={"ssh #{@env.remote_user}@#{@env.slug}"}
               />
               <.command
+                :if={command = EnvironmentConnection.exec_command(@env)}
                 id="exec-command"
                 label="On the box"
-                command={"docker exec -it -u #{@env.remote_user} -w #{@env.workspace_folder} #{@env.slug}-#{@env.devcontainer_service}-1 bash -l"}
+                command={command}
               />
               <div :if={tailscale?()} class="flex flex-wrap items-center gap-2">
-                <.button href={vscode_url(@env)} size="sm" icon="hero-code-bracket-square-mini">Open in VS Code</.button>
-                <.button href={zed_url(@env)} size="sm" icon="hero-code-bracket-square-mini">Open in Zed</.button>
+                <.button
+                  :if={EnvironmentConnection.workspace?(@env.workspace_folder)}
+                  href={vscode_url(@env)}
+                  size="sm"
+                  icon="hero-code-bracket-square-mini"
+                >Open in VS Code</.button>
+                <.button
+                  :if={EnvironmentConnection.workspace?(@env.workspace_folder)}
+                  href={zed_url(@env)}
+                  size="sm"
+                  icon="hero-code-bracket-square-mini"
+                >Open in Zed</.button>
                 <span
                   :if={not show_ports?(@env, @online, @ports)}
                   id={if(tailscale?(), do: "ports-hint")}

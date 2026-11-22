@@ -130,6 +130,31 @@ defmodule ForemanWeb.PagesTest do
            )
   end
 
+  test "connection commands quote workspace paths and skip invalid account names", %{
+    conn: conn,
+    user: user,
+    repo: repo,
+    box: box
+  } do
+    env = environment_fixture(user: user, repo: repo, box: box)
+
+    env =
+      env
+      |> Ecto.Changeset.change(
+        remote_user: "vscode",
+        workspace_folder: "/workspaces/My Project",
+        devcontainer_service: "app"
+      )
+      |> Repo.update!()
+
+    {:ok, view, _} = live(conn, ~p"/environments/#{env.id}")
+    assert has_element?(view, "#exec-command", "-w '/workspaces/My Project'")
+    env |> Ecto.Changeset.change(remote_user: "two words") |> Repo.update!()
+    {:ok, next, _} = live(conn, ~p"/environments/#{env.id}")
+    refute has_element?(next, "#exec-command")
+    refute has_element?(next, "#ssh-command")
+  end
+
   test "without Tailscale, a started environment says why SSH and VS Code are missing", %{
     conn: conn,
     user: user,
