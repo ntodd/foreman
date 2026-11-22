@@ -59,7 +59,7 @@ wait_for() {
 }
 
 registry=localhost:5000/foreman
-dc='docker compose -f /opt/foreman/compose.yml'
+dc='docker compose -f "/opt/foreman/compose stack.yml"'
 
 ctr() { host sh -c "$dc ps -q foreman"; }
 running_image() { host sh -c "docker inspect -f '{{.Config.Image}}' \$($dc ps -q foreman)"; }
@@ -125,7 +125,7 @@ host docker rmi "$registry:0.9.2" "$registry:0.9.3" > /dev/null
 
 say "run the control plane from docker/compose.yml"
 host mkdir -p /opt/foreman /etc/foreman
-$compose cp docker/compose.yml host:/opt/foreman/compose.yml
+$compose cp docker/compose.yml "host:/opt/foreman/compose stack.yml"
 host sh -c "printf 'FOREMAN_IMAGE=$registry:0.9.1\nOTHER_SETTING=kept\n' > /opt/foreman/.env"
 host sh -c 'umask 077 && printf "%s\n" \
   "SECRET_KEY_BASE=$(head -c 48 /dev/urandom | base64 | tr -d "\n")" \
@@ -139,8 +139,8 @@ cp_eval 'E2E.updater()' | grep -q 'installed=false' || fail "the updater shows a
 echo "ok: running 0.9.1, updater not installed"
 
 say "install the updater the way the docs say"
-host sh -c 'img=$(docker inspect -f "{{.Config.Image}}" $(docker compose -f /opt/foreman/compose.yml ps -q foreman)) &&
-  docker run --rm --entrypoint cat "$img" /app/updater/foreman-update | sh -s -- install /opt/foreman/compose.yml' |
+host sh -c 'img=$(docker inspect -f "{{.Config.Image}}" $(docker compose -f "/opt/foreman/compose stack.yml" ps -q foreman)) &&
+  docker run --rm --entrypoint cat "$img" /app/updater/foreman-update | sh -s -- install "/opt/foreman/compose stack.yml"' |
   tee "$work/install.log"
 grep -q "installed; update from the Deployment page" "$work/install.log" || fail "install didn't finish"
 [ "$(host systemctl is-active foreman-update.path)" = active ] || fail "the path unit isn't active"
