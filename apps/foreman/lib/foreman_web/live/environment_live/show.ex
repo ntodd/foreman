@@ -406,7 +406,7 @@ defmodule ForemanWeb.EnvironmentLive.Show do
   def handle_async(:branch_sync, _result, socket), do: {:noreply, assign(socket, :sync, nil)}
 
   defp trim_log(log) when byte_size(log) > 400_000,
-    do: binary_part(log, byte_size(log) - 300_000, 300_000)
+    do: String.byte_slice(log, -300_000, 300_000)
 
   defp trim_log(log), do: log
 
