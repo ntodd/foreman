@@ -1704,6 +1704,37 @@ defmodule ForemanAgent.EnvTest do
       assert {:ok, %{"changed_files" => 900, "clean" => false}} = status.()
     end
 
+    test "destroy checks include hidden untracked files, stashes, and detached commits", %{
+      ctx: ctx,
+      tmp_dir: tmp
+    } do
+      dir = Path.join(tmp, "repo")
+      {_, 0} = System.cmd("git", ["init", "-q", "-b", "main", dir])
+
+      git = fn args ->
+        {_, 0} =
+          System.cmd(
+            "git",
+            ["-c", "user.name=Tester", "-c", "user.email=test@example.org" | args], cd: dir)
+      end
+
+      git.(["commit", "-q", "--allow-empty", "-m", "base"])
+      git.(["update-ref", "refs/remotes/origin/main", "HEAD"])
+      status = status_for_repo(ctx, dir)
+      assert {:ok, %{"clean" => true}} = status.()
+
+      git.(["config", "status.showUntrackedFiles", "no"])
+      File.write!(Path.join(dir, "notes"), "draft")
+      assert {:ok, %{"changed_files" => 1, "clean" => false}} = status.()
+      git.(["stash", "push", "-q", "-u"])
+      assert {:ok, %{"changed_files" => 0, "has_stash" => true, "clean" => false}} = status.()
+
+      git.(["stash", "drop", "-q"])
+      git.(["checkout", "-q", "--detach"])
+      git.(["commit", "-q", "--allow-empty", "-m", "detached"])
+      assert {:ok, %{"has_stash" => false, "unpushed_commits" => 1, "clean" => false}} = status.()
+    end
+
     test "asks git inside the container, never on the box", %{ctx: ctx} do
       stub_tools()
       {:ok, _} = Env.run("env.create", payload(), ctx)
@@ -1736,6 +1767,7 @@ defmodule ForemanAgent.EnvTest do
         output =
           case rest do
             ["status" | _] -> "## main...origin/main [ahead 2]\n2\n"
+            ["stash" | _] -> ""
             ["rev-list" | _] -> "2\n"
             ["rev-parse", "HEAD"] -> @head <> "\n"
             ["merge-base", "HEAD", "@{upstream}"] -> @base <> "\n"
@@ -1750,6 +1782,7 @@ defmodule ForemanAgent.EnvTest do
       assert result == %{
                "branch" => "main",
                "changed_files" => 2,
+               "has_stash" => false,
                "unpushed_commits" => 2,
                "clean" => false,
                "head" => @head,
@@ -1767,6 +1800,7 @@ defmodule ForemanAgent.EnvTest do
       stub(RunnerMock, :run, fn "docker", args, _ ->
         case Enum.drop_while(args, &(&1 != "core.fsmonitor=false")) |> tl() do
           ["status" | _] -> {:ok, %{status: 0, output: "## topic\n0\n"}}
+          ["stash" | _] -> {:ok, %{status: 0, output: ""}}
           ["rev-list" | _] -> {:ok, %{status: 0, output: "0\n"}}
           # Whatever runs in the container answers for git there.
           ["rev-parse", "HEAD"] -> {:ok, %{status: 0, output: "../../etc\n"}}

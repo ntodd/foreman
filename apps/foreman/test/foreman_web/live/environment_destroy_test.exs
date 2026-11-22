@@ -64,6 +64,17 @@ defmodule ForemanWeb.EnvironmentDestroyTest do
     refute has_element?(view, "#destroy-modal", "every commit is pushed")
   end
 
+  test "an older agent's clean result still needs a slug", %{conn: conn, env: env} do
+    {:ok, view, _} = live(conn, ~p"/environments/#{env.id}")
+    view |> element("#env-actions [role=menuitem]", "Destroy") |> render_click()
+    assert_receive {:dispatch, %{type: "env.git_status", op_id: id}}
+    result = %{"branch" => "main", "clean" => true, "changed_files" => 0, "unpushed_commits" => 0}
+    {:ok, op} = Foreman.Operations.finish(id, "ok", result, nil)
+    send(view.pid, {:operation, op})
+    assert has_element?(view, "#confirm-destroy")
+    assert has_element?(view, "#destroy-modal", "did not check for stashed work")
+  end
+
   test "Enter in the confirmation destroys once the slug is typed", %{conn: conn, env: env} do
     view = open_destroy(conn, env)
 

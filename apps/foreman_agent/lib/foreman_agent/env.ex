@@ -1340,8 +1340,20 @@ defmodule ForemanAgent.Env do
 
       with {:ok, status} <- compact_status(ctx, spec, container),
            {:ok, unpushed} <-
-             git.(["rev-list", "--count", "--branches", "--not", "--remotes"], "git rev-list"),
-           {:ok, summary} <- git_summary(status, unpushed) do
+             git.(
+               [
+                 "rev-list",
+                 "--count",
+                 "--branches",
+                 "--ignore-missing",
+                 "HEAD",
+                 "--not",
+                 "--remotes"
+               ],
+               "git rev-list"
+             ),
+           {:ok, stash} <- git.(["stash", "list", "-1", "--format=%H"], "git stash list"),
+           {:ok, summary} <- git_summary(status, unpushed, stash) do
         {:ok,
          Map.merge(summary, %{
            "head" => git_object(git, ["rev-parse", "HEAD"], "git rev-parse"),
@@ -1383,7 +1395,7 @@ defmodule ForemanAgent.Env do
   defp compact_status(ctx, spec, container) do
     argv =
       ["sh", "-c", @count_status, "foreman-status"] ++
-        @git_command ++ ["status", "--porcelain=v1", "--branch"]
+        @git_command ++ ["status", "--porcelain=v1", "--branch", "--untracked-files=normal"]
 
     container_cmd(ctx, spec, container, argv, "git status", [])
   end
@@ -1403,7 +1415,9 @@ defmodule ForemanAgent.Env do
     if trimmed =~ ~r/\A[0-9a-f]{40}([0-9a-f]{24})?\z/, do: trimmed
   end
 
-  defp git_summary(status, unpushed) do
+  defp git_summary(status, unpushed, stash) do
+    has_stash = String.trim(stash) != ""
+
     with ["## " <> _ = branch_line, files] <-
            status |> String.split("\n", trim: true) |> Enum.take(-2),
          {files, ""} when files >= 0 <- Integer.parse(files),
@@ -1414,7 +1428,8 @@ defmodule ForemanAgent.Env do
          "changed_files" => files,
          "unpushed_commits" => commits,
          "ahead" => ahead(branch_line),
-         "clean" => files == 0 and commits == 0
+         "has_stash" => has_stash,
+         "clean" => files == 0 and commits == 0 and not has_stash
        }}
     else
       _ -> {:error, "incomplete git status from the container"}

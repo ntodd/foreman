@@ -379,6 +379,15 @@ defmodule ForemanWeb.EnvironmentLive.Show do
 
   defp destroy_check_done(socket, _op), do: socket
 
+  defp destroy_status(%{status: "succeeded", result: %{"clean" => true} = result})
+       when not is_map_key(result, "has_stash"),
+       do:
+         {:failed,
+          %{
+            "error" =>
+              "The box did not check for stashed work. Update its agent for a complete check."
+          }}
+
   defp destroy_status(%{
          status: "succeeded",
          result:
@@ -391,7 +400,8 @@ defmodule ForemanWeb.EnvironmentLive.Show do
        })
        when is_binary(branch) and branch != "" and is_integer(files) and files >= 0 and
               is_integer(commits) and commits >= 0 and is_boolean(clean) and
-              (not clean or (files == 0 and commits == 0)),
+              (not clean or
+                 (files == 0 and commits == 0 and :erlang.map_get("has_stash", result) == false)),
        do: {:done, result}
 
   defp destroy_status(%{status: "succeeded"}),
@@ -960,15 +970,22 @@ defmodule ForemanWeb.EnvironmentLive.Show do
             :if={@destroy_check.status == :done and not @destroy_check.result["clean"]}
             kind="danger"
           >
-            {@destroy_check.result["changed_files"]} uncommitted {if @destroy_check.result[
-                                                                       "changed_files"
-                                                                     ] == 1,
-                                                                     do: "change",
-                                                                     else: "changes"} and {@destroy_check.result[
-              "unpushed_commits"
-            ]} unpushed {if @destroy_check.result["unpushed_commits"] == 1,
-              do: "commit",
-              else: "commits"} on {@destroy_check.result["branch"]} will be lost.
+            <p :if={
+              @destroy_check.result["changed_files"] > 0 or
+                @destroy_check.result["unpushed_commits"] > 0 or
+                @destroy_check.result["has_stash"] != true
+            }>
+              {@destroy_check.result["changed_files"]} uncommitted {if @destroy_check.result[
+                                                                         "changed_files"
+                                                                       ] == 1,
+                                                                       do: "change",
+                                                                       else: "changes"} and {@destroy_check.result[
+                "unpushed_commits"
+              ]} unpushed {if @destroy_check.result["unpushed_commits"] == 1,
+                do: "commit",
+                else: "commits"} on {@destroy_check.result["branch"]} will be lost.
+            </p>
+            <p :if={@destroy_check.result["has_stash"] == true}>Stashed work will be lost.</p>
           </.callout>
           <.callout :if={@destroy_check.status == :failed} kind="warning">
             Couldn't check git status: {@destroy_check.result["error"]}
