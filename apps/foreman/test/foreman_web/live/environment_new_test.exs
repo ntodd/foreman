@@ -46,6 +46,13 @@ defmodule ForemanWeb.EnvironmentNewTest do
     refute has_element?(view, "#placement-refuse")
   end
 
+  test "a malformed hostRequirements doesn't take the page down", %{conn: conn, user: user} do
+    online(box_fixture(owner_user_id: user.id))
+    bad = repo_fixture(name: "aaa", host_requirements: %{"cpus" => %{"n" => 1}})
+    assert {:ok, _, _} = live(conn, ~p"/environments/new?repo_id=#{bad.id}")
+    assert {:ok, _, _} = live(conn, ~p"/repos/#{bad.id}")
+  end
+
   test "an admin starts on their own box, not whichever sorts first", %{conn: conn, user: user} do
     other = user_fixture()
     online(box_fixture(owner_user_id: other.id, name: "alpha"))
