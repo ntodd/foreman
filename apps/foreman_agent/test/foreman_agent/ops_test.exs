@@ -39,6 +39,23 @@ defmodule ForemanAgent.OpsTest do
 
   defp finish(pid, result \\ {:ok, %{}}), do: send(pid, {:finish, result})
 
+  test "a NUL in a log chunk or an error doesn't lose the rest" do
+    test_pid = self()
+
+    handler = fn _cmd, log ->
+      log.("stdout", "line one\nbinary junk \0 here\nline three\n")
+      log.("info", "after\n")
+      {:error, "git clone failed: fatal: bad object \0"}
+    end
+
+    sink = fn event -> send(test_pid, {:event, event.type, event.payload}) end
+    ops = start_supervised!({Ops, name: nil, handler: handler, sink: sink}, id: :nul_ops)
+    :accepted = Ops.submit(ops, stop_cmd(@env1))
+
+    assert_receive {:event, "op.log", %{data: "line one" <> _}}, @timeout
+    assert_receive {:event, "op.result", %{error: "git clone failed" <> _}}, @timeout
+  end
+
   test "runs a command and reports accepted, logs and result", %{ops: ops} do
     cmd = stop_cmd(@env1)
     assert :accepted = Ops.submit(ops, cmd)
