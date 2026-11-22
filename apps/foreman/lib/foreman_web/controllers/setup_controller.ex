@@ -85,7 +85,11 @@ defmodule ForemanWeb.SetupController do
 
   # GitHub sends people here after installing the app.
   def installed(conn, _params) do
-    Oban.insert(Foreman.Jobs.SyncRepos.new(%{}))
+    Oban.insert(
+      Foreman.Jobs.SyncRepos.new(%{},
+        unique: [period: 300, states: [:available, :scheduled, :retryable]]
+      )
+    )
 
     conn
     |> put_flash(:info, "Installed. Foreman is syncing your repos; sign in to continue.")
