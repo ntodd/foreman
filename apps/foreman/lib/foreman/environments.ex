@@ -1071,7 +1071,19 @@ defmodule Foreman.Environments do
   def push_secrets(opts \\ []) do
     query =
       from e in Environment,
-        where: is_nil(e.destroyed_at) and e.desired_state == "running" and e.created_once
+        where: is_nil(e.destroyed_at) and e.desired_state == "running"
+
+    query =
+      if opts[:include_building] do
+        builds =
+          from o in Foreman.Operations.Operation,
+            where: o.action == "create" and o.status in ["queued", "dispatched", "running"],
+            select: o.environment_id
+
+        where(query, [e], e.created_once or e.id in subquery(builds))
+      else
+        where(query, [e], e.created_once)
+      end
 
     query =
       case opts[:user_id] do
@@ -1085,7 +1097,11 @@ defmodule Foreman.Environments do
         cutoff -> where(query, [e], is_nil(e.token_pushed_at) or e.token_pushed_at < ^cutoff)
       end
 
-    for env <- Repo.all(query), do: enqueue(env, "secrets_write", %{}, nil)
+    for env <- Repo.all(query) do
+      args = if env.created_once, do: %{}, else: %{"after_first_create" => true}
+      enqueue(env, "secrets_write", args, nil)
+    end
+
     :ok
   end
 

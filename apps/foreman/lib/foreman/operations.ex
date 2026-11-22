@@ -55,9 +55,10 @@ defmodule Foreman.Operations do
   (a secret changed after a restart was queued, say, and the restart
   should see it), then the oldest.
   """
-  def next_queued(env_id) do
+  def next_queued(env_id, created_once) do
     from(o in Operation,
       where: o.environment_id == ^env_id and o.status == "queued",
+      where: ^created_once or is_nil(o.args["after_first_create"]),
       order_by: [
         asc: fragment("CASE WHEN ? = 'secrets_write' THEN 0 ELSE 1 END", o.action),
         asc: o.inserted_at
