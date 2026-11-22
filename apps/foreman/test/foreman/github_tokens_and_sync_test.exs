@@ -170,6 +170,27 @@ defmodule Foreman.GitHubTokensAndSyncTest do
       Repo.update!(Ecto.Changeset.change(repo, github_id: id))
     end
 
+    test "reports a config containing a NUL and continues with the next repo" do
+      installation([gh_repo(1, "bad"), gh_repo(2, "good")],
+        get_file: fn _, name, _, _ ->
+          memory = if name == "acme/bad", do: "8gb" <> <<0>>, else: "8gb"
+
+          {:ok,
+           JSON.encode!(%{
+             "dockerComposeFile" => "c.yml",
+             "hostRequirements" => %{"memory" => memory}
+           })}
+        end
+      )
+
+      assert {:ok, 2} = GitHub.sync_repos()
+      assert Foreman.Repos.get_repo_by_full_name("acme/bad").devcontainer_error =~ "NUL"
+
+      assert Foreman.Repos.get_repo_by_full_name("acme/good").host_requirements == %{
+               "memory" => "8gb"
+             }
+    end
+
     test "a GitHub error while reading the devcontainer keeps what was known" do
       repo = synced_repo(1, "storefront")
 

@@ -460,7 +460,7 @@ defmodule Foreman.GitHub do
         }
 
       {path, content} ->
-        case ForemanProtocol.Jsonc.decode(content) do
+        case decode_config(content) do
           {:ok, config} ->
             %{
               devcontainer_path: path,
@@ -478,6 +478,14 @@ defmodule Foreman.GitHub do
               private_registry_refs: []
             }
         end
+    end
+  end
+
+  defp decode_config(content) do
+    with {:ok, config} <- ForemanProtocol.Jsonc.decode(content) do
+      if Foreman.DatabaseText.contains_nul?(config),
+        do: {:error, "devcontainer.json contains a NUL character"},
+        else: {:ok, config}
     end
   end
 
