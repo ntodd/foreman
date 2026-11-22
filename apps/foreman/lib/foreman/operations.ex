@@ -173,6 +173,12 @@ defmodule Foreman.Operations do
     # Before the transaction: the buffer writes from its own process, which
     # on SQLite would wait on this transaction's write lock.
     LogBuffer.flush(op_id)
+
+    {status, result, error} =
+      if Foreman.DatabaseText.contains_nul?(result),
+        do: {"error", %{}, error || "Operation result contains a NUL character"},
+        else: {status, result, error}
+
     error = error && Redactions.redact(op_id, error)
 
     {:ok, {op, applied}} =
