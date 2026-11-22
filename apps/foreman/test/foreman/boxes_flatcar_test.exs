@@ -137,6 +137,22 @@ defmodule Foreman.BoxesFlatcarTest do
       assert [%{tailscale_auth_key: nil}] = Repo.all(Foreman.Boxes.JoinToken)
     end
 
+    test "an expired first-boot request does not retain a newly minted key", %{admin: admin} do
+      tailscale(%{})
+      raw = token(admin)
+
+      expect(ClientMock, :create_auth_key, fn _, _ ->
+        Repo.update_all(Foreman.Boxes.JoinToken,
+          set: [expires_at: DateTime.add(DateTime.utc_now(), -1)]
+        )
+
+        {:ok, %{key: "tskey-test", id: "k1"}}
+      end)
+
+      assert {:error, :invalid_token} = Boxes.flatcar_ignition(raw, %{"arch" => "amd64"})
+      assert [%{tailscale_auth_key: nil}] = Repo.all(Foreman.Boxes.JoinToken)
+    end
+
     test "tags boxes tag:foreman-box unless told otherwise", %{admin: admin} do
       tailscale(%{})
 
