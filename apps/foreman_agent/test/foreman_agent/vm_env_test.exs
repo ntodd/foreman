@@ -1220,6 +1220,58 @@ defmodule ForemanAgent.VMEnvTest do
       assert File.exists?(VM.paths(ctx.config, @env).dir)
     end
 
+    test "a prebuild admitted while GC reads the active operations keeps its VM", ctx do
+      ops = Process.whereis(ForemanAgent.Ops)
+      :ok = :sys.suspend(ops)
+
+      try do
+        gc =
+          Task.async(fn ->
+            receive do
+              :start -> Status.gc(ctx.ctx)
+            end
+          end)
+
+        :erlang.trace(gc.pid, true, [:send])
+        send(gc.pid, :start)
+        assert_receive {:trace, _, :send, {:"$gen_call", _, :in_flight}, ^ops}, 2_000
+        paths = VM.paths(ctx.config, @prebuild)
+        File.mkdir_p!(paths.dir)
+
+        VM.write_meta(ctx.config, @prebuild, %{
+          "slug" => "prebuild-3c2b1a09",
+          "kind" => "prebuild",
+          "op_id" => ForemanProtocol.uuid()
+        })
+
+        :ok = :sys.resume(ops)
+        assert {:ok, _} = Task.await(gc)
+        assert File.dir?(paths.dir)
+      after
+        :sys.resume(ops)
+      end
+    end
+
+    test "prebuild VMs survive GC while operations are unavailable", ctx do
+      paths = VM.paths(ctx.config, @prebuild)
+      File.mkdir_p!(paths.dir)
+
+      VM.write_meta(ctx.config, @prebuild, %{
+        "slug" => "prebuild-3c2b1a09",
+        "kind" => "prebuild",
+        "op_id" => ForemanProtocol.uuid()
+      })
+
+      :ok = Supervisor.terminate_child(ForemanAgent.Supervisor, ForemanAgent.Ops)
+
+      try do
+        assert {:ok, _} = Status.gc(ctx.ctx)
+        assert File.dir?(paths.dir)
+      after
+        {:ok, _} = Supervisor.restart_child(ForemanAgent.Supervisor, ForemanAgent.Ops)
+      end
+    end
+
     test "a build whose VM had to be forced off isn't kept", ctx do
       FakeMachine.configure(
         test: self(),
