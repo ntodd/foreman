@@ -209,8 +209,8 @@ first-boot config the control plane makes for a join token:
   bakery over HTTPS, checked only against the bakery's own SHA256SUMS:
   trusting the bakery is trusting Flatcar's builds, as the OS itself
   does.
-- The launcher, `vm.sh`, pins what it downloads: Flatcar's image and
-  kernel against the digests in its signed release files.
+- The launcher, `vm.sh`, checks the downloaded Flatcar disk image
+  against the digest in Flatcar's signed release files.
 - As a VM, a box is a second boundary: code that escapes an
   environment's VM lands in the box's VM, not on the machine running it.
   QEMU runs as the `foreman-box` user under systemd's sandboxing (no

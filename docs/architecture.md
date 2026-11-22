@@ -56,7 +56,7 @@ Browser ──LiveView──► Control plane (Phoenix, SQLite or Postgres, tail
 A Phoenix app that owns all durable state: users, repos, secrets, boxes, environments, desired state and the audit log.
 
 - **UI:** LiveView. Environment status, build logs and box usage stream live.
-- **Agent link:** Phoenix Channels, with Presence tracking which agents are online.
+- **Agent link:** Phoenix Channels. Connected agents register their box IDs in `Foreman.Registry`.
 - **One GenServer per environment:** a state machine that sends commands to the agent and records the results.
 - **Oban:** durable jobs such as GitHub token refresh, Tailscale device cleanup, idle auto-stop and agent update rollouts.
 - **Encryption:** Cloak.Ecto for secrets and stored GitHub tokens.

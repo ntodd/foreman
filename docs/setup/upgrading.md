@@ -149,8 +149,8 @@ delete `/usr/local/sbin/foreman-update`, the two
    is up. Upgrading to 0.3.0 from an older release clears every pin, so
    for that one, stop the agent on the box first (`sudo systemctl stop
    foreman-agent`), pin it once the new control plane is up, then start
-   the agent again. Running the install command on a pinned box installs
-   the newest agent first, and the box then moves back to its pin.
+   the agent again. On a VM-enabled box, rerunning the installer keeps
+   the installed agent release and refreshes the root helpers.
 4. Point `FOREMAN_IMAGE` at the new version (in the `.env` beside
    `compose.yml`), then pull and recreate:
 
@@ -181,8 +181,9 @@ its reboot alert, and offers no Reboot). A box whose agent reports no
 firewall, or older rules than the agent ships with, gets an alert on
 its page and its cards, and one whose VM helper is missing or too old
 says it can't run environments. Run the install command on it again;
-an enrolled box needs no token, but pass any `--block-lan`,
-`--vm-subnet` or `--default-bridge-reaches-tailnet` it had:
+an enrolled box keeps its identity, LAN policy and VM subnet. Repeat
+`--default-bridge-reaches-tailnet` if you enabled it, and `--url`
+if the box uses a different control plane address.
 
 ```sh
 curl -fsSL https://desktop.tail1234.ts.net/agent/install.sh | sudo sh
@@ -435,9 +436,9 @@ there.
 Agents before 0.4.9 downloaded from the public URL, so on such a box
 the update fails (often with `TLS client alert: Bad Certificate`) and
 rolls back. Reinstall it once by hand with the same `--url` it was
-installed with (and any `--block-lan`, `--vm-subnet` or
-`--default-bridge-reaches-tailnet` it had); an enrolled box needs no
-token:
+installed with. Repeat `--default-bridge-reaches-tailnet` if enabled.
+For boxes installed before preferences were saved in `install.conf`,
+pass any custom LAN policy and VM subnet on this first rerun.
 
 ```sh
 curl -fsSL http://127.0.0.1:4000/agent/install.sh | sudo sh -s -- --url http://127.0.0.1:4000
