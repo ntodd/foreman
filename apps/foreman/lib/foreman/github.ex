@@ -443,6 +443,7 @@ defmodule Foreman.GitHub do
     Enum.reduce_while(candidates, {:ok, nil}, fn path, acc ->
       case client().get_file(token, full_name, path, nil) do
         {:ok, content} -> {:halt, {:ok, {path, content}}}
+        {:error, :too_large} -> {:halt, {:ok, {path, :too_large}}}
         {:error, :not_found} -> {:cont, acc}
         {:error, reason} -> {:halt, {:error, reason}}
       end
@@ -480,6 +481,11 @@ defmodule Foreman.GitHub do
         end
     end
   end
+
+  @max_config_bytes Client.max_file_bytes()
+  defp decode_config(content)
+       when content == :too_large or byte_size(content) > @max_config_bytes,
+       do: {:error, "devcontainer.json exceeds the #{div(@max_config_bytes, 1024)} KiB limit"}
 
   defp decode_config(content) do
     with {:ok, config} <- ForemanProtocol.Jsonc.decode(content) do

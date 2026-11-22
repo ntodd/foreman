@@ -170,6 +170,13 @@ defmodule Foreman.GitHubTokensAndSyncTest do
       Repo.update!(Ecto.Changeset.change(repo, github_id: id))
     end
 
+    test "oversized config files are recorded as repo errors" do
+      contents = ~s({"dockerComposeFile":"c.yml"}) <> String.duplicate(" ", 256 * 1024)
+      installation([gh_repo(1, "big")], get_file: fn _, _, _, _ -> {:ok, contents} end)
+      assert {:ok, 1} = GitHub.sync_repos()
+      assert Foreman.Repos.get_repo_by_full_name("acme/big").devcontainer_error =~ "256 KiB"
+    end
+
     test "reports a config containing a NUL and continues with the next repo" do
       installation([gh_repo(1, "bad"), gh_repo(2, "good")],
         get_file: fn _, name, _, _ ->
