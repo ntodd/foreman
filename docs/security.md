@@ -351,7 +351,8 @@ table for guests, `inet foreman_guests`, that works on each VM's tap
   routed back through its tap is dropped, and IPv6 is dropped
 - nothing outside the box starts a connection into a guest
 - the firewall blocks IPv4 link-local destinations, including HTTP to cloud
-  instance metadata. It permits TCP and UDP port 53 to configured resolvers
+  instance metadata. It also blocks Azure's platform address (168.63.129.16).
+  Configured resolvers can receive DNS on TCP and UDP port 53.
 - `install.sh --block-lan` extends that policy to RFC 1918 addresses
 
 What's left goes out through the box's NAT. The box's other table,
