@@ -17,6 +17,11 @@ defmodule ForemanWeb.ClientIPTest do
              "fd7a::5"
   end
 
+  test "separate forwarded field lines use the same order as a combined field" do
+    headers = [{"X-Forwarded-For", "192.0.2.1"}, {"x-forwarded-for", "192.0.2.2, 192.0.2.3"}]
+    assert ClientIP.resolve({127, 0, 0, 1}, headers) == "192.0.2.3"
+  end
+
   test "forwarded headers from anyone but a local proxy are ignored" do
     assert ClientIP.resolve({100, 64, 0, 7}, [{"x-forwarded-for", "1.2.3.4"}]) == "100.64.0.7"
   end

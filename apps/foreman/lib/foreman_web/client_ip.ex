@@ -142,7 +142,9 @@ defmodule ForemanWeb.ClientIP do
 
   defp last_forwarded(headers) do
     value =
-      Enum.find_value(headers, fn {k, v} -> String.downcase(k) == "x-forwarded-for" && v end)
+      headers
+      |> Enum.reverse()
+      |> Enum.find_value(fn {k, v} -> String.downcase(k) == "x-forwarded-for" && v end)
 
     with value when is_binary(value) <- value,
          true <- String.valid?(value),
