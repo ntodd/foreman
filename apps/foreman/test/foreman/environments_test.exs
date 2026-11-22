@@ -453,6 +453,32 @@ defmodule Foreman.EnvironmentsTest do
     end
   end
 
+  test "large operation results retain useful fields and expire with the logs", %{box: box} do
+    op =
+      Operations.create!(%{
+        id: Ecto.UUID.generate(),
+        box_id: box.id,
+        action: "git_status",
+        command: "env.git_status",
+        status: "running",
+        args: %{}
+      })
+
+    result = %{
+      "branch" => "main",
+      "changed_files" => 0,
+      "diagnostics" => String.duplicate("sample ", 12_000)
+    }
+
+    assert {:ok, stored} = Operations.finish(op.id, "ok", result, nil)
+    assert stored.status == "succeeded"
+    assert stored.result == %{"branch" => "main", "changed_files" => 0}
+    old = DateTime.add(DateTime.utc_now(), -31, :day)
+    stored |> Ecto.Changeset.change(finished_at: old) |> Repo.update!()
+    assert :ok = Foreman.Jobs.Housekeeping.perform(%Oban.Job{})
+    assert is_nil(Operations.get!(op.id).result)
+  end
+
   describe "a long up result" do
     test "is recorded", %{scope: scope, repo: repo, box: box} do
       connect_agent(box)
