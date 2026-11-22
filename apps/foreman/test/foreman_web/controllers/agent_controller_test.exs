@@ -24,7 +24,10 @@ defmodule ForemanWeb.AgentControllerTest do
     again =
       post(again(conn), ~p"/api/agents/enroll", %{"join_token" => token, "public_key" => public})
 
-    assert json_response(again, 401)["error"] =~ "used"
+    assert json_response(again, 201)["agent_id"] == id
+
+    different = Base.encode64(:crypto.strong_rand_bytes(32))
+    assert {:error, :invalid_token} = Boxes.enroll(token, %{"public_key" => different})
   end
 
   if Foreman.Repo.database() == "postgres" do
