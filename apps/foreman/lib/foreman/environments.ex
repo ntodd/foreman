@@ -414,6 +414,9 @@ defmodule Foreman.Environments do
     local = if is_integer(status["ahead"]) and status["ahead"] >= 0, do: status["ahead"], else: 0
 
     cond do
+      not is_binary(status["branch"]) or status["branch"] == "" ->
+        {:error, :invalid_git_status}
+
       status["branch"] != env.branch ->
         {:ok, %{other_branch: status["branch"]}}
 

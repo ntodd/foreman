@@ -51,6 +51,19 @@ defmodule ForemanWeb.EnvironmentDestroyTest do
     assert has_element?(view, "#confirm-destroy")
   end
 
+  test "an incomplete clean result requires confirmation", %{conn: conn, env: env} do
+    {:ok, view, _} = live(conn, ~p"/environments/#{env.id}")
+    view |> element("#env-actions [role=menuitem]", "Destroy") |> render_click()
+    assert_receive {:dispatch, %{type: "env.git_status", op_id: op_id}}
+
+    {:ok, op} =
+      Foreman.Operations.finish(op_id, "ok", %{"clean" => true, "branch" => "main"}, nil)
+
+    send(view.pid, {:operation, op})
+    assert has_element?(view, "#confirm-destroy")
+    refute has_element?(view, "#destroy-modal", "every commit is pushed")
+  end
+
   test "Enter in the confirmation destroys once the slug is typed", %{conn: conn, env: env} do
     view = open_destroy(conn, env)
 

@@ -364,18 +364,35 @@ defmodule ForemanWeb.EnvironmentLive.Show do
   # The destroy check and the page's own check can be the same operation:
   # a queued git status is shared.
   defp destroy_check_done(%{assigns: %{destroy_check: %{op_id: id}}} = socket, %{id: id} = op) do
-    {status, result} =
-      if op.status == "succeeded" do
-        {:done, op.result}
-      else
-        reason = if op.error in [nil, ""], do: op.status, else: op.error
-        {:failed, %{"error" => reason}}
-      end
+    {status, result} = destroy_status(op)
 
     update(socket, :destroy_check, &%{&1 | status: status, result: result})
   end
 
   defp destroy_check_done(socket, _op), do: socket
+
+  defp destroy_status(%{
+         status: "succeeded",
+         result:
+           %{
+             "branch" => branch,
+             "changed_files" => files,
+             "unpushed_commits" => commits,
+             "clean" => clean
+           } = result
+       })
+       when is_binary(branch) and branch != "" and is_integer(files) and files >= 0 and
+              is_integer(commits) and commits >= 0 and is_boolean(clean) and
+              (not clean or (files == 0 and commits == 0)),
+       do: {:done, result}
+
+  defp destroy_status(%{status: "succeeded"}),
+    do: {:failed, %{"error" => "Invalid git status from the box"}}
+
+  defp destroy_status(op) do
+    reason = if op.error in [nil, ""], do: op.status, else: op.error
+    {:failed, %{"error" => reason}}
+  end
 
   # A success is followed by the offer itself.
   defp connect_done(
