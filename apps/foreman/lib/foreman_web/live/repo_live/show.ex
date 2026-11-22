@@ -104,7 +104,7 @@ defmodule ForemanWeb.RepoLive.Show do
       {:error, %Ecto.Changeset{} = changeset} ->
         {:noreply,
          socket
-         |> assign(:settings_form, to_form(%{changeset | action: :update}, as: :settings))
+         |> assign(:settings_form, to_form(params, as: :settings, errors: changeset.errors))
          |> assign(
            :token_choices,
            TokenPermissions.choices(params["token_permissions"] || socket.assigns.token_choices)

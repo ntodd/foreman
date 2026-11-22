@@ -6,6 +6,36 @@ defmodule ForemanWeb.RepoTokenPermissionsTest do
 
   setup :register_and_log_in_admin
 
+  test "correcting a rejected save preserves comma-separated repos and tags", %{conn: conn} do
+    repo = repo_fixture()
+    {:ok, view, _html} = live(conn, ~p"/repos/#{repo.id}")
+    repos = "shared-config, design-system"
+    tags = "tag:staging, tag:build"
+
+    view
+    |> form("#repo-settings",
+      settings: %{extra_repos: repos, tailscale_tags: tags, cpu_limit: "0"}
+    )
+    |> render_submit()
+
+    assert has_element?(view, "#repo-settings", "must be greater than 0")
+
+    assert has_element?(
+             view,
+             "#repo-settings input[name='settings[extra_repos]'][value='#{repos}']"
+           )
+
+    assert has_element?(
+             view,
+             "#repo-settings input[name='settings[tailscale_tags]'][value='#{tags}']"
+           )
+
+    view |> form("#repo-settings", settings: %{cpu_limit: "1"}) |> render_submit()
+    saved = Repo.reload!(repo)
+    assert saved.extra_repos == ["shared-config", "design-system"]
+    assert saved.tailscale_tags == ["tag:staging", "tag:build"]
+  end
+
   test "saves a permission change", %{conn: conn} do
     repo = repo_fixture()
     {:ok, view, html} = live(conn, ~p"/repos/#{repo.id}")
