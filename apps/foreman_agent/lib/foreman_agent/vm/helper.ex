@@ -19,7 +19,8 @@ defmodule ForemanAgent.VM.Helper do
   # them unconfined, keeps VMs from its socket, and says which tap a VM
   # has, which a resume checks its snapshot against.
   # Version 3 assigns each VM its own tap group.
-  @version 3
+  # Version 4 clears or quarantines addresses before assigning them again.
+  @version 4
   @timeout 60_000
 
   def version, do: @version
@@ -30,8 +31,12 @@ defmodule ForemanAgent.VM.Helper do
   """
   @spec ready(Config.t()) :: :ok | {:error, String.t()}
   def ready(config) do
+    with :ok <- current_helper(config), do: landlock(config)
+  end
+
+  defp current_helper(config) do
     case installed_version(config) do
-      {:ok, version} when version >= @version -> landlock(config)
+      {:ok, version} when version >= @version -> :ok
       _ -> {:error, "the VM helper is missing or too old; re-run the install script"}
     end
   end
@@ -96,7 +101,9 @@ defmodule ForemanAgent.VM.Helper do
   def stop(config, env_id), do: request(config, ["stop", env_id])
 
   @doc "Stops an environment's VM and gives back its tap and address."
-  def release(config, env_id), do: request(config, ["release", env_id])
+  def release(config, env_id) do
+    with :ok <- current_helper(config), do: request(config, ["release", env_id])
+  end
 
   @doc false
   @spec request(Config.t(), [String.t()], timeout()) :: {:ok, [String.t()]} | {:error, String.t()}

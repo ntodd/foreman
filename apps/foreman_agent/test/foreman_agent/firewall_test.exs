@@ -97,6 +97,17 @@ defmodule ForemanAgent.FirewallTest do
     end
   end
 
+  test "Azure platform traffic is restricted in both LAN modes, after configured DNS" do
+    rules = File.read!(Config.load().firewall_rules)
+
+    for lan <- [rules, Regex.replace(~r/^.*# block-lan.*$/m, rules, "")] do
+      [_, chain] = String.split(lan, "chain lan {", parts: 2)
+      [exceptions, _] = String.split(chain, "ip daddr 168.63.129.16 counter reject", parts: 2)
+      assert exceptions =~ "ip daddr @guest_dns udp dport 53 accept"
+      assert exceptions =~ "ip daddr @guest_dns tcp dport 53 accept"
+    end
+  end
+
   test "the rules it ships with are the ones in priv" do
     assert File.read!(Config.load().firewall_rules) =~ "table inet foreman"
   end

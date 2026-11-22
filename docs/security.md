@@ -351,8 +351,16 @@ table for guests, `inet foreman_guests`, that works on each VM's tap
   routed back through its tap is dropped, and IPv6 is dropped
 - nothing outside the box starts a connection into a guest
 - the firewall blocks IPv4 link-local destinations, including HTTP to cloud
-  instance metadata. It permits TCP and UDP port 53 to configured resolvers
+  instance metadata. It also blocks Azure's platform address (168.63.129.16).
+  Configured resolvers can receive DNS on TCP and UDP port 53.
 - `install.sh --block-lan` extends that policy to RFC 1918 addresses
+
+Destroying a VM removes its tap before clearing connection tracking for its guest
+address. If the box lacks `conntrack` or cannot confirm the cleanup, it reserves
+that address until the host reboots. Installing `conntrack` allows flushed
+addresses to return to the pool immediately. On existing boxes, re-run the box
+installer to get the updated helper. For a pool used by an older helper,
+new leases on the upgrade boot require a working `conntrack` or a host reboot.
 
 What's left goes out through the box's NAT. The box's other table,
 `inet foreman`, also rejects anything arriving on an `fm-` interface,

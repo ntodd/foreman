@@ -51,6 +51,13 @@ esac
 STUB
   chmod +x "$work/bin/$tool"
 done
+cat > "$work/bin/conntrack" <<STUB
+#!/bin/sh
+echo "conntrack \$*" >> "$work/calls"
+[ ! -e "$work/fail-conntrack" ]
+STUB
+chmod +x "$work/bin/conntrack"
+
 cat > "$work/bin/systemd-run" <<STUB
 #!/bin/sh
 printf '%s\n' "\$@" > "$work/last-run"
@@ -68,6 +75,7 @@ AGENT_ROOT=$work/agent
 AGENT_USER=foreman
 POOL=10.250
 STATE=$work/state
+RETIRED=$work/retired
 RESOLV=$work/resolv.conf
 LSM=$work/lsm
 MEMINFO=$work/meminfo
@@ -109,7 +117,7 @@ check "failed locks never touch networking or units" test ! -e "$work/calls"
 check "failed locks never launch a unit" test ! -e "$work/last-run"
 
 # -- refusals --------------------------------------------------------------
-expect "says its version" "version" "ok 3"
+expect "says its version" "version" "ok 4"
 nonce=0123456789abcdef0123456789abcdef
 stage=$work/srv/vms/.adopt-$nonce
 expect "refuses a published VM id as an adoption stage" "adopt $env1 $env1 $guest" "error invalid adoption stage"
@@ -244,6 +252,15 @@ rm "$work/fail-del"
 expect "releases a VM" "release $env1" "ok"
 check "removes its tap" grep -q "ip link del fm-vm0" "$work/calls"
 check "frees its address" test ! -e "$work/state/nets/0"
+for field in orig-src orig-dst reply-src reply-dst; do
+  check "clears $field for the released guest" grep -Fxq "conntrack -D -f ipv4 --$field 10.250.0.2" "$work/calls"
+done
+expect "reuses a flushed address" "start $env1 1 1024 $guest 1.2.3" "ok started fm-vm0 10.250.0.2"
+touch "$work/fail-conntrack"
+expect "can destroy a VM when conntrack is unavailable" "release $env1" "ok"
+expect "skips the unflushed address" "start $env1 1 1024 $guest 1.2.3" "ok started fm-vm2 10.250.0.10"
+rm "$work/fail-conntrack"
+
 mkdir -p "$work/srv/vms/$env2/snapshot"
 : > "$work/srv/vms/$env2/snapshot/config.json"
 sed -i.bak "/foreman-vm-$env2/d" "$work/units"
@@ -277,6 +294,14 @@ expect "restores a VM on the address it had" "restore $env2 1 1024" "ok restored
 check "from its own snapshot" grep -qxF -- \
   "source_url=file://$work/srv/vms/$env2/snapshot,memory_restore_mode=copyonwrite,resume=true" "$work/last-run"
 expect "stops a VM" "stop $env2" "ok"
+
+# An older helper may have already freed slots on this boot.
+rm -f "$work/state/pool-generation"
+touch "$work/fail-conntrack"
+expect "releases another slot during an upgrade" "release $env1" "ok"
+expect "requires verification for a previously used pool" "start $env1 1 1024 $guest 1.2.3" "error .*conntrack.*reboot.*"
+rm "$work/fail-conntrack"
+expect "clears a legacy slot before allocating it" "start $env1 1 1024 $guest 1.2.3" "ok started fm-vm3 10.250.0.14"
 
 [ "$failures" -eq 0 ] || { echo "$failures check(s) failed" >&2; exit 1; }
 echo "all checks passed"

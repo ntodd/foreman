@@ -51,6 +51,49 @@ defmodule Foreman.EnvironmentsCommandsTest do
     end
   end
 
+  test "shared credentials follow repository access at each dispatch", ctx do
+    stub(ClientMock, :scope_user_token, fn _, _, _, _, _ -> {:ok, %{token: "member-token"}} end)
+    stub(ClientMock, :get_repo, fn _, _ -> {:ok, %{}} end)
+
+    repo = Repo.preload(ctx.env, repo: :owner).repo
+
+    repo.owner
+    |> Ecto.Changeset.change(registry_username: "reader", registry_token: "registry-value")
+    |> Repo.update!()
+
+    secret_fixture("repo", repo, "BUILD_SHARED", "repo-value")
+    secret_fixture("owner", repo.owner, "OWNER_SHARED", "owner-value")
+    secret_fixture("environment", ctx.env, "PRIVATE_SETTING", "personal-value", actor: ctx.user)
+    env = %{ctx.env | box: on_protocol(ctx.box, 7)}
+
+    for access <- [true, false],
+        action <- ~w(create rebuild pull_rebuild start restart_all restart_affected secrets_write) do
+      full_name = repo.full_name
+
+      stub(ClientMock, :get_repo, fn "member-token", ^full_name ->
+        if access, do: {:ok, %{}}, else: {:error, {:http, 404, "missing"}}
+      end)
+
+      op = %Foreman.Operations.Operation{id: Ecto.UUID.generate(), action: action, args: %{}}
+      assert {:ok, cmd, _extra} = Foreman.Environments.Commands.build(op, env)
+
+      if values = cmd.payload[:compose_env] do
+        assert values["PRIVATE_SETTING"] == "personal-value"
+        assert Map.has_key?(values, "BUILD_SHARED") == access
+        assert Map.has_key?(values, "OWNER_SHARED") == access
+      end
+
+      if files = cmd.payload[:files] do
+        assert files["secrets.env"] =~ "personal-value"
+        assert String.contains?(files["secrets.env"], "repo-value") == access
+        assert String.contains?(files["secrets.env"], "owner-value") == access
+      end
+
+      unless action == "secrets_write",
+        do: assert(Map.has_key?(cmd.payload, :registry_auth) == access)
+    end
+  end
+
   describe "a GitHub error while writing secrets" do
     setup ctx do
       ctx.env
