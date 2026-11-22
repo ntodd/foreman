@@ -106,39 +106,63 @@ defmodule Foreman.Secrets do
   the same scope.
   """
   def put_secret(%Scope{} = scope, scope_name, subject, attrs) do
-    with :ok <- authorize(scope, scope_name, subject) do
-      key = scope_key(scope_name, subject)
-      name = attrs["name"] || attrs[:name]
-      existing = name && Foreman.Repo.get_by(Secret, scope_key: key, name: name)
-
-      secret =
-        existing ||
-          %Secret{scope: scope_name, scope_key: key}
-          |> Map.merge(subject_fields(scope_name, subject))
-
-      # Without repo_ids, a replaced value keeps the secret's repos: a
-      # secret limited to one repo mustn't reach all of them on rotation.
-      attrs =
-        case stringify(attrs) do
-          %{"repo_ids" => ids} = attrs -> %{attrs | "repo_ids" => List.wrap(ids)}
-          attrs -> Map.put(attrs, "repo_ids", if(existing, do: existing.repo_ids, else: []))
-        end
-
-      changeset =
-        secret
-        |> Secret.changeset(attrs)
-        |> Ecto.Changeset.put_change(:updated_by_id, Scope.user_id(scope))
-
-      with {:ok, saved} <- Foreman.Repo.insert_or_update(changeset) do
-        Audit.log(scope, if(existing, do: "secret.update", else: "secret.create"), saved, %{
-          "scope" => key,
-          "name" => saved.name
-        })
-
-        Foreman.Environments.secrets_changed(affected_environment_ids(scope_name, subject))
-        {:ok, %{saved | value: nil}}
-      end
+    with :ok <- authorize(scope, scope_name, subject),
+         {:ok, saved} <-
+           while_live(subject, fn -> save_secret(scope, scope_name, subject, attrs) end) do
+      Foreman.Environments.secrets_changed(affected_environment_ids(scope_name, subject))
+      {:ok, saved}
     end
+  end
+
+  # Serialize an environment write with the update that marks it destroyed.
+  defp while_live(%Environment{id: id}, save) do
+    Foreman.Repo.transact(fn ->
+      query = from e in Environment, where: e.id == ^id and is_nil(e.destroyed_at), select: e.id
+      query = if Foreman.Repo.sqlite?(), do: query, else: lock(query, "FOR UPDATE")
+      if Foreman.Repo.one(query), do: save.(), else: {:error, :unauthorized}
+    end)
+  end
+
+  defp while_live(_subject, save), do: save.()
+
+  defp save_secret(scope, scope_name, subject, attrs) do
+    key = scope_key(scope_name, subject)
+    name = attrs["name"] || attrs[:name]
+    existing = name && Foreman.Repo.get_by(Secret, scope_key: key, name: name)
+
+    secret =
+      existing ||
+        %Secret{scope: scope_name, scope_key: key}
+        |> Map.merge(subject_fields(scope_name, subject))
+
+    # Without repo_ids, a replaced value keeps the secret's repos: a
+    # secret limited to one repo mustn't reach all of them on rotation.
+    attrs =
+      case stringify(attrs) do
+        %{"repo_ids" => ids} = attrs -> %{attrs | "repo_ids" => List.wrap(ids)}
+        attrs -> Map.put(attrs, "repo_ids", if(existing, do: existing.repo_ids, else: []))
+      end
+
+    changeset =
+      secret
+      |> Secret.changeset(attrs)
+      |> Ecto.Changeset.put_change(:updated_by_id, Scope.user_id(scope))
+
+    with {:ok, saved} <- Foreman.Repo.insert_or_update(changeset) do
+      Audit.log(scope, if(existing, do: "secret.update", else: "secret.create"), saved, %{
+        "scope" => key,
+        "name" => saved.name
+      })
+
+      {:ok, %{saved | value: nil}}
+    end
+  end
+
+  @doc "Delete an environment's own secrets after its destruction has been recorded."
+  def delete_environment_secrets(%Environment{id: id, destroyed_at: at}) when not is_nil(at) do
+    Foreman.Repo.delete_all(
+      from s in Secret, where: s.scope == "environment" and s.environment_id == ^id
+    )
   end
 
   def delete_secret(%Scope{} = scope, scope_name, subject, name) do

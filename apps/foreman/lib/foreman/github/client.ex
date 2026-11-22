@@ -50,6 +50,9 @@ defmodule Foreman.GitHub.Client do
               {:ok, map()} | {:error, term()}
   @callback list_branches(token :: String.t(), full_name :: String.t()) ::
               {:ok, [String.t()]} | {:error, term()}
+  @doc "Maximum raw devcontainer configuration accepted during repository discovery."
+  def max_file_bytes, do: 256 * 1024
+
   @callback get_file(
               token :: String.t(),
               full_name :: String.t(),

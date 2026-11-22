@@ -54,6 +54,14 @@ defmodule Foreman.PrebuildsTest do
     |> Repo.insert!()
   end
 
+  test "builds a prebuild for a nested devcontainer path longer than 255 bytes", ctx do
+    online(ctx.box)
+    path = ".devcontainer/" <> String.duplicate("a", 245) <> "/devcontainer.json"
+    repo = repo_fixture(devcontainer_path: path)
+    assert {:ok, prebuild} = Prebuilds.build(ctx.scope, repo, ctx.box)
+    assert Repo.reload!(prebuild).config_path == path
+  end
+
   describe "building one" do
     setup :github_configured
 

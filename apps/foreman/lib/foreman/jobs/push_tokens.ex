@@ -10,5 +10,5 @@ defmodule Foreman.Jobs.PushTokens do
 
   @impl true
   def perform(%Oban.Job{args: %{"user_id" => user_id}}),
-    do: Foreman.Environments.push_secrets(user_id: user_id)
+    do: Foreman.Environments.push_secrets(user_id: user_id, include_building: true)
 end

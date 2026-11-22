@@ -10,7 +10,7 @@ defmodule ForemanWeb.RepoLive.Show do
 
   import ForemanWeb.ForemanComponents
 
-  alias Foreman.{Accounts, Boxes, Environments, Prebuilds, Repos, Scope}
+  alias Foreman.{Accounts, Boxes, Capacity, Environments, Prebuilds, Repos, Scope}
   alias ForemanWeb.Fleet
   alias Foreman.Repos.TokenPermissions
   alias ForemanProtocol.Feature
@@ -518,8 +518,9 @@ defmodule ForemanWeb.RepoLive.Show do
             <% @limited -> %>
               The repo's limits
             <% @repo.host_requirements -> %>
-              Wants {@repo.host_requirements["cpus"] || "?"} CPUs, {@repo.host_requirements["memory"] ||
-                "?"} memory
+              Wants {Capacity.req_cpus(@repo.host_requirements) || "?"} CPUs, {Capacity.req_memory_label(
+                @repo.host_requirements
+              ) || "?"} memory
             <% true -> %>
               No repo limits
           <% end %>

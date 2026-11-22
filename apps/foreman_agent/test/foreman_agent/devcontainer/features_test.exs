@@ -286,6 +286,30 @@ defmodule ForemanAgent.Devcontainer.FeaturesTest do
       %{registry: registry, opts: opts}
     end
 
+    test "an independent personal feature keeps the repo's cached layer prefix", ctx do
+      %{registry: registry, dst: dst, opts: opts} = ctx
+
+      for {org, id} <- [{"team", "base"}, {"team", "app"}, {"alice", "tool"}] do
+        metadata = %{"id" => id, "version" => "1.0.0"}
+
+        metadata =
+          if id == "app",
+            do: Map.put(metadata, "dependsOn", %{"#{registry.host}/team/features/base:1" => %{}}),
+            else: metadata
+
+        FakeRegistry.put_feature(registry, "#{org}/features/#{id}", "1", metadata)
+      end
+
+      config = config(%{"#{registry.host}/team/features/app:1" => %{}})
+      {:ok, prebuild} = Features.prepare(config, %{}, dst, opts)
+
+      {:ok, personal} =
+        Features.prepare(config, %{"#{registry.host}/alice/features/tool:1" => %{}}, dst, opts)
+
+      assert Enum.map(prebuild, & &1.consecutive_id) == ["base_0", "app_1"]
+      assert Enum.map(personal, & &1.consecutive_id) == ["base_0", "app_1", "tool_2"]
+    end
+
     test "downloads a feature and unpacks it", %{registry: registry, dst: dst, opts: opts} do
       metadata = %{
         "id" => "hello",
@@ -728,7 +752,7 @@ defmodule ForemanAgent.Devcontainer.FeaturesTest do
     end
   end
 
-  describe "lockfile/3" do
+  describe "lockfile/1" do
     test "records where each of the config's features came from", %{dst: dst, opts: opts} do
       registry = FakeRegistry.start()
       base = "#{registry.host}/org/features/base"
@@ -746,9 +770,17 @@ defmodule ForemanAgent.Devcontainer.FeaturesTest do
           "dependsOn" => %{base => %{}}
         })
 
+      user_dep = "#{registry.host}/org/features/user-dep:1"
+
+      FakeRegistry.put_feature(registry, "org/features/user-dep", "1", %{
+        "id" => "user-dep",
+        "version" => "1.0.0"
+      })
+
       FakeRegistry.put_feature(registry, "org/features/extra", "1", %{
         "id" => "extra",
-        "version" => "0.1.0"
+        "version" => "0.1.0",
+        "dependsOn" => %{user_dep => %{}, base => %{}}
       })
 
       app = "#{registry.host}/org/features/app:1"
@@ -759,7 +791,7 @@ defmodule ForemanAgent.Devcontainer.FeaturesTest do
       {:ok, sets} = Features.prepare(config, additional, dst, opts)
 
       # Not the additional feature, and not the local one.
-      assert Features.lockfile(sets, config, additional) == """
+      assert Features.lockfile(sets) == """
              {
                "features": {
                  "#{app}": {
@@ -784,7 +816,7 @@ defmodule ForemanAgent.Devcontainer.FeaturesTest do
       config = config(%{"./second" => %{}})
       {:ok, sets} = Features.prepare(config, %{}, dst, opts)
 
-      assert Features.lockfile(sets, config, %{}) == "{\n  \"features\": {}\n}\n"
+      assert Features.lockfile(sets) == "{\n  \"features\": {}\n}\n"
     end
   end
 

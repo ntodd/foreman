@@ -59,12 +59,16 @@ defmodule ForemanAgent.Devcontainer.Features.Order do
         {:error, :circular, Enum.map(worklist, & &1.user_feature_id)}
 
       ready ->
-        highest = ready |> Enum.map(& &1.priority) |> Enum.max()
-        round = Enum.filter(ready, &(&1.priority == highest))
+        highest = ready |> Enum.map(&priority/1) |> Enum.max()
+        round = Enum.filter(ready, &(priority(&1) == highest))
         rest = Enum.reject(worklist, fn node -> Enum.any?(round, &equal?(&1, node)) end)
         rounds(rest, installed ++ Enum.sort(round, &(compare(&1, &2) != :gt)))
     end
   end
+
+  # Follow explicit overrides first. At equal priority, finish the layers
+  # already present in a prebuild before installing personal features.
+  defp priority(node), do: {node.priority, Map.get(node.set, :repo_feature?, false)}
 
   @doc """
   The worklist with `overrideFeatureInstallOrder` applied: a feature an

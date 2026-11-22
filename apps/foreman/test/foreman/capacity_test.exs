@@ -5,6 +5,11 @@ defmodule Foreman.CapacityTest do
   alias Foreman.Capacity.Tracker
   alias Foreman.Environments.Environment
 
+  test "ignores memory requirements outside the supported size format" do
+    assert Capacity.parse_size(String.duplicate("9", 400) <> "gb") == nil
+    assert Capacity.parse_size(%{}) == nil
+  end
+
   describe "provisioned/2" do
     test "limits first, then hostRequirements, then the observed average" do
       repo = repo_fixture(host_requirements: %{"cpus" => 4, "memory" => "8gb"})

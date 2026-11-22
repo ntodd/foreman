@@ -939,7 +939,7 @@ defmodule ForemanAgent.Devcontainer do
   defp current_lockfile(_params, _path), do: {:ok, nil}
 
   defp keep_lockfile(%{params: %{lockfile: true} = params} = state, path, [_ | _] = sets, current) do
-    content = Features.lockfile(sets, state.config, params.additional_features)
+    content = Features.lockfile(sets)
 
     cond do
       JSON.decode!(content) == current -> :ok
@@ -972,9 +972,16 @@ defmodule ForemanAgent.Devcontainer do
     case SafeFS.read(workspace, relative, max_bytes: @max_dockerfile) do
       {:ok, content} ->
         case {String.trim(content), JSON.decode(content)} do
-          {"", _} -> {:ok, nil}
-          {_, {:ok, %{} = lockfile}} -> {:ok, lockfile}
-          _ -> {:error, "#{relative} isn't valid JSON; fix or delete it"}
+          {"", _} ->
+            {:ok, nil}
+
+          {_, {:ok, %{} = lockfile}} ->
+            if valid_pins?(Map.get(lockfile, "features", %{})),
+              do: {:ok, lockfile},
+              else: {:error, "#{relative} has invalid feature pins; fix or delete it"}
+
+          _ ->
+            {:error, "#{relative} isn't valid JSON; fix or delete it"}
         end
 
       {:error, :enoent} ->
@@ -991,6 +998,15 @@ defmodule ForemanAgent.Devcontainer do
         {:error, "couldn't read #{relative}: #{inspect(reason)}"}
     end
   end
+
+  defp valid_pins?(features) when is_map(features) do
+    Enum.all?(features, fn
+      {_, %{"integrity" => digest}} -> is_binary(digest)
+      {_, entry} -> is_map(entry)
+    end)
+  end
+
+  defp valid_pins?(_), do: false
 
   # Written only when it would change, so a repo's own stays as committed.
   # Into the file the path really leads to: a lock file, or a .devcontainer

@@ -14,7 +14,7 @@ defmodule ForemanAgent.Text do
   """
   @spec scrub(term()) :: term()
   def scrub(binary) when is_binary(binary) do
-    if String.valid?(binary), do: binary, else: String.replace_invalid(binary)
+    binary |> String.replace_invalid() |> String.replace(<<0>>, "�")
   end
 
   def scrub(list) when is_list(list), do: Enum.map(list, &scrub/1)

@@ -29,6 +29,17 @@ defmodule Foreman.Repos do
     Repo.all(query)
   end
 
+  def devcontainer_scan_versions(owner) do
+    from(r in GitRepo,
+      where:
+        r.owner_id == ^owner.id and not r.archived and is_nil(r.removed_at) and
+          not is_nil(r.devcontainer_pushed_at),
+      select: {r.github_id, {r.full_name, r.default_branch, r.devcontainer_pushed_at}}
+    )
+    |> Repo.all()
+    |> Map.new()
+  end
+
   def get_repo!(id), do: GitRepo |> Repo.get!(id) |> Repo.preload(:owner)
 
   @doc "`%{id => full_name}` for the repos with these ids, listed or not."

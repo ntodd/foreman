@@ -194,9 +194,9 @@ defmodule ForemanWeb.EnvironmentLive.New do
               <div class="flex flex-wrap gap-1.5 text-xs text-ink-2">
                 <.badge size="sm">{@repo.devcontainer_path}</.badge>
                 <.badge :if={@repo.host_requirements} size="sm">
-                  Wants {@repo.host_requirements["cpus"] || "?"} CPUs, {@repo.host_requirements[
-                    "memory"
-                  ] || "?"} memory
+                  Wants {Capacity.req_cpus(@repo.host_requirements) || "?"} CPUs, {Capacity.req_memory_label(
+                    @repo.host_requirements
+                  ) || "?"} memory
                 </.badge>
                 <.badge :if={@repo.token_mode == "broad"} color="amber" size="sm">
                   Unscoped GitHub token

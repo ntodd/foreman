@@ -170,6 +170,74 @@ defmodule Foreman.GitHubTokensAndSyncTest do
       Repo.update!(Ecto.Changeset.change(repo, github_id: id))
     end
 
+    test "repo sync reuses successful scans and retries a failed change" do
+      data = Map.put(gh_repo(1, "cached"), "pushed_at", "2026-11-20T10:00:00Z")
+
+      good = fn _, _, _, _ ->
+        send(self(), :checked)
+        {:ok, "{}"}
+      end
+
+      no_directory = fn _, _, _ -> flunk("a standard config needs no directory listing") end
+      installation([data], get_file: good, list_dir: no_directory)
+      assert {:ok, 1} = GitHub.sync_repos()
+      assert_received :checked
+      installation([data], get_file: good)
+      assert {:ok, 1} = GitHub.sync_repos()
+      refute_received :checked
+
+      changed = %{data | "default_branch" => "next"}
+      installation([changed], get_file: fn _, _, _, _ -> {:error, :timeout} end)
+      assert {:ok, 1} = GitHub.sync_repos()
+      installation([changed], get_file: good)
+      assert {:ok, 1} = GitHub.sync_repos()
+      assert_received :checked
+    end
+
+    test "a large nested directory has a bounded number of file probes" do
+      entries = for i <- 1..100, do: %{"name" => "dir#{i}", "type" => "dir"}
+
+      installation([gh_repo(1, "many")],
+        list_dir: fn _, _, _ -> {:ok, entries} end,
+        get_file: fn _, _, _, _ ->
+          send(self(), :probe)
+          {:error, :not_found}
+        end
+      )
+
+      assert {:ok, 1} = GitHub.sync_repos()
+      for _ <- 1..34, do: assert_received(:probe)
+      refute_received :probe
+    end
+
+    test "oversized config files are recorded as repo errors" do
+      contents = ~s({"dockerComposeFile":"c.yml"}) <> String.duplicate(" ", 256 * 1024)
+      installation([gh_repo(1, "big")], get_file: fn _, _, _, _ -> {:ok, contents} end)
+      assert {:ok, 1} = GitHub.sync_repos()
+      assert Foreman.Repos.get_repo_by_full_name("acme/big").devcontainer_error =~ "256 KiB"
+    end
+
+    test "reports a config containing a NUL and continues with the next repo" do
+      installation([gh_repo(1, "bad"), gh_repo(2, "good")],
+        get_file: fn _, name, _, _ ->
+          memory = if name == "acme/bad", do: "8gb" <> <<0>>, else: "8gb"
+
+          {:ok,
+           JSON.encode!(%{
+             "dockerComposeFile" => "c.yml",
+             "hostRequirements" => %{"memory" => memory}
+           })}
+        end
+      )
+
+      assert {:ok, 2} = GitHub.sync_repos()
+      assert Foreman.Repos.get_repo_by_full_name("acme/bad").devcontainer_error =~ "NUL"
+
+      assert Foreman.Repos.get_repo_by_full_name("acme/good").host_requirements == %{
+               "memory" => "8gb"
+             }
+    end
+
     test "a GitHub error while reading the devcontainer keeps what was known" do
       repo = synced_repo(1, "storefront")
 

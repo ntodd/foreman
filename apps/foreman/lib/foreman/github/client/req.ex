@@ -172,17 +172,48 @@ defmodule Foreman.GitHub.Client.Req do
     req =
       api(
         bearer(token) ++
-          [headers: [{"accept", "application/vnd.github.raw+json"}], decode_body: false]
+          [
+            headers: [{"accept", "application/vnd.github.raw+json"}],
+            decode_body: false,
+            into: &collect_file/2
+          ]
       )
 
     params = if ref, do: [ref: ref], else: []
 
     case Req.get(req, url: "/repos/#{full_name}/contents/#{encode_path(path)}", params: params) do
-      {:ok, %{status: 200, body: body}} when is_binary(body) -> {:ok, body}
-      {:ok, %{status: 404}} -> {:error, :not_found}
-      other -> unexpected(other)
+      {:ok, %{status: 200, body: :too_large}} ->
+        {:error, :too_large}
+
+      {:ok, %{status: 200, body: {_, chunks}}} ->
+        {:ok, chunks |> Enum.reverse() |> IO.iodata_to_binary()}
+
+      {:ok, %{status: 200, body: ""}} ->
+        {:ok, ""}
+
+      {:ok, %{status: 404}} ->
+        {:error, :not_found}
+
+      other ->
+        unexpected(other)
     end
   end
+
+  defp collect_file({:data, chunk}, {request, %{status: 200} = response}) do
+    {bytes, chunks} =
+      case response.body do
+        "" -> {0, []}
+        collected -> collected
+      end
+
+    total = bytes + byte_size(chunk)
+
+    if total > Foreman.GitHub.Client.max_file_bytes(),
+      do: {:halt, {request, %{response | body: :too_large}}},
+      else: {:cont, {request, %{response | body: {total, [chunk | chunks]}}}}
+  end
+
+  defp collect_file({:data, _}, acc), do: {:halt, acc}
 
   @impl true
   def compare(token, full_name, base, head) do

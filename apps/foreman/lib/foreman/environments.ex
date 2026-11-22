@@ -270,15 +270,17 @@ defmodule Foreman.Environments do
 
   # -- actions -----------------------------------------------------------------------
 
-  def start(scope, env, confirmed? \\ false) do
+  def start(scope, env, confirmed? \\ false), do: boot_action(scope, env, :start, confirmed?)
+
+  defp boot_action(scope, env, action, confirmed?) do
     with :ok <- authorize(scope, env),
          {:ok, op} <-
            with_box_lock(env.box_id, fn _box ->
              env = get!(env.id)
 
-             with :ok <- allowed?(env, :start),
-                  :ok <- admit_start(env, confirmed?) do
-               queue_action(scope, env, :start, %{})
+             with :ok <- allowed?(env, action),
+                  :ok <- admit_boot(env, action, confirmed?) do
+               queue_action(scope, env, action, %{})
              end
            end) do
       Server.kick(env.id)
@@ -286,6 +288,12 @@ defmodule Foreman.Environments do
       {:ok, op}
     end
   end
+
+  defp admit_boot(%{desired_state: "running"} = env, action, confirmed?) when action != :start do
+    if Capacity.allocated?(env), do: :ok, else: admit_start(env, confirmed?)
+  end
+
+  defp admit_boot(env, _action, confirmed?), do: admit_start(env, confirmed?)
 
   defp admit_start(%{observed_state: "running", desired_state: "running"}, _confirmed?), do: :ok
 
@@ -300,17 +308,17 @@ defmodule Foreman.Environments do
   stops, and a start resumes it where it was, processes and all.
   """
   def suspend(scope, env), do: action(scope, env, :suspend)
-  def rebuild(scope, env), do: action(scope, env, :rebuild)
+  def rebuild(scope, env, confirmed? \\ false), do: boot_action(scope, env, :rebuild, confirmed?)
 
   @doc """
   Fast-forwards the clone to its branch, then rebuilds. The agent refuses
   (and leaves the environment running) if the clone has uncommitted
   changes or commits the branch doesn't.
   """
-  def pull_rebuild(scope, env) do
+  def pull_rebuild(scope, env, confirmed? \\ false) do
     with :ok <- authorize(scope, env),
          :ok <- can_pull?(env),
-         do: action(scope, env, :pull_rebuild)
+         do: boot_action(scope, env, :pull_rebuild, confirmed?)
   end
 
   # Protocol 3 added `pull` to env.rebuild; an older agent refuses it.
@@ -392,7 +400,7 @@ defmodule Foreman.Environments do
   defp offer_topic(op_id), do: "connect_offer:" <> op_id
 
   @doc "Runs the create again, for an environment whose first create failed."
-  def retry(scope, env), do: action(scope, env, :create)
+  def retry(scope, env, confirmed? \\ false), do: boot_action(scope, env, :create, confirmed?)
 
   def logs(scope, env, service \\ nil) do
     action(scope, env, :logs, %{"service" => service, "tail" => 300})
@@ -414,6 +422,9 @@ defmodule Foreman.Environments do
     local = if is_integer(status["ahead"]) and status["ahead"] >= 0, do: status["ahead"], else: 0
 
     cond do
+      not is_binary(status["branch"]) or status["branch"] == "" ->
+        {:error, :invalid_git_status}
+
       status["branch"] != env.branch ->
         {:ok, %{other_branch: status["branch"]}}
 
@@ -612,15 +623,18 @@ defmodule Foreman.Environments do
             else: Operations.mark(op, "failed", error: "the box was revoked", finished_at: now)
         end
 
-        {:ok,
-         env
-         |> Environment.state_changeset(%{
-           desired_state: "destroyed",
-           observed_state: "destroyed",
-           destroyed_at: now,
-           status_message: nil
-         })
-         |> Repo.update!()}
+        destroyed =
+          env
+          |> Environment.state_changeset(%{
+            desired_state: "destroyed",
+            observed_state: "destroyed",
+            destroyed_at: now,
+            status_message: nil
+          })
+          |> Repo.update!()
+
+        Secrets.delete_environment_secrets(destroyed)
+        {:ok, destroyed}
       end)
 
     cleanup_tailnet(env)
@@ -767,10 +781,9 @@ defmodule Foreman.Environments do
       attrs ->
         replaced_device(env, attrs[:tailscale_device_id])
 
-        env
-        |> Environment.state_changeset(attrs)
-        |> Repo.update!()
-        |> Map.put(:stale_notice, stale_notice?(op, env))
+        updated = env |> Environment.state_changeset(attrs) |> Repo.update!()
+        if attrs[:destroyed_at], do: Secrets.delete_environment_secrets(updated)
+        Map.put(updated, :stale_notice, stale_notice?(op, env))
     end
   end
 
@@ -1068,7 +1081,19 @@ defmodule Foreman.Environments do
   def push_secrets(opts \\ []) do
     query =
       from e in Environment,
-        where: is_nil(e.destroyed_at) and e.desired_state == "running" and e.created_once
+        where: is_nil(e.destroyed_at) and e.desired_state == "running"
+
+    query =
+      if opts[:include_building] do
+        builds =
+          from o in Foreman.Operations.Operation,
+            where: o.action == "create" and o.status in ["queued", "dispatched", "running"],
+            select: o.environment_id
+
+        where(query, [e], e.created_once or e.id in subquery(builds))
+      else
+        where(query, [e], e.created_once)
+      end
 
     query =
       case opts[:user_id] do
@@ -1082,7 +1107,11 @@ defmodule Foreman.Environments do
         cutoff -> where(query, [e], is_nil(e.token_pushed_at) or e.token_pushed_at < ^cutoff)
       end
 
-    for env <- Repo.all(query), do: enqueue(env, "secrets_write", %{}, nil)
+    for env <- Repo.all(query) do
+      args = if env.created_once, do: %{}, else: %{"after_first_create" => true}
+      enqueue(env, "secrets_write", args, nil)
+    end
+
     :ok
   end
 

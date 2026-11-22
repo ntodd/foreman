@@ -1338,10 +1338,22 @@ defmodule ForemanAgent.Env do
          {:ok, container} <- devcontainer_container(ctx, p.env_id, spec.devcontainer_service) do
       git = &container_git(ctx, spec, container, &1, &2)
 
-      with {:ok, status} <- git.(["status", "--porcelain=v1", "--branch"], "git status"),
+      with {:ok, status} <- compact_status(ctx, spec, container),
            {:ok, unpushed} <-
-             git.(["log", "--branches", "--not", "--remotes", "--oneline"], "git log"),
-           {:ok, summary} <- git_summary(String.split(status, "\n", trim: true), unpushed) do
+             git.(
+               [
+                 "rev-list",
+                 "--count",
+                 "--branches",
+                 "--ignore-missing",
+                 "HEAD",
+                 "--not",
+                 "--remotes"
+               ],
+               "git rev-list"
+             ),
+           {:ok, stash} <- git.(["stash", "list", "-1", "--format=%H"], "git stash list"),
+           {:ok, summary} <- git_summary(status, unpushed, stash) do
         {:ok,
          Map.merge(summary, %{
            "head" => git_object(git, ["rev-parse", "HEAD"], "git rev-parse"),
@@ -1356,27 +1368,36 @@ defmodule ForemanAgent.Env do
   # git inside the devcontainer, as the remote user. The workspace's owner
   # inside the container depends on the host (Docker Desktop maps it to
   # root), so safe.directory is opened up.
+  @git_command ["git", "-c", "safe.directory=*", "-c", "core.fsmonitor=false"]
+
   defp container_git(ctx, spec, container, args, label, opts \\ []) do
-    exec =
-      [
-        "exec",
-        "-u",
-        spec.remote_user,
-        "-w",
-        spec.remote_workspace_folder,
-        container,
-        "git",
-        "-c",
-        "safe.directory=*",
-        "-c",
-        "core.fsmonitor=false"
-      ] ++ args
+    container_cmd(ctx, spec, container, @git_command ++ args, label, opts)
+  end
+
+  defp container_cmd(ctx, spec, container, args, label, opts) do
+    exec = ["exec", "-u", spec.remote_user, "-w", spec.remote_workspace_folder, container | args]
 
     cmd(ctx, ctx.config.docker, exec,
       env: %{},
       quiet: Keyword.get(opts, :quiet, true),
       label: label
     )
+  end
+
+  # Count inside the container before the runner trims output. Git diagnostics stay
+  # on stderr and a failed status propagates through the POSIX shell pipeline.
+  @count_status ~S"""
+  { "$@" || printf '\nFOREMAN_STATUS_FAILED\n'; } |
+    awk '/^## / { branch=$0; next } /^FOREMAN_STATUS_FAILED$/ { failed=1; next }
+         { count++ } END { if (failed || !branch) exit 1; print branch; print count+0 }'
+  """
+
+  defp compact_status(ctx, spec, container) do
+    argv =
+      ["sh", "-c", @count_status, "foreman-status"] ++
+        @git_command ++ ["status", "--porcelain=v1", "--branch", "--untracked-files=normal"]
+
+    container_cmd(ctx, spec, container, argv, "git status", [])
   end
 
   # For comparing with the branch on GitHub. A repo with no commits has no
@@ -1394,21 +1415,26 @@ defmodule ForemanAgent.Env do
     if trimmed =~ ~r/\A[0-9a-f]{40}([0-9a-f]{24})?\z/, do: trimmed
   end
 
-  # `--branch` always prints the "## " line first; no output at all means
-  # the container went away under the exec.
-  defp git_summary(["## " <> _ = branch_line | files], unpushed) do
-    {:ok,
-     %{
-       "branch" => branch_name(branch_line),
-       "changed_files" => length(files),
-       "unpushed_commits" => unpushed |> String.split("\n", trim: true) |> length(),
-       "ahead" => ahead(branch_line),
-       "clean" => files == [] and String.trim(unpushed) == ""
-     }}
-  end
+  defp git_summary(status, unpushed, stash) do
+    has_stash = String.trim(stash) != ""
 
-  defp git_summary(_lines, _unpushed),
-    do: {:error, "no output from the container; is it still running?"}
+    with ["## " <> _ = branch_line, files] <-
+           status |> String.split("\n", trim: true) |> Enum.take(-2),
+         {files, ""} when files >= 0 <- Integer.parse(files),
+         {commits, ""} when commits >= 0 <- Integer.parse(String.trim(unpushed)) do
+      {:ok,
+       %{
+         "branch" => branch_name(branch_line),
+         "changed_files" => files,
+         "unpushed_commits" => commits,
+         "ahead" => ahead(branch_line),
+         "has_stash" => has_stash,
+         "clean" => files == 0 and commits == 0 and not has_stash
+       }}
+    else
+      _ -> {:error, "incomplete git status from the container"}
+    end
+  end
 
   defp branch_name("## " <> rest),
     do: rest |> String.split("...") |> hd() |> String.split(" ") |> hd()
