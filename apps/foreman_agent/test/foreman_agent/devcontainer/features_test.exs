@@ -286,6 +286,30 @@ defmodule ForemanAgent.Devcontainer.FeaturesTest do
       %{registry: registry, opts: opts}
     end
 
+    test "an independent personal feature keeps the repo's cached layer prefix", ctx do
+      %{registry: registry, dst: dst, opts: opts} = ctx
+
+      for {org, id} <- [{"team", "base"}, {"team", "app"}, {"alice", "tool"}] do
+        metadata = %{"id" => id, "version" => "1.0.0"}
+
+        metadata =
+          if id == "app",
+            do: Map.put(metadata, "dependsOn", %{"#{registry.host}/team/features/base:1" => %{}}),
+            else: metadata
+
+        FakeRegistry.put_feature(registry, "#{org}/features/#{id}", "1", metadata)
+      end
+
+      config = config(%{"#{registry.host}/team/features/app:1" => %{}})
+      {:ok, prebuild} = Features.prepare(config, %{}, dst, opts)
+
+      {:ok, personal} =
+        Features.prepare(config, %{"#{registry.host}/alice/features/tool:1" => %{}}, dst, opts)
+
+      assert Enum.map(prebuild, & &1.consecutive_id) == ["base_0", "app_1"]
+      assert Enum.map(personal, & &1.consecutive_id) == ["base_0", "app_1", "tool_2"]
+    end
+
     test "downloads a feature and unpacks it", %{registry: registry, dst: dst, opts: opts} do
       metadata = %{
         "id" => "hello",
