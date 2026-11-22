@@ -100,7 +100,7 @@ defmodule Foreman.Boxes do
     now = DateTime.utc_now()
 
     Repo.transact(fn ->
-      with %JoinToken{} = token <- Repo.get_by(JoinToken, token_hash: hash(raw_token)),
+      with %JoinToken{} = token <- enrollment_token(raw_token),
            true <- is_nil(token.used_at) and DateTime.compare(token.expires_at, now) == :gt,
            {:ok, public_key} <- decode_key(attrs["public_key"]),
            {:ok, box} <- upsert_enrolled_box(token, public_key, attrs) do
@@ -150,6 +150,13 @@ defmodule Foreman.Boxes do
            }) do
       {:ok, config, token.box_name}
     end
+  end
+
+  # SQLite starts an immediate transaction; PostgreSQL needs a row lock to
+  # serialize the spend with other enrollments for this token.
+  defp enrollment_token(raw) do
+    query = from t in JoinToken, where: t.token_hash == ^hash(raw)
+    Repo.one(if Repo.sqlite?(), do: query, else: lock(query, "FOR UPDATE"))
   end
 
   defp valid_join_token(raw) when is_binary(raw) do

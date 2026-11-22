@@ -27,6 +27,30 @@ defmodule ForemanWeb.AgentControllerTest do
     assert json_response(again, 401)["error"] =~ "used"
   end
 
+  if Foreman.Repo.database() == "postgres" do
+    test "enrollment locks the PostgreSQL token row before changing the box", %{
+      token: token,
+      public: public
+    } do
+      handler = make_ref()
+
+      :telemetry.attach(
+        handler,
+        [:foreman, :repo, :query],
+        fn _, _, meta, owner ->
+          if self() == owner and meta.source == "join_tokens",
+            do: send(owner, {:token_sql, meta.query})
+        end,
+        self()
+      )
+
+      on_exit(fn -> :telemetry.detach(handler) end)
+      assert {:ok, _} = Boxes.enroll(token, %{"public_key" => public})
+      assert_received {:token_sql, read}
+      assert read =~ "FOR UPDATE"
+    end
+  end
+
   test "refuses bad tokens and keys", %{conn: conn, token: token} do
     assert post(conn, ~p"/api/agents/enroll", %{"join_token" => "fj_nope", "public_key" => "x"})
            |> json_response(401)
