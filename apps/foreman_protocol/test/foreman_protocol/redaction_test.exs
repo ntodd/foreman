@@ -30,6 +30,21 @@ defmodule ForemanProtocol.RedactionTest do
     assert Redaction.redact(r, "abcabcabc abcabcabc") == "[redacted] [redacted]"
   end
 
+  test "a dense overlap masks the rest of its line and scanning resumes on the next" do
+    pattern = String.duplicate("ab", 16)
+    values = Redaction.prepare([pattern, "second-value"])
+    text = "before " <> String.duplicate(pattern, 5) <> " trailing detail\nsecond-value done"
+    assert Redaction.redact(values, text) == "before [redacted]\n[redacted] done"
+  end
+
+  test "a multiline pattern keeps the remainder covered when the overlap budget is spent" do
+    pattern = String.duplicate("xy", 16)
+    values = Redaction.prepare([pattern, "first line\nsecond line"])
+
+    assert Redaction.redact(values, String.duplicate(pattern, 5) <> " first line\nsecond line") ==
+             "[redacted]"
+  end
+
   test "redacts text that isn't UTF-8 without raising" do
     r = Redaction.prepare(["secret-value"])
     assert Redaction.redact(r, <<0xFF, "secret-value", 0xE2>>) == <<0xFF, "[redacted]", 0xE2>>

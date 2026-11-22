@@ -19,12 +19,13 @@ defmodule ForemanProtocol.Redaction do
   @min_length 6
   @mask "[redacted]"
 
-  defstruct values: [], pattern: nil, max_length: 0
+  defstruct values: [], pattern: nil, max_length: 0, single_line?: true
 
   @type t :: %__MODULE__{
           values: [String.t()],
           pattern: :binary.cp() | nil,
-          max_length: non_neg_integer()
+          max_length: non_neg_integer(),
+          single_line?: boolean()
         }
 
   @doc """
@@ -58,6 +59,7 @@ defmodule ForemanProtocol.Redaction do
 
     %__MODULE__{
       values: values,
+      single_line?: single_line?(values),
       pattern: if(values != [], do: :binary.compile_pattern(values)),
       max_length: values |> Enum.map(&byte_size/1) |> Enum.max(fn -> 0 end)
     }
@@ -73,18 +75,23 @@ defmodule ForemanProtocol.Redaction do
   """
   @spec redact(t() | [String.t()], term()) :: term()
   def redact(%__MODULE__{pattern: nil}, text), do: text
-  def redact(%__MODULE__{pattern: pattern}, text) when is_binary(text), do: mask(text, pattern)
+
+  def redact(%__MODULE__{pattern: pattern} = prepared, text) when is_binary(text),
+    do: mask(text, pattern, Map.get(prepared, :single_line?, false))
+
   def redact([], text), do: text
 
   def redact(values, text) when is_list(values) and is_binary(text),
-    do: mask(text, :binary.compile_pattern(values))
+    do: mask(text, :binary.compile_pattern(values), single_line?(values))
 
   def redact(_prepared, other), do: other
 
-  defp mask(text, pattern) do
+  defp single_line?(values), do: Enum.all?(values, &(:binary.match(&1, "\n") == :nomatch))
+
+  defp mask(text, pattern, single_line?) do
     case :binary.match(text, pattern) do
       :nomatch -> text
-      first -> text |> ranges(pattern, first, []) |> splice(text)
+      first -> text |> ranges(pattern, first, [], 0, single_line?) |> splice(text)
     end
   end
 
@@ -92,13 +99,38 @@ defmodule ForemanProtocol.Redaction do
   # into non-overlapping {start, stop} ranges in order. :binary.match finds
   # the leftmost match (the longest at that position), so searching again
   # from one byte past its start finds anything overlapping it.
-  defp ranges(text, pattern, {start, len}, acc) do
-    acc = merge(acc, start, start + len)
-    from = start + 1
+  defp ranges(text, pattern, {start, len}, acc, credit, single_line?) do
+    stop = start + len
+
+    # An overlapping search pays for bytes it revisits. New coverage buys
+    # constant work per byte. Once spent, cover the remainder conservatively.
+    credit =
+      case acc do
+        [{_, last} | _] when start < last -> credit + 4 * max(stop - last, 0) - len
+        _ -> max(256, 4 * len)
+      end
+
+    {acc, from} =
+      if credit < 0 do
+        [{_, last} | _] = acc
+        boundary = mask_until(text, max(last, stop), single_line?)
+        {merge(acc, start, boundary), boundary}
+      else
+        {merge(acc, start, stop), start + 1}
+      end
 
     case :binary.match(text, pattern, scope: {from, byte_size(text) - from}) do
       :nomatch -> Enum.reverse(acc)
-      next -> ranges(text, pattern, next, acc)
+      next -> ranges(text, pattern, next, acc, credit, single_line?)
+    end
+  end
+
+  defp mask_until(text, _from, false), do: byte_size(text)
+
+  defp mask_until(text, from, true) do
+    case :binary.match(text, "\n", scope: {from, byte_size(text) - from}) do
+      {newline, 1} -> newline
+      :nomatch -> byte_size(text)
     end
   end
 
