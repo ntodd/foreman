@@ -137,27 +137,36 @@ defmodule Foreman.Prebuilds do
     # leaves a prebuild building with nothing to finish it (which would
     # block every build after it).
     with :ok <- check_build(scope, repo, box),
-         {:ok, cmd, redact} <- build_command(repo, prebuild) do
-      {:ok, {prebuild, op}} =
-        Repo.transact(fn ->
-          op =
-            Operations.create!(%{
-              id: cmd.op_id,
-              box_id: box.id,
-              user_id: Scope.user_id(scope),
-              action: "box.prebuild",
-              command: "box.prebuild",
-              args: %{"prebuild_id" => prebuild.id, "repo" => repo.full_name},
-              status: "dispatched",
-              dispatched_at: DateTime.utc_now()
-            })
-
-          {:ok, {Repo.insert!(%{prebuild | op_id: op.id}), op}}
-        end)
-
+         {:ok, cmd, redact} <- build_command(repo, prebuild),
+         {:ok, {prebuild, op}} <- reserve_build(scope, repo, box, prebuild, cmd) do
       Redactions.put_values(op.id, redact)
       send_build(box, prebuild, op, cmd)
     end
+  end
+
+  defp reserve_build(scope, repo, box, prebuild, cmd) do
+    Repo.transact(fn ->
+      row = from b in Boxes.Box, where: b.id == ^box.id, select: b.id
+      Repo.one!(if Repo.sqlite?(), do: row, else: lock(row, "FOR UPDATE"))
+
+      if building?(repo, box) do
+        {:error, "A prebuild is already building on this box."}
+      else
+        op =
+          Operations.create!(%{
+            id: cmd.op_id,
+            box_id: box.id,
+            user_id: Scope.user_id(scope),
+            action: "box.prebuild",
+            command: "box.prebuild",
+            args: %{"prebuild_id" => prebuild.id, "repo" => repo.full_name},
+            status: "dispatched",
+            dispatched_at: DateTime.utc_now()
+          })
+
+        {:ok, {Repo.insert!(%{prebuild | op_id: op.id}), op}}
+      end
+    end)
   end
 
   defp check_build(scope, repo, box) do
