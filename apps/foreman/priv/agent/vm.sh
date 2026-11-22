@@ -46,7 +46,41 @@ fail() { echo "foreman-box: $*" >&2; exit 1; }
 # So a Ctrl-C runs the cleanup (an EXIT trap) too; dash skips it otherwise.
 trap 'exit 130' INT TERM HUP
 
-conf() { sed -n "s/^$1=//p" "$DIR/box.conf" 2>/dev/null | tail -1; }
+as_box() {
+  if [ "$(id -u)" = 0 ]; then
+    setpriv --reuid="$USER_NAME" --regid="$(id -g "$USER_NAME")" --init-groups "$@"
+  else
+    "$@"
+  fi
+}
+
+probe_aio() {
+  # The box user opens and removes the probe on the disk's filesystem.
+  as_box sh -eu -s -- "$1" "$2" <<'PROBE'
+    probe=$(mktemp "$1/.aio.XXXXXXXX")
+    trap 'rm -f "$probe"' EXIT
+    truncate -s 1M "$probe"
+    if printf "quit\n" | timeout 30 "$2" -nodefaults -display none -machine none -S -monitor stdio \
+      -drive "if=none,id=probe,file=$probe,format=raw,cache=none,aio=io_uring" >/dev/null 2>&1; then
+      echo io_uring
+    else
+      echo threads
+    fi
+PROBE
+}
+
+update_config() {
+  as_box sh -eu -s -- "$DIR" "$@" <<'CONFIG'
+    cd "$1"
+    tmp=$(mktemp .box.conf.XXXXXXXX)
+    trap 'rm -f "$tmp"' EXIT
+    awk "!/^(cpus|memory|qemu|firmware|aio)=/" box.conf > "$tmp"
+    printf "%s\n" "cpus=$2" "memory=$3" "qemu=$4" "firmware=$5" "aio=$6" >> "$tmp"
+    mv -fT "$tmp" box.conf
+CONFIG
+}
+
+conf() { as_box sed -n "s/^$1=//p" "$DIR/box.conf" 2>/dev/null | tail -1; }
 
 # -- the box's VM ------------------------------------------------------------
 
@@ -127,6 +161,15 @@ uninstall() {
   say "removed the box; revoke it on its page in Foreman"
 }
 
+# The installed launcher's data-plane commands access box-owned files.
+case "${1:-}" in
+  run|powerdown|ssh|logs)
+    if [ "$(id -u)" = 0 ]; then
+      exec setpriv --reuid="$USER_NAME" --regid="$(id -g "$USER_NAME")" --init-groups "$SELF" "$@"
+    fi
+    ;;
+esac
+
 case "${1:-}" in
   run) run ;;
   powerdown) powerdown; exit ;;
@@ -203,7 +246,12 @@ find_firmware() {
 }
 
 new=""
-[ -f "$DIR/box.conf" ] || new=1
+[ ! -L "$DIR" ] || fail "the box directory must be a real directory"
+if [ ! -e "$DIR" ]; then
+  new=1
+elif [ ! -f "$DIR/box.conf" ] || [ -L "$DIR/box.conf" ]; then
+  fail "existing box directory has no regular box.conf"
+fi
 # A new box, until it starts: a failure leaves nothing of it behind.
 fresh_dir="" fresh_user="" fresh_unit="" fresh_self=""
 work=$(mktemp -d)
@@ -229,7 +277,6 @@ if [ -n "$new" ]; then
   [ "$MEMORY" -lt "$mem_gib" ] || fail "--memory $MEMORY GiB leaves nothing for this machine's $mem_gib GiB"
   [ "$DISK" -ge 20 ] || fail "--disk needs at least 20 GiB"
 
-  [ -e "$DIR" ] || fresh_dir=1
   [ -e "/etc/systemd/system/$UNIT.service" ] || fresh_unit=1
   [ -e "$SELF" ] || fresh_self=1
   id "$USER_NAME" >/dev/null 2>&1 || fresh_user=1
@@ -277,21 +324,17 @@ if getent group kvm >/dev/null 2>&1; then
   usermod -aG kvm "$USER_NAME"
   kvm_group="SupplementaryGroups=kvm"
 fi
-install -d -m 0750 -o "$USER_NAME" -g "$USER_NAME" "$DIR"
-
-# io_uring where the kernel lets QEMU's user have it (kernel.io_uring_disabled
-# can keep it from unprivileged users), with direct I/O on the filesystem
-# the disk goes on; threads otherwise.
-aio=threads
-probe="$DIR/.aio-probe"
-truncate -s 1M "$probe"
-chown "$USER_NAME" "$probe"
-if printf 'quit\n' | timeout 30 setpriv --reuid="$USER_NAME" --regid="$USER_NAME" --clear-groups \
-  "$qemu_path" -nodefaults -display none -machine none -S -monitor stdio \
-  -drive "if=none,id=probe,file=$probe,format=raw,cache=none,aio=io_uring" >/dev/null 2>&1; then
-  aio=io_uring
+if [ -n "$new" ]; then
+  # Root prepares a new box privately. Transfer the directory itself last.
+  mkdir -m 0710 "$DIR" || fail "could not create the box directory"
+  fresh_dir=1
+  chgrp "$USER_NAME" "$DIR"
+  install -d -m 0700 -o "$USER_NAME" "$DIR/.probe"
+  aio=$(probe_aio "$DIR/.probe" "$qemu_path")
+  rmdir "$DIR/.probe"
+else
+  aio=$(probe_aio "$DIR" "$qemu_path")
 fi
-rm -f "$probe"
 
 say "installing $SELF"
 curl -fsSL -o "$SELF.new" "$FOREMAN_URL/agent/vm.sh" </dev/null || fail "couldn't reach $FOREMAN_URL"
@@ -344,14 +387,7 @@ systemctl daemon-reload
 if [ -z "$new" ]; then
   # An update: the box and its disk stay as they are. (To start over with
   # a new token: foreman-box uninstall --yes, then this again.)
-  { grep -v -e '^cpus=' -e '^memory=' -e '^qemu=' -e '^firmware=' -e '^aio=' "$DIR/box.conf"
-    echo "cpus=${CPUS:-$(conf cpus)}"
-    echo "memory=${MEMORY:-$(conf memory)}"
-    echo "qemu=$qemu_path"
-    echo "firmware=$firmware_code"
-    echo "aio=$aio"; } > "$DIR/box.conf.new"
-  mv -f "$DIR/box.conf.new" "$DIR/box.conf"
-  chown "$USER_NAME:$USER_NAME" "$DIR/box.conf"
+  update_config "${CPUS:-$(conf cpus)}" "${MEMORY:-$(conf memory)}" "$qemu_path" "$firmware_code" "$aio"
   systemctl enable "$UNIT" >/dev/null 2>&1
   systemctl start "$UNIT"
   [ -z "$CPUS$MEMORY" ] || say "the box gets $(conf cpus) CPUs and $(conf memory) GiB from its next start (foreman-box restart)"
@@ -394,7 +430,10 @@ firmware=$firmware_code
 aio=$aio
 flatcar=$FLATCAR_VERSION
 EOF
-chown -R "$USER_NAME:$USER_NAME" "$DIR"
+chown "$USER_NAME:$USER_NAME" "$DIR/disk.img" "$DIR/efi-vars.fd" "$DIR/config.ign" \
+  "$DIR/id_ed25519" "$DIR/id_ed25519.pub" "$DIR/box.conf"
+chmod 0750 "$DIR"
+chown "$USER_NAME:$USER_NAME" "$DIR"
 
 # The box exists from here on, and keeps trying whatever happens next.
 fresh_dir="" fresh_user="" fresh_unit="" fresh_self=""
@@ -407,12 +446,12 @@ i=0
 seen=0
 while [ $i -lt 600 ]; do
   if [ -f "$DIR/serial.log" ]; then
-    lines=$(tr -d '\r' < "$DIR/serial.log" | grep -a -c -E '^foreman(-box)?: ' || true)
+    lines=$(as_box cat "$DIR/serial.log" | tr -d '\r' | grep -a -c -E '^foreman(-box)?: ' || true)
     if [ "$lines" -gt "$seen" ]; then
-      tr -d '\r' < "$DIR/serial.log" | grep -a -E '^foreman(-box)?: ' | tail -n +"$((seen + 1))"
+      as_box cat "$DIR/serial.log" | tr -d '\r' | grep -a -E '^foreman(-box)?: ' | tail -n +"$((seen + 1))"
       seen=$lines
     fi
-    if grep -aq 'foreman-box: enrolled' "$DIR/serial.log"; then
+    if as_box grep -aq 'foreman-box: enrolled' "$DIR/serial.log"; then
       # Spent: the token and the box's Tailscale key.
       rm -f "$DIR/config.ign"
       say "done: $name is on the Boxes page in Foreman"
@@ -428,5 +467,5 @@ while [ $i -lt 600 ]; do
   sleep 2
 done
 
-tail -n 40 "$DIR/serial.log" >&2 || true
+as_box tail -n 40 "$DIR/serial.log" >&2 || true
 fail "the box didn't enroll within 10 minutes; it keeps trying. Watch it with: foreman-box logs"
