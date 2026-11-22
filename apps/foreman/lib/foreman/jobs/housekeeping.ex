@@ -48,7 +48,7 @@ defmodule Foreman.Jobs.Housekeeping do
         where: s.inserted_at < ^DateTime.add(DateTime.utc_now(), -31 * 86_400)
     )
 
-    Operations.prune_logs(DateTime.add(DateTime.utc_now(), -@log_days * 86_400))
+    Operations.prune_output(DateTime.add(DateTime.utc_now(), -@log_days * 86_400))
     Redactions.prune()
     :ok
   end

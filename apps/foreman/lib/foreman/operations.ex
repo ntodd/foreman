@@ -174,10 +174,7 @@ defmodule Foreman.Operations do
     # on SQLite would wait on this transaction's write lock.
     LogBuffer.flush(op_id)
 
-    {status, result, error} =
-      if Foreman.DatabaseText.contains_nul?(result),
-        do: {"error", %{}, error || "Operation result contains a NUL character"},
-        else: {status, result, error}
+    {status, result, error} = checked_result(status, result, error)
 
     error = error && Redactions.redact(op_id, error)
 
@@ -198,6 +195,31 @@ defmodule Foreman.Operations do
     Foreman.Activity.operation_finished(op)
     {:ok, op, applied}
   end
+
+  @max_result_bytes 64 * 1024
+  @result_fields ~w(branch changed_files unpushed_commits clean has_stash head base ahead
+                    resumed suspended vm_size remote_user remote_workspace_folder services
+                    devcontainer_service warnings host_requirements feature_version tailscale_node_id
+                    connect pull_failed size_mb rebooted restart version)
+
+  defp checked_result(status, result, error) do
+    cond do
+      Foreman.DatabaseText.contains_nul?(result) ->
+        {"error", %{}, error || "Operation result contains a NUL character"}
+
+      is_map(result) and result_size(result) > @max_result_bytes ->
+        fields = Map.take(result, @result_fields)
+
+        if result_size(fields) <= @max_result_bytes,
+          do: {status, fields, error},
+          else: {"error", %{}, error || "Operation result exceeds 64 KiB"}
+
+      true ->
+        {status, result, error}
+    end
+  end
+
+  defp result_size(result), do: result |> JSON.encode_to_iodata!() |> IO.iodata_length()
 
   @doc "Whether Housekeeping failed the operation for taking too long (see `timed_out/2`)."
   def timed_out?(%Operation{status: "failed", args: %{"timed_out" => true}}), do: true
@@ -343,12 +365,14 @@ defmodule Foreman.Operations do
     end
   end
 
-  @doc "Clears the logs of operations that finished before `cutoff`. Returns how many."
-  def prune_logs(cutoff) do
+  @doc "Clears the logs and results of operations that finished before `cutoff`. Returns how many."
+  def prune_output(cutoff) do
     {count, _} =
       Repo.update_all(
-        from(o in Operation, where: o.finished_at < ^cutoff and not is_nil(o.log)),
-        set: [log: nil]
+        from(o in Operation,
+          where: o.finished_at < ^cutoff and (not is_nil(o.log) or not is_nil(o.result))
+        ),
+        set: [log: nil, result: nil]
       )
 
     count
