@@ -19,6 +19,8 @@
 set -eu
 
 cd "$(dirname "$0")/../.."
+sh e2e/updater/request-test.sh
+
 project=${E2E_PROJECT:-foreman-update-e2e}
 work=tmp/$project
 export E2E_BOX_IMAGE="$project-box"
