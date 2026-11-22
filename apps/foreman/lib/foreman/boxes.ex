@@ -170,10 +170,21 @@ defmodule Foreman.Boxes do
 
     case Foreman.Tailscale.create_box_auth_key(token.box_name, expiry) do
       {:ok, %{key: key}} ->
-        from(t in JoinToken, where: t.id == ^token.id and is_nil(t.tailscale_auth_key))
+        now = DateTime.utc_now()
+
+        live =
+          from(t in JoinToken,
+            where: t.id == ^token.id and is_nil(t.used_at) and t.expires_at > ^now
+          )
+
+        live
+        |> where([t], is_nil(t.tailscale_auth_key))
         |> Repo.update_all(set: [tailscale_auth_key: key])
 
-        {:ok, Repo.reload!(token).tailscale_auth_key}
+        case Repo.one(select(live, [t], t.tailscale_auth_key)) do
+          nil -> {:error, :invalid_token}
+          stored -> {:ok, stored}
+        end
 
       {:error, reason} ->
         {:error, {:tailscale, reason}}
