@@ -115,10 +115,15 @@ defmodule ForemanAgent.Outbox do
     if state.logs > state.max_logs, do: drop_oldest_log(state), else: state
   end
 
-  # Inventory, stats and state events are snapshots; only the latest of
-  # each type matters once the connection is back.
+  # State transitions and guest OOM reports are deltas between scans.
+  defp enqueue(state, seq, %Event{type: type} = event)
+       when type in ["env.state", "box.guest_oom"] do
+    %{state | pending: :queue.in({seq, event}, state.pending)}
+  end
+
+  # Only the latest snapshot of each type matters on reconnect.
   defp enqueue(state, seq, %Event{type: type} = event) do
-    pending = :queue.filter(fn {_, e} -> e.type != type or type == "env.state" end, state.pending)
+    pending = :queue.filter(fn {_, e} -> e.type != type end, state.pending)
     %{state | pending: :queue.in({seq, event}, pending)}
   end
 

@@ -19,6 +19,27 @@ defmodule ForemanAgent.OutboxTest do
   defp log(n), do: event("op.log", %{op_id: @op, stream: "info", data: "line #{n}\n"})
   defp result, do: event("op.result", %{op_id: @op, status: "ok"})
 
+  test "guest OOM kills from two scans both arrive after a reconnect", %{outbox: outbox} do
+    a = "6f1c1d1e-9a3b-4c1f-8f5e-2d7a9b0c1e2f"
+    b = "0b8e3a6c-5d2f-4e1a-9c7b-3f2e1d0c9b8a"
+
+    kill = fn env ->
+      event("box.guest_oom", %{environments: %{env => %{at: 1_795_000_000, processes: ["node"]}}})
+    end
+
+    Outbox.push(outbox, kill.(a))
+    Outbox.push(outbox, kill.(b))
+    Outbox.attach(outbox, self())
+
+    assert_receive {:outbox_deliver,
+                    %Event{type: "box.guest_oom", payload: %{environments: first}}, _}
+
+    assert_receive {:outbox_deliver,
+                    %Event{type: "box.guest_oom", payload: %{environments: second}}, _}
+
+    assert Enum.sort(Map.keys(first) ++ Map.keys(second)) == Enum.sort([a, b])
+  end
+
   test "delivers straight away to an attached connection", %{outbox: outbox} do
     Outbox.attach(outbox, self())
     Outbox.push(outbox, log(1))
