@@ -5,7 +5,7 @@
 #
 # Re-running it on an enrolled box refreshes its units and keeps the installed release and box's
 # identity (no token needed). To enroll again, for
-# example after the box was revoked, pass --reenroll with a new token.
+# example after the box was revoked, pass --reenroll with a token for a new box name.
 #
 # Every environment runs in a VM of its own (Cloud Hypervisor, which the
 # agent release carries), with its own kernel and Docker. The agent runs
@@ -681,7 +681,7 @@ fi
 
 if [ -z "$enroll" ]; then
   echo "foreman: updated; this box keeps its enrollment ($IDENTITY)."
-  echo "foreman: if it was revoked in Foreman, re-run with --reenroll and a new --token."
+  echo "foreman: if it was revoked in Foreman, re-run with --reenroll and a --token for a new box name."
   exit 0
 fi
 
