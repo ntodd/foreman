@@ -134,7 +134,7 @@ defmodule Foreman.Environments.Commands do
     identity = Accounts.effective_identity(env.user, env.repo)
     features = features(env)
 
-    with {:ok, ts_key, env} <- tailscale_key(env, op.action) do
+    with {:ok, ts_key, env} <- tailscale_key(env, op) do
       files =
         file_set(env, secrets, identity, token, token_notice)
         |> put_present("ts-authkey", ts_key)
@@ -275,17 +275,19 @@ defmodule Foreman.Environments.Commands do
   end
 
   # A new node needs an auth key on its first boot only; the node's state
-  # volume keeps its identity after that. Until the environment has come
-  # up once, a rebuild is a first boot too. A failed first build drops its
+  # volume keeps its identity after that. A rebuild can also be the first
+  # boot with Tailscale enabled. A failed build drops its
   # key (keys expire after a day), so the next attempt gets a fresh one.
-  defp tailscale_key(env, action)
+  defp tailscale_key(env, %Operation{action: action, status: status})
        when action == "create" or
-              (action in ["rebuild", "pull_rebuild"] and not env.created_once) do
+              (action in ["rebuild", "pull_rebuild"] and is_nil(env.tailscale_device_id)) do
     cond do
       not Tailscale.configured?() ->
         {:ok, nil, env}
 
-      env.ts_authkey ->
+      # Reconnects resend the same operation. A newly queued build can
+      # inherit an expired key from an older control plane's failed build.
+      env.ts_authkey && status in ["dispatched", "running"] ->
         {:ok, env.ts_authkey, env}
 
       true ->
@@ -300,7 +302,7 @@ defmodule Foreman.Environments.Commands do
     end
   end
 
-  defp tailscale_key(env, _action), do: {:ok, env.ts_authkey, env}
+  defp tailscale_key(env, _op), do: {:ok, env.ts_authkey, env}
 
   defp with_start_limits(payload, %{box: %{protocol_version: v}} = env)
        when is_integer(v) and v >= 7,
