@@ -117,7 +117,7 @@ defmodule Foreman.Environments.Server do
       is_nil(env) -> :ok
       Operations.in_flight(env_id) -> :ok
       not Boxes.online?(env.box_id) -> :ok
-      op = Operations.next_queued(env_id) -> dispatch(op, env)
+      op = Operations.next_queued(env_id, env.created_once) -> dispatch(op, env)
       true -> :ok
     end
   end

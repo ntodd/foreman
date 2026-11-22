@@ -515,12 +515,21 @@ defmodule ForemanWeb.ForemanComponents do
   attr :warning, :map, required: true
 
   def start_warning(assigns) do
+    label = %{
+      "start" => "Start",
+      "retry" => "Retry",
+      "rebuild" => "Rebuild",
+      "pull_rebuild" => "Pull and rebuild"
+    }
+
+    assigns = assign(assigns, :label, Map.fetch!(label, assigns.warning.action))
+
     ~H"""
     <.callout kind="warning" id="start-warning">
-      <p class="font-medium">Start {@warning.slug}?</p>
+      <p class="font-medium">{@label} {@warning.slug}?</p>
       <p>{@warning.message}</p>
       <:actions>
-        <.button size="sm" phx-click="confirm_start">Start anyway</.button>
+        <.button size="sm" phx-click="confirm_start">{@label} anyway</.button>
         <.button size="sm" variant="ghost" phx-click="dismiss_start">Cancel</.button>
       </:actions>
     </.callout>

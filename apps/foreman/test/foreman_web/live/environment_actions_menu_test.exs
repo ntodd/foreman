@@ -172,6 +172,38 @@ defmodule ForemanWeb.EnvironmentActionsMenuTest do
     end
   end
 
+  test "confirming a rebuild warning queues the selected operation", %{
+    conn: conn,
+    box: box,
+    env: env
+  } do
+    box
+    |> Ecto.Changeset.change(
+      capacity_policy: "warn",
+      vm: %{
+        "default_cpus" => 2,
+        "default_memory_mb" => 2048,
+        "host_cpus" => 2,
+        "host_memory_mb" => 2048
+      },
+      capacity: %{"cpus" => 2, "memory_mb" => 2048}
+    )
+    |> Foreman.Repo.update!()
+
+    env
+    |> Ecto.Changeset.change(observed_state: "stopped", desired_state: "stopped")
+    |> Foreman.Repo.update!()
+
+    {:ok, view, _} = live(conn, ~p"/environments/#{env.id}")
+    render_click(view, "action", %{"do" => "rebuild"})
+    view |> element("#start-warning button", "Rebuild anyway") |> render_click()
+
+    assert Foreman.Repo.get_by(Foreman.Operations.Operation,
+             environment_id: env.id,
+             action: "rebuild"
+           )
+  end
+
   test "Stop is the only action left outside the menu", %{conn: conn, env: env} do
     {:ok, view, _html} = live(conn, ~p"/environments/#{env.id}")
 

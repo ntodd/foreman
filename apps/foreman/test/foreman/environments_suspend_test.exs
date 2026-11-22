@@ -54,6 +54,61 @@ defmodule Foreman.EnvironmentsSuspendTest do
     assert env.status_message == "suspend failed: no room for the snapshot"
   end
 
+  for {action, operation} <- [rebuild: "rebuild", pull_rebuild: "pull_rebuild", retry: "create"] do
+    test "#{action} checks placement before a cold boot and queues the confirmed action", ctx do
+      box =
+        ctx.box
+        |> Ecto.Changeset.change(
+          capacity_policy: "refuse",
+          protocol_version: 3,
+          capacity: %{"cpus" => 8, "memory_mb" => 8192},
+          vm: %{
+            "default_cpus" => 1,
+            "default_memory_mb" => 8192,
+            "host_memory_mb" => 8192,
+            "host_cpus" => 8
+          }
+        )
+        |> Repo.update!()
+
+      env =
+        ctx.env
+        |> Ecto.Changeset.change(desired_state: "stopped", observed_state: "stopped")
+        |> Repo.update!()
+
+      assert {:error, reason} = apply(Environments, unquote(action), [ctx.scope, env])
+      assert reason =~ "memory"
+      assert Repo.reload!(env).desired_state == "stopped"
+      box |> Ecto.Changeset.change(capacity_policy: "warn") |> Repo.update!()
+      assert {:confirm, _} = apply(Environments, unquote(action), [ctx.scope, env])
+      assert {:ok, op} = apply(Environments, unquote(action), [ctx.scope, env, true])
+      assert op.action == unquote(operation)
+    end
+  end
+
+  test "rebuilding a partially running environment reuses its existing allocation", ctx do
+    ctx.box
+    |> Ecto.Changeset.change(
+      capacity_policy: "refuse",
+      capacity: %{"cpus" => 1, "memory_mb" => 512},
+      vm: %{
+        "default_cpus" => 1,
+        "default_memory_mb" => 1024,
+        "host_memory_mb" => 512,
+        "host_cpus" => 1
+      }
+    )
+    |> Repo.update!()
+
+    env =
+      ctx.env
+      |> Ecto.Changeset.change(desired_state: "running", observed_state: "partial")
+      |> Repo.update!()
+
+    assert {:ok, op} = Environments.rebuild(ctx.scope, env)
+    assert op.action == "rebuild"
+  end
+
   test "resume checks the saved allocation after editing limits for the next cold boot", ctx do
     ctx.box
     |> Ecto.Changeset.change(

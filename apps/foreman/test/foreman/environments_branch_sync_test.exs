@@ -99,6 +99,11 @@ defmodule Foreman.EnvironmentsBranchSyncTest do
     assert {:error, :not_found} = Environments.branch_sync(env, status(%{}))
   end
 
+  test "an absent branch is an unavailable status", %{env: env} do
+    assert {:error, :invalid_git_status} =
+             Environments.branch_sync(env, status(%{"branch" => nil}))
+  end
+
   describe "the GitHub client" do
     setup do
       Application.put_env(:foreman, :github_req_options,

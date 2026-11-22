@@ -434,6 +434,25 @@ defmodule Foreman.EnvironmentsTest do
   # Results carry what the agent and the repo say, at whatever length.
   # Postgres refuses a varchar(255) overflow outright, which used to crash
   # the agent's channel every time the agent resent the result.
+  test "an operation result that cannot be stored reaches a terminal state", %{box: box} do
+    for value <- [%{"nested" => [%{"label" => "a" <> <<0>>}]}, %{("key" <> <<0>>) => "value"}] do
+      op =
+        Operations.create!(%{
+          id: Ecto.UUID.generate(),
+          box_id: box.id,
+          action: "box.gc",
+          command: "box.gc",
+          status: "running",
+          args: %{}
+        })
+
+      assert {:ok, finished} = Operations.finish(op.id, "ok", value, nil)
+      assert finished.status == "failed" and finished.result == %{}
+      assert finished.error =~ "NUL"
+      assert :already = Operations.finish(op.id, "ok", value, nil)
+    end
+  end
+
   describe "a long up result" do
     test "is recorded", %{scope: scope, repo: repo, box: box} do
       connect_agent(box)
@@ -460,6 +479,41 @@ defmodule Foreman.EnvironmentsTest do
       assert env.observed_state == "running"
       assert env.workspace_folder == "/workspaces/" <> long
     end
+  end
+
+  test "destroying an environment removes its environment secrets", %{
+    scope: scope,
+    user: user,
+    repo: repo,
+    box: box
+  } do
+    connect_agent(box)
+    env = environment_fixture(user: user, repo: repo, box: box)
+
+    {:ok, _} =
+      Secrets.put_secret(scope, "environment", env, %{
+        "name" => "API_KEY",
+        "value" => "fixture-value"
+      })
+
+    assert_receive {:dispatch, %Command{type: "env.secrets.write"} = write}
+    succeed(box, write)
+
+    {:ok, _} = Environments.destroy(scope, env)
+    assert_receive {:dispatch, %Command{type: "env.destroy"} = cmd}
+    succeed(box, cmd)
+    assert Repo.reload!(env).destroyed_at
+
+    assert [] =
+             Repo.all(
+               from s in Foreman.Secrets.Secret, where: s.scope_key == ^("environment:" <> env.id)
+             )
+
+    assert {:error, :unauthorized} =
+             Secrets.put_secret(scope, "environment", env, %{
+               "name" => "STALE",
+               "value" => "fixture"
+             })
   end
 
   describe "secrets changes" do

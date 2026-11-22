@@ -18,6 +18,8 @@ defmodule Foreman.Repos.Repo do
     field :archived, :boolean, default: false
     field :manual, :boolean, default: false
     field :devcontainer_path, :string
+    field :devcontainer_pushed_at, :string
+
     field :devcontainer_checked_at, :utc_datetime_usec
     field :removed_at, :utc_datetime_usec
     field :devcontainer_error, :string
@@ -47,6 +49,7 @@ defmodule Foreman.Repos.Repo do
       :archived,
       :manual,
       :devcontainer_path,
+      :devcontainer_pushed_at,
       :devcontainer_checked_at,
       :devcontainer_error,
       :host_requirements,

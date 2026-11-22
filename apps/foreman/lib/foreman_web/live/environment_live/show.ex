@@ -109,17 +109,40 @@ defmodule ForemanWeb.EnvironmentLive.Show do
 
   # -- events ------------------------------------------------------------------
 
-  defp run_action(:confirmed_start, scope, env), do: Environments.start(scope, env, true)
-  defp run_action("start", scope, env), do: Environments.start(scope, env)
-  defp run_action("retry", scope, env), do: Environments.retry(scope, env)
-  defp run_action("stop", scope, env), do: Environments.stop(scope, env)
-  defp run_action("suspend", scope, env), do: Environments.suspend(scope, env)
-  defp run_action("rebuild", scope, env), do: Environments.rebuild(scope, env)
-  defp run_action("pull_rebuild", scope, env), do: Environments.pull_rebuild(scope, env)
-  defp run_action("restart_affected", scope, env), do: Environments.restart(scope, env, :affected)
-  defp run_action("restart_all", scope, env), do: Environments.restart(scope, env, :all)
-  defp run_action("logs", scope, env), do: Environments.logs(scope, env)
-  defp run_action(_, _scope, _env), do: {:error, "That isn't something an environment can do."}
+  defp perform_action(socket, action, confirmed?) do
+    %{current_scope: scope, env: env} = socket.assigns
+    socket = assign(socket, :start_warning, nil)
+
+    case run_action(action, scope, env, confirmed?) do
+      {:confirm, message} ->
+        {:noreply,
+         assign(socket, :start_warning, %{slug: env.slug, message: message, action: action})}
+
+      {:ok, op} ->
+        {:noreply, socket |> load() |> watch_op(op.id)}
+
+      {:error, reason} ->
+        {:noreply, put_flash(socket, :error, error_message(reason))}
+    end
+  end
+
+  defp run_action("start", scope, env, confirmed?), do: Environments.start(scope, env, confirmed?)
+  defp run_action("retry", scope, env, confirmed?), do: Environments.retry(scope, env, confirmed?)
+  defp run_action("stop", scope, env, _), do: Environments.stop(scope, env)
+  defp run_action("suspend", scope, env, _), do: Environments.suspend(scope, env)
+
+  defp run_action("rebuild", scope, env, confirmed?),
+    do: Environments.rebuild(scope, env, confirmed?)
+
+  defp run_action("pull_rebuild", scope, env, confirmed?),
+    do: Environments.pull_rebuild(scope, env, confirmed?)
+
+  defp run_action("restart_affected", scope, env, _),
+    do: Environments.restart(scope, env, :affected)
+
+  defp run_action("restart_all", scope, env, _), do: Environments.restart(scope, env, :all)
+  defp run_action("logs", scope, env, _), do: Environments.logs(scope, env)
+  defp run_action(_, _scope, _env, _), do: {:error, "That isn't something an environment can do."}
 
   @impl true
   def handle_event("dismiss_start", _, socket),
@@ -129,24 +152,9 @@ defmodule ForemanWeb.EnvironmentLive.Show do
     do: {:noreply, socket}
 
   def handle_event("confirm_start", _, socket),
-    do: handle_event("action", %{"do" => :confirmed_start}, socket)
+    do: perform_action(socket, socket.assigns.start_warning.action, true)
 
-  def handle_event("action", %{"do" => action}, socket) do
-    %{current_scope: scope, env: env} = socket.assigns
-
-    socket = assign(socket, :start_warning, nil)
-
-    case run_action(action, scope, env) do
-      {:confirm, message} ->
-        {:noreply, assign(socket, :start_warning, %{slug: env.slug, message: message})}
-
-      {:ok, op} ->
-        {:noreply, socket |> load() |> watch_op(op.id)}
-
-      {:error, reason} ->
-        {:noreply, put_flash(socket, :error, error_message(reason))}
-    end
-  end
+  def handle_event("action", %{"do" => action}, socket), do: perform_action(socket, action, false)
 
   def handle_event("later", _params, socket), do: {:noreply, assign(socket, :later, true)}
 
@@ -364,18 +372,45 @@ defmodule ForemanWeb.EnvironmentLive.Show do
   # The destroy check and the page's own check can be the same operation:
   # a queued git status is shared.
   defp destroy_check_done(%{assigns: %{destroy_check: %{op_id: id}}} = socket, %{id: id} = op) do
-    {status, result} =
-      if op.status == "succeeded" do
-        {:done, op.result}
-      else
-        reason = if op.error in [nil, ""], do: op.status, else: op.error
-        {:failed, %{"error" => reason}}
-      end
+    {status, result} = destroy_status(op)
 
     update(socket, :destroy_check, &%{&1 | status: status, result: result})
   end
 
   defp destroy_check_done(socket, _op), do: socket
+
+  defp destroy_status(%{status: "succeeded", result: %{"clean" => true} = result})
+       when not is_map_key(result, "has_stash"),
+       do:
+         {:failed,
+          %{
+            "error" =>
+              "The box did not check for stashed work. Update its agent for a complete check."
+          }}
+
+  defp destroy_status(%{
+         status: "succeeded",
+         result:
+           %{
+             "branch" => branch,
+             "changed_files" => files,
+             "unpushed_commits" => commits,
+             "clean" => clean
+           } = result
+       })
+       when is_binary(branch) and branch != "" and is_integer(files) and files >= 0 and
+              is_integer(commits) and commits >= 0 and is_boolean(clean) and
+              (not clean or
+                 (files == 0 and commits == 0 and :erlang.map_get("has_stash", result) == false)),
+       do: {:done, result}
+
+  defp destroy_status(%{status: "succeeded"}),
+    do: {:failed, %{"error" => "Invalid git status from the box"}}
+
+  defp destroy_status(op) do
+    reason = if op.error in [nil, ""], do: op.status, else: op.error
+    {:failed, %{"error" => reason}}
+  end
 
   # A success is followed by the offer itself.
   defp connect_done(
@@ -935,15 +970,22 @@ defmodule ForemanWeb.EnvironmentLive.Show do
             :if={@destroy_check.status == :done and not @destroy_check.result["clean"]}
             kind="danger"
           >
-            {@destroy_check.result["changed_files"]} uncommitted {if @destroy_check.result[
-                                                                       "changed_files"
-                                                                     ] == 1,
-                                                                     do: "change",
-                                                                     else: "changes"} and {@destroy_check.result[
-              "unpushed_commits"
-            ]} unpushed {if @destroy_check.result["unpushed_commits"] == 1,
-              do: "commit",
-              else: "commits"} on {@destroy_check.result["branch"]} will be lost.
+            <p :if={
+              @destroy_check.result["changed_files"] > 0 or
+                @destroy_check.result["unpushed_commits"] > 0 or
+                @destroy_check.result["has_stash"] != true
+            }>
+              {@destroy_check.result["changed_files"]} uncommitted {if @destroy_check.result[
+                                                                         "changed_files"
+                                                                       ] == 1,
+                                                                       do: "change",
+                                                                       else: "changes"} and {@destroy_check.result[
+                "unpushed_commits"
+              ]} unpushed {if @destroy_check.result["unpushed_commits"] == 1,
+                do: "commit",
+                else: "commits"} on {@destroy_check.result["branch"]} will be lost.
+            </p>
+            <p :if={@destroy_check.result["has_stash"] == true}>Stashed work will be lost.</p>
           </.callout>
           <.callout :if={@destroy_check.status == :failed} kind="warning">
             Couldn't check git status: {@destroy_check.result["error"]}

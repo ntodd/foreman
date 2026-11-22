@@ -88,20 +88,30 @@ defmodule Foreman.Capacity do
   end
 
   @doc "hostRequirements.cpus as a number."
-  def req_cpus(%{"cpus" => cpus}) when is_number(cpus), do: cpus
+  def req_cpus(%{"cpus" => cpus}) when is_number(cpus) and cpus > 0 and cpus <= 1_000_000,
+    do: cpus
+
   def req_cpus(_), do: nil
 
   @doc ~s|hostRequirements.memory ("8gb", "512mb") in MB.|
   def req_memory(%{"memory" => memory}) when is_binary(memory), do: parse_size(memory)
   def req_memory(_), do: nil
 
-  def parse_size(value) do
+  def req_memory_label(%{"memory" => memory} = reqs) do
+    if req_memory(reqs), do: memory
+  end
+
+  def req_memory_label(_), do: nil
+
+  def parse_size(value) when is_binary(value) and byte_size(value) <= 64 do
     case Regex.run(~r/\A\s*(\d+(?:\.\d+)?)\s*(tb|gb|mb|kb)?\s*\z/i, value) do
       [_, n, unit] -> round(String.to_float(normalize(n)) * multiplier(String.downcase(unit)))
       [_, n] -> round(String.to_float(normalize(n)) / (1024 * 1024))
       _ -> nil
     end
   end
+
+  def parse_size(_), do: nil
 
   defp normalize(n), do: if(String.contains?(n, "."), do: n, else: n <> ".0")
   defp multiplier("tb"), do: 1024 * 1024
@@ -152,13 +162,15 @@ defmodule Foreman.Capacity do
     }
   end
 
-  defp allocated?(%{observed_state: state})
-       when state in ~w(running partial starting creating pending), do: true
+  @doc "Whether this environment already counts toward its box's provisioned capacity."
 
-  defp allocated?(%{desired_state: "running", observed_state: state})
-       when state in ~w(stopped suspended missing), do: true
+  def allocated?(%{observed_state: state})
+      when state in ~w(running partial starting creating pending), do: true
 
-  defp allocated?(%{vm_size: size, observed_state: state}),
+  def allocated?(%{desired_state: "running", observed_state: state})
+      when state in ~w(stopped suspended missing), do: true
+
+  def allocated?(%{vm_size: size, observed_state: state}),
     do: is_map(size) and state != "suspended"
 
   defp thresholds(%Box{} = box),
