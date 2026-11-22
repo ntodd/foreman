@@ -39,20 +39,15 @@ defmodule Foreman.Operations.LogBuffer do
   def init(_) do
     Process.send_after(self(), :flush, @flush_every)
     # chunks: op_id => redacted text not written yet (newest first)
-    # partial: op_id => {unredacted unfinished line, when it was last extended}
+    # partial: op_id => {raw tail, already masked prefix length, last extended at}
     {:ok, %{chunks: %{}, partial: %{}}}
   end
 
   @impl true
   def handle_cast({:append, op_id, data}, state) do
-    {held, state} = pop_partial(state, op_id)
-    {ready, rest} = split_lines(held <> data)
-
-    # A line too long to hold goes out, but not a tail that could be the
-    # start of a secret.
-    {ready, rest} = if rest == "", do: hold_back(op_id, ready), else: {ready, rest}
-
-    {:noreply, state |> emit(op_id, ready) |> hold(op_id, rest)}
+    {held, covered, state} = pop_partial(state, op_id)
+    text = held <> data
+    {:noreply, release(state, op_id, text, line_cut(text), covered)}
   end
 
   @impl true
@@ -61,10 +56,8 @@ defmodule Foreman.Operations.LogBuffer do
   end
 
   def handle_call({:flush, op_id}, _from, state) do
-    {held, state} = pop_partial(state, op_id)
-    # The start of a secret whose rest never came is still part of it.
-    {shown, cut} = hold_back(op_id, held)
-    state = emit(state, op_id, shown <> if(cut == "", do: "", else: "[redacted]"))
+    {held, covered, state} = pop_partial(state, op_id)
+    state = release(state, op_id, held, byte_size(held), covered, true)
     {chunks, state} = pop_in(state.chunks[op_id])
     if chunks, do: write(op_id, chunks)
     {:reply, :ok, state}
@@ -73,14 +66,14 @@ defmodule Foreman.Operations.LogBuffer do
   @impl true
   def handle_info(:flush, state) do
     cutoff = now() - @hold_partial_ms
-    {stale, fresh} = Enum.split_with(state.partial, fn {_, {_, at}} -> at <= cutoff end)
+    {stale, fresh} = Enum.split_with(state.partial, fn {_, {_, _, at}} -> at <= cutoff end)
 
     # A prompt waiting for input is shown, up to anything that could be the
     # start of a secret, which waits for the next read.
     state =
-      Enum.reduce(stale, %{state | partial: Map.new(fresh)}, fn {op_id, {held, _}}, acc ->
-        {shown, kept} = hold_back(op_id, held)
-        acc |> emit(op_id, shown) |> hold(op_id, kept)
+      Enum.reduce(stale, %{state | partial: Map.new(fresh)}, fn {op_id, {held, covered, _}},
+                                                                acc ->
+        release(acc, op_id, held, byte_size(held), covered)
       end)
 
     Enum.each(state.chunks, fn {op_id, chunks} -> write(op_id, chunks) end)
@@ -88,53 +81,47 @@ defmodule Foreman.Operations.LogBuffer do
     {:noreply, %{state | chunks: %{}}}
   end
 
-  defp hold(state, _op_id, ""), do: state
-  defp hold(state, op_id, text), do: put_in(state.partial[op_id], {text, now()})
+  defp release(state, op_id, text, cut, covered, final? \\ false) do
+    {shown, kept, covered} = Redactions.split(op_id, text, cut, covered)
 
-  defp hold_back(op_id, text) do
-    Redactions.hold_back(op_id, text)
+    if final? do
+      shown = if kept != "" and covered == 0, do: shown <> "[redacted]", else: shown
+      emit(state, op_id, shown)
+    else
+      state = emit(state, op_id, shown)
+
+      if kept == "",
+        do: state,
+        else: put_in(state.partial[op_id], {:binary.copy(kept), covered, now()})
+    end
   rescue
-    _ -> {text, ""}
+    # Reconstructing secret values may need the database after a restart.
+    _ -> state
   end
 
   defp pop_partial(state, op_id) do
     case Map.pop(state.partial, op_id) do
-      {{held, _at}, partial} -> {held, %{state | partial: partial}}
-      {nil, _} -> {"", state}
+      {{held, covered, _at}, partial} -> {held, covered, %{state | partial: partial}}
+      {nil, _} -> {"", 0, state}
     end
   end
 
-  # Splits after the last line ending ("\r" too, for progress output). An
-  # unfinished line too long to hold goes out whole.
-  defp split_lines(text) do
-    case :binary.matches(text, ["\n", "\r"]) do
-      [] when byte_size(text) > @max_partial ->
-        {text, ""}
+  # Release complete lines and overlong partial lines.
+  defp line_cut(text) do
+    last =
+      case List.last(:binary.matches(text, ["\n", "\r"])) do
+        nil -> 0
+        {pos, 1} -> pos + 1
+      end
 
-      [] ->
-        {"", text}
-
-      matches ->
-        {pos, 1} = List.last(matches)
-        cut = pos + 1
-        rest = binary_part(text, cut, byte_size(text) - cut)
-
-        if byte_size(rest) > @max_partial,
-          do: {text, ""},
-          else: {binary_part(text, 0, cut), rest}
-    end
+    if byte_size(text) - last > @max_partial, do: byte_size(text), else: last
   end
 
   defp emit(state, _op_id, ""), do: state
 
   defp emit(state, op_id, text) do
-    text = Redactions.redact(op_id, text)
     Phoenix.PubSub.broadcast(Foreman.PubSub, "operation:" <> op_id, {:op_log, op_id, text})
     %{state | chunks: Map.update(state.chunks, op_id, [text], &[text | &1])}
-  rescue
-    # Redaction can need the database (after a restart); a failure there
-    # drops this text rather than the buffer, and never shows it unscrubbed.
-    _ -> state
   end
 
   defp now, do: System.monotonic_time(:millisecond)

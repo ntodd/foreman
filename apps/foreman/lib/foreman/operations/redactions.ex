@@ -45,22 +45,24 @@ defmodule Foreman.Operations.Redactions do
   end
 
   @doc """
-  Splits `text` into what can be shown now and its longest tail that is
-  the start of one of the operation's secrets (the rest may be in the next
-  read), which has to wait.
+  Redacts up to `cut`, holding any unfinished secret prefix for the next
+  read. Recognition uses the unsplit text, including already masked bytes.
   """
-  @spec hold_back(String.t(), binary()) :: {binary(), binary()}
-  def hold_back(op_id, text) do
+  def split(_op_id, text, 0, covered), do: {"", text, covered}
+
+  def split(op_id, text, cut, covered) do
+    prepared = values(op_id)
     size = byte_size(text)
 
     keep =
-      op_id
-      |> values()
+      prepared
       |> secret_values()
       |> Enum.map(fn value -> longest_start(value, text, min(byte_size(value) - 1, size)) end)
       |> Enum.max(fn -> 0 end)
 
-    {binary_part(text, 0, size - keep), binary_part(text, size - keep, keep)}
+    cut = min(cut, size - keep)
+    {shown, covered} = Redaction.redact_prefix(prepared, text, cut, covered)
+    {shown, binary_part(text, cut, size - cut), covered}
   end
 
   defp secret_values(%Redaction{values: values}), do: values

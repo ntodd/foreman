@@ -74,24 +74,57 @@ defmodule ForemanProtocol.Redaction do
   already-prepared values (compiled on each call).
   """
   @spec redact(t() | [String.t()], term()) :: term()
-  def redact(%__MODULE__{pattern: nil}, text), do: text
-
-  def redact(%__MODULE__{pattern: pattern} = prepared, text) when is_binary(text),
-    do: mask(text, pattern, Map.get(prepared, :single_line?, false))
-
-  def redact([], text), do: text
-
-  def redact(values, text) when is_list(values) and is_binary(text),
-    do: mask(text, :binary.compile_pattern(values), single_line?(values))
+  def redact(prepared, text)
+      when is_binary(text) and (is_struct(prepared, __MODULE__) or is_list(prepared)) do
+    case match_ranges(prepared, text) do
+      [] -> text
+      ranges -> splice(ranges, text)
+    end
+  end
 
   def redact(_prepared, other), do: other
 
+  @doc """
+  Redacts the first `cut` bytes using matches in the whole text. The
+  returned count is the number of retained bytes covered by a mask already
+  emitted. Pass that count with the raw tail on the next read so overlapping
+  values are still recognized and their shared bytes are shown only once.
+  """
+  def redact_prefix(prepared, text, cut, covered) do
+    {parts, pos} =
+      prepared
+      |> match_ranges(text)
+      |> Enum.reduce_while({[], covered}, fn
+        {start, _stop}, acc when start >= cut ->
+          {:halt, acc}
+
+        {start, stop}, {parts, pos} when pos > 0 and start <= pos ->
+          {:cont, {parts, max(pos, stop)}}
+
+        {start, stop}, {parts, pos} ->
+          {:cont, {[@mask, binary_part(text, pos, start - pos) | parts], stop}}
+      end)
+
+    last = min(pos, cut)
+    shown = Enum.reverse([binary_part(text, last, cut - last) | parts])
+    {IO.iodata_to_binary(shown), max(0, pos - cut)}
+  end
+
+  defp match_ranges(%__MODULE__{pattern: nil}, _text), do: []
+  defp match_ranges([], _text), do: []
+
+  defp match_ranges(%__MODULE__{pattern: pattern} = prepared, text),
+    do: match_ranges(text, pattern, Map.get(prepared, :single_line?, false))
+
+  defp match_ranges(values, text) when is_list(values),
+    do: match_ranges(text, :binary.compile_pattern(values), single_line?(values))
+
   defp single_line?(values), do: Enum.all?(values, &(:binary.match(&1, "\n") == :nomatch))
 
-  defp mask(text, pattern, single_line?) do
+  defp match_ranges(text, pattern, single_line?) do
     case :binary.match(text, pattern) do
-      :nomatch -> text
-      first -> text |> ranges(pattern, first, [], 0, single_line?) |> splice(text)
+      :nomatch -> []
+      first -> ranges(text, pattern, first, [], 0, single_line?)
     end
   end
 
