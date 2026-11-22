@@ -279,7 +279,7 @@ defmodule Foreman.Environments do
              env = get!(env.id)
 
              with :ok <- allowed?(env, action),
-                  :ok <- admit_start(env, confirmed?) do
+                  :ok <- admit_boot(env, action, confirmed?) do
                queue_action(scope, env, action, %{})
              end
            end) do
@@ -288,6 +288,12 @@ defmodule Foreman.Environments do
       {:ok, op}
     end
   end
+
+  defp admit_boot(%{desired_state: "running"} = env, action, confirmed?) when action != :start do
+    if Capacity.allocated?(env), do: :ok, else: admit_start(env, confirmed?)
+  end
+
+  defp admit_boot(env, _action, confirmed?), do: admit_start(env, confirmed?)
 
   defp admit_start(%{observed_state: "running", desired_state: "running"}, _confirmed?), do: :ok
 

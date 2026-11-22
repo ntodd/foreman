@@ -86,6 +86,29 @@ defmodule Foreman.EnvironmentsSuspendTest do
     end
   end
 
+  test "rebuilding a partially running environment reuses its existing allocation", ctx do
+    ctx.box
+    |> Ecto.Changeset.change(
+      capacity_policy: "refuse",
+      capacity: %{"cpus" => 1, "memory_mb" => 512},
+      vm: %{
+        "default_cpus" => 1,
+        "default_memory_mb" => 1024,
+        "host_memory_mb" => 512,
+        "host_cpus" => 1
+      }
+    )
+    |> Repo.update!()
+
+    env =
+      ctx.env
+      |> Ecto.Changeset.change(desired_state: "running", observed_state: "partial")
+      |> Repo.update!()
+
+    assert {:ok, op} = Environments.rebuild(ctx.scope, env)
+    assert op.action == "rebuild"
+  end
+
   test "resume checks the saved allocation after editing limits for the next cold boot", ctx do
     ctx.box
     |> Ecto.Changeset.change(

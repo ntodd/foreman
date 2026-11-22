@@ -162,13 +162,15 @@ defmodule Foreman.Capacity do
     }
   end
 
-  defp allocated?(%{observed_state: state})
-       when state in ~w(running partial starting creating pending), do: true
+  @doc "Whether this environment already counts toward its box's provisioned capacity."
 
-  defp allocated?(%{desired_state: "running", observed_state: state})
-       when state in ~w(stopped suspended missing), do: true
+  def allocated?(%{observed_state: state})
+      when state in ~w(running partial starting creating pending), do: true
 
-  defp allocated?(%{vm_size: size, observed_state: state}),
+  def allocated?(%{desired_state: "running", observed_state: state})
+      when state in ~w(stopped suspended missing), do: true
+
+  def allocated?(%{vm_size: size, observed_state: state}),
     do: is_map(size) and state != "suspended"
 
   defp thresholds(%Box{} = box),
