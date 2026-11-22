@@ -1670,6 +1670,40 @@ defmodule ForemanAgent.EnvTest do
   end
 
   describe "git_status" do
+    defp status_for_repo(ctx, dir) do
+      stub_tools()
+      {:ok, _} = Env.run("env.create", payload(), ctx)
+      stub_running_container()
+
+      stub(RunnerMock, :run, fn "docker", ["exec", "-u", _, "-w", _, _ | [program | argv]], _ ->
+        {out, status} = System.cmd(program, argv, cd: dir, stderr_to_stdout: true)
+
+        out =
+          if "status" in argv, do: "warning: directory could not be opened\n" <> out, else: out
+
+        kept = min(byte_size(out), 65_536)
+        {:ok, %{status: status, output: binary_part(out, byte_size(out) - kept, kept)}}
+      end)
+
+      fn -> Env.run("env.git_status", %{env_id: @env_id, slug: "storefront-2"}, ctx) end
+    end
+
+    test "counts large status output and tolerates diagnostics before the branch", %{
+      ctx: ctx,
+      tmp_dir: tmp
+    } do
+      dir = Path.join(tmp, "repo")
+      {_, 0} = System.cmd("git", ["init", "-q", "-b", "main", dir])
+      status = status_for_repo(ctx, dir)
+      assert {:ok, %{"changed_files" => 0}} = status.()
+
+      for i <- 1..900 do
+        File.touch!(Path.join(dir, "#{i}-" <> String.duplicate("x", 80)))
+      end
+
+      assert {:ok, %{"changed_files" => 900, "clean" => false}} = status.()
+    end
+
     test "asks git inside the container, never on the box", %{ctx: ctx} do
       stub_tools()
       {:ok, _} = Env.run("env.create", payload(), ctx)
@@ -1693,28 +1727,21 @@ defmodule ForemanAgent.EnvTest do
                                   "vscode",
                                   "-w",
                                   "/workspaces/storefront",
-                                  "abc123",
-                                  "git",
-                                  "-c",
-                                  "safe.directory=*",
-                                  "-c",
-                                  "core.fsmonitor=false" | rest
+                                  "abc123" | command
                                 ],
                                 _ ->
-        case rest do
-          ["status" | _] ->
-            {:ok,
-             %{status: 0, output: "## main...origin/main [ahead 2]\n M lib/a.ex\n?? new.txt\n"}}
+        ["git", "-c", "safe.directory=*", "-c", "core.fsmonitor=false" | rest] =
+          Enum.drop_while(command, &(&1 != "git"))
 
-          ["log" | _] ->
-            {:ok, %{status: 0, output: "abc one\ndef two\n"}}
+        output =
+          case rest do
+            ["status" | _] -> "## main...origin/main [ahead 2]\n2\n"
+            ["rev-list" | _] -> "2\n"
+            ["rev-parse", "HEAD"] -> @head <> "\n"
+            ["merge-base", "HEAD", "@{upstream}"] -> @base <> "\n"
+          end
 
-          ["rev-parse", "HEAD"] ->
-            {:ok, %{status: 0, output: @head <> "\n"}}
-
-          ["merge-base", "HEAD", "@{upstream}"] ->
-            {:ok, %{status: 0, output: @base <> "\n"}}
-        end
+        {:ok, %{status: 0, output: output}}
       end)
 
       assert {:ok, result} =
@@ -1739,8 +1766,8 @@ defmodule ForemanAgent.EnvTest do
 
       stub(RunnerMock, :run, fn "docker", args, _ ->
         case Enum.drop_while(args, &(&1 != "core.fsmonitor=false")) |> tl() do
-          ["status" | _] -> {:ok, %{status: 0, output: "## topic\n"}}
-          ["log" | _] -> {:ok, %{status: 0, output: ""}}
+          ["status" | _] -> {:ok, %{status: 0, output: "## topic\n0\n"}}
+          ["rev-list" | _] -> {:ok, %{status: 0, output: "0\n"}}
           # Whatever runs in the container answers for git there.
           ["rev-parse", "HEAD"] -> {:ok, %{status: 0, output: "../../etc\n"}}
           ["merge-base" | _] -> {:ok, %{status: 128, output: "fatal: no upstream configured\n"}}
