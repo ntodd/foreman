@@ -175,7 +175,23 @@ defmodule ForemanAgent.Devcontainer.Dockerfile do
   def supports_build_contexts(%{preamble: %{version: nil, directives: directives}}),
     do: if(directives["syntax"], do: :unknown, else: false)
 
-  def supports_build_contexts(%{preamble: %{version: version}}) do
+  def supports_build_contexts(%{preamble: %{version: version}}),
+    do: supports_context_version?(version)
+
+  @doc "Syntax directive for a build that mounts features from a named context."
+  def feature_syntax(syntax) do
+    version = syntax_version(syntax)
+
+    if version && !supports_context_version?(version) do
+      if String.contains?(version, "-labs"),
+        do: "docker/dockerfile:1.4-labs",
+        else: "docker/dockerfile:1.4"
+    else
+      syntax
+    end
+  end
+
+  defp supports_context_version?(version) do
     case Regex.run(~r/^\d+(\.\d+){0,2}/, version) do
       nil ->
         # latest, labs or no tag.

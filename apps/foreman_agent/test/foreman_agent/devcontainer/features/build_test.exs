@@ -190,6 +190,27 @@ defmodule ForemanAgent.Devcontainer.Features.BuildTest do
       assert build.contexts == [{"dev_containers_feature_content_source", dst}]
     end
 
+    test "uses a named-context capable frontend for features on older Dockerfiles", %{
+      sets: sets,
+      dst: dst
+    } do
+      for {pin, minimum} <- [{"1.2", "1.4"}, {"1.3-labs", "1.4-labs"}] do
+        build =
+          Build.dockerfile(sets,
+            dst: dst,
+            base_name: "base",
+            image_user: "root",
+            container_user: "root",
+            remote_user: "root",
+            metadata: [],
+            container_env: nil,
+            syntax: "docker/dockerfile:#{pin}"
+          )
+
+        assert String.starts_with?(build.prefix, "# syntax=docker/dockerfile:#{minimum}\n")
+      end
+    end
+
     test "keeps the Dockerfile's own syntax directive", %{sets: sets, dst: dst} do
       build =
         Build.dockerfile(sets,

@@ -12,7 +12,7 @@ defmodule ForemanAgent.Devcontainer.Features.Build do
   built by one reuses the layers the other built.
   """
 
-  alias ForemanAgent.Devcontainer.Metadata
+  alias ForemanAgent.Devcontainer.{Dockerfile, Metadata}
   alias ForemanAgent.SafeFS
 
   @container_dir "/tmp/dev-container-features"
@@ -244,7 +244,7 @@ defmodule ForemanAgent.Devcontainer.Features.Build do
     """
 
     %{
-      prefix: prefix(opts[:syntax]),
+      prefix: prefix(Dockerfile.feature_syntax(opts[:syntax])),
       content: content,
       target: @target,
       args: [
