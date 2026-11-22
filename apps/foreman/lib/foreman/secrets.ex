@@ -278,24 +278,27 @@ defmodule Foreman.Secrets do
   # -- resolution --------------------------------------------------------------------
 
   @doc "The secrets an environment gets, name => value, with later scopes winning."
-  def resolve(%Environment{} = env) do
+  def resolve(%Environment{} = env, opts \\ []) do
     env
-    |> env_secrets()
+    |> env_secrets(Keyword.get(opts, :include_shared, true))
     |> Enum.concat()
     |> Enum.reduce(%{}, fn s, acc -> Map.put(acc, s.name, s.value) end)
   end
 
+  def shared?(%Environment{} = env) do
+    keys = shared_keys(env)
+    Foreman.Repo.exists?(from s in Secret, where: s.scope_key in ^keys)
+  end
+
+  defp shared_keys(env), do: ["owner:" <> env.repo.owner_id, "repo:" <> env.repo_id]
+
   # The secrets that reach an environment, one list per scope from owner
   # to environment. A user secret limited to other repos doesn't.
-  defp env_secrets(%Environment{} = env) do
+  defp env_secrets(%Environment{} = env, include_shared \\ true) do
     env = Foreman.Repo.preload(env, :repo)
 
-    keys = [
-      "owner:" <> env.repo.owner_id,
-      "repo:" <> env.repo_id,
-      "user:" <> env.user_id,
-      "environment:" <> env.id
-    ]
+    shared = if include_shared, do: shared_keys(env), else: []
+    keys = shared ++ ["user:" <> env.user_id, "environment:" <> env.id]
 
     by_key =
       from(s in Secret, where: s.scope_key in ^keys, order_by: s.name)

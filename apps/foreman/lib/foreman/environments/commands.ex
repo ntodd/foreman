@@ -37,7 +37,7 @@ defmodule Foreman.Environments.Commands do
             base(env)
             |> with_start_limits(env)
             |> Map.put(:compose_env, compose_env(s.values))
-            |> put_present(:registry_auth, up_registry_auth(env))
+            |> put_present(:registry_auth, up_registry_auth(env, s))
 
           command(op, "env.start", payload)
         end)
@@ -86,11 +86,11 @@ defmodule Foreman.Environments.Commands do
   defp restart(env, mode, changed, s) do
     base(env)
     |> Map.merge(%{mode: mode, changed: changed, compose_env: compose_env(s.values)})
-    |> put_present(:registry_auth, up_registry_auth(env))
+    |> put_present(:registry_auth, up_registry_auth(env, s))
   end
 
   defp with_secrets(env, fun) do
-    secrets = secrets(env)
+    secrets = secrets(env, fn -> elem(github_token(env), 0) end)
 
     with {:ok, cmd, extra} <- fun.(secrets) do
       {:ok, cmd, Map.put(extra, "secret_hashes", secrets.hashes)}
@@ -130,7 +130,7 @@ defmodule Foreman.Environments.Commands do
     # the token follows with the next refresh.
     {token, token_notice, token_status} = github_token(env)
     {type, extra} = up_command(op.action, env, token)
-    secrets = secrets(env)
+    secrets = secrets(env, fn -> token end)
     identity = Accounts.effective_identity(env.user, env.repo)
     features = features(env)
 
@@ -157,7 +157,7 @@ defmodule Foreman.Environments.Commands do
         })
         |> put_present(:dotfiles, dotfiles(identity))
         |> put_present(:features, features)
-        |> put_present(:registry_auth, registry_auth(env.repo.owner))
+        |> put_present(:registry_auth, secrets.registry_auth)
         |> Map.merge(extra)
 
       with {:ok, cmd, _} <- command(op, type, payload) do
@@ -178,9 +178,9 @@ defmodule Foreman.Environments.Commands do
   # refresh, which this puts first in line. (An expired login is
   # different: that token is dead, and the notice says to sign in again.)
   defp secrets_write(op, env) do
-    secrets = secrets(env)
-    identity = Accounts.effective_identity(env.user, env.repo)
     {token, notice, status} = github_token(env)
+    secrets = secrets(env, fn -> token end)
+    identity = Accounts.effective_identity(env.user, env.repo)
 
     payload =
       %{env_id: env.id, files: file_set(env, secrets, identity, token, notice)}
@@ -209,9 +209,25 @@ defmodule Foreman.Environments.Commands do
   defp compose_env(values),
     do: Map.reject(values, fn {name, _} -> ForemanProtocol.Schema.reserved_env?(name) end)
 
-  defp secrets(env) do
-    values = Secrets.resolve(env)
-    %{values: values, hashes: Secrets.hashes(values)}
+  defp secrets(env, get_token) do
+    shared? = share_credentials?(env, get_token)
+    values = Secrets.resolve(env, include_shared: shared?)
+    auth = if shared?, do: registry_auth(env.repo.owner)
+    %{values: values, hashes: Secrets.hashes(values), registry_auth: auth}
+  end
+
+  defp share_credentials?(env, get_token) do
+    cond do
+      not GitHub.configured?() ->
+        true
+
+      is_nil(env.repo.owner.registry_token) and not Secrets.shared?(env) ->
+        false
+
+      true ->
+        token = get_token.()
+        is_binary(token) and GitHub.can_read?(token, env.repo, [])
+    end
   end
 
   defp file_set(env, secrets, identity, token, token_notice) do
@@ -339,10 +355,10 @@ defmodule Foreman.Environments.Commands do
 
   # A start or restart runs devcontainer up too, which resolves the repo's
   # features again. Protocol 4: an older agent refuses the field there.
-  defp up_registry_auth(%{box: %{protocol_version: v}} = env) when is_integer(v) and v >= 4,
-    do: registry_auth(env.repo.owner)
+  defp up_registry_auth(%{box: %{protocol_version: v}}, secrets) when is_integer(v) and v >= 4,
+    do: secrets.registry_auth
 
-  defp up_registry_auth(_env), do: nil
+  defp up_registry_auth(_env, _secrets), do: nil
 
   defp put_present(map, _key, nil), do: map
   defp put_present(map, _key, ""), do: map
