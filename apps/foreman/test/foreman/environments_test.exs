@@ -1037,10 +1037,18 @@ defmodule Foreman.EnvironmentsTest do
         {:ok, %{key: "k2", id: "2"}}
       end)
 
-      {:ok, _} = Environments.retry(scope, Repo.reload!(env))
+      # Older control planes kept this key on the failed environment.
+      env =
+        env |> Repo.reload!() |> Ecto.Changeset.change(ts_authkey: "expired") |> Repo.update!()
+
+      {:ok, _} = Environments.retry(scope, env)
 
       assert_receive {:dispatch, %Command{type: "env.create"} = retry}
       assert retry.payload.files["ts-authkey"] == "k2"
+
+      Foreman.Environments.Server.resend(env.id, retry.op_id)
+      assert_receive {:dispatch, %Command{type: "env.create"} = resend}
+      assert resend.payload.files["ts-authkey"] == "k2"
     end
 
     test "a rebuild of one that never came up gets a fresh key too", %{
