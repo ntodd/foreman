@@ -72,7 +72,7 @@ defmodule ForemanAgent.Devcontainer.Features do
           dst: dst
         }
 
-        with {:ok, worklist} <- graph(features, state),
+        with {:ok, worklist} <- graph(features, config["features"], state),
              {:ok, worklist} <- prioritize(worklist, config["overrideFeatureInstallOrder"], state),
              {:ok, ordered} <- order(worklist) do
           fetch(Enum.map(ordered, & &1.set), state)
@@ -130,9 +130,16 @@ defmodule ForemanAgent.Devcontainer.Features do
   # -- the graph -----------------------------------------------------------
 
   # Every feature to install, with what it depends on found too.
-  defp graph(features, state) do
+  defp graph(features, declared, state) do
+    repo_ids = user_features(declared, %{}) |> MapSet.new(&elem(&1, 0))
     roots = for {id, options} <- features, do: new_node(id, options)
-    {:ok, walk(roots, [], state)}
+    {repo, extra} = Enum.split_with(roots, &MapSet.member?(repo_ids, &1.user_feature_id))
+
+    # Resolve the repo's entire dependency closure before adding personal
+    # features. Shared dependencies keep their repository provenance.
+    repo_graph = walk(repo, [], state)
+    done = Enum.reverse(Enum.map(repo_graph, &put_in(&1.set.repo_feature?, true)))
+    {:ok, walk(extra, done, state)}
   end
 
   defp new_node(id, options) do
@@ -286,6 +293,7 @@ defmodule ForemanAgent.Devcontainer.Features do
       metadata: metadata,
       order: %{},
       consecutive_id: nil,
+      repo_feature?: false,
       cache_path: nil,
       computed_digest: nil
     }
@@ -790,15 +798,12 @@ defmodule ForemanAgent.Devcontainer.Features do
   of the config's own features that came from a registry or a URL, and
   what those depend on, with the digest that was pulled.
   """
-  @spec lockfile([set()], map(), map()) :: String.t()
-  def lockfile(sets, config, additional) do
-    declared = Map.keys(if is_map(config["features"]), do: config["features"], else: %{})
-    excluded = Map.keys(additional || %{}) -- declared
-
+  @spec lockfile([set()]) :: String.t()
+  def lockfile(sets) do
     entries =
       for %{source: %{type: type} = source} = set <- sets,
           type in [:oci, :tarball],
-          source.user_feature_id not in excluded do
+          set.repo_feature? do
         resolved =
           case source do
             %{type: :oci, ref: ref} -> "#{ref.registry}/#{ref.path}@#{set.computed_digest}"

@@ -728,7 +728,7 @@ defmodule ForemanAgent.Devcontainer.FeaturesTest do
     end
   end
 
-  describe "lockfile/3" do
+  describe "lockfile/1" do
     test "records where each of the config's features came from", %{dst: dst, opts: opts} do
       registry = FakeRegistry.start()
       base = "#{registry.host}/org/features/base"
@@ -746,9 +746,17 @@ defmodule ForemanAgent.Devcontainer.FeaturesTest do
           "dependsOn" => %{base => %{}}
         })
 
+      user_dep = "#{registry.host}/org/features/user-dep:1"
+
+      FakeRegistry.put_feature(registry, "org/features/user-dep", "1", %{
+        "id" => "user-dep",
+        "version" => "1.0.0"
+      })
+
       FakeRegistry.put_feature(registry, "org/features/extra", "1", %{
         "id" => "extra",
-        "version" => "0.1.0"
+        "version" => "0.1.0",
+        "dependsOn" => %{user_dep => %{}, base => %{}}
       })
 
       app = "#{registry.host}/org/features/app:1"
@@ -759,7 +767,7 @@ defmodule ForemanAgent.Devcontainer.FeaturesTest do
       {:ok, sets} = Features.prepare(config, additional, dst, opts)
 
       # Not the additional feature, and not the local one.
-      assert Features.lockfile(sets, config, additional) == """
+      assert Features.lockfile(sets) == """
              {
                "features": {
                  "#{app}": {
@@ -784,7 +792,7 @@ defmodule ForemanAgent.Devcontainer.FeaturesTest do
       config = config(%{"./second" => %{}})
       {:ok, sets} = Features.prepare(config, %{}, dst, opts)
 
-      assert Features.lockfile(sets, config, %{}) == "{\n  \"features\": {}\n}\n"
+      assert Features.lockfile(sets) == "{\n  \"features\": {}\n}\n"
     end
   end
 

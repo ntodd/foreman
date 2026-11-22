@@ -939,7 +939,7 @@ defmodule ForemanAgent.Devcontainer do
   defp current_lockfile(_params, _path), do: {:ok, nil}
 
   defp keep_lockfile(%{params: %{lockfile: true} = params} = state, path, [_ | _] = sets, current) do
-    content = Features.lockfile(sets, state.config, params.additional_features)
+    content = Features.lockfile(sets)
 
     cond do
       JSON.decode!(content) == current -> :ok
