@@ -76,7 +76,7 @@ try {
       const row = name === "boxes" ? "#join-token-form" : name === "secrets" ? "#user-secrets-form" : null
       if (row && width >= 768) {
         const selector = name === "boxes" ? "input:not([type=hidden]), select, button" : "input[type=text], textarea"
-        const aligned = await browser.evaluate(`(() => {
+        const aligned = () => browser.evaluate(`(() => {
           const controls = [...document.querySelector(${JSON.stringify(row)}).querySelectorAll(${JSON.stringify(selector)})]
           const first = controls[0].getBoundingClientRect()
           return controls.every(control => {
@@ -84,7 +84,13 @@ try {
             return Math.abs(rect.top - first.top) < 1 && Math.abs(rect.bottom - first.bottom) < 1
           })
         })()`)
-        if (!aligned) problems.push("form controls have uneven edges")
+        if (!await aligned()) problems.push("form controls have uneven edges")
+        if (name === "boxes") {
+          await browser.fill(row + " input[name$='[box_name]']", "Bad name")
+          await browser.submit(row)
+          await browser.waitFor("document.querySelector('#join-token-form').textContent.includes('must be lowercase')")
+          if (!await aligned()) problems.push("validation moved the create button")
+        }
       }
 
       const status = problems.length ? "FAIL" : "ok"

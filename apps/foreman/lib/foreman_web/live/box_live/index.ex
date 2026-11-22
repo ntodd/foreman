@@ -342,7 +342,7 @@ defmodule ForemanWeb.BoxLive.Index do
               placeholder="tskey-auth-..."
               autocomplete="off"
             />
-            <.button type="submit" variant="primary" class="sm:self-end sm:justify-self-start">
+            <.button type="submit" variant="primary" class="sm:mt-[1.6875rem] sm:justify-self-start">
               Create join token
             </.button>
           </.form>
