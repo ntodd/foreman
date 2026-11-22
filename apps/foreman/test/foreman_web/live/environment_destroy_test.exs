@@ -31,6 +31,26 @@ defmodule ForemanWeb.EnvironmentDestroyTest do
     view
   end
 
+  test "a failed git check shows the agent's reason and still requires confirmation", %{
+    conn: conn,
+    env: env
+  } do
+    {:ok, view, _html} = live(conn, ~p"/environments/#{env.id}")
+    view |> element("#env-actions [role=menuitem]", "Destroy") |> render_click()
+    assert_receive {:dispatch, %{type: "env.git_status", op_id: op_id}}
+
+    {:ok, event} =
+      ForemanProtocol.Event.new("op.result", %{
+        op_id: op_id,
+        status: "error",
+        error: "Workspace unavailable"
+      })
+
+    :ok = Foreman.Agents.handle_event(env.box_id, event)
+    assert has_element?(view, "#destroy-modal", "Workspace unavailable")
+    assert has_element?(view, "#confirm-destroy")
+  end
+
   test "Enter in the confirmation destroys once the slug is typed", %{conn: conn, env: env} do
     view = open_destroy(conn, env)
 
