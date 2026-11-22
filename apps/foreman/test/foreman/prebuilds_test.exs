@@ -93,6 +93,19 @@ defmodule Foreman.PrebuildsTest do
       assert Repo.reload!(prebuild).repos == [ctx.repo.name]
     end
 
+    test "a competing build admitted during token resolution wins the slot", ctx do
+      online(ctx.box)
+
+      expect(ClientMock, :repo_read_token, fn _, _, _ ->
+        prebuild_fixture(ctx.repo, ctx.box, status: "building")
+        {:ok, "ghs_readonly"}
+      end)
+
+      assert {:error, message} = Prebuilds.build(ctx.scope, ctx.repo, ctx.box)
+      assert message =~ "already building"
+      refute_received {:dispatch, %Command{type: "box.prebuild"}}
+    end
+
     test "its token and record take in the extra repos set on the repo's owner", ctx do
       online(ctx.box)
       ctx.repo.owner |> Ecto.Changeset.change(extra_repos: ["shared-config"]) |> Repo.update!()
