@@ -23,7 +23,8 @@ defmodule ForemanProtocol do
   # box.prebuild.delete, and env.create's `prebuild_id`.
   # 7: start and stop carry the assigned limits for legacy VM record migration.
   # 8: the join reports VM defaults and host caps, and inventory carries boot sizes.
-  @version 8
+  # 9: box.gc reports orphan disk candidates before the control plane authorizes deletion.
+  @version 9
 
   # Usually the protocol before this one is accepted too. Protocol 5
   # agents run environments on the box's shared Docker, which protocol 6

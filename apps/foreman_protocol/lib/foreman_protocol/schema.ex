@@ -45,6 +45,9 @@ defmodule ForemanProtocol.Schema do
 
   @max_text 1_048_576
 
+  @doc "Whether the value is a canonical wire-format UUID."
+  def uuid?(value), do: is_binary(value) and Regex.match?(@uuid, value)
+
   @doc "File names the agent will write into an environment's secrets directory."
   def secret_files, do: ~w(secrets.env github-token ts-authkey gitconfig notices)
 

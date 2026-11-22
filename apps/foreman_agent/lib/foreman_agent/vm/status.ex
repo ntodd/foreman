@@ -153,19 +153,14 @@ defmodule ForemanAgent.VM.Status do
   @doc """
   Prunes Docker in every running VM, drops guest images and agent disks
   no VM uses any more, and the VMs of prebuilds nothing is building (an
-  agent that stopped mid-build leaves one). With `prebuilds` (the ones the
-  control plane knows on this box), deletes the box's others.
+  agent that stopped mid-build leaves one). Reports unclaimed prebuild
+  disks for the control plane to confirm against its current records.
   """
   @spec gc(map(), map()) :: {:ok, map()} | {:error, String.t()}
   def gc(ctx, payload \\ %{}) do
     config = ctx.config
     machine = Machine.impl(config)
     envs = VM.list(config)
-
-    # First, before anything slow: a build started after the control plane
-    # listed its prebuilds can't have finished yet.
-    with %{prebuilds: known} when is_list(known) <- payload,
-         do: prune_prebuilds(config, known, ctx)
 
     # Every VM at once, each with a deadline: one guest that never answers
     # doesn't hold up the others, or the pruning on the box after.
@@ -228,27 +223,28 @@ defmodule ForemanAgent.VM.Status do
     )
 
     case failures ++ List.flatten(cleanup_failures) do
-      [] -> {:ok, %{}}
+      [] -> {:ok, orphan_report(config, payload)}
       errors -> {:error, Enum.map_join(errors, "; ", fn {id, m} -> "#{id}: #{m}" end)}
     end
   end
 
-  defp prune_prebuilds(config, known, ctx) do
-    case File.ls(config.prebuilds_root) do
-      {:ok, names} ->
-        for name <- names, name =~ ~r/\A[0-9a-f-]{36}\z/, name not in known do
-          ctx.log.(
-            "info",
-            "Removing the prebuild #{name}, which the control plane doesn't know\n"
-          )
+  defp orphan_report(config, %{check_prebuilds: known}) do
+    known = MapSet.new(known)
 
-          File.rm_rf(Path.join(config.prebuilds_root, name))
-        end
+    candidates =
+      with {:ok, names} <- File.ls(config.prebuilds_root) do
+        names
+        |> Stream.filter(&ForemanProtocol.Schema.uuid?/1)
+        |> Stream.reject(&MapSet.member?(known, &1))
+        |> Enum.take(256)
+      else
+        {:error, _} -> []
+      end
 
-      {:error, _} ->
-        :ok
-    end
+    %{orphan_prebuilds: candidates}
   end
+
+  defp orphan_report(_config, _payload), do: %{}
 
   defp in_flight do
     Ops.in_flight()

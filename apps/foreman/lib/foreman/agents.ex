@@ -62,13 +62,19 @@ defmodule Foreman.Agents do
     end
   end
 
-  # A prune names every prebuild the control plane knows on the box, and
-  # the box deletes the others: ones whose delete it never got, or that
-  # finished after they were forgotten.
+  # Protocol 9 reports candidate disks for confirmation. Older agents
+  # would delete from a stale inventory, so only prune their other resources.
   def run_box_command(%Scope{} = scope, box, "box.gc") do
-    if Scope.admin?(scope),
-      do: send_box_command(scope, box, "box.gc", %{prebuilds: Prebuilds.ids_on_box(box.id)}),
-      else: {:error, :unauthorized}
+    if Scope.admin?(scope) do
+      payload =
+        if is_integer(box.protocol_version) and box.protocol_version >= 9,
+          do: %{check_prebuilds: Prebuilds.ids_on_box(box.id)},
+          else: %{}
+
+      send_box_command(scope, box, "box.gc", payload)
+    else
+      {:error, :unauthorized}
+    end
   end
 
   def run_box_command(%Scope{} = scope, box, type)
