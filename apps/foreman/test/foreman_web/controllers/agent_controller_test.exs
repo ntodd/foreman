@@ -47,6 +47,20 @@ defmodule ForemanWeb.AgentControllerTest do
            |> json_response(401)
   end
 
+  test "an admin sees that a revoked name is reserved", %{
+    admin: admin,
+    token: token,
+    public: public
+  } do
+    {:ok, box} = Boxes.enroll(token, %{"public_key" => public})
+    scope = Scope.for_user(admin)
+    {:ok, pending} = Boxes.create_join_token(scope, %{"box_name" => "desktop"})
+    {:ok, _} = Boxes.revoke(scope, box)
+    assert {:error, changeset} = Boxes.create_join_token(scope, %{"box_name" => "desktop"})
+    assert changeset.errors[:box_name]
+    assert {:error, :revoked} = Boxes.enroll(pending, %{"public_key" => public})
+  end
+
   test "only admins create join tokens" do
     member = user_fixture()
 

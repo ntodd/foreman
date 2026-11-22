@@ -224,7 +224,7 @@ since the firewall would cut environments off from the internet there.
 | `--block-lan` | blocks guest access to RFC 1918 networks. Both settings block IPv4 link-local services, including cloud metadata, with a DNS exception for configured resolvers. The box page shows the reported LAN policy. |
 | `--vm-subnet A.B` | gives VMs their addresses from `A.B.0.0/16` instead of `10.250.0.0/16`, for a LAN that already uses it. It has to be a private range. |
 | `--default-bridge-reaches-tailnet` | on a box with Docker, leaves Docker's default bridge out of the firewall ([tailscale.md](tailscale.md#boxes-on-the-tailnet)) |
-| `--reenroll` | enrolls the box again with a new `--token` (after revoking it, say); the old identity is moved aside |
+| `--reenroll` | enrolls the box again with a new `--token` under the name on that token. A revoked name stays reserved; create the replacement token for a new box name. The old identity is moved aside |
 | `--url` | the control plane's address, when the box reaches it some other way than the one in the command |
 
 Re-running the script refreshes the root helpers from the control plane’s fleet release

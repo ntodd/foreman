@@ -64,6 +64,16 @@ defmodule Foreman.Boxes do
       not changeset.valid? ->
         {:error, %{changeset | action: :insert}}
 
+      Repo.exists?(
+        from b in Box,
+          where:
+            b.name == ^Ecto.Changeset.get_field(changeset, :box_name) and not is_nil(b.revoked_at)
+      ) ->
+        changeset =
+          Ecto.Changeset.add_error(changeset, :box_name, "has been revoked; choose a new name")
+
+        {:error, %{changeset | action: :insert}}
+
       true ->
         data = Ecto.Changeset.apply_changes(changeset)
         raw = "fj_" <> (32 |> :crypto.strong_rand_bytes() |> Base.url_encode64(padding: false))
@@ -104,6 +114,7 @@ defmodule Foreman.Boxes do
         {:ok, box}
       else
         {:error, %Ecto.Changeset{} = changeset} -> {:error, changeset}
+        {:error, :revoked} -> {:error, :revoked}
         {:error, :bad_key} -> {:error, :bad_key}
         _ -> {:error, :invalid_token}
       end
