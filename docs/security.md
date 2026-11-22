@@ -355,6 +355,11 @@ table for guests, `inet foreman_guests`, that works on each VM's tap
   Configured resolvers can receive DNS on TCP and UDP port 53.
 - `install.sh --block-lan` extends that policy to RFC 1918 addresses
 
+Destroying a VM removes its tap before clearing connection tracking for its guest
+address. If the box lacks `conntrack` or cannot confirm the cleanup, it reserves
+that address until the host reboots. Installing `conntrack` allows flushed
+addresses to return to the pool immediately.
+
 What's left goes out through the box's NAT. The box's other table,
 `inet foreman`, also rejects anything arriving on an `fm-` interface,
 or on Docker's default bridge on a box that has Docker, bound for the

@@ -50,6 +50,7 @@ AGENT_ROOT=/opt/foreman-agent
 AGENT_USER=foreman
 POOL=10.250
 STATE=/var/lib/foreman-vmctl
+RETIRED=/run/foreman-vmctl-retired
 MEMINFO=/proc/meminfo
 RESOLV=/etc/resolv.conf
 LSM=/sys/kernel/security/lsm
@@ -86,7 +87,7 @@ net_index() {
   done
   i=0
   while [ "$i" -lt 16384 ]; do
-    if (set -C && printf '%s\n' "$1" > "$STATE/nets/$i") 2>/dev/null; then
+    if [ ! -e "$RETIRED/$i" ] && (set -C && printf '%s\n' "$1" > "$STATE/nets/$i") 2>/dev/null; then
       echo "$i"
       return 0
     fi
@@ -359,6 +360,18 @@ cmd_stop() {
   answer "ok"
 }
 
+# With the tap down no more guest traffic can establish flows. conntrack
+# also returns nonzero when a delete matched nothing. Confirm that case
+# with a successful empty lookup before returning the slot to the pool.
+clear_flows() {
+  command -v conntrack >/dev/null 2>&1 || return 1
+  for field in orig-src orig-dst reply-src reply-dst; do
+    conntrack -D -f ipv4 "--$field" "$1" >/dev/null 2>&1 && continue
+    remaining=$(conntrack -L -f ipv4 "--$field" "$1" 2>/dev/null) || return 1
+    [ -z "$remaining" ] || return 1
+  done
+}
+
 cmd_release() {
   if [ "$#" -ne 1 ] || ! uuid_ok "$1"; then answer "error release takes ENV_ID"; fi
   stop_unit "$1"
@@ -369,6 +382,13 @@ cmd_release() {
         answer "error could not remove fm-vm$n"
       fi
     fi
+    address=$POOL.$((n / 64)).$((4 * (n % 64) + 2))
+    if ! clear_flows "$address"; then
+      # /run and the kernel's conntrack table both reset on host reboot.
+      mkdir -p "$RETIRED" || answer "error could not create address quarantine"
+      touch "$RETIRED/$n" || answer "error could not quarantine address"
+    fi
+
     rm -f "$STATE/nets/$n" || answer "error could not release address"
   fi
   answer "ok"

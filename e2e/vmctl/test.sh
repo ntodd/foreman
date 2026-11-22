@@ -51,6 +51,13 @@ esac
 STUB
   chmod +x "$work/bin/$tool"
 done
+cat > "$work/bin/conntrack" <<STUB
+#!/bin/sh
+echo "conntrack \$*" >> "$work/calls"
+[ ! -e "$work/fail-conntrack" ]
+STUB
+chmod +x "$work/bin/conntrack"
+
 cat > "$work/bin/systemd-run" <<STUB
 #!/bin/sh
 printf '%s\n' "\$@" > "$work/last-run"
@@ -68,6 +75,7 @@ AGENT_ROOT=$work/agent
 AGENT_USER=foreman
 POOL=10.250
 STATE=$work/state
+RETIRED=$work/retired
 RESOLV=$work/resolv.conf
 LSM=$work/lsm
 MEMINFO=$work/meminfo
@@ -244,6 +252,15 @@ rm "$work/fail-del"
 expect "releases a VM" "release $env1" "ok"
 check "removes its tap" grep -q "ip link del fm-vm0" "$work/calls"
 check "frees its address" test ! -e "$work/state/nets/0"
+for field in orig-src orig-dst reply-src reply-dst; do
+  check "clears $field for the released guest" grep -Fxq "conntrack -D -f ipv4 --$field 10.250.0.2" "$work/calls"
+done
+expect "reuses a flushed address" "start $env1 1 1024 $guest 1.2.3" "ok started fm-vm0 10.250.0.2"
+touch "$work/fail-conntrack"
+expect "can destroy a VM when conntrack is unavailable" "release $env1" "ok"
+expect "skips the unflushed address" "start $env1 1 1024 $guest 1.2.3" "ok started fm-vm2 10.250.0.10"
+rm "$work/fail-conntrack"
+
 mkdir -p "$work/srv/vms/$env2/snapshot"
 : > "$work/srv/vms/$env2/snapshot/config.json"
 sed -i.bak "/foreman-vm-$env2/d" "$work/units"
