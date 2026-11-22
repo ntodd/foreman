@@ -462,6 +462,41 @@ defmodule Foreman.EnvironmentsTest do
     end
   end
 
+  test "destroying an environment removes its environment secrets", %{
+    scope: scope,
+    user: user,
+    repo: repo,
+    box: box
+  } do
+    connect_agent(box)
+    env = environment_fixture(user: user, repo: repo, box: box)
+
+    {:ok, _} =
+      Secrets.put_secret(scope, "environment", env, %{
+        "name" => "API_KEY",
+        "value" => "fixture-value"
+      })
+
+    assert_receive {:dispatch, %Command{type: "env.secrets.write"} = write}
+    succeed(box, write)
+
+    {:ok, _} = Environments.destroy(scope, env)
+    assert_receive {:dispatch, %Command{type: "env.destroy"} = cmd}
+    succeed(box, cmd)
+    assert Repo.reload!(env).destroyed_at
+
+    assert [] =
+             Repo.all(
+               from s in Foreman.Secrets.Secret, where: s.scope_key == ^("environment:" <> env.id)
+             )
+
+    assert {:error, :unauthorized} =
+             Secrets.put_secret(scope, "environment", env, %{
+               "name" => "STALE",
+               "value" => "fixture"
+             })
+  end
+
   describe "secrets changes" do
     setup %{scope: scope, repo: repo, box: box} do
       connect_agent(box)

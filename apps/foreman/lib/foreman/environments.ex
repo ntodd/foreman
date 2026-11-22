@@ -615,15 +615,18 @@ defmodule Foreman.Environments do
             else: Operations.mark(op, "failed", error: "the box was revoked", finished_at: now)
         end
 
-        {:ok,
-         env
-         |> Environment.state_changeset(%{
-           desired_state: "destroyed",
-           observed_state: "destroyed",
-           destroyed_at: now,
-           status_message: nil
-         })
-         |> Repo.update!()}
+        destroyed =
+          env
+          |> Environment.state_changeset(%{
+            desired_state: "destroyed",
+            observed_state: "destroyed",
+            destroyed_at: now,
+            status_message: nil
+          })
+          |> Repo.update!()
+
+        Secrets.delete_environment_secrets(destroyed)
+        {:ok, destroyed}
       end)
 
     cleanup_tailnet(env)
@@ -770,10 +773,9 @@ defmodule Foreman.Environments do
       attrs ->
         replaced_device(env, attrs[:tailscale_device_id])
 
-        env
-        |> Environment.state_changeset(attrs)
-        |> Repo.update!()
-        |> Map.put(:stale_notice, stale_notice?(op, env))
+        updated = env |> Environment.state_changeset(attrs) |> Repo.update!()
+        if attrs[:destroyed_at], do: Secrets.delete_environment_secrets(updated)
+        Map.put(updated, :stale_notice, stale_notice?(op, env))
     end
   end
 
