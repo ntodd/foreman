@@ -1715,7 +1715,9 @@ defmodule ForemanAgent.EnvTest do
         {_, 0} =
           System.cmd(
             "git",
-            ["-c", "user.name=Tester", "-c", "user.email=test@example.org" | args], cd: dir)
+            ["-c", "user.name=Tester", "-c", "user.email=test@example.org" | args],
+            cd: dir
+          )
       end
 
       git.(["commit", "-q", "--allow-empty", "-m", "base"])
