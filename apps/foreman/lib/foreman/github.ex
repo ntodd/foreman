@@ -384,6 +384,8 @@ defmodule Foreman.GitHub do
          {:ok, repos} <- client().list_installation_repos(token) do
       {archived, live} = Enum.split_with(repos, & &1["archived"])
 
+      versions = Repos.devcontainer_scan_versions(owner)
+
       for data <- live do
         Repos.upsert_repo(
           owner,
@@ -396,7 +398,7 @@ defmodule Foreman.GitHub do
             archived: data["archived"] || false,
             removed_at: nil
           }
-          |> Map.merge(devcontainer_attrs(token, data["full_name"], owner.login))
+          |> Map.merge(scan_attrs(versions[data["id"]], token, data, owner.login))
         )
       end
 
@@ -413,14 +415,27 @@ defmodule Foreman.GitHub do
 
   # When GitHub couldn't say (rate limits, outages), the repo keeps what
   # the last sync found rather than looking like it has no devcontainer.
-  defp devcontainer_attrs(token, full_name, owner_login) do
+  defp scan_attrs(previous, token, data, owner_login) do
+    version = {data["full_name"], data["default_branch"] || "main", data["pushed_at"]}
+
+    if is_binary(data["pushed_at"]) and previous == version do
+      %{}
+    else
+      devcontainer_attrs(token, data["full_name"], owner_login, data["pushed_at"])
+    end
+  end
+
+  defp devcontainer_attrs(token, full_name, owner_login, pushed_at) do
     case detect_devcontainer(token, full_name, owner_login) do
       {:error, reason} ->
         Logger.warning("couldn't check #{full_name} for a devcontainer: #{inspect(reason)}")
-        %{}
+        %{devcontainer_pushed_at: nil}
 
       attrs ->
-        Map.put(attrs, :devcontainer_checked_at, DateTime.utc_now())
+        Map.merge(attrs, %{
+          devcontainer_checked_at: DateTime.utc_now(),
+          devcontainer_pushed_at: pushed_at
+        })
     end
   end
 
@@ -433,9 +448,20 @@ defmodule Foreman.GitHub do
   answer, as opposed to the repo having no devcontainer.
   """
   def detect_devcontainer(token, full_name, owner_login) do
+    case find_config(token, full_name, @config_candidates) do
+      {:ok, nil} -> detect_nested(token, full_name, owner_login)
+      {:ok, found} -> devcontainer_fields(found, owner_login)
+      error -> error
+    end
+  end
+
+  @max_nested_candidates 32
+  defp detect_nested(token, full_name, owner_login) do
     with {:ok, nested} <- nested_configs(token, full_name),
-         {:ok, found} <- find_config(token, full_name, @config_candidates ++ nested) do
-      devcontainer_fields(found, owner_login)
+         {:ok, found} <- find_config(token, full_name, Enum.take(nested, @max_nested_candidates)) do
+      if is_nil(found) and length(nested) > @max_nested_candidates,
+        do: {:error, :nested_candidate_limit},
+        else: devcontainer_fields(found, owner_login)
     end
   end
 
