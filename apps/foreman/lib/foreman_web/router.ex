@@ -30,6 +30,11 @@ defmodule ForemanWeb.Router do
     plug :accepts, ["json"]
   end
 
+  scope "/", ForemanWeb do
+    pipe_through :api
+    get "/.well-known/oauth-authorization-server", OAuthMetadataController, :show
+  end
+
   # Health checks: no session, no pipeline, and not logged (they come
   # every few seconds).
   scope "/", ForemanWeb do
