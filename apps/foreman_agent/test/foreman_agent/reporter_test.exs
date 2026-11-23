@@ -61,9 +61,23 @@ defmodule ForemanAgent.ReporterTest do
     stub(RunnerMock, :run, fn _, _, _ -> {:ok, %{status: 0, output: ""}} end)
     stub(DockerMock, :info, fn -> {:ok, %{}} end)
 
+    env = ForemanProtocol.uuid()
+    workspace = String.duplicate("a", 64)
+
+    container = %{
+      "Id" => workspace,
+      "State" => "running",
+      "Labels" => %{
+        "foreman.env_id" => env,
+        "foreman.slug" => "workspace-1",
+        "com.docker.compose.service" => "app",
+        "foreman.devcontainer" => "true"
+      }
+    }
+
     expect(DockerMock, :list_containers, fn ["foreman.env_id"] ->
       send(parent, {:scan_started, self()})
-      receive do: (:release -> {:ok, []})
+      receive do: (:release -> {:ok, [container]})
     end)
 
     :ok = ForemanAgent.Outbox.attach(self())
@@ -74,7 +88,7 @@ defmodule ForemanAgent.ReporterTest do
     local_join = System.monotonic_time()
     :ok = ForemanAgent.Outbox.attach(self())
     send(collector, :release)
-    assert_receive {:workspace_sample, started_at, %{}} = sample, 1_000
+    assert_receive {:workspace_sample, started_at, %{^env => [^workspace]}} = sample, 1_000
     assert started_at < local_join
 
     socket =
