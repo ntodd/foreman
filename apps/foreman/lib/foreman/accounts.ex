@@ -63,6 +63,7 @@ defmodule Foreman.Accounts do
   def sign_in_from_github(profile, tokens, opts) do
     config = Keyword.get_lazy(opts, :config, &login_config/0)
     existing = find_github_user(profile, &Repo.one/1)
+    first_sign_in = if is_nil(existing), do: begin_first_sign_in(profile["id"])
 
     membership =
       case opts[:check_membership] do
@@ -72,9 +73,12 @@ defmodule Foreman.Accounts do
 
     result =
       Repo.transact(fn ->
+        # Serialize callbacks for the same new identity before looking for
+        # a user. A different callback may have created one while we waited.
+        first_current? = first_sign_in_current?(first_sign_in)
         current = find_github_user(profile, &Repo.one_for_update/1)
 
-        if generation(current) == generation(existing) and
+        if first_current? and same_sign_in_generation?(existing, current, profile["id"]) and
              config == Keyword.get_lazy(opts, :config, &login_config/0) do
           checked_sign_in(current, profile, tokens, config, membership)
         else
@@ -89,8 +93,39 @@ defmodule Foreman.Accounts do
     end
   end
 
-  defp generation(nil), do: nil
-  defp generation(user), do: {user.id, user.access_generation}
+  defp same_sign_in_generation?(nil, nil, _), do: true
+
+  # A concurrent first admission creates generation zero. A negative
+  # decision still has to revoke that user's newly issued credentials.
+  defp same_sign_in_generation?(nil, %User{github_id: id, access_generation: 0}, id), do: true
+
+  defp same_sign_in_generation?(
+         %User{id: id, access_generation: g},
+         %User{id: id, access_generation: g},
+         _
+       ),
+       do: true
+
+  defp same_sign_in_generation?(_, _, _), do: false
+
+  # An unknown GitHub identity has no user row to lock. Keep only its
+  # immutable GitHub ID and a counter, so a denial never provisions a user.
+  defp begin_first_sign_in(github_id) do
+    Repo.insert_all("github_sign_in_generations", [%{github_id: github_id}],
+      on_conflict: :nothing,
+      conflict_target: [:github_id]
+    )
+
+    query = first_sign_in_generation(github_id)
+    {query, Repo.one!(query)}
+  end
+
+  defp first_sign_in_generation(github_id) do
+    from g in "github_sign_in_generations", where: g.github_id == ^github_id, select: g.generation
+  end
+
+  defp first_sign_in_current?(nil), do: true
+  defp first_sign_in_current?({query, generation}), do: Repo.one_for_update(query) == generation
 
   defp checked_sign_in(current, profile, tokens, config, membership) do
     login = profile["login"]
@@ -106,12 +141,17 @@ defmodule Foreman.Accounts do
         persist_sign_in(current, profile, tokens, config)
 
       true ->
-        if current && membership != :unknown,
-          do: revoke_access(current, "no longer allowed at sign-in")
+        if membership != :unknown, do: revoke_sign_in(current, profile)
 
         {:ok, :not_allowed}
     end
   end
+
+  defp revoke_sign_in(nil, %{"id" => github_id}),
+    do: Repo.update_all(first_sign_in_generation(github_id), inc: [generation: 1])
+
+  defp revoke_sign_in(current, _profile),
+    do: revoke_access(current, "no longer allowed at sign-in")
 
   defp persist_sign_in(current, profile, tokens, config) do
     login = profile["login"]

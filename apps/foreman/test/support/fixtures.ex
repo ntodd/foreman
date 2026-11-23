@@ -107,6 +107,7 @@ defmodule Foreman.Fixtures do
       slug: Map.get(attrs, :slug, "#{repo.name}-#{n}"),
       index: n,
       repo_id: repo.id,
+      repo_github_id: repo.github_id,
       user_id: user.id,
       box_id: box.id,
       branch: Map.get(attrs, :branch, "main"),
