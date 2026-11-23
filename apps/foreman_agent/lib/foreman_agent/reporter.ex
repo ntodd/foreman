@@ -133,10 +133,12 @@ defmodule ForemanAgent.Reporter do
   end
 
   defp inventory(state) do
+    started_at = System.monotonic_time()
+
     case Handler.inventory() do
       {:ok, envs} ->
         if envs != state.last, do: report_inventory(envs)
-        push("box.workspaces", %{environments: running_containers(envs)})
+        Outbox.workspace_sample(started_at, running_containers(envs))
 
         states = Map.new(envs, &{&1.env_id, &1.state})
 

@@ -134,11 +134,23 @@ defmodule Foreman.Environments.Server do
     env = Repo.get(Environment, env_id)
 
     cond do
-      is_nil(env) -> :ok
-      Operations.in_flight(env_id) -> :ok
-      not Boxes.online?(env.box_id) -> :ok
-      op = Operations.next_queued(env_id, env.created_once) -> dispatch(op, env)
-      true -> :ok
+      is_nil(env) ->
+        :ok
+
+      Operations.in_flight(env_id) ->
+        :ok
+
+      not Boxes.online?(env.box_id) ->
+        :ok
+
+      Foreman.Jobs.EnvironmentExpiry.due?(env) ->
+        if op = Foreman.Jobs.EnvironmentExpiry.next_due(env_id), do: dispatch(op, env)
+
+      op = Operations.next_queued(env_id, env.created_once) ->
+        dispatch(op, env)
+
+      true ->
+        :ok
     end
   end
 
@@ -285,7 +297,8 @@ defmodule Foreman.Environments.Server do
     end
   end
 
-  defp resend_files(%{action: action} = op, env) when action in @needs_files do
+  defp resend_files(%{action: action, command: command} = op, env)
+       when action in @needs_files and command != "env.create" do
     rewrite_secrets(env, op)
   end
 

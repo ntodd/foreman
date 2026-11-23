@@ -1184,7 +1184,7 @@ defmodule ForemanAgent.Env do
          {:ok, result} <- start(p, ctx) do
       {:ok,
        result
-       |> Map.take(["connect"])
+       |> Map.take(["connect", "container_id"])
        |> Map.merge(%{"restarted" => "all", "feature_version" => result["feature_version"]})}
     end
   end
@@ -1218,7 +1218,7 @@ defmodule ForemanAgent.Env do
       {:ok,
        result
        |> put_connect_hooks(ctx)
-       |> Map.take(["connect"])
+       |> Map.take(["connect", "container_id"])
        |> Map.merge(%{
          "restarted" => sidecars ++ [service],
          "feature_version" => result["feature_version"]

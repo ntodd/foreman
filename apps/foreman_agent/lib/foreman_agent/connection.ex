@@ -141,15 +141,14 @@ defmodule ForemanAgent.Connection do
   def handle_join(topic, reply, socket) do
     Logger.info("joined #{topic}")
     # Joining is what makes a newly installed release good.
+    workspace_joined_at =
+      if match?(%{"workspace_samples" => 2}, reply), do: System.monotonic_time()
+
     Updater.confirm(socket.assigns.config)
     Outbox.attach(self())
     Reporter.report_now()
 
-    {:ok,
-     assign(socket,
-       joined: true,
-       workspace_samples: match?(%{"workspace_samples" => true}, reply)
-     )}
+    {:ok, assign(socket, joined: true, workspace_joined_at: workspace_joined_at)}
   end
 
   @impl Slipstream
@@ -188,13 +187,19 @@ defmodule ForemanAgent.Connection do
   defp reject(_, _), do: :ok
 
   @impl Slipstream
-  # Older control planes predate workspace samples. They keep receiving
-  # inventory unchanged and never see an event their protocol rejects.
-  def handle_info(
-        {:outbox_deliver, %Event{type: "box.workspaces"}, nil},
-        %{assigns: %{workspace_samples: false}} = socket
-      ),
-      do: {:noreply, socket}
+  def handle_info({:workspace_sample, started_at, environments}, socket) do
+    # Only this join's scans can supply evidence. Both ends use monotonic
+    # clocks, so this also works when the box and server wall clocks differ.
+    with %{joined: true, workspace_joined_at: joined_at}
+         when is_integer(joined_at) and started_at >= joined_at <- socket.assigns,
+         elapsed = System.convert_time_unit(started_at - joined_at, :native, :millisecond),
+         {:ok, event} <-
+           Event.new("box.workspaces", %{since_join_ms: elapsed, environments: environments}) do
+      handle_info({:outbox_deliver, event, nil}, socket)
+    else
+      _ -> {:noreply, socket}
+    end
+  end
 
   def handle_info({:outbox_deliver, event, ack_id}, socket) do
     case safe_push(socket, event) do

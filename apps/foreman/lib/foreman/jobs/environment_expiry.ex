@@ -15,6 +15,38 @@ defmodule Foreman.Jobs.EnvironmentExpiry do
     |> Oban.insert!()
   end
 
+  def retry!(%Environment{id: id}) do
+    %{"environment_id" => id}
+    |> new(schedule_in: 60)
+    |> Oban.insert!()
+  end
+
+  # A reconnect or the periodic dispatcher can beat the scheduled Oban
+  # job. While due, send only system cleanup, preserving any in-flight work.
+  # A failed attempt already scheduled a delayed retry in its result transaction.
+  def next_due(id) do
+    {:ok, op} =
+      Repo.transact(fn ->
+        env = Environments.locked_environment(id)
+
+        if due?(env) do
+          attempts =
+            from o in Foreman.Operations.Operation,
+              where: o.environment_id == ^id and o.trigger == "expiry"
+
+          if Repo.exists?(attempts) do
+            {:ok, Repo.one(from o in attempts, where: o.status == "queued", limit: 1)}
+          else
+            reserve(env)
+          end
+        else
+          {:ok, nil}
+        end
+      end)
+
+    op
+  end
+
   @impl true
   def perform(%{args: %{"environment_id" => id}}) do
     {:ok, result} =

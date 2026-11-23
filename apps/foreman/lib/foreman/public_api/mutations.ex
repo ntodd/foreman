@@ -9,6 +9,7 @@ defmodule Foreman.PublicAPI.Mutations do
   alias Foreman.Environments.{Environment, Server}
   alias Foreman.Jobs.EnvironmentExpiry
   alias Foreman.OAuth.Principal
+  alias Foreman.Operations.Retention
   alias Foreman.PublicAPI.{Access, MutationInput, Receipt}
 
   @not_found {:error, :resource_not_found, "Resource not found."}
@@ -297,7 +298,7 @@ defmodule Foreman.PublicAPI.Mutations do
   defp stable?(env, action),
     do:
       env.observed_state == target(action) and env.desired_state == target(action) and
-        Boxes.online?(env.box_id)
+        Foreman.Agents.LifecycleState.confirmed?(env, target(action))
 
   defp admit_action(env, %{"action" => "start"} = input) do
     env = Repo.preload(env, [:box, :repo])
@@ -338,7 +339,9 @@ defmodule Foreman.PublicAPI.Mutations do
 
         receipt.operation_id &&
             not Repo.exists?(
-              from(o in Foreman.Operations.Operation, where: o.id == ^receipt.operation_id)
+              from(o in Retention.history(DateTime.utc_now()),
+                where: o.id == ^receipt.operation_id
+              )
             ) ->
           {:history_expired, env.id, receipt.operation_id}
 

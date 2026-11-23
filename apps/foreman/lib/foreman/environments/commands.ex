@@ -48,10 +48,15 @@ defmodule Foreman.Environments.Commands do
     )
   end
 
+  # A start can be the first physical boot after expiry deferred creation.
+  # Keep the start operation for authorization while building a create command.
+  defp build_authorized(%{action: "start", command: "env.create"} = op, env, policy),
+    do: up(op, env, policy, "create")
+
   defp build_authorized(op, env, policy) do
     case op.action do
       action when action in ["create", "rebuild", "pull_rebuild"] ->
-        up(op, env, policy)
+        up(op, env, policy, action)
 
       "start" ->
         with_secrets(env, policy, fn s ->
@@ -153,11 +158,11 @@ defmodule Foreman.Environments.Commands do
     end
   end
 
-  defp up(op, env, policy) do
+  defp up(op, env, policy, action) do
     # A build shouldn't wait on GitHub: without a token it goes ahead, and
     # the token follows with the next refresh.
     {token, token_notice, token_status} = github_token(env, policy)
-    {type, extra} = up_command(op.action, env, token, policy)
+    {type, extra} = up_command(action, env, token, policy)
     secrets = secrets(env, policy, fn -> token end)
     identity = identity(env, policy)
     features = features(env, policy)

@@ -85,12 +85,23 @@ defmodule ForemanAgent.VM.Machine.Cloud do
 
   @impl true
   def inventory_state(env_id, _config) do
-    args = ["show", "--property=ActiveState,Result,ExecMainExitTimestamp", unit(env_id)]
+    args = ["show", "--property=LoadState,ActiveState,Result,ExecMainExitTimestamp", unit(env_id)]
     opts = [env: %{"TZ" => "UTC", "LC_ALL" => "C"}, timeout: 2_000]
 
     case ForemanAgent.Runner.run("systemctl", args, opts) do
-      {:ok, %{status: 0, output: text}} -> unit_state(text)
-      _ -> :stopped
+      {:ok, %{status: 0, output: text}} ->
+        unit_state(text)
+
+      # A stopped transient unit can have been collected by systemd.
+      {:ok, %{status: 4, output: text}} ->
+        properties = String.split(text, "\n")
+
+        if "LoadState=not-found" in properties and "ActiveState=inactive" in properties,
+          do: :stopped,
+          else: :unknown
+
+      _ ->
+        :unknown
     end
   end
 
@@ -100,7 +111,8 @@ defmodule ForemanAgent.VM.Machine.Cloud do
     cond do
       "ActiveState=active" in properties or "ActiveState=reloading" in properties -> :running
       "Result=oom-kill" in properties -> oom_exit(text)
-      true -> :stopped
+      "ActiveState=inactive" in properties or "ActiveState=failed" in properties -> :stopped
+      true -> :unknown
     end
   end
 

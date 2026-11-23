@@ -6,15 +6,22 @@ defmodule Foreman.PublicAPI.Readiness do
   """
 
   # Agents sample inventory every 15 seconds. Allow missed reports and query latency.
-  @max_age_seconds 60
+  @max_age_ms 60_000
 
-  def record(box_id, environments) do
-    Registry.update_value(Foreman.Registry, {:agent, box_id}, fn table ->
+  def record(box_id, environments, since_join_ms) do
+    Registry.update_value(Foreman.Registry, {:agent, box_id}, fn {joined_at, table} ->
       table = table || :ets.new(__MODULE__, [:set, :protected, read_concurrency: true])
-      now = System.monotonic_time(:second)
+      # The box measures scan start relative to receiving the join. Our join
+      # started earlier, so collection and transit time consume the freshness window.
+      sampled_at = min(System.monotonic_time(:millisecond), joined_at + since_join_ms)
       :ets.delete_all_objects(table)
-      :ets.insert(table, Enum.map(environments, fn {id, running} -> {id, now, running} end))
-      table
+
+      :ets.insert(
+        table,
+        Enum.map(environments, fn {id, running} -> {id, sampled_at, running} end)
+      )
+
+      {joined_at, table}
     end)
 
     :ok
@@ -24,13 +31,13 @@ defmodule Foreman.PublicAPI.Readiness do
     case Registry.lookup(Foreman.Registry, {:agent, env.box_id}) do
       [] -> "unknown"
       [_] when not env.created_once or env.observed_state == "error" -> "not_ready"
-      [{_, nil}] -> "unknown"
-      [{_, table}] -> current(table, env)
+      [{_, {_, table}}] when not is_nil(table) -> current(table, env)
+      [_] -> "unknown"
     end
   end
 
   defp current(table, env) do
-    cutoff = System.monotonic_time(:second) - @max_age_seconds
+    cutoff = System.monotonic_time(:millisecond) - @max_age_ms
 
     case :ets.lookup(table, env.id) do
       [{_, at, ids}] when at >= cutoff ->
