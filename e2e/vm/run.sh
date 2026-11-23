@@ -230,6 +230,8 @@ echo "PROBE user \$(id -un)"
 # the devcontainer CLI's \`up\`) and gives the container's user its uid, so
 # the 0600 secrets and the clone are the user's own.
 [ "\$(stat -c %u /run/foreman/secrets.env)" = "\$(id -u)" ] && echo "PROBE secrets-owner self" || echo "PROBE secrets-owner other"
+[ -s .workspace-marker ] || cat /proc/sys/kernel/random/uuid > .workspace-marker
+echo "PROBE workspace-marker \$(cat .workspace-marker)"
 touch .probe-write 2>/dev/null; echo "PROBE workspace-writable \$?"
 secret=\$(. /run/foreman/secrets.env 2>/dev/null; printf %s "\${SIDECAR_TOKEN:-none}" | sha256sum | cut -c1-16)
 echo "PROBE secret \$secret"
@@ -337,6 +339,9 @@ cp_eval 'E2E.vm_status()' | grep "^VM"
 # user's clicks do, so the running control plane sends them at once. Work
 # queued from an eval (a VM of its own) waits for the dispatch sweep, up
 # to a minute each time.
+public_api() {
+  python3 "$root/e2e/vm/public_api.py" "$url" "$work/api-client.json" "$1"
+}
 cookie=$(cp_eval 'E2E.session_cookie()' | sed -n 's/^COOKIE=//p')
 [ -n "$cookie" ] || fail "no session cookie"
 box_id=$(cp_eval 'E2E.box_id()' | sed -n 's/^BOX_ID=//p')
@@ -386,12 +391,28 @@ probe dind 0 create
 echo "ok: the environment reaches the internet and the LAN, not the box, and runs docker-in-docker"
 
 say "a second environment can't reach the first"
-[ -n "$(create_env hello-2)" ] || fail "no second environment"
+E2E_COOKIE="$cookie" public_api login
+second=$(public_api create)
+[ -n "$second" ] || fail "the API did not reserve the second environment"
 wait_for_env hello-2 running 600
+public_api ready
 cp_eval 'E2E.log("hello-2", "create")' > "$work/create2.log"
 probe first-guest 124 create2
 probe gateway 124 create2
 echo "ok: environments don't reach each other"
+
+say "the API stops and starts the same workspace disk"
+marker=$(sed -n 's/^PROBE workspace-marker //p' "$work/create2.log" | tail -1)
+[ -n "$marker" ] || fail "the API-created workspace never wrote its marker"
+public_api stop
+wait_for_env hello-2 stopped 180
+public_api not_ready
+sudo test -s "/srv/foreman/vms/$second/data.raw" || fail "stop removed the workspace disk"
+public_api start
+wait_for_env hello-2 running 300
+public_api ready
+cp_eval 'E2E.log("hello-2", "start")' > "$work/start2.log"
+probe workspace-marker "$marker" start2
 
 say "secrets survive a stop and start"
 cp_eval 'E2E.secret("hello-1", "SIDECAR_TOKEN", "vm-secret-1")' >/dev/null
@@ -519,9 +540,11 @@ echo "create took ${cold}s from scratch, ${warm}s from the prebuild"
 echo "ok: hello-3 started from the prebuild, without cloning"
 
 say "release the other VMs before testing the memory reserve"
-cp_eval 'E2E.act("hello-2", "destroy")' >/dev/null
+public_api destroy
 cp_eval 'E2E.act("hello-3", "destroy")' >/dev/null
 wait_for_env hello-2 destroyed 180
+public_api destroyed
+sudo test ! -e "/srv/foreman/vms/$second" || fail "API destroy left the workspace on disk"
 wait_for_env hello-3 destroyed 180
 
 say "the slice contains an OOM and the environment page records the cause"

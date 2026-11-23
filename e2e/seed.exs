@@ -26,7 +26,7 @@ scope = Scope.for_user(admin)
 repo =
   case Repos.get_repo_by_full_name(repo_name) do
     nil ->
-      {:ok, repo} = Repos.add_repo(scope, repo_name, %{devcontainer_path: ".devcontainer/devcontainer.json", host_requirements: %{"cpus" => 2, "memory" => "2gb"}})
+      {:ok, repo} = Repos.add_repo(scope, repo_name, %{private: false, devcontainer_path: ".devcontainer/devcontainer.json", host_requirements: %{"cpus" => 2, "memory" => "2gb"}})
       repo
 
     repo ->
