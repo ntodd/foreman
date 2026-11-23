@@ -11,6 +11,8 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"reflect"
+	"strings"
 	"syscall"
 	"time"
 
@@ -20,12 +22,18 @@ import (
 // A record contains everything required to replay a submission, even when the
 // process is killed inside the HTTP call. No credentials are written here.
 type record struct {
-	Key             string     `json:"request_key"`
-	Instance        string     `json:"instance"`
-	Account         string     `json:"account"`
-	ClientID        string     `json:"client_id"`
-	Body            api.Create `json:"body"`
-	CapacityWarning bool       `json:"capacity_warning,omitempty"`
+	Key      string     `json:"request_key"`
+	Instance string     `json:"instance"`
+	Account  string     `json:"account"`
+	ClientID string     `json:"client_id"`
+	Body     api.Create `json:"body"`
+	// Empty means an attempt may have been accepted, including after a crash.
+	// Set only if every send so far received a definitive pre-acceptance rejection.
+	Rejection string `json:"rejection,omitempty"`
+}
+
+func (r *record) matches(o Options, key string) bool {
+	return r.Key == key && r.Instance == o.Instance && r.Account == o.Account && r.ClientID == o.ClientID
 }
 
 func newKey() string {
@@ -46,8 +54,12 @@ func keyValid(key string) bool {
 }
 
 type journal struct {
-	path string
-	lock *os.File
+	path          string
+	lock          *os.File
+	alternatePath string // Scoped file to check when using an existing legacy record.
+	// The key prefix includes records for all local identities. It is used
+	// only to distinguish a missing resume key from a wrong selection.
+	keyPrefix string
 }
 
 func journalError(err error) error {
@@ -75,8 +87,27 @@ func (o Options) openJournal(ctx context.Context, key string) (*journal, error) 
 	if err := syncDir(o.StateDir); err != nil {
 		return nil, journalError(err)
 	}
-	digest := sha256.Sum256([]byte(key))
-	path := filepath.Join(dir, fmt.Sprintf("%x", digest))
+	keyPrefix := fmt.Sprintf("%x", sha256.Sum256([]byte(key)))
+	legacyPath := filepath.Join(dir, keyPrefix)
+	scope, err := json.Marshal([3]string{o.Instance, o.Account, o.ClientID})
+	if err != nil {
+		return nil, journalError(err)
+	}
+	path := fmt.Sprintf("%s-%x", legacyPath, sha256.Sum256(scope))
+	// Honor the original lock and record in place for an already-journaled
+	// connection. Other identities get independent files and locks.
+	legacy, err := loadRecord(legacyPath + ".json")
+	if err != nil {
+		return nil, err
+	}
+	var alternatePath string
+	if legacy != nil && legacy.Key != key {
+		return nil, journalError(errors.New("saved request key differs from its filename"))
+	}
+	if legacy != nil && legacy.matches(o, key) {
+		alternatePath = path + ".json"
+		path = legacyPath
+	}
 	lock, err := openRegular(path+".lock", os.O_CREATE|os.O_RDWR)
 	if err != nil {
 		return nil, journalError(err)
@@ -90,7 +121,7 @@ func (o Options) openJournal(ctx context.Context, key string) (*journal, error) 
 		}
 		err = syscall.Flock(int(lock.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
 		if err == nil {
-			return &journal{path: path + ".json", lock: lock}, nil
+			return &journal{path: path + ".json", lock: lock, keyPrefix: keyPrefix, alternatePath: alternatePath}, nil
 		}
 		if errors.Is(err, syscall.EINTR) {
 			continue
@@ -106,8 +137,33 @@ func (o Options) openJournal(ctx context.Context, key string) (*journal, error) 
 	}
 }
 
-func (j *journal) load() (*record, error) {
-	file, err := openRegular(j.path, os.O_RDONLY)
+func (j *journal) load(o Options, key string) (*record, error) {
+	saved, err := loadRecord(j.path)
+	if err != nil || saved == nil {
+		return nil, err
+	}
+	if !saved.matches(o, key) {
+		return nil, &Failure{Code: "request_identity_mismatch", Message: "Select the instance, account and client that saved this create request."}
+	}
+	if j.alternatePath != "" {
+		other, err := loadRecord(j.alternatePath)
+		if err != nil {
+			return nil, err
+		}
+		if other != nil {
+			if !other.matches(o, key) || !reflect.DeepEqual(saved.Body, other.Body) {
+				return nil, journalError(fmt.Errorf("different create requests exist in %s and %s. Check both saved requests and the operation history before retrying", j.path, j.alternatePath))
+			}
+			// Both CLI versions wrote this key. Only their shared exact inputs
+			// can safely be replayed: either history may include a lost response.
+			saved.Rejection = ""
+		}
+	}
+	return saved, nil
+}
+
+func loadRecord(path string) (*record, error) {
+	file, err := openRegular(path, os.O_RDONLY)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil, nil
 	}
@@ -127,6 +183,20 @@ func (j *journal) load() (*record, error) {
 		return nil, journalError(errors.New("incomplete create record"))
 	}
 	return &r, nil
+}
+
+func (j *journal) missingRecord() error {
+	entries, err := os.ReadDir(filepath.Dir(j.path))
+	if err != nil {
+		return journalError(err)
+	}
+	for _, entry := range entries {
+		name := entry.Name()
+		if name == j.keyPrefix+".json" || (strings.HasPrefix(name, j.keyPrefix+"-") && strings.HasSuffix(name, ".json")) {
+			return &Failure{Code: "request_identity_mismatch", Message: "Select the instance, account and client that saved this create request."}
+		}
+	}
+	return &Failure{Code: "request_not_found", Message: "No saved create request has this key."}
 }
 
 func (j *journal) save(r *record) error {

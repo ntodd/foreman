@@ -46,6 +46,8 @@ type Options struct {
 type Failure struct {
 	Code          string `json:"code"`
 	Message       string `json:"message"`
+	HTTPStatus    int    `json:"http_status,omitempty"`
+	RemoteCode    string `json:"remote_code,omitempty"`
 	EnvironmentID string `json:"environment_id,omitempty"`
 	OperationID   string `json:"operation_id,omitempty"`
 	RequestKey    string `json:"request_key,omitempty"`
@@ -71,7 +73,7 @@ func failure(err error) *Failure {
 		if message == "" {
 			message = remote.Error()
 		}
-		return &Failure{Code: code, Message: message}
+		return &Failure{Code: code, Message: message, HTTPStatus: remote.StatusCode}
 	case errors.Is(err, context.Canceled):
 		return &Failure{Code: "interrupted", Message: "Command interrupted."}
 	case errors.Is(err, context.DeadlineExceeded):
@@ -180,7 +182,11 @@ func (o Options) dispatch(ctx context.Context, v invocation) error {
 		if err != nil {
 			return err
 		}
-		return o.show(r.Value)
+		if err := o.show(r.Value); err != nil {
+			return err
+		}
+		_, err = outcome(r.Value)
+		return err
 	case "env create", "env start", "env stop", "env destroy":
 		return o.lifecycle(ctx, v)
 	case "op wait":

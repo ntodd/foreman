@@ -486,3 +486,22 @@ func TestLostResponseKeepsInputLockedAfterRejection(t *testing.T) {
 		h.failure(t, "idempotency_conflict", "env", "create", "--resume", "uncertain", "--confirm-capacity-warning")
 	}
 }
+
+func TestConflictingOldAndNewJournalsCannotReplaceUncertainInputs(t *testing.T) {
+	h := setup(t, fake{create: func(context.Context, string, api.Create) (*api.Response[api.Accepted], error) {
+		return nil, io.ErrUnexpectedEOF
+	}})
+	key := "shared"
+	h.failure(t, "outcome_unknown", "env", "create", repoID, "--branch", "current", "--request-key", key)
+	// A different CLI installation later used the old on-disk layout for this identity.
+	raw := fmt.Sprintf(`{"request_key":%q,"instance":%q,"account":%q,"client_id":%q,"body":{"repo_id":%q,"branch":"other"}}`, key, h.Instance, h.Account, h.ClientID, repoID)
+	path := filepath.Join(h.StateDir, "create-requests", fmt.Sprintf("%x.json", sha256.Sum256([]byte(key))))
+	if err := os.WriteFile(path, []byte(raw), 0600); err != nil {
+		t.Fatal(err)
+	}
+	h.API = fake{create: func(context.Context, string, api.Create) (*api.Response[api.Accepted], error) {
+		t.Fatal("submitted one of two conflicting histories")
+		return nil, nil
+	}}
+	h.failure(t, "state_error", "env", "create", "--resume", key)
+}

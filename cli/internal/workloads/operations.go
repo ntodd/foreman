@@ -62,7 +62,11 @@ func (o Options) wait(ctx context.Context, id string) (*api.Operation, error) {
 	for {
 		r, err := o.API.GetOperation(ctx, id)
 		if err != nil {
-			return nil, waitFailure(ctx, err, id)
+			f := waitFailure(ctx, err, id)
+			if f.Code == "insufficient_scope" {
+				f.Message = "Reading operation status requires operations:read. " + f.Message + " Resume with foreman op wait " + id + " after obtaining that permission."
+			}
+			return nil, f
 		}
 		done, err := outcome(r.Value)
 		if err != nil {
@@ -77,93 +81,165 @@ func (o Options) wait(ctx context.Context, id string) (*api.Operation, error) {
 	}
 }
 
+// Foreman serves a rolling 1 MiB tail in pages of up to 64 KiB. Bound both
+// bytes and requests, even when a producer appends between every HTTP read.
+const (
+	maxSnapshotBytes = 1 << 20
+	maxSnapshotPages = 16
+)
+
 func (o Options) logs(parent context.Context, v invocation) error {
 	ctx, cancel := context.WithTimeout(parent, v.timeout)
 	defer cancel()
-	cursor := v.flags["cursor"]
-	follow := v.flags["follow"] != ""
-	var collected strings.Builder
-	var truncated, terminal bool
-	var terminalErr error
-	fail := func(err error) error {
-		f := waitFailure(ctx, err, v.arg)
-		f.Cursor = cursor
-		if f.Code == "wait_timeout" || f.Code == "interrupted" {
-			f.Message = "Log reading stopped. Resume with foreman op logs and the last log cursor."
-		}
-		// A snapshot reader must receive the prefix before resuming at its end.
-		if o.JSON && !follow && collected.Len() > 0 {
-			page := api.LogPage{Text: collected.String(), NextCursor: cursor, Truncated: truncated}
-			if writeErr := json.NewEncoder(o.Out).Encode(page); writeErr != nil {
-				f.Cursor = v.flags["cursor"]
-				f.Message += " Could not write the partial log: " + writeErr.Error()
-			}
-		}
-		return f
+	if v.flags["follow"] != "" {
+		return o.followLogs(ctx, v.arg, v.flags["cursor"])
 	}
+	return o.snapshotLogs(ctx, v.arg, v.flags["cursor"])
+}
+
+func (o Options) logPage(ctx context.Context, id, cursor string) (api.LogPage, error) {
+	r, err := o.API.GetOperationLogs(ctx, id, cursor)
+	if err != nil {
+		return api.LogPage{}, err
+	}
+	page := r.Value
+	if page.NextCursor == "" || (page.NextCursor == cursor && page.Text != "") {
+		return api.LogPage{}, &Failure{Code: "invalid_response", Message: "The log page has no usable continuation cursor."}
+	}
+	return page, nil
+}
+
+func logReadFailure(ctx context.Context, err error, id, cursor string) *Failure {
+	f := waitFailure(ctx, err, id)
+	f.Cursor = cursor
+	if f.Code == "wait_timeout" || f.Code == "interrupted" {
+		f.Message = "Log reading stopped. Resume with foreman op logs and the last log cursor."
+	}
+	return f
+}
+
+func (o Options) printLogText(page api.LogPage) error {
+	if page.Truncated {
+		if _, err := fmt.Fprintln(o.Err, "The operation log was truncated. Earlier output is unavailable."); err != nil {
+			return err
+		}
+	}
+	_, err := io.WriteString(o.Out, page.Text)
+	return err
+}
+
+func (o Options) snapshotLogs(ctx context.Context, id, start string) error {
+	var text strings.Builder
+	var truncated, limited bool
+	var pagesRead, bytesRead int
+	var readErr error
+	cursor := start
 	for {
-		r, err := o.API.GetOperationLogs(ctx, v.arg, cursor)
+		page, err := o.logPage(ctx, id, cursor)
 		if err != nil {
-			return fail(err)
+			readErr = logReadFailure(ctx, err, id, cursor)
+			break
 		}
-		page := r.Value
-		if page.NextCursor == "" || (page.NextCursor == cursor && page.Text != "") {
-			return fail(&Failure{Code: "invalid_response", Message: "The log page has no usable continuation cursor."})
-		}
-		if page.Truncated {
-			truncated = true
-			if !o.JSON {
-				fmt.Fprintln(o.Err, "The operation log was truncated. Earlier output is unavailable.")
+		if len(page.Text) > maxSnapshotBytes-bytesRead {
+			// A cursor identifies a whole page. Leave it for the next read.
+			if pagesRead == 0 {
+				return logReadFailure(ctx, &Failure{Code: "invalid_response", Message: "A log page exceeds the maximum single read size."}, id, cursor)
 			}
+			limited = true
+			break
 		}
-		switch {
-		case o.JSON && follow:
+		if o.JSON {
+			text.WriteString(page.Text)
+		} else if err := o.printLogText(page); err != nil {
+			return logReadFailure(ctx, err, id, cursor)
+		}
+		pagesRead++
+		bytesRead += len(page.Text)
+		truncated = truncated || page.Truncated
+		previous := cursor
+		cursor = page.NextCursor
+		if page.Text == "" && cursor == previous {
+			break
+		}
+		if pagesRead == maxSnapshotPages || bytesRead == maxSnapshotBytes {
+			limited = true
+			break
+		}
+	}
+	// Deliver the prefix even if the next GET failed. An empty page may
+	// already have advanced the cursor past discarded bytes.
+	if o.JSON && pagesRead > 0 {
+		result := api.LogPage{Text: text.String(), NextCursor: cursor, Truncated: truncated}
+		if err := json.NewEncoder(o.Out).Encode(result); err != nil {
+			f := failure(err)
+			if readErr != nil {
+				f = failure(readErr)
+				f.Message += " Could not write the partial log: " + err.Error()
+			}
+			f.OperationID = id
+			f.Cursor = start
+			return f
+		}
+	}
+	if readErr != nil || o.JSON {
+		return readErr
+	}
+	if limited {
+		if _, err := fmt.Fprintln(o.Err, "Read limit reached. Continue with --cursor."); err != nil {
+			return err
+		}
+	}
+	_, err := fmt.Fprintln(o.Err, "Log cursor:", cursor)
+	return err
+}
+
+func (o Options) followLogs(ctx context.Context, id, cursor string) error {
+	var terminal bool
+	var terminalErr error
+	for {
+		page, err := o.logPage(ctx, id, cursor)
+		if err != nil {
+			return logReadFailure(ctx, err, id, cursor)
+		}
+		if o.JSON {
 			err = json.NewEncoder(o.Out).Encode(page)
-		case o.JSON:
-			_, err = collected.WriteString(page.Text)
-		default:
-			_, err = io.WriteString(o.Out, page.Text)
+		} else {
+			err = o.printLogText(page)
 		}
 		if err != nil {
-			return fail(err)
-		}
-		if follow && !o.JSON && page.NextCursor != cursor {
-			fmt.Fprintln(o.Err, "Log cursor:", page.NextCursor)
+			return logReadFailure(ctx, err, id, cursor)
 		}
 		advanced := page.NextCursor != cursor
 		cursor = page.NextCursor
-		// An empty page can advance past discarded bytes. Drain until an empty
-		// read leaves the cursor unchanged, including after a terminal status.
-		if page.Text != "" || (advanced && (!follow || terminal)) {
-			continue
-		}
-		if !follow {
-			if o.JSON {
-				return json.NewEncoder(o.Out).Encode(api.LogPage{Text: collected.String(), NextCursor: cursor, Truncated: truncated})
+		if !o.JSON && advanced {
+			if _, err := fmt.Fprintln(o.Err, "Log cursor:", cursor); err != nil {
+				return logReadFailure(ctx, err, id, cursor)
 			}
-			fmt.Fprintln(o.Err, "Log cursor:", cursor)
-			return nil
+		}
+		// A writer can flush between the last empty read and the terminal
+		// status check. Drain again, even if an empty page advanced the cursor.
+		if page.Text != "" || (advanced && terminal) {
+			continue
 		}
 		if terminal {
 			if terminalErr != nil {
-				return fail(terminalErr)
+				return logReadFailure(ctx, terminalErr, id, cursor)
 			}
 			return nil
 		}
-		state, err := o.API.GetOperation(ctx, v.arg)
+		state, err := o.API.GetOperation(ctx, id)
 		if err != nil {
-			return fail(err)
+			return logReadFailure(ctx, err, id, cursor)
 		}
 		terminal, terminalErr = outcome(state.Value)
-		// A writer can flush after the empty read and before this status check.
 		if terminal {
 			continue
 		}
 		if terminalErr != nil {
-			return fail(terminalErr)
+			return logReadFailure(ctx, terminalErr, id, cursor)
 		}
 		if err := sleep(ctx, o.PollInterval); err != nil {
-			return fail(err)
+			return logReadFailure(ctx, err, id, cursor)
 		}
 	}
 }

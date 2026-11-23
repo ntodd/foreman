@@ -22,9 +22,9 @@ type submission struct {
 	Environment             *api.Environment `json:"environment,omitempty"`
 }
 
+const capacityWarningCode = "capacity_confirmation_required"
+
 func (o Options) lifecycle(ctx context.Context, v invocation) error {
-	ctx, cancel := context.WithTimeout(ctx, v.timeout)
-	defer cancel()
 	action := strings.TrimPrefix(v.command, "env ")
 	var result submission
 	var err error
@@ -58,7 +58,9 @@ func (o Options) lifecycle(ctx context.Context, v invocation) error {
 	}
 
 	if !result.AlreadyReached && !result.OperationHistoryExpired {
-		result.Operation, err = o.wait(ctx, result.OperationID)
+		waitCtx, cancel := context.WithTimeout(ctx, v.timeout)
+		result.Operation, err = o.wait(waitCtx, result.OperationID)
+		cancel()
 	}
 	if err == nil && readReadiness {
 		r, e := o.API.GetEnvironment(ctx, result.EnvironmentID)
@@ -183,15 +185,12 @@ func (o Options) create(ctx context.Context, v invocation) (submission, error) {
 		return result, err
 	}
 	defer j.lock.Close() // The lock ends at submission, before any operation wait.
-	saved, err := j.load()
+	saved, err := j.load(o, key)
 	if err != nil {
-		return result, err
-	}
-	if saved != nil && (saved.Instance != o.Instance || saved.Account != o.Account || saved.ClientID != o.ClientID || saved.Key != key) {
-		return result, attach(&Failure{Code: "request_identity_mismatch", Message: "Select the instance, account and client that saved this create request."}, result)
+		return result, attach(err, result)
 	}
 	if resume && saved == nil {
-		return result, attach(&Failure{Code: "request_not_found", Message: "No saved create request has this key."}, result)
+		return result, attach(j.missingRecord(), result)
 	}
 	var body api.Create
 	if resume {
@@ -205,29 +204,26 @@ func (o Options) create(ctx context.Context, v invocation) (submission, error) {
 			return result, err
 		}
 	}
+	allRejected := saved == nil || correctableStatus(saved.Rejection) != 0
 	if saved == nil {
-		saved = &record{Key: key, Instance: o.Instance, Account: o.Account, ClientID: o.ClientID, Body: body}
-	} else {
-		expected := saved.Body
-		if saved.CapacityWarning && body.ConfirmCapacityWarning != nil && *body.ConfirmCapacityWarning {
-			expected.ConfirmCapacityWarning = new(true)
+		saved = &record{Key: key, Instance: o.Instance, Account: o.Account, ClientID: o.ClientID}
+	} else if !reflect.DeepEqual(body, saved.Body) {
+		canChange := allRejected && (!resume || saved.Rejection == capacityWarningCode)
+		if !canChange {
+			return result, attach(&Failure{Code: "idempotency_conflict", Message: "This key has different saved inputs. Use foreman env create --resume with the original key."}, result)
 		}
-		if !reflect.DeepEqual(body, expected) {
-			return result, attach(&Failure{Code: "idempotency_conflict", Message: "This key has different saved inputs. Resume the original request with foreman env create --resume."}, result)
-		}
-		saved.Body = body
 	}
-	if err := o.submitSaved(ctx, j, saved, &result); err != nil {
+	saved.Body = body
+	if err := o.submitSaved(ctx, j, saved, &result, allRejected); err != nil {
 		return result, attach(err, result)
 	}
 	return result, nil
 }
 
-func (o Options) submitSaved(ctx context.Context, j *journal, r *record, result *submission) error {
+func (o Options) submitSaved(ctx context.Context, j *journal, r *record, result *submission, allRejected bool) error {
 	for {
-		// Clear a prior definitive warning before the next send. If that send
-		// succeeds and its response is lost, no caller may change its body.
-		r.CapacityWarning = false
+		// A crash from this point on must leave an exact-replay-only record.
+		r.Rejection = ""
 		if err := j.save(r); err != nil {
 			return err
 		}
@@ -241,11 +237,14 @@ func (o Options) submitSaved(ctx context.Context, j *journal, r *record, result 
 			result.OperationHistoryExpired = reply.Value.OperationHistoryExpired != nil && *reply.Value.OperationHistoryExpired
 			return nil
 		}
-		if isCapacityWarning(err) && r.Body.ConfirmCapacityWarning == nil {
-			r.CapacityWarning = true
+		var remote *api.HTTPError
+		if allRejected && errors.As(err, &remote) && remote.StatusCode >= 400 && remote.StatusCode == correctableStatus(remote.Code) {
+			r.Rejection = remote.Code
 			if e := j.save(r); e != nil {
 				return e
 			}
+		}
+		if r.Rejection == capacityWarningCode && r.Body.ConfirmCapacityWarning == nil {
 			confirmed, confirmErr := o.confirm(ctx, failure(err).Message+" Continue despite this capacity warning?")
 			if confirmErr != nil {
 				return confirmErr
@@ -254,6 +253,11 @@ func (o Options) submitSaved(ctx context.Context, j *journal, r *record, result 
 				r.Body.ConfirmCapacityWarning = new(true)
 				continue
 			}
+		}
+		if !allRejected && isCapacityWarning(err) {
+			f := failure(err)
+			f.Message += " An earlier submission may have been accepted. This key must replay its original inputs."
+			return f
 		}
 		return mutationFailure(err, "create", r.Key, "")
 	}
@@ -305,19 +309,20 @@ func (o Options) operate(ctx context.Context, v invocation, action string) (subm
 
 func mutationFailure(err error, action, key, id string) *Failure {
 	var remote *api.HTTPError
-	if errors.As(err, &remote) && remote.StatusCode >= 400 && remote.StatusCode < 500 {
+	if errors.As(err, &remote) && remote.StatusCode >= 400 && remote.StatusCode < 500 && remote.StatusCode != 408 {
 		f := failure(err)
 		switch f.Code {
 		case "original_environment_gone":
 			f.Message = "The original environment was destroyed."
-		case "capacity_confirmation_required":
+		case capacityWarningCode:
 			f.Message += " Use --confirm-capacity-warning to acknowledge this warning."
 		}
 		return f
 	}
 	f := failure(err)
-	if !errors.As(err, &remote) || remote.Code == "" {
-		f.Code = "outcome_unknown"
+	f.Code = "outcome_unknown"
+	if remote != nil {
+		f.RemoteCode = remote.Code
 	}
 	if action == "create" {
 		f.RequestKey = key
@@ -328,7 +333,20 @@ func mutationFailure(err error, action, key, id string) *Failure {
 	return f
 }
 
+// Foreman reserves no receipt for these validation and admission failures.
+// Authorization and visibility errors can also occur on an existing receipt.
+func correctableStatus(code string) int {
+	switch code {
+	case "invalid_request":
+		return 422
+	case capacityWarningCode, "capacity_exceeded", "no_provisionable_boxes", "box_vm_unavailable", "box_offline":
+		return 409
+	default:
+		return 0
+	}
+}
+
 func isCapacityWarning(err error) bool {
 	var remote *api.HTTPError
-	return errors.As(err, &remote) && remote.StatusCode == 409 && remote.Code == "capacity_confirmation_required"
+	return errors.As(err, &remote) && remote.StatusCode == 409 && remote.Code == capacityWarningCode
 }

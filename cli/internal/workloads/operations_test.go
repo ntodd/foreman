@@ -269,3 +269,32 @@ func TestPartialLogKeepsEmptyTruncation(t *testing.T) {
 		t.Fatal(page)
 	}
 }
+
+func TestSingleLogReadStopsOnPageOrByteLimit(t *testing.T) {
+	for _, test := range []struct {
+		name                          string
+		pageSize, requests, delivered int
+	}{
+		{"advancing empty pages", 0, 16, 16},
+		// Invalid UTF-8 replacement can expand the returned text. Keep the
+		// last whole-page cursor when the next page would exceed 1 MiB.
+		{"expanded text", 96 << 10, 11, 10},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			reads := 0
+			chunk := strings.Repeat("x", test.pageSize)
+			h := setup(t, fake{logs: func(_ context.Context, _, cursor string) (*api.Response[api.LogPage], error) {
+				reads++
+				if reads > test.requests {
+					t.Fatal("read beyond the snapshot limit")
+				}
+				return response(api.LogPage{Text: chunk, NextCursor: strconv.Itoa(reads)})
+			}})
+			h.success(t, "op", "logs", opID)
+			page := h.doc(t)
+			if reads != test.requests || page["next_cursor"] != strconv.Itoa(test.delivered) || len(page["text"].(string)) != test.delivered*test.pageSize || page["truncated"] != false {
+				t.Fatalf("requests=%d cursor=%v truncated=%v", reads, page["next_cursor"], page["truncated"])
+			}
+		})
+	}
+}
