@@ -188,7 +188,6 @@ say "a git server on the box's LAN"
 box_ip=$(ip -4 route get 1.1.1.1 | sed -n 's/.* src \([0-9.]*\).*/\1/p')
 # Every cold VM needs the same privileged sidecar. Stage it once on the
 # fixture LAN so concurrent guests cannot exhaust a public registry quota.
-dind_ref=foreman-e2e-dind:29
 dind_source=
 for registry in public.ecr.aws/docker/library mirror.gcr.io/library docker.io/library; do
   if docker pull "$registry/docker:29-dind"; then
@@ -197,15 +196,25 @@ for registry in public.ecr.aws/docker/library mirror.gcr.io/library docker.io/li
   fi
 done
 [ -n "$dind_source" ] || fail "couldn't stage the Docker-in-Docker fixture"
-docker tag "$dind_source" "$dind_ref"
-dind_id=$(docker image inspect --format '{{.Id}}' "$dind_ref")
+rm -rf "$work/git"
+mkdir -p "$work/git"
+docker save -o "$work/git/dind.tar" "$dind_source"
+gzip -1 "$work/git/dind.tar"
+# The host and guest can report different IDs for the same image. Key the
+# guest's local tag by the archive it actually verified and loaded.
+dind_sha=$(sha256sum "$work/git/dind.tar.gz")
+dind_sha=${dind_sha%% *}
+dind_ref=foreman-e2e-dind:$dind_sha
 mkdir -p "$work/overlay/.devcontainer"
 cat > "$work/overlay/.devcontainer/load-dind.sh" <<EOF
 set -e -o pipefail
-if ! docker image inspect "$dind_id" >/dev/null 2>&1; then
-  curl -fsS "http://$lan:8080/dind.tar.gz" | docker load
-fi
-docker tag "$dind_id" "$dind_ref"
+if docker image inspect "$dind_ref" >/dev/null 2>&1; then exit 0; fi
+archive=\$(mktemp)
+trap 'rm -f "\$archive"' EXIT
+curl -fsS "http://$lan:8080/dind.tar.gz" -o "\$archive"
+printf '%s  %s\n' "$dind_sha" "\$archive" | sha256sum -c -
+docker load -i "\$archive"
+docker tag "$dind_source" "$dind_ref"
 EOF
 cat > "$work/overlay/.devcontainer/devcontainer.json" <<EOF
 {
@@ -273,10 +282,7 @@ try lan $lan 8080
 for _ in \$(seq 30); do timeout 2 bash -c "exec 3<>/dev/tcp/dind/2375" 2>/dev/null && break; sleep 1; done
 try dind dind 2375
 EOF
-rm -rf "$work/git"
 e2e/make-git-fixture.sh "$work/git" hello "$work/overlay" >/dev/null
-docker save -o "$work/git/dind.tar" "$dind_ref"
-gzip -1 "$work/git/dind.tar"
 
 sudo ip netns del e2e-lan 2>/dev/null || true
 sudo ip link del e2e-lan0 2>/dev/null || true
