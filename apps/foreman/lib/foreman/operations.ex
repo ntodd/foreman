@@ -353,12 +353,33 @@ defmodule Foreman.Operations do
   end
 
   @doc "Takes a queued operation for sending. `:error` if it isn't queued any more."
-  def claim(%Operation{} = op, fields),
-    do: transition(op, "queued", [status: "dispatched"] ++ fields)
+  def claim(%Operation{} = op, fields) do
+    query = from o in Operation, where: o.id == ^op.id and o.status == "queued"
 
-  defp transition(op, from, fields) do
-    query = from(o in Operation, where: o.id == ^op.id and o.status == ^from)
+    # Command construction can block on external services. A deadline may
+    # pass after selecting the operation but before this atomic claim.
+    query =
+      if op.trigger != "expiry" and
+           op.action in ~w(create start rebuild pull_rebuild restart_all restart_affected) do
+        due =
+          from e in Foreman.Environments.Environment,
+            where:
+              e.id == ^op.environment_id and is_nil(e.destroyed_at) and
+                is_nil(e.expiry_consumed_at) and e.expiry_at <= ^DateTime.utc_now()
 
+        where(query, not exists(subquery(due)))
+      else
+        query
+      end
+
+    transition(op, query, [status: "dispatched"] ++ fields)
+  end
+
+  defp transition(op, from, fields) when is_binary(from) do
+    transition(op, from(o in Operation, where: o.id == ^op.id and o.status == ^from), fields)
+  end
+
+  defp transition(op, query, fields) do
     case Repo.update_all(query, set: fields) do
       {1, _} -> {:ok, op.id |> get!() |> tap(&broadcast/1)}
       {0, _} -> :error
