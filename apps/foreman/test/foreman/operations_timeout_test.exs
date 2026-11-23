@@ -67,6 +67,18 @@ defmodule Foreman.OperationsTimeoutTest do
     assert Operations.timed_out(op, "again", &Environments.record_result/1) == :finished
   end
 
+  test "a late success updates its history without undoing a newer successful stop", ctx do
+    op = start(ctx)
+    {:ok, _op, _} = Operations.timed_out(op, "no result", &Environments.record_result/1)
+    stop = Operations.create!(%{box_id: op.box_id, environment_id: op.environment_id,
+      action: "stop", command: "env.stop", status: "succeeded", dispatched_at: DateTime.utc_now(),
+      finished_at: DateTime.utc_now()})
+    Environments.record_result(stop)
+    :ok = report(ctx.box, op.id, %{status: "ok"})
+    assert Operations.get!(op.id).status == "succeeded"
+    assert Repo.reload!(ctx.env).observed_state == "stopped"
+  end
+
   test "a late success clears the timeout", ctx do
     op = start(ctx)
     {:ok, op} = Operations.timed_out(op, "no result after 3 hours")
