@@ -276,7 +276,14 @@ defmodule Foreman.Environments.Server do
   # it the workspace would go on answering to the connection that
   # launched it, and after that one is revoked no changed secret could be
   # written to the box.
-  defp bind_workload_grant(%{action: action, api_grant_id: id} = op, env)
+  #
+  # Only while running is still what is wanted. A restart sent again
+  # after a reconnect may find a stop has been asked for since, and the
+  # authority recorded then belongs to the stop.
+  defp bind_workload_grant(
+         %{action: action, api_grant_id: id} = op,
+         %{desired_state: "running"} = env
+       )
        when action in ["restart_affected", "restart_all"] and not is_nil(id) do
     authority = %{
       "action" => action,

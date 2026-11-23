@@ -42,6 +42,17 @@ defmodule Foreman.PublicAPI.RestartTest do
     end
   end
 
+  # Acknowledge everything the box has been sent, until it is sent nothing more.
+  defp settle(box) do
+    receive do
+      {:dispatch, %ForemanProtocol.Command{op_id: id}} ->
+        complete(box, id)
+        settle(box)
+    after
+      50 -> :ok
+    end
+  end
+
   defp flush do
     receive do
       {:dispatch, _} -> flush()
@@ -229,8 +240,31 @@ defmodule Foreman.PublicAPI.RestartTest do
       complete(ctx.box, op)
 
       # So the next change reaches the box without another restart.
-      {:ok, _} = Foreman.Secrets.apply_changes(owner, "environment", ctx.env, [{"A", "2"}], [])
-      assert_receive {:dispatch, %Command{type: "env.secrets.write"}}
+      settle(ctx.box)
+
+      {:ok, _} =
+        Foreman.Secrets.apply_changes(owner, "environment", ctx.env, [{"A", "second-value"}], [])
+
+      assert_receive {:dispatch, %Command{type: "env.secrets.write", payload: payload}}
+      assert inspect(payload) =~ "second-value"
+    end
+
+    test "a restart sent again after a stop was asked for leaves the stop in charge", ctx do
+      assert {:ok, _, op} = restart(ctx.actor, ctx.env, "restart_all")
+      files_then_restart(ctx.box, op)
+
+      # The owner stops it in the browser while the restart is still out.
+      {:ok, _} =
+        Foreman.Environments.stop(Foreman.Scope.for_user(ctx.user), Repo.reload!(ctx.env))
+
+      stopping = Repo.reload!(ctx.env)
+      assert stopping.desired_state == "stopped"
+
+      Foreman.Environments.Server.resend(ctx.env.id, op)
+
+      after_resend = Repo.reload!(ctx.env)
+      assert after_resend.desired_state == "stopped"
+      assert after_resend.desired_authority == stopping.desired_authority
     end
 
     test "a restart refused at dispatch leaves the authority behind the workspace alone", ctx do
