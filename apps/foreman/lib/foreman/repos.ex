@@ -197,24 +197,54 @@ defmodule Foreman.Repos do
 
   # Adding a public repo outside the app installation is an existing admin
   # workflow. A verified immutable ID makes it eligible for the public API.
-  defp bind_manual_repo(user, %GitRepo{github_id: nil} = repo) do
+  defp bind_manual_repo(user, repo) do
     with true <- Foreman.GitHub.configured?(),
          {:ok, token} <- Foreman.GitHub.user_token(user),
-         {:ok, %{"id" => id, "full_name" => name}} when is_integer(id) and is_binary(name) <-
-           Foreman.GitHub.Client.impl().get_repo(token, repo.full_name),
-         true <- String.downcase(name) == String.downcase(repo.full_name) do
-      from(r in GitRepo,
-        where: r.id == ^repo.id and is_nil(r.github_id) and r.full_name == ^repo.full_name
-      )
-      |> Repo.update_all(set: [github_id: id, github_identity_bound_at: DateTime.utc_now()])
-
+         {:ok, remote} <- Foreman.GitHub.Client.impl().get_repo(token, repo.full_name),
+         true <- observe_manual_repo(repo, remote) do
       Repo.reload!(repo)
     else
       _ -> repo
     end
   end
 
-  defp bind_manual_repo(_user, repo), do: repo
+  @doc "Record archive status for a matching manual repository, binding its GitHub ID on first observation."
+  def observe_manual_repo(
+        %GitRepo{manual: true, github_id: bound} = repo,
+        %{"id" => id, "full_name" => name} = remote
+      )
+      when is_integer(id) and is_binary(name) and (is_nil(bound) or bound == id) do
+    if String.downcase(name) == String.downcase(repo.full_name) do
+      row =
+        from r in GitRepo, where: r.id == ^repo.id and r.manual and r.full_name == ^repo.full_name
+
+      if is_nil(bound),
+        do: record_manual_binding(row, id, remote["archived"]),
+        else: record_manual_archive(row, id, remote["archived"])
+
+      true
+    else
+      false
+    end
+  end
+
+  def observe_manual_repo(_, _), do: false
+
+  defp record_manual_binding(row, id, archived) do
+    binding = [github_id: id, github_identity_bound_at: DateTime.utc_now()]
+    changes = if is_boolean(archived), do: [{:archived, archived} | binding], else: binding
+    {bound, _} = Repo.update_all(where(row, [r], is_nil(r.github_id)), set: changes)
+    # An installation sync may have bound the row during the GitHub request.
+    if bound == 0, do: record_manual_archive(row, id, archived)
+  end
+
+  defp record_manual_archive(row, id, archived) when is_boolean(archived) do
+    row
+    |> where([r], r.github_id == ^id and r.archived != ^archived)
+    |> Repo.update_all(set: [archived: archived])
+  end
+
+  defp record_manual_archive(_, _, _), do: :ok
 
   defp get_or_create_owner(login) do
     case get_owner_by_login(login) do
