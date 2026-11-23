@@ -138,6 +138,27 @@ delete `/usr/local/sbin/foreman-update`, the two
 `/etc/systemd/system/foreman-update.*` units and
 `/etc/foreman/update.conf`.
 
+### When something else deploys the control plane
+
+The updater needs a host: systemd, Docker Compose and a directory it
+shares with the container. A control plane that runs on a container
+service (ECS, Kubernetes, Fly and the like), or that a deploy pipeline
+replaces, has none of those, and the install command on the Deployment
+page can't be run there. Set this in its environment:
+
+```sh
+FOREMAN_UPDATER=false
+```
+
+Admins still see a new release in the sidebar and on the Deployment
+page, with its release notes. In place of the install command and the
+**Update and restart** button, the page says the deployment is updated
+outside Foreman, and the control plane refuses to ask a host for an
+update whatever is mounted at `FOREMAN_UPDATE_DIR`. Deploying the new
+image is then whatever it was the first time: a new image tag in the
+service's definition, say. The steps [by hand](#by-hand) still apply,
+with your platform's way of swapping the image in step 4.
+
 ### By hand
 
 1. Back up, as above.

@@ -153,6 +153,18 @@ defmodule Foreman.UpdatesTest do
       assert %{state: "stale"} = Updates.updater()
     end
 
+    test "turned off, it isn't there whatever the host's directory says", %{dir: dir} do
+      installed(dir, %{"state" => "succeeded", "to" => "0.4.7"})
+      File.write!(Path.join(dir, "request/version"), "0.4.8\n")
+      assert Updates.updater_enabled?()
+
+      Application.put_env(:foreman, :updater, false)
+      on_exit(fn -> Application.delete_env(:foreman, :updater) end)
+
+      refute Updates.updater_enabled?()
+      assert Updates.updater() == %{installed: false, state: nil}
+    end
+
     test "a request the host hasn't picked up yet is pending", %{dir: dir} do
       installed(dir)
       File.write!(Path.join(dir, "request/version"), "0.4.7\n")
@@ -196,6 +208,14 @@ defmodule Foreman.UpdatesTest do
     test "needs the host's updater", %{dir: dir} do
       File.rm!(Path.join(dir, "status/updater"))
       assert {:error, :no_updater} = Updates.request(admin(), "0.4.7")
+    end
+
+    test "not when the deployment updates some other way", %{dir: dir} do
+      Application.put_env(:foreman, :updater, false)
+      on_exit(fn -> Application.delete_env(:foreman, :updater) end)
+
+      assert {:error, :disabled} = Updates.request(admin(), "0.4.7")
+      refute File.exists?(Path.join(dir, "request/version"))
     end
 
     test "one at a time", %{dir: dir} do

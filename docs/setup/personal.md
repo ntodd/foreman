@@ -340,6 +340,7 @@ plane from starting, so a typo can't quietly turn one off.
 | `FOREMAN_FORCE_SSL`, `FOREMAN_SECURE_COOKIES` | `true` | Leave on behind `tailscale serve` |
 | `FOREMAN_UPDATE_CHECK` | `true` | `false` stops checking GitHub for new releases |
 | `FOREMAN_UPDATE_REPO` | `ntodd/foreman` | Where to look for them |
+| `FOREMAN_UPDATER` | `true` | `false` when something other than the host's updater replaces the control plane: admins still see new releases, with nothing to install or run ([upgrading.md](upgrading.md#when-something-else-deploys-the-control-plane)) |
 | `FOREMAN_UPDATE_DIR` | `/var/lib/foreman-update` | Shared with the host's updater; compose.yml mounts it |
 
 With none of `FOREMAN_ADMINS`, `FOREMAN_ALLOWED_USERS` and
