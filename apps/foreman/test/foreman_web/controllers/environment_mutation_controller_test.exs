@@ -4,19 +4,20 @@ defmodule ForemanWeb.EnvironmentMutationControllerTest do
   import Foreman.PublicAPIMutationFixtures
   alias Foreman.{OAuth, Repo}
   setup :local_git
+  setup %{conn: conn}, do: %{conn: %{conn | remote_ip: {127, 0, 0, 1}}}
 
   test "the authenticated routes return the operation location, stable state, errors and scopes",
        %{conn: conn} do
     user = user_fixture()
     repo = repo_fixture() |> Ecto.Changeset.change(private: false) |> Repo.update!()
-    box = box_fixture(owner_user_id: user.id)
+    box = box_fixture(owner_user_id: user.id, vm: %{"ready" => true})
     {:ok, _} = Registry.register(Foreman.Registry, {:agent, box.id}, nil)
     {actor, grant} = principal(user)
     full = OAuth.issue(grant, actor.scopes, :user).access_token
     limited = OAuth.issue(grant, ["environments:create"], :user).access_token
 
     submit = fn path, body, key, token ->
-      %{conn | scheme: :https}
+      conn
       |> put_req_header("authorization", "Bearer " <> token)
       |> put_req_header("content-type", "application/json")
       |> put_req_header("idempotency-key", key)
@@ -55,6 +56,13 @@ defmodule ForemanWeb.EnvironmentMutationControllerTest do
     stable = submit.(actions, %{action: "start"}, "stable", full)
     assert json_response(stable, 200) == %{"environment_id" => env}
     assert get_resp_header(stable, "location") == []
+    Repo.delete!(Foreman.Operations.get!(op))
+    replay = submit.(base, %{repo_id: repo.id}, "create", full)
+
+    assert %{"environment_id" => ^env, "operation_id" => ^op, "operation_history_expired" => true} =
+             json_response(replay, 202)
+
+    assert get_resp_header(replay, "location") == ["/api/v1/operations/#{op}"]
   end
 
   test "both mutations require a bearer credential", %{conn: conn} do
@@ -63,7 +71,7 @@ defmodule ForemanWeb.EnvironmentMutationControllerTest do
           "/api/v1/environments/#{Ecto.UUID.generate()}/operations"
         ] do
       assert %{"code" => _, "message" => _} =
-               %{conn | scheme: :https} |> post(path, %{}) |> json_response(401)
+               conn |> post(path, %{}) |> json_response(401)
     end
   end
 end

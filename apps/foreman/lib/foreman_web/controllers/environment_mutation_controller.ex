@@ -3,8 +3,6 @@ defmodule ForemanWeb.EnvironmentMutationController do
 
   alias Foreman.PublicAPI.Mutations
 
-  plug ForemanWeb.Plugs.ApiAuth
-
   def create(conn, _params) do
     respond(
       conn,
@@ -33,11 +31,11 @@ defmodule ForemanWeb.EnvironmentMutationController do
 
   defp respond(conn, {:ok, env, nil}), do: json(conn, %{environment_id: env})
 
-  defp respond(conn, {:ok, env, op}) do
-    conn
-    |> put_resp_header("location", "/api/v1/operations/#{op}")
-    |> put_status(:accepted)
-    |> json(%{environment_id: env, operation_id: op})
+  defp respond(conn, {:ok, env, op}),
+    do: accepted(conn, op, %{environment_id: env, operation_id: op})
+
+  defp respond(conn, {:history_expired, env, op}) do
+    accepted(conn, op, %{environment_id: env, operation_id: op, operation_history_expired: true})
   end
 
   defp respond(conn, {:error, code, message}) do
@@ -51,5 +49,12 @@ defmodule ForemanWeb.EnvironmentMutationController do
       end
 
     conn |> put_status(status) |> json(%{code: code, message: message})
+  end
+
+  defp accepted(conn, op, body) do
+    conn
+    |> put_resp_header("location", "/api/v1/operations/#{op}")
+    |> put_status(:accepted)
+    |> json(body)
   end
 end

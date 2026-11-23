@@ -20,7 +20,7 @@ defmodule Foreman.PublicAPI.MutationConcurrencyTest do
   setup do
     Sandbox.unboxed_run(Repo, fn ->
       user = user_fixture()
-      box = box_fixture(owner_user_id: user.id)
+      box = box_fixture(owner_user_id: user.id, vm: %{"ready" => true})
       repo = repo_fixture() |> Ecto.Changeset.change(private: false) |> Repo.update!()
       {actor, _grant} = principal(user)
       Registry.register(Foreman.Registry, {:agent, box.id}, nil)
@@ -110,6 +110,27 @@ defmodule Foreman.PublicAPI.MutationConcurrencyTest do
 
       assert Repo.aggregate(from(o in Operation, where: o.environment_id == ^env), :count) == 1
       assert Repo.aggregate(from(r in Receipt, where: r.environment_id == ^env), :count) == 1
+    end)
+  end
+
+  test "an outer rollback sends no agent command and leaves the key available", ctx do
+    Sandbox.unboxed_run(Repo, fn ->
+      input = %{"repo_id" => ctx.repo.id}
+
+      assert {:error, :abort} =
+               Repo.transact(fn ->
+                 assert {:ok, _, _} = Mutations.create(ctx.actor, "retry", input)
+                 refute_received {:dispatch, _}
+                 {:error, :abort}
+               end)
+
+      assert Repo.aggregate(
+               from(e in Environment, where: e.user_id == ^ctx.actor.user.id),
+               :count
+             ) == 0
+
+      assert {:ok, _env, op} = Mutations.create(ctx.actor, "retry", input)
+      assert_receive {:dispatch, %{op_id: ^op}}
     end)
   end
 

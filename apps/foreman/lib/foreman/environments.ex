@@ -520,21 +520,7 @@ defmodule Foreman.Environments do
     with :ok <- authorize(scope, env) do
       result =
         with_box_lock(env.box_id, fn box ->
-          env = locked_environment(env.id)
-
-          with :ok <- allowed?(env, action) do
-            cond do
-              action == :destroy and not is_nil(box.revoked_at) and env.expiry_action == "destroy" and
-                  is_nil(env.expiry_consumed_at) ->
-                {:error, "Physical deletion is pending on the revoked box."}
-
-              action == :destroy and not is_nil(box.revoked_at) ->
-                {:forget, env}
-
-              true ->
-                queue_action(scope, env, action, args)
-            end
-          end
+          reserve_user_action(scope, locked_environment(env.id), box, action, args)
         end)
 
       case result do
@@ -547,6 +533,21 @@ defmodule Foreman.Environments do
 
         error ->
           error
+      end
+    end
+  end
+
+  defp reserve_user_action(scope, env, box, action, args) do
+    with :ok <- allowed?(env, action) do
+      cond do
+        action != :destroy or is_nil(box.revoked_at) ->
+          queue_action(scope, env, action, args)
+
+        env.expiry_action == "destroy" and is_nil(env.expiry_consumed_at) ->
+          {:error, "Physical deletion is pending on the revoked box."}
+
+        true ->
+          {:forget, env}
       end
     end
   end
@@ -820,9 +821,10 @@ defmodule Foreman.Environments do
     attrs = result_attrs(op, env)
 
     attrs =
-      if op.trigger == "expiry" and is_nil(env.expiry_consumed_at),
-        do: Map.put(attrs, :expiry_consumed_at, DateTime.utc_now()),
-        else: attrs
+      if env.expiry_at && is_nil(env.expiry_consumed_at) &&
+           (op.trigger == "expiry" or attrs[:destroyed_at]),
+         do: Map.put(attrs, :expiry_consumed_at, DateTime.utc_now()),
+         else: attrs
 
     case attrs do
       attrs when attrs == %{} ->
@@ -949,7 +951,12 @@ defmodule Foreman.Environments do
   end
 
   defp result_attrs(%{status: "succeeded", action: "destroy"}, _env),
-    do: %{observed_state: "destroyed", destroyed_at: DateTime.utc_now(), status_message: nil}
+    do: %{
+      observed_state: "destroyed",
+      desired_state: "destroyed",
+      destroyed_at: DateTime.utc_now(),
+      status_message: nil
+    }
 
   # A write that works clears the message an earlier failed one left.
   defp result_attrs(%{status: "succeeded", action: "secrets_write"} = op, env) do

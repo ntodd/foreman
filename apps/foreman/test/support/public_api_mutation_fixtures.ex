@@ -22,9 +22,7 @@ defmodule Foreman.PublicAPIMutationFixtures do
         scopes \\ ~w(environments:create environments:start environments:stop environments:destroy)
       ) do
     grant =
-      Repo.insert!(
-        struct!(OAuth.Grant, user_id: user.id, client_id: "foreman-cli", scopes: scopes)
-      )
+      Repo.insert!(%OAuth.Grant{user_id: user.id, client_id: "foreman-cli", scopes: scopes})
 
     {:ok, actor} = OAuth.authorize_grant(grant.id)
     {actor, grant}

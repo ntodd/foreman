@@ -37,6 +37,8 @@ defmodule ForemanWeb.Router do
   scope "/api/v1", ForemanWeb do
     pipe_through [:api, :oauth_bearer]
     get "/me", IdentityController, :show
+    post "/environments", EnvironmentMutationController, :create
+    post "/environments/:id/operations", EnvironmentMutationController, :operate
   end
 
   scope "/", ForemanWeb do
@@ -67,13 +69,6 @@ defmodule ForemanWeb.Router do
     get "/setup/github", SetupController, :github
     get "/setup/github/created", SetupController, :created
     get "/setup/github/installed", SetupController, :installed
-  end
-
-  scope "/api/v1", ForemanWeb do
-    pipe_through :api
-
-    post "/environments", EnvironmentMutationController, :create
-    post "/environments/:id/operations", EnvironmentMutationController, :operate
   end
 
   # Agents: enrollment, the install script and release downloads. Release

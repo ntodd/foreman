@@ -8,6 +8,7 @@ defmodule Foreman.PublicAPI.Mutations do
   alias Foreman.{Audit, Boxes, Capacity, Environments, Repo, Scope, Tailscale}
   alias Foreman.Environments.{Environment, Server}
   alias Foreman.Jobs.EnvironmentExpiry
+  alias Foreman.OAuth.Principal
   alias Foreman.PublicAPI.{Access, MutationInput, Receipt}
 
   @not_found {:error, :resource_not_found, "Resource not found."}
@@ -15,10 +16,10 @@ defmodule Foreman.PublicAPI.Mutations do
   @conflict {:error, :lifecycle_conflict,
              "An opposing lifecycle action or due expiry prevents this action."}
 
-  def create(actor, key, params) do
+  def create(%Principal{} = actor, key, params) do
     with :ok <- MutationInput.key(key),
          {:ok, input} <- MutationInput.create(params) do
-      hash = key_hash(actor, "environments", key)
+      hash = Receipt.key_hash(actor, "environments", key)
 
       case Repo.get(Receipt, hash) do
         nil -> place(actor, hash, input)
@@ -27,16 +28,16 @@ defmodule Foreman.PublicAPI.Mutations do
     end
   end
 
-  def operate(actor, id, key, params) do
+  def operate(%Principal{} = actor, id, key, params) do
     with :ok <- MutationInput.key(key),
          {:ok, input} <- MutationInput.action(params),
          {:ok, id} <- path_id(id),
          visible = Access.environments(actor, id),
          %Environment{} = env <- Repo.one(visible),
          :ok <- permit(actor, input["action"]) do
-      hash = key_hash(actor, "environments/#{id}/operations", key)
+      hash = Receipt.key_hash(actor, "environments/#{id}/operations", key)
 
-      reserve(hash, input, fn ->
+      Receipt.reserve(hash, input, fn ->
         # Boot admission shares the same box lock as every other reservation.
         lock_box(env.box_id)
 
@@ -58,7 +59,7 @@ defmodule Foreman.PublicAPI.Mutations do
   defp place(actor, hash, input) do
     repo_query = Access.repos(actor, input["repo_id"])
 
-    with repo when not is_nil(repo) <- Repo.one(repo_query),
+    with true <- Repo.exists?(repo_query),
          :ok <- explicit_box_visible(actor, input["box_id"]),
          :ok <- create_scopes(actor, input) do
       explicit = input["box_id"]
@@ -69,19 +70,8 @@ defmodule Foreman.PublicAPI.Mutations do
       # back the receipt and releases the lock before trying the next box.
       Enum.reduce_while(ids, @no_box, fn id, _ ->
         result =
-          reserve(hash, input, fn ->
-            box = lock_box(id)
-
-            repo =
-              if actor.kind == :service_account,
-                do: Repo.one(Access.repos(actor, repo.id)),
-                else: Repo.one(repo_query)
-
-            with :ok <- new_policy(input["expiry"]),
-                 :ok <- usable_repo(repo),
-                 :ok <- admission(actor, box, repo, input) do
-              create_on(actor, repo, box, input, names)
-            end
+          Receipt.reserve(hash, input, fn ->
+            reserve_on_box(actor, id, repo_query, input, names)
           end)
 
         case result do
@@ -91,8 +81,26 @@ defmodule Foreman.PublicAPI.Mutations do
         end
       end)
     else
-      nil -> @not_found
+      false -> @not_found
       error -> error
+    end
+  end
+
+  defp reserve_on_box(actor, id, repo_query, input, names) do
+    box = lock_box(id)
+    # Personal repository access has already been checked with GitHub. A
+    # service installation's local grant may change between candidates.
+    query =
+      if actor.kind == :service_account,
+        do: Access.repos(actor, input["repo_id"]),
+        else: repo_query
+
+    repo = Repo.one(query)
+
+    with :ok <- new_policy(input["expiry"]),
+         :ok <- usable_repo(repo),
+         :ok <- admission(actor, box, repo, input) do
+      create_on(actor, repo, box, input, names)
     end
   end
 
@@ -157,48 +165,57 @@ defmodule Foreman.PublicAPI.Mutations do
       not Boxes.online?(box.id) ->
         {:error, :box_offline, "The selected box is offline."}
 
+      Boxes.vm_problem(box) ->
+        {:error, message} = Boxes.check_vm(box)
+        {:error, :box_vm_unavailable, message}
+
+      not match?(%{"ready" => true}, box.vm) ->
+        {:error, :box_vm_unavailable, "The selected box has not confirmed VM support."}
+
       true ->
-        case Boxes.check_vm(box) do
-          :ok -> :ok
-          {:error, message} -> {:error, :box_vm_unavailable, message}
-        end
+        :ok
     end
   end
 
   defp capacity({:warn, _}, %{"confirm_capacity_warning" => true}), do: :ok
   defp capacity({:warn, message}, _), do: {:error, :capacity_confirmation_required, message}
   defp capacity({:refuse, message}, _), do: {:error, :capacity_exceeded, message}
-  defp capacity(_, _), do: :ok
+  defp capacity(:ok, _), do: :ok
+  defp capacity({:contention, _}, _), do: :ok
 
   defp create_on(actor, repo, box, input, names) do
     branch = input["branch"] || repo.default_branch
 
-    with {:ok, env} <- Environments.insert_environment(actor.user, repo, box, branch, %{}, names) do
-      expiry = input["expiry"]
+    expiry = input["expiry"]
 
-      env =
-        env
-        |> Ecto.Changeset.change(
-          api_grant_id: actor.grant_id,
-          expiry_at: expiry && deadline(expiry),
-          expiry_action: expiry && expiry["action"]
+    attrs = %{
+      api_grant_id: actor.grant_id,
+      expiry_at: expiry && deadline(expiry),
+      expiry_action: expiry && expiry["action"]
+    }
+
+    case Environments.insert_environment(actor.user, repo, box, branch, attrs, names) do
+      {:ok, env} ->
+        op =
+          Environments.queue_operation(env, "create", %{}, actor.user,
+            api_grant_id: actor.grant_id
+          )
+
+        EnvironmentExpiry.schedule!(env)
+
+        Audit.log(
+          actor.user,
+          "environment.create",
+          env,
+          Map.merge(audit(actor), %{
+            "slug" => env.slug,
+            "repo" => repo.full_name,
+            "box" => box.name
+          })
         )
-        |> Repo.update!()
 
-      op =
-        Environments.queue_operation(env, "create", %{}, actor.user, api_grant_id: actor.grant_id)
+        {:accept, env.id, op.id}
 
-      EnvironmentExpiry.schedule!(env)
-
-      Audit.log(
-        actor.user,
-        "environment.create",
-        env,
-        Map.merge(audit(actor), %{"slug" => env.slug, "repo" => repo.full_name, "box" => box.name})
-      )
-
-      {:accept, env.id, op.id}
-    else
       {:error, %Ecto.Changeset{}} ->
         {:error, :invalid_request, "The environment could not be reserved."}
     end
@@ -228,15 +245,15 @@ defmodule Foreman.PublicAPI.Mutations do
       due && action != env.expiry_action ->
         @conflict
 
+      due ->
+        {:ok, op} = EnvironmentExpiry.reserve(env)
+        accepted_existing(actor, env, action, op.id)
+
       Enum.any?(active, &(target(&1.action) != target(action))) ->
         @conflict
 
       active != [] ->
         accepted_existing(actor, env, action, hd(active).id)
-
-      due ->
-        {:ok, op} = EnvironmentExpiry.queue(env)
-        accepted_existing(actor, env, action, op.id)
 
       stable?(env, action) ->
         accepted_existing(actor, env, action, nil)
@@ -248,7 +265,11 @@ defmodule Foreman.PublicAPI.Mutations do
               Scope.for_user(actor.user),
               env,
               String.to_existing_atom(action),
-              %{}, api_grant_id: actor.grant_id, audit: audit(actor), dedupe: false)
+              %{},
+              api_grant_id: actor.grant_id,
+              audit: audit(actor),
+              dedupe: false
+            )
 
           {:accept, env.id, op.id}
         end
@@ -287,39 +308,6 @@ defmodule Foreman.PublicAPI.Mutations do
 
   defp admit_action(_, _), do: :ok
 
-  defp key_hash(actor, endpoint, key) do
-    :crypto.hash(
-      :sha256,
-      :erlang.term_to_binary({actor.kind, actor.user.id, actor.client_id, endpoint, key})
-    )
-  end
-
-  defp reserve(hash, input, accept) do
-    Repo.transact(fn ->
-      case Repo.insert_all(Receipt, [%{key_hash: hash, input: input}],
-             on_conflict: :nothing,
-             conflict_target: [:key_hash]
-           ) do
-        {0, _} ->
-          {:ok, {:replay, Repo.get!(Receipt, hash)}}
-
-        {1, _} ->
-          case accept.() do
-            {:accept, env_id, op_id} ->
-              {1, _} =
-                Repo.update_all(from(r in Receipt, where: r.key_hash == ^hash),
-                  set: [environment_id: env_id, operation_id: op_id]
-                )
-
-              {:ok, {:accepted, env_id, op_id}}
-
-            error ->
-              {:error, error}
-          end
-      end
-    end)
-  end
-
   defp finish({:ok, {:accepted, id, op}}, _actor, _input, _endpoint) do
     unless Repo.in_transaction?() do
       if op, do: Server.kick(id)
@@ -347,6 +335,12 @@ defmodule Foreman.PublicAPI.Mutations do
 
         endpoint == :create and not is_nil(env.destroyed_at) ->
           {:error, :original_environment_gone, "Original environment gone."}
+
+        receipt.operation_id &&
+            not Repo.exists?(
+              from(o in Foreman.Operations.Operation, where: o.id == ^receipt.operation_id)
+            ) ->
+          {:history_expired, env.id, receipt.operation_id}
 
         true ->
           {:ok, env.id, receipt.operation_id}

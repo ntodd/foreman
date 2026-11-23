@@ -2,6 +2,8 @@ defmodule Foreman.Jobs.EnvironmentExpiry do
   @moduledoc "Transfers an authorized expiry policy to the durable agent queue when it comes due."
   use Oban.Worker, queue: :default
 
+  import Ecto.Query
+
   alias Foreman.{Environments, Repo, Scope}
   alias Foreman.Environments.{Environment, Server}
 
@@ -42,29 +44,29 @@ defmodule Foreman.Jobs.EnvironmentExpiry do
   defp consider(%{expiry_consumed_at: at}) when not is_nil(at), do: :ok
 
   defp consider(env) do
-    active = Repo.all(Environments.active_lifecycle(env.id))
-
-    cond do
-      not due?(env) ->
-        {:snooze, max(1, DateTime.diff(env.expiry_at, DateTime.utc_now()))}
-
-      Enum.any?(active, &(&1.trigger == "expiry")) ->
-        :ok
-
-      active != [] ->
-        {:snooze, 5}
-
-      true ->
-        {:ok, _op} = queue(env)
-        :queued
+    if due?(env) do
+      {:ok, _op} = reserve(env)
+      :queued
+    else
+      {:snooze, max(1, DateTime.diff(env.expiry_at, DateTime.utc_now()))}
     end
   end
 
-  @doc "Queues system work for a due policy, with the environment locked and its lifecycle queue idle."
-  def queue(env) do
-    Environments.queue_action(%Scope{}, env, String.to_existing_atom(env.expiry_action), %{},
-      trigger: "expiry",
-      audit: %{"trigger" => "expiry"}
-    )
+  @doc "Reserve the system operation with the environment locked. The normal dispatcher serializes it behind in-flight work."
+  def reserve(env) do
+    queued =
+      from o in Environments.active_lifecycle(env.id), where: o.trigger == "expiry", limit: 1
+
+    case Repo.one(queued) do
+      nil ->
+        Environments.queue_action(%Scope{}, env, String.to_existing_atom(env.expiry_action), %{},
+          dedupe: false,
+          trigger: "expiry",
+          audit: %{"trigger" => "expiry"}
+        )
+
+      op ->
+        {:ok, op}
+    end
   end
 end

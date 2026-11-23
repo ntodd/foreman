@@ -59,7 +59,7 @@ defmodule Foreman.PublicAPI.ExpiryTest do
              Repo.all(from o in Operation, where: o.environment_id == ^env.id)
   end
 
-  test "an in-flight lifecycle transition finishes before the expiry is accepted" do
+  test "a pending expiry is visible while the in-flight transition finishes" do
     env = environment_fixture()
 
     env
@@ -76,8 +76,20 @@ defmodule Foreman.PublicAPI.ExpiryTest do
       })
 
     job = %Oban.Job{args: %{"environment_id" => env.id}}
-    assert {:snooze, seconds} = EnvironmentExpiry.perform(job)
-    assert seconds > 0
-    assert [^op] = Repo.all(from o in Operation, where: o.environment_id == ^env.id)
+    Registry.register(Foreman.Registry, {:agent, env.box_id}, nil)
+    assert :ok = EnvironmentExpiry.perform(job)
+
+    assert %{status: "queued", trigger: "expiry", id: cleanup} =
+             Repo.one!(
+               from o in Operation, where: o.environment_id == ^env.id and o.action == "stop"
+             )
+
+    refute_received {:dispatch, _}
+
+    {:ok, event} =
+      ForemanProtocol.Event.new("op.result", %{op_id: op.id, status: "ok", result: %{}})
+
+    assert :ok = Foreman.Agents.handle_event(env.box_id, event)
+    assert_receive {:dispatch, %{type: "env.stop", op_id: ^cleanup}}
   end
 end

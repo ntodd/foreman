@@ -82,6 +82,9 @@ defmodule Foreman.Environments.Environment do
       :user_id,
       :box_id,
       :branch,
+      :api_grant_id,
+      :expiry_at,
+      :expiry_action,
       :cpu_limit,
       :memory_limit_mb
     ])
