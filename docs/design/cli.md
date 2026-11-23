@@ -41,6 +41,7 @@ Create prints the environment and operation IDs as soon as the server accepts th
 | `env start ENV_ID`, `env stop ENV_ID`, `env destroy ENV_ID` | Submit the action, report an already-reached state immediately, or report the accepted operation ID. Destroy requires confirmation in a terminal or an explicit `--yes`. |
 | `op list ENV_ID`, `op show OP_ID`, `op wait OP_ID` | Read history, including after destruction, inspect one operation, or wait for its terminal outcome. Surface the server's error code on failure. |
 | `op logs OP_ID [--follow] [--cursor CURSOR]` | Read available log pages. Follow from the last cursor, including across empty pages. Report truncation. On a terminal operation, drain remaining output before exiting. |
+| `secrets list`, `secrets set NAME=value …`, `secrets unset NAME …`, `secrets import FILE` | Manage secrets at one level, chosen with `--env ID`, `--repo OWNER/NAME`, `--owner LOGIN` or `--user` (the default: the caller's own). `set` takes several pairs and sends them as one all-or-nothing request. `NAME=@file` reads a file and `NAME` alone asks without echo. `import` reads a dotenv file, or `-` for standard input. Values are never printed. `secret` is accepted as the same command. |
 | `update` | Check the official stable CLI release, install it if newer, and print the installed version. Works before login. An already-current installation exits successfully. |
 
 An explicit capacity confirmation flag passes the warning acknowledgement to the API for create or start. The CLI describes the warning before offering an interactive retry. A destroy confirmation applies only to destruction. A hard capacity limit is returned to the caller.
@@ -51,7 +52,7 @@ The current CLI uses the public client ID `foreman-cli`. Retain issuer and endpo
 
 Remember the instance and account after a successful login. Explicit `--instance` and `--account` take priority. For an explicit instance with multiple accounts and no selected account for that instance, list the choices and require a selection. Never borrow credentials from a different origin. Preserve working connections under `$XDG_STATE_HOME/foreman` (default `~/.local/state/foreman`), including account locks, atomic credential replacement, and pending revocations. An upgrade must allow the next refresh and logout to succeed using an existing personal connection.
 
-Default login scopes cover discovery, reads, operations, logs, create, start and stop. Request destroy explicitly through `login --scope` when needed. Honor a narrower grant. For example, `env create REPO_UUID --no-wait` can submit with create permission alone. Report any missing read permission for a later wait as a separate error with the accepted IDs. Foreman authorizes every request.
+Default login scopes cover discovery, reads, operations, logs, create, start and stop. Request destroy explicitly through `login --scope` when needed. The secret permissions are requested the same way: `foreman help secrets` prints the full `login --scope` line, and a secrets command refused for lack of permission prints it too. Honor a narrower grant. For example, `env create REPO_UUID --no-wait` can submit with create permission alone. Report any missing read permission for a later wait as a separate error with the accepted IDs. Foreman authorizes every request.
 
 ## Long-running work and recovery
 

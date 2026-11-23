@@ -39,6 +39,12 @@ const help = `Usage: foreman [--instance ORIGIN] [--account ID] [--json] COMMAND
   op wait OP_ID                  Wait for completion
   op logs OP_ID [--follow] [--cursor CURSOR]
 
+  secrets list                   List secret names at one level (never values)
+  secrets set NAME=value ...     Set several at once; NAME=@file reads a file, NAME asks
+  secrets unset NAME ...         Remove secrets
+  secrets import FILE            Set everything in a dotenv file (- for standard input)
+    [--env ID | --repo REPO | --owner LOGIN | --user]   Default: your own secrets
+
 Lifecycle commands wait by default. Use --no-wait for submission only
 or --timeout 30s to bound a wait.
 
@@ -161,6 +167,8 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 				usage = "Usage: foreman [--instance ORIGIN] [--account ID] me\n\nPrint the selected connection's acting identity as JSON.\n"
 			case "logout":
 				usage = "Usage: foreman [--instance ORIGIN] [--account ID] [--json] logout\n\nRevoke the selected personal connection.\n"
+			case "secrets", "secret":
+				usage = secretsHelp
 			default:
 				return fail(stderr, o.json, fmt.Errorf("unknown command %q", args[0]), "invalid_invocation", 2)
 			}
@@ -199,6 +207,8 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	switch command {
 	case "repo", "box", "env", "op":
 		return runWorkload(ctx, args, o, stdout, stderr)
+	case "secrets", "secret":
+		return runSecrets(ctx, args, o, stdout, stderr)
 	}
 	flags := flag.NewFlagSet(command, flag.ContinueOnError)
 	flags.SetOutput(io.Discard)

@@ -51,6 +51,32 @@ A single `op logs` read returns up to 16 whole pages and 1 MiB of text. In JSON 
 
 Use `--follow` for a continuous log stream. JSON follow mode writes one page per line, including empty pages. To reconnect, run `foreman op logs "$OP_ID" --follow --cursor "$CURSOR"` using the last delivered cursor.
 
+## Secrets with the installed CLI
+
+A default login leaves the secret permissions out. Connect with them once; `foreman help secrets` prints the exact line for your version:
+
+```sh
+foreman login --scope "repos:list boxes:list environments:list environments:read operations:list operations:read logs:read environments:create environments:start environments:stop secrets:list secrets:write"
+```
+
+Then set, list and remove secrets at one level:
+
+```sh
+foreman secrets set LOG_LEVEL=debug API_KEY=@key.txt --env "$ENV_ID"
+foreman secrets set DATABASE_PASSWORD            # asks, without showing what you type
+foreman secrets import team.env --repo acme/payments
+foreman secrets list --repo acme/payments
+foreman secrets unset OLD_TOKEN --repo acme/payments
+```
+
+With no level named, the secrets are your own and reach all of your environments. `--env` takes an environment ID. `--repo` takes an exact owner/name or a repository UUID, and `--owner` a login; both of those need an admin. An environment gets the owner's secrets, then the repository's, then your own, then its own, and a later level wins.
+
+One `set`, `unset` or `import` is one request: everything in it is saved, or nothing is. A request takes up to 100 changes. `list` shows names and when each last changed. No command prints a value.
+
+A value written as `NAME=value` stays in your shell history and is visible to other processes while the command runs. For anything sensitive use `NAME=@file`, which reads the file and drops its final newline, or `NAME` alone, which asks on the terminal. `import` reads `NAME=value` lines from a dotenv file, or from standard input when the file is `-`. It skips blank lines and `#` comments, accepts a leading `export`, keeps single-quoted values as written, and reads `\n`, `\t`, `\"` and `\\` inside double quotes.
+
+In a running environment new shells see a change at once. Processes and services that were already running keep the values they started with, and the command lists your environments in that state. Apply the change with `foreman env stop "$ENV_ID"` and then `foreman env start "$ENV_ID"`, or with **Restart affected** in the browser.
+
 ## Update or disconnect
 
 Run `foreman update` to install the latest stable CLI release. An interactive command announces a newly available version once. Updating preserves your login, including personal connections saved by the checkout CLI. Run `foreman logout` to disconnect the selected account.

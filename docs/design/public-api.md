@@ -21,7 +21,7 @@ The official CLI ships with a recognized public client ID. An instance admin reg
 
 **Discovery.** For an instance at an HTTPS origin, fetch `/.well-known/oauth-authorization-server` and verify that its `issuer` matches the selected instance before using the advertised endpoints. Metadata lists the device authorization, token and revocation URLs, grant types, client authentication methods and individual scopes. [Authorization server metadata](https://www.rfc-editor.org/rfc/rfc8414.html)
 
-**Scope names.** Use the resource-first form `resource:action`. Any authenticated connection can call `/me`. Request scopes as space-separated values. Use `repos:list`, `boxes:list`, `environments:list`, `environments:read`, `operations:list`, `operations:read` and `logs:read` for the corresponding reads. Mutations use `environments:create`, `environments:start`, `environments:stop` and `environments:destroy`. The scope for an expiry action is also required when setting it. The client must inspect the granted scope.
+**Scope names.** Use the resource-first form `resource:action`. Any authenticated connection can call `/me`. Request scopes as space-separated values. Use `repos:list`, `boxes:list`, `environments:list`, `environments:read`, `operations:list`, `operations:read` and `logs:read` for the corresponding reads. Mutations use `environments:create`, `environments:start`, `environments:stop` and `environments:destroy`. The scope for an expiry action is also required when setting it. `secrets:list` and `secrets:write` cover secrets and belong to personal connections alone: an admin cannot grant them to a service account. The client must inspect the granted scope.
 
 **Personal connection.** The client selects an instance URL and identifies itself to `POST /oauth/device/code` with its registered client ID. It displays the returned verification URI and user code. The user signs in to that instance using Foreman’s existing browser login, confirms the code, and approves the named client and requested permissions. The client polls `POST /oauth/token` at the advertised interval, handles pending approval, slowdown, denial, and expiry, and exchanges the device code once. This requires only outbound HTTPS from the client. Device codes expire after 10 minutes. A distributed CLI is a public client. [OAuth device authorization grant](https://www.rfc-editor.org/rfc/rfc8628.html)
 
@@ -75,6 +75,29 @@ A ready workspace has a successful devcontainer setup result for the same contai
 
 The v1 operation history includes create, start, stop and destroy. When Foreman times out an operation it reports a terminal `failed` with error code `operation_timeout`. A late agent result can correct the environment's observed state when that operation still controls it. The public operation keeps its timeout outcome. If workload authorization is withdrawn before dispatch or reconnect, the operation reports a terminal `failed` with `workload_unauthorized`. A late result for an earlier delivery may still reconcile the environment while that public outcome stays final.
 
+## Secrets
+
+A personal connection can manage secrets at the four levels the browser offers: an owner's, a repository's, the caller's own, and one environment's. An environment receives them in that order and a later level wins.
+
+`GET /api/v1/secrets/{scope}/{subject}` lists the names set at one level, with when each last changed. `PATCH` on the same path sets and removes several together. The scope is `owner`, `repo`, `user` or `environment`. The subject is the environment or repository ID, the owner's ID or login, or `me`.
+
+```json
+{
+  "secrets": [{"name": "DATABASE_URL", "value": "postgres://…"}, {"name": "LOG_LEVEL", "value": "debug"}],
+  "unset": ["OLD_TOKEN"]
+}
+```
+
+**Values go in and never come out.** No response carries a value, including the response to the request that set it. The request log filters the `secrets` field.
+
+**One request, all or nothing.** Every change in a request is saved, or none is. A refused name fails the request with `422 invalid_request` and a message naming it. Removing a name that isn't set is skipped and left out of the response's `unset`. A request holds between one and 100 changes and names each secret once. Repeating a request leaves the same secrets in place, so it needs no idempotency key.
+
+**Who may change what.** The caller's own secrets and the secrets of the caller's own environments need no role. A repository's or an owner's take an admin, as in the browser. A member asking for either gets `403 forbidden` before anything is looked up, so the answer is the same whether or not the repository or owner exists. Another person's environment is `404 resource_not_found`, for an admin too. Service accounts cannot hold the two scopes; they receive the secrets an admin approved for them.
+
+**Running environments.** A change reaches a running environment's `/run/foreman/secrets.env` at once, so new shells see it. Processes and compose services already running keep the values they started with. The response lists the caller's own environments in that state under `pending_restart`, and counts other people's in `others_pending_restart`. Stopping and starting an environment applies the change; so does **Restart affected** in the browser. A stopped environment picks the new values up on its next start.
+
+Each change is audited with the client and the acting user.
+
 ### Create errors
 
 | HTTP | Code | Caller action |
@@ -101,4 +124,4 @@ The v1 operation history includes create, start, stop and destroy. When Foreman 
 
 ## V1 boundaries
 
-The lifecycle API supports create, start, stop and destroy. Set any expiry when creating the environment. The administrator registers service credentials, selects workload grants and manages rotation from **Admin → API clients**. Each installation has its own tailnet tag. Tailnet administrators control SSH authorization in deployments that delegate SSH to Tailscale.
+The lifecycle API supports create, start, stop and destroy. Set any expiry when creating the environment. Restarting an environment's services after a secret change is a stop and a start; **Restart affected** remains a browser action. The administrator registers service credentials, selects workload grants and manages rotation from **Admin → API clients**. Each installation has its own tailnet tag. Tailnet administrators control SSH authorization in deployments that delegate SSH to Tailscale.

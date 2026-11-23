@@ -118,6 +118,60 @@ defmodule Foreman.CLIAcceptanceTest do
     assert Repo.aggregate(Environment, :count) == 2
   end
 
+  test "secrets are set, imported, listed and removed without a value ever being printed", ctx do
+    env = environment_fixture(user: ctx.user, repo: ctx.repo, box: ctx.box)
+
+    # A default login leaves the secret permissions out, and says how to ask for them.
+    login(ctx, ctx.user)
+    assert {%{"code" => "insufficient_scope"}, "", _} = failure(ctx, ["secrets", "set", "A=1"])
+    {status, "", hint} = ctx |> launch(["secrets", "list"]) |> finish()
+    assert status != 0
+    assert hint =~ ~s(foreman login --scope ")
+    assert hint =~ "secrets:write"
+
+    login(ctx, ctx.user, "repos:list secrets:list secrets:write")
+    File.write!(Path.join(ctx.tmp_dir, "key.txt"), "from a file\n")
+
+    File.write!(
+      Path.join(ctx.tmp_dir, "team.env"),
+      "# shared\nDOTENV_ONE=1\nexport DOTENV_TWO=\"two words\"\n"
+    )
+
+    args = ["secrets", "set", "PLAIN=hunter2", "FROM_FILE=@key.txt", "--env", env.id]
+    assert %{"set" => ["PLAIN", "FROM_FILE"], "unset" => []} = json(ctx, args)
+    assert Foreman.Secrets.resolve(env) == %{"PLAIN" => "hunter2", "FROM_FILE" => "from a file"}
+
+    {0, human, ""} = ctx |> launch(["secrets", "list", "--env", env.id]) |> finish()
+    assert ["NAME\tUPDATED", "FROM_FILE\t" <> _, "PLAIN\t" <> _] = String.split(human, "\n", trim: true)
+    listed = json(ctx, ["secrets", "list", "--env", env.id])
+    assert Enum.map(items(listed), & &1["name"]) == ["FROM_FILE", "PLAIN"]
+    refute human <> inspect(listed) =~ "hunter2"
+
+    # With no level named, the secrets are the caller's own.
+    assert %{"set" => ["DOTENV_ONE", "DOTENV_TWO"]} = json(ctx, ["secret", "import", "team.env"])
+    assert Enum.map(items(json(ctx, ["secrets", "list"])), & &1["name"]) == ["DOTENV_ONE", "DOTENV_TWO"]
+    assert Foreman.Secrets.resolve(env)["DOTENV_TWO"] == "two words"
+
+    assert %{"set" => [], "unset" => ["PLAIN"]} =
+             json(ctx, ["secrets", "unset", "PLAIN", "NEVER_SET", "--env", env.id])
+
+    # One refused name leaves the whole request unapplied.
+    assert {%{"code" => "invalid_request", "message" => message}, "", _} =
+             failure(ctx, ["secrets", "set", "GOOD=1", "FOREMAN_TOKEN=2", "--env", env.id])
+
+    assert message =~ "FOREMAN_TOKEN"
+    refute Map.has_key?(Foreman.Secrets.resolve(env), "GOOD")
+
+    # A repository's secrets take an admin, and another person's environment is not found.
+    assert {%{"code" => "forbidden"}, "", _} =
+             failure(ctx, ["secrets", "set", "A=1", "--repo", ctx.repo.full_name])
+
+    foreign = environment_fixture(repo: ctx.repo)
+
+    assert {%{"code" => "resource_not_found"}, "", _} =
+             failure(ctx, ["secrets", "list", "--env", foreign.id])
+  end
+
   test "create-only authorization submits by UUID and preserves accepted IDs on a wait error",
        ctx do
     login(ctx, ctx.user, "environments:create")
