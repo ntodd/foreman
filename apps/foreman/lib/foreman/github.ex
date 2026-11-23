@@ -314,7 +314,7 @@ defmodule Foreman.GitHub do
 
   defp issue_workload_token(%{kind: :service_account} = principal, repo, requested_ids) do
     import Ecto.Query
-    ids = Foreman.OAuth.ServiceAccounts.repo_ids(principal)
+    ids = Foreman.OAuth.ServiceAccounts.repo_ids(principal, repo.id)
 
     approved =
       Foreman.Repo.all(
