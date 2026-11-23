@@ -897,27 +897,33 @@ defmodule ForemanAgent.VMEnvTest do
     setup ctx do
       test = self()
 
+      inventory =
+        start_supervised!(
+          {Agent,
+           fn ->
+             {:ok,
+              [
+                %{
+                  "env_id" => @other,
+                  "slug" => "evil-1",
+                  "state" => "running",
+                  "containers" => []
+                },
+                %{
+                  "env_id" => @env,
+                  "slug" => "made-up",
+                  "state" => "running",
+                  "containers" => [%{"id" => "c1", "service" => "app", "state" => "running"}]
+                }
+              ]}
+           end}
+        )
+
       FakeMachine.configure(
         test: test,
         handler: fn _cmd, _log -> {:ok, %{}} end,
         queries: %{
-          "inventory" => fn ->
-            {:ok,
-             [
-               %{
-                 "env_id" => @other,
-                 "slug" => "evil-1",
-                 "state" => "running",
-                 "containers" => []
-               },
-               %{
-                 "env_id" => @env,
-                 "slug" => "made-up",
-                 "state" => "running",
-                 "containers" => [%{"id" => "c1", "service" => "app", "state" => "running"}]
-               }
-             ]}
-          end,
+          "inventory" => fn -> Agent.get(inventory, &Function.identity/1) end,
           "ports" => fn ->
             {:ok,
              %{
@@ -947,7 +953,7 @@ defmodule ForemanAgent.VMEnvTest do
       )
 
       {:ok, _} = run(create(), ctx)
-      :ok
+      %{inventory: inventory}
     end
 
     test "page cache reclaim samples the box, and each running VM from outside", ctx do
@@ -980,6 +986,28 @@ defmodule ForemanAgent.VMEnvTest do
       assert entry.slug == "hello-1"
       assert entry.state == "running"
       assert [%{id: "c1", service: "app"}] = entry.containers
+    end
+
+    test "workspace samples follow the guest inventory through the VM link", ctx do
+      container = %{"id" => "sidecar", "service" => "db", "state" => "running"}
+
+      entry = %{
+        "env_id" => @env,
+        "slug" => "hello-1",
+        "state" => "partial",
+        "containers" => [container]
+      }
+
+      for {reply, expected} <- [
+            {{:ok, [entry]}, %{@env => ["sidecar"]}},
+            {{:ok, []}, %{@env => []}},
+            {{:ok, [Map.put(entry, "env_id", @other)]}, %{}},
+            {{:error, "guest inventory unavailable"}, %{}}
+          ] do
+        Agent.update(ctx.inventory, fn _ -> reply end)
+        assert {:ok, entries} = Status.inventory(ctx.config)
+        assert ForemanAgent.Reporter.running_containers(entries) == expected
+      end
     end
 
     test "inventory shows a stopped VM as stopped", ctx do

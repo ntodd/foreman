@@ -47,8 +47,17 @@ defmodule Foreman.PublicAPI.Access do
       if id == :all, do: reraise(error, __STACKTRACE__), else: where(GitRepo, false)
   end
 
-  def environments(principal, id \\ :all) do
-    owned = by_id(owned_environments(principal), id)
+  def environments(principal, id \\ :all),
+    do: visible_environments(owned_environments(principal), principal, id)
+
+  def live_environments(principal, id \\ :all) do
+    owned_environments(principal)
+    |> where([e], is_nil(e.destroyed_at))
+    |> visible_environments(principal, id)
+  end
+
+  defp visible_environments(owned, principal, id) do
+    owned = by_id(owned, id)
     candidates = select(owned, [e], e.repo_id)
     query = from r in GitRepo, where: is_nil(r.removed_at) and r.id in subquery(candidates)
     allowed = authorized_repos(query, principal)

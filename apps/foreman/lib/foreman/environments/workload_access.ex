@@ -80,7 +80,10 @@ defmodule Foreman.Environments.WorkloadAccess do
     Access.Unavailable -> :retry
   end
 
-  defp launchable?(%{action: "create"}, %{created_once: false} = env, %{grant_id: _}) do
+  defp launchable?(%{action: action, command: command}, %{created_once: false} = env, %{
+         grant_id: _
+       })
+       when action == "create" or command == "env.create" do
     Repo.exists?(
       from r in Repos.Repo,
         where: r.id == ^env.repo_id and not r.archived and not is_nil(r.devcontainer_path)

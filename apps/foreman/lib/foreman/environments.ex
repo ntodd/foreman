@@ -26,6 +26,8 @@ defmodule Foreman.Environments do
   require Logger
 
   @preloads [:box, :user, repo: :owner]
+  @up ~w(create rebuild pull_rebuild start restart_affected restart_all)
+  @lifecycle @up ++ ~w(stop suspend destroy)
 
   # -- queries ----------------------------------------------------------------------
 
@@ -55,8 +57,16 @@ defmodule Foreman.Environments do
   def get!(id), do: Environment |> Repo.get!(id) |> Repo.preload(@preloads)
 
   def live_for_box(box_id) do
+    boots =
+      from o in Foreman.Operations.Operation,
+        where:
+          o.box_id == ^box_id and o.action in @up and
+            o.status in ["queued", "dispatched", "running"],
+        select: o.environment_id
+
     from(e in Environment,
       where: e.box_id == ^box_id and is_nil(e.destroyed_at),
+      select_merge: %{boot_reserved: type(fragment("?", e.id in subquery(boots)), :boolean)},
       preload: ^@preloads
     )
     |> Repo.all()
@@ -601,13 +611,27 @@ defmodule Foreman.Environments do
         env
       end
 
-    supersede(env, name)
+    env = prepare_queue(env, name, opts[:trigger])
 
-    if action == :start, do: queue_operation(env, "secrets_write", %{}, scope.user, opts)
+    if action == :start and not env.initial_create_deferred,
+      do: queue_operation(env, "secrets_write", %{}, scope.user, opts)
 
     op = queue_operation(env, name, args, scope.user, opts)
     Audit.log(scope, "environment.#{action}", env, Keyword.get(opts, :audit, %{}))
     {:ok, op}
+  end
+
+  defp prepare_queue(env, "stop", "expiry") do
+    cancelled = cancel_queued(env, &(&1 in @up or &1 == "suspend"))
+
+    if not env.created_once and Enum.any?(cancelled, &(&1.action == "create")),
+      do: update_env!(env, %{initial_create_deferred: true}),
+      else: env
+  end
+
+  defp prepare_queue(env, name, _) do
+    supersede(env, name)
+    env
   end
 
   defp supersede(env, "destroy"), do: cancel_queued(env, &(&1 != "destroy"))
@@ -625,11 +649,9 @@ defmodule Foreman.Environments do
             from o in Foreman.Operations.Operation,
               where: o.environment_id == ^env.id and o.status == "queued"
           ),
-        which?.(op.action) do
-      Operations.cancel_queued(op)
-    end
-
-    :ok
+        which?.(op.action),
+        {:ok, cancelled} <- [Operations.cancel_queued(op)],
+        do: cancelled
   end
 
   # A revoked box can never reconnect, so its environments are marked
@@ -680,6 +702,7 @@ defmodule Foreman.Environments do
 
   defp allowed?(%Environment{destroyed_at: nil} = env, action)
        when action in [
+              :create,
               :start,
               :stop,
               :destroy,
@@ -739,7 +762,11 @@ defmodule Foreman.Environments do
         api_grant_id: opts[:api_grant_id],
         trigger: Keyword.get(opts, :trigger, "request"),
         action: action,
-        command: command_type(action),
+        command:
+          if(action == "start" and env.initial_create_deferred,
+            do: "env.create",
+            else: command_type(action)
+          ),
         args: args
       })
   end
@@ -809,7 +836,6 @@ defmodule Foreman.Environments do
 
   # -- results -----------------------------------------------------------------------
 
-  @up ~w(create rebuild pull_rebuild start restart_affected restart_all)
   @fresh_build ~w(create rebuild pull_rebuild)
 
   @doc """
@@ -836,15 +862,29 @@ defmodule Foreman.Environments do
   end
 
   def record_result(%Foreman.Operations.Operation{} = op) do
-    env = Repo.get!(Environment, op.environment_id)
+    env = locked_environment(op.environment_id)
 
     attrs = result_attrs(op, env)
 
     attrs =
-      if env.expiry_at && is_nil(env.expiry_consumed_at) &&
-           (op.trigger == "expiry" or attrs[:destroyed_at]),
-         do: Map.put(attrs, :expiry_consumed_at, DateTime.utc_now()),
-         else: attrs
+      cond do
+        is_nil(env.expiry_at) or not is_nil(env.expiry_consumed_at) ->
+          attrs
+
+        attrs[:destroyed_at] || (op.trigger == "expiry" and op.status == "succeeded") ->
+          # A late physical success can race a queued replacement for its timeout.
+          retire_queued_expiry(env.id)
+          Map.put(attrs, :expiry_consumed_at, DateTime.utc_now())
+
+        op.trigger == "expiry" ->
+          # The failed attempt stays in history. Its replacement must survive a
+          # restart and run as system cleanup even after the owner loses access.
+          EnvironmentExpiry.retry!(env)
+          attrs
+
+        true ->
+          attrs
+      end
 
     case attrs do
       attrs when attrs == %{} ->
@@ -857,6 +897,14 @@ defmodule Foreman.Environments do
         if attrs[:destroyed_at], do: Secrets.delete_environment_secrets(updated)
         Map.put(updated, :stale_notice, stale_notice?(op, env))
     end
+  end
+
+  defp retire_queued_expiry(env_id) do
+    from(o in Foreman.Operations.Operation,
+      where: o.environment_id == ^env_id and o.trigger == "expiry" and o.status == "queued"
+    )
+    |> Repo.all()
+    |> Enum.each(&Operations.cancel_queued/1)
   end
 
   # The files on the box were sent with the secrets that applied before
@@ -948,13 +996,14 @@ defmodule Foreman.Environments do
       observed_state: "running",
       status_message: nil,
       created_once: true,
+      initial_create_deferred: false,
       pending_restart: changed != [],
       pending_changes: changed
     }
     |> put_if(:applied_secret_hashes, args["secret_hashes"])
     |> put_token_pushed(args)
     # Results carry repo content (devcontainer.json): take only what fits.
-    |> Map.put(:workspace_container_id, workspace_id(result, action, env))
+    |> Map.put(:workspace_container_id, workspace_id(result))
     |> put_if(:remote_user, string(result["remote_user"]))
     |> put_if(:workspace_folder, string(result["remote_workspace_folder"]))
     |> put_if(:services, strings(result["services"]))
@@ -967,7 +1016,12 @@ defmodule Foreman.Environments do
     # Every up from an agent that runs hooks reports them; one that doesn't
     # is older (a box rolled back) and can't run them.
     |> Map.put(:connect_hooks, connect_hooks(result["connect"]))
-    |> then(&if(action in @fresh_build, do: Map.put(&1, :ts_authkey, nil), else: &1))
+    |> then(
+      &if(op.command == "env.create" or action in @fresh_build,
+        do: Map.put(&1, :ts_authkey, nil),
+        else: &1
+      )
+    )
   end
 
   # Nothing's running with the old secrets any more; a start picks up
@@ -1071,12 +1125,10 @@ defmodule Foreman.Environments do
 
   defp result_attrs(_op, _env), do: %{}
 
-  # Restarting only sidecars can succeed without running devcontainer up.
-  defp workspace_id(%{"container_id" => id}, _action, _env)
-       when is_binary(id) and byte_size(id) in 1..128, do: id
+  defp workspace_id(%{"container_id" => id}) when is_binary(id) and byte_size(id) in 1..128,
+    do: id
 
-  defp workspace_id(_result, "restart_affected", env), do: env.workspace_container_id
-  defp workspace_id(_result, _action, _env), do: nil
+  defp workspace_id(_result), do: nil
 
   defp connect_hooks(hooks) when is_list(hooks), do: Connect.cast_hooks(hooks)
   defp connect_hooks(_), do: []
@@ -1271,6 +1323,7 @@ defmodule Foreman.Environments do
 
   defp reconcile_entry(env, inv) do
     observed = if inv, do: inv.state, else: "missing"
+    Agents.LifecycleState.record(env.box_id, env.id, observed)
 
     size =
       if inv && inv[:vm_size],
@@ -1383,6 +1436,8 @@ defmodule Foreman.Environments do
   def observe(box_id, env_id, state) do
     case Repo.get(Environment, env_id) do
       %Environment{box_id: ^box_id, destroyed_at: nil} = env ->
+        Agents.LifecycleState.record(box_id, env_id, state)
+
         unless lifecycle_active?(env.id) or env.observed_state == state,
           do: update_env!(env, %{observed_state: state})
 
@@ -1393,13 +1448,14 @@ defmodule Foreman.Environments do
     end
   end
 
-  @lifecycle ~w(create rebuild pull_rebuild start stop suspend destroy restart_affected restart_all)
+  def lifecycle_operations do
+    from o in Foreman.Operations.Operation,
+      where: not is_nil(o.environment_id) and o.action in @lifecycle
+  end
 
   def active_lifecycle(env_id) do
-    from o in Foreman.Operations.Operation,
-      where:
-        o.environment_id == ^env_id and o.action in @lifecycle and
-          o.status in ["queued", "dispatched", "running"],
+    from o in lifecycle_operations(),
+      where: o.environment_id == ^env_id and o.status in ["queued", "dispatched", "running"],
       order_by: [asc: o.inserted_at, asc: o.id]
   end
 

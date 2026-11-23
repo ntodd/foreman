@@ -164,6 +164,8 @@ defmodule Foreman.Capacity do
 
   @doc "Whether this environment already counts toward its box's provisioned capacity."
 
+  def allocated?(%{boot_reserved: true}), do: true
+
   def allocated?(%{observed_state: state})
       when state in ~w(running partial starting creating pending), do: true
 

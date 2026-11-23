@@ -10,6 +10,7 @@ defmodule Foreman.Agents do
   import Ecto.Query
 
   alias Foreman.{Boxes, Environments, Metrics, Operations, Prebuilds, Repo, Scope}
+  alias Foreman.Agents.LifecycleState
   alias Foreman.Capacity.Tracker
   alias Foreman.Environments.Environment
   alias Foreman.Operations.Operation
@@ -19,8 +20,13 @@ defmodule Foreman.Agents do
 
   @doc "Called by the channel process once an agent has joined."
   def register(box_id) do
-    case Registry.register(Foreman.Registry, {:agent, box_id}, nil) do
+    case Registry.register(
+           Foreman.Registry,
+           {:agent, box_id},
+           {System.monotonic_time(:millisecond), nil}
+         ) do
       {:ok, _} ->
+        LifecycleState.joined(box_id)
         :ok
 
       {:error, {:already_registered, old}} ->
@@ -192,6 +198,8 @@ defmodule Foreman.Agents do
             if offer && op.status == "succeeded",
               do: Environments.deliver_offer(op.id, offer)
 
+            LifecycleState.inventory_result(box_id, payload)
+            LifecycleState.result(box_id, op, env)
             Environments.after_result(op, env)
 
           :already ->
@@ -212,15 +220,20 @@ defmodule Foreman.Agents do
     end
   end
 
-  def handle_event(box_id, %Event{type: "box.workspaces", payload: %{environments: entries}}) do
-    Foreman.PublicAPI.Readiness.record(box_id, entries)
+  def handle_event(box_id, %Event{type: "box.workspaces", payload: sample}) do
+    Foreman.PublicAPI.Readiness.record(box_id, sample.environments, sample.since_join_ms)
   end
 
   def handle_event(box_id, %Event{type: "box.inventory", payload: %{environments: envs}}) do
-    Environments.reconcile_inventory(box_id, envs)
+    if LifecycleState.receiving?(box_id),
+      do: Environments.reconcile_inventory(box_id, envs),
+      else: refresh_inventory(box_id)
   end
 
   def handle_event(box_id, %Event{type: "box.stats", payload: stats}) do
+    # Stats arrive periodically even when inventory never changes, so a lost
+    # first probe can recover without another reconnect.
+    refresh_inventory(box_id)
     slugs = Environments.live_slugs_for_box(box_id)
     stats = %{stats | environments: Map.take(stats.environments, Map.keys(slugs))}
 
@@ -260,7 +273,15 @@ defmodule Foreman.Agents do
   end
 
   def handle_event(box_id, %Event{type: "env.state", payload: %{env_id: env_id, state: state}}) do
-    Environments.observe(box_id, env_id, state)
+    if LifecycleState.receiving?(box_id),
+      do: Environments.observe(box_id, env_id, state),
+      else: :ok
+  end
+
+  defp refresh_inventory(box_id) do
+    LifecycleState.refresh_inventory(box_id, fn ->
+      send_box_command(%Scope{}, %{id: box_id}, "box.inventory", %{})
+    end)
   end
 
   defp owns_op(box_id, op_id) do

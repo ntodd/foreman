@@ -55,6 +55,9 @@ defmodule ForemanAgent.VM.Status do
           :running ->
             with_size(guest_entry(env_id, slug, base, config), VM.boot_size(record))
 
+          :unknown ->
+            Map.put(base, :state, "partial")
+
           {:oom_kill, at} ->
             Map.merge(base, %{state: "stopped", oom_killed_at: at})
 
@@ -73,14 +76,18 @@ defmodule ForemanAgent.VM.Status do
   defp with_size(entry, size), do: Map.put(entry, :vm_size, size)
 
   defp guest_entry(env_id, slug, base, config) do
-    with {:ok, entries} <- Link.query(Links.get(env_id, config), "inventory", @query_timeout),
-         {:ok, entry} <- VM.cast_inventory_entry(entries, env_id, slug) do
-      entry
-    else
-      # Running, without its containers: nothing up yet, or taken down by hand.
-      :error -> Map.put(base, :state, "stopped")
-      # Running, and its agent isn't answering.
-      {:error, _} -> Map.put(base, :state, "partial")
+    case Link.query(Links.get(env_id, config), "inventory", @query_timeout) do
+      {:ok, []} ->
+        Map.put(base, :state, "stopped")
+
+      {:ok, entries} ->
+        case VM.cast_inventory_entry(entries, env_id, slug) do
+          {:ok, entry} -> entry
+          :error -> Map.put(base, :state, "partial")
+        end
+
+      {:error, _} ->
+        Map.put(base, :state, "partial")
     end
   end
 

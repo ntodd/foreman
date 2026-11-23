@@ -225,6 +225,12 @@ defmodule Foreman.PublicAPI.MutationsTest do
     online(ctx.box)
     assert {:ok, env, op} = Mutations.create(ctx.actor, "create", ctx.input)
     complete(ctx.box, op)
+
+    Repo.update!(
+      change(Repo.get!(Operation, op), finished_at: DateTime.add(DateTime.utc_now(), -91, :day))
+    )
+
+    assert {:history_expired, ^env, ^op} = Mutations.create(ctx.actor, "create", ctx.input)
     Repo.delete!(Repo.get!(Operation, op))
     assert {:history_expired, ^env, ^op} = Mutations.create(ctx.actor, "create", ctx.input)
     Repo.update!(change(ctx.repo, private: true))
@@ -348,6 +354,97 @@ defmodule Foreman.PublicAPI.MutationsTest do
     replay = put_in(input, ["expiry", "at"], DateTime.to_iso8601(at, :extended, 3600))
     assert {:ok, ^env, ^op} = Mutations.create(ctx.actor, "expiry", replay)
     assert {:error, :invalid_request, _} = Mutations.create(ctx.actor, "new-key", replay)
+  end
+
+  test "a new socket must establish current state before saving a stable receipt", ctx do
+    env = environment_fixture(user: ctx.user, repo: ctx.repo, box: ctx.box)
+    online(ctx.box)
+
+    Foreman.Agents.handle_event(ctx.box.id, %ForemanProtocol.Event{
+      type: "box.inventory",
+      payload: %{environments: [%{env_id: env.id, slug: env.slug, state: "running"}]}
+    })
+
+    assert {:ok, _, nil} =
+             Mutations.operate(ctx.actor, env.id, "confirmed", %{"action" => "start"})
+
+    Registry.unregister(Foreman.Registry, {:agent, ctx.box.id})
+    parent = self()
+
+    channel =
+      spawn_link(fn ->
+        Foreman.Agents.register(ctx.box.id)
+        send(parent, :joined)
+
+        receive do
+          :close -> :ok
+        end
+      end)
+
+    on_exit(fn -> send(channel, :close) end)
+    assert_receive :joined
+
+    assert {:ok, _, op_id} =
+             Mutations.operate(ctx.actor, env.id, "reconnected", %{"action" => "start"})
+
+    assert is_binary(op_id)
+    assert Repo.get!(Operation, op_id).action == "start"
+  end
+
+  test "buffered pre-join inventory cannot confirm a no-op until a fresh round trip", ctx do
+    env = environment_fixture(user: ctx.user, repo: ctx.repo, box: ctx.box)
+    :ok = Foreman.Agents.register(ctx.box.id)
+    entries = [%{env_id: env.id, slug: env.slug, state: "running"}]
+    {:ok, inventory} = ForemanProtocol.Event.new("box.inventory", %{environments: entries})
+    :ok = Foreman.Agents.handle_event(ctx.box.id, inventory)
+    refute Foreman.Agents.LifecycleState.confirmed?(env, "running")
+    assert_receive {:dispatch, %{type: "box.inventory", op_id: probe}}
+
+    {:ok, buffered} = ForemanProtocol.Event.new("env.state", %{env_id: env.id, state: "running"})
+    :ok = Foreman.Agents.handle_event(ctx.box.id, buffered)
+    :ok = Foreman.Agents.handle_event(ctx.box.id, inventory)
+    refute_received {:dispatch, _}
+    refute Foreman.Agents.LifecycleState.confirmed?(env, "running")
+
+    {:ok, failed} = ForemanProtocol.Event.new("op.result", %{op_id: probe, status: "error"})
+    :ok = Foreman.Agents.handle_event(ctx.box.id, failed)
+    :ok = Foreman.Agents.handle_event(ctx.box.id, inventory)
+    assert_receive {:dispatch, %{type: "box.inventory", op_id: retry}}
+    refute Foreman.Agents.LifecycleState.confirmed?(env, "running")
+
+    {:ok, result} =
+      ForemanProtocol.Event.new("op.result", %{
+        op_id: retry,
+        status: "ok",
+        result: ForemanProtocol.Event.to_wire(inventory)["payload"]
+      })
+
+    :ok = Foreman.Agents.handle_event(ctx.box.id, result)
+
+    assert {:ok, _, nil} =
+             Mutations.operate(ctx.actor, env.id, "verified", %{"action" => "start"})
+  end
+
+  test "a queued start of an errored workspace reserves its boot allocation", ctx do
+    online(ctx.box)
+
+    Repo.update!(
+      change(ctx.box, capacity_policy: "refuse", capacity: %{"cpus" => 2}, cpu_threshold: 1.0)
+    )
+
+    repo = Repo.update!(change(ctx.repo, cpu_limit: 2.0))
+    env = environment_fixture(user: ctx.user, repo: repo, box: ctx.box, observed_state: "error")
+
+    assert {:ok, _, start} =
+             Mutations.operate(ctx.actor, env.id, "recover", %{"action" => "start"})
+
+    assert Repo.get!(Operation, start).status == "queued"
+    assert Enum.map(Foreman.Environments.live_for_box(ctx.box.id), & &1.boot_reserved) == [true]
+
+    assert {:error, :capacity_exceeded, _} =
+             Mutations.create(ctx.actor, "competitor", Map.put(ctx.input, "box_id", ctx.box.id))
+
+    assert Repo.aggregate(from(e in Environment, where: e.box_id == ^ctx.box.id), :count) == 1
   end
 
   defp complete(box, op_id) do

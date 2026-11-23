@@ -41,6 +41,13 @@ defmodule ForemanWeb.AgentReconnectTest do
   defp inventory(env, state),
     do: %{environments: [%{env_id: env.id, slug: env.slug, state: state, containers: []}]}
 
+  defp fresh_inventory(socket, env, state) do
+    snapshot = inventory(env, state)
+    send_event(socket, "box.inventory", snapshot)
+    {"box.inventory", probe} = next_command()
+    send_event(socket, "op.result", %{op_id: probe, status: "ok", result: snapshot})
+  end
+
   defp next_command do
     assert_push "command", %{"type" => type, "op_id" => op_id}
     {type, op_id}
@@ -52,7 +59,7 @@ defmodule ForemanWeb.AgentReconnectTest do
 
       socket = join_box(ctx.box)
       {"env.secrets.write", write_id} = next_command()
-      send_event(socket, "box.inventory", inventory(ctx.env, "stopped"))
+      fresh_inventory(socket, ctx.env, "stopped")
       send_event(socket, "op.result", %{op_id: write_id, status: "ok"})
 
       {"env.start", _} = next_command()
@@ -67,7 +74,7 @@ defmodule ForemanWeb.AgentReconnectTest do
 
       socket = join_box(ctx.box)
       {"env.logs", logs_id} = next_command()
-      send_event(socket, "box.inventory", inventory(ctx.env, "stopped"))
+      fresh_inventory(socket, ctx.env, "stopped")
       assert Repo.reload!(ctx.env).observed_state == "stopped"
       send_event(socket, "op.result", %{op_id: logs_id, status: "error", error: "no container"})
 

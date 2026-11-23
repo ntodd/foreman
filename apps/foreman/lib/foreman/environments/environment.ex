@@ -27,6 +27,7 @@ defmodule Foreman.Environments.Environment do
     field :last_guest_oom_at, :utc_datetime
     field :last_guest_oom_processes, {:array, :string}, default: []
     field :status_message, :string
+    field :boot_reserved, :boolean, virtual: true, default: false
     field :vm_size, :map
     field :cpu_limit, :float
     field :memory_limit_mb, :integer
@@ -48,6 +49,7 @@ defmodule Foreman.Environments.Environment do
     field :tailscale_device_id, :string
     field :ts_authkey_tags, {:array, :string}
     field :ts_authkey, Foreman.Encrypted.Binary, redact: true
+    field :initial_create_deferred, :boolean, default: false
     field :created_once, :boolean, default: false
     field :token_pushed_at, :utc_datetime_usec
     field :workload_grant_id, :binary_id
@@ -167,6 +169,7 @@ defmodule Foreman.Environments.Environment do
       :tailscale_device_id,
       :ts_authkey,
       :ts_authkey_tags,
+      :initial_create_deferred,
       :created_once,
       :token_pushed_at,
       :expiry_consumed_at,

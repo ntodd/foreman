@@ -77,15 +77,15 @@ defmodule Foreman.OperationsTimeoutTest do
         environment_id: op.environment_id,
         action: "stop",
         command: "env.stop",
-        status: "succeeded",
-        dispatched_at: DateTime.utc_now(),
-        finished_at: DateTime.utc_now()
+        status: "dispatched",
+        dispatched_at: DateTime.utc_now()
       })
 
-    Environments.record_result(stop)
+    :ok = report(ctx.box, stop.id, %{status: "ok"})
     :ok = report(ctx.box, op.id, %{status: "ok"})
     assert Operations.get!(op.id).status == "succeeded"
     assert Repo.reload!(ctx.env).observed_state == "stopped"
+    assert Agents.LifecycleState.confirmed?(ctx.env, "stopped")
   end
 
   test "a late success clears the timeout", ctx do
