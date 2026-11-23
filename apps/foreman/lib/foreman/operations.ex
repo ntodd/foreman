@@ -194,7 +194,7 @@ defmodule Foreman.Operations do
         else
           changes = outcome(op, status, result, error)
           updated = op |> Ecto.Changeset.change(changes) |> Repo.update!()
-          applied = unless superseded_timeout?(op), do: apply.(updated)
+          applied = unless superseded_timeout?(op, updated.status), do: apply.(updated)
           {:ok, {updated, applied}}
         end
       end)
@@ -218,15 +218,19 @@ defmodule Foreman.Operations do
   # The late result corrects its own history. Once a later lifecycle command
   # was dispatched, it owns the environment state. Also serialize competing
   # results on the environment row so neither can race the visibility check.
-  defp superseded_timeout?(%Operation{environment_id: nil}), do: false
+  defp superseded_timeout?(%Operation{environment_id: nil}, _status), do: false
 
-  defp superseded_timeout?(op) do
+  defp superseded_timeout?(op, status) do
     query =
       from e in Foreman.Environments.Environment,
         where: e.id == ^op.environment_id,
         select: e.destroyed_at
 
     destroyed_at = Repo.one!(if Repo.sqlite?(), do: query, else: lock(query, "FOR UPDATE"))
+
+    # A successful expiry attempt confirms the same cleanup as its retry.
+    # A different lifecycle command still supersedes that old result.
+    expiry_success? = op.trigger == "expiry" and status == "succeeded"
 
     timed_out?(op) and
       (not is_nil(destroyed_at) or
@@ -236,7 +240,9 @@ defmodule Foreman.Operations do
                newer.environment_id == ^op.environment_id and newer.id != ^op.id and
                  newer.dispatched_at >= ^op.finished_at,
              where:
-               newer.action in ~w(create rebuild pull_rebuild start stop restart_all restart_affected suspend destroy)
+               newer.action in ~w(create rebuild pull_rebuild start stop restart_all restart_affected suspend destroy),
+             where:
+               not (^expiry_success? and newer.trigger == "expiry" and newer.action == ^op.action)
          ))
   end
 
