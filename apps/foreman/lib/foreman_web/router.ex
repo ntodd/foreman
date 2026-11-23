@@ -69,6 +69,13 @@ defmodule ForemanWeb.Router do
     get "/setup/github/installed", SetupController, :installed
   end
 
+  scope "/api/v1", ForemanWeb do
+    pipe_through :api
+
+    post "/environments", EnvironmentMutationController, :create
+    post "/environments/:id/operations", EnvironmentMutationController, :operate
+  end
+
   # Agents: enrollment, the install script and release downloads. Release
   # tarballs are signed, and the agent checks the signature itself.
   scope "/", ForemanWeb do

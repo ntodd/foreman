@@ -158,6 +158,7 @@ defmodule Foreman.Environments.Environment do
       :ts_authkey,
       :created_once,
       :token_pushed_at,
+      :expiry_consumed_at,
       :destroyed_at
     ])
     |> validate_inclusion(:desired_state, @desired)

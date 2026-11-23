@@ -1,0 +1,388 @@
+defmodule Foreman.PublicAPI.Mutations do
+  @moduledoc """
+  Accepts an authenticated environment request. The receipt and its effects
+  commit together. Only the winner wakes the normal agent dispatcher.
+  """
+  import Ecto.Query
+
+  alias Foreman.{Audit, Boxes, Capacity, Environments, Repo, Scope, Tailscale}
+  alias Foreman.Environments.{Environment, Server}
+  alias Foreman.Jobs.EnvironmentExpiry
+  alias Foreman.PublicAPI.{Access, MutationInput, Receipt}
+
+  @not_found {:error, :resource_not_found, "Resource not found."}
+  @no_box {:error, :no_provisionable_boxes, "You have no provisionable boxes."}
+  @conflict {:error, :lifecycle_conflict,
+             "An opposing lifecycle action or due expiry prevents this action."}
+
+  def create(actor, key, params) do
+    with :ok <- MutationInput.key(key),
+         {:ok, input} <- MutationInput.create(params) do
+      hash = key_hash(actor, "environments", key)
+
+      case Repo.get(Receipt, hash) do
+        nil -> place(actor, hash, input)
+        receipt -> replay(actor, receipt, input, :create)
+      end
+    end
+  end
+
+  def operate(actor, id, key, params) do
+    with :ok <- MutationInput.key(key),
+         {:ok, input} <- MutationInput.action(params),
+         {:ok, id} <- path_id(id),
+         visible = Access.environments(actor, id),
+         %Environment{} = env <- Repo.one(visible),
+         :ok <- permit(actor, input["action"]) do
+      hash = key_hash(actor, "environments/#{id}/operations", key)
+
+      reserve(hash, input, fn ->
+        # Boot admission shares the same box lock as every other reservation.
+        lock_box(env.box_id)
+
+        query =
+          if actor.kind == :service_account, do: Access.environments(actor, id), else: visible
+
+        case locked_one(query) do
+          nil -> @not_found
+          current -> operate_locked(actor, current, input)
+        end
+      end)
+      |> finish(actor, input, :operate)
+    else
+      nil -> @not_found
+      error -> error
+    end
+  end
+
+  defp place(actor, hash, input) do
+    repo_query = Access.repos(actor, input["repo_id"])
+
+    with repo when not is_nil(repo) <- Repo.one(repo_query),
+         :ok <- explicit_box_visible(actor, input["box_id"]),
+         :ok <- create_scopes(actor, input) do
+      explicit = input["box_id"]
+      ids = candidates(actor, explicit)
+      names = Tailscale.taken_names()
+
+      # Each attempt holds at most one box lock. Its failed admission rolls
+      # back the receipt and releases the lock before trying the next box.
+      Enum.reduce_while(ids, @no_box, fn id, _ ->
+        result =
+          reserve(hash, input, fn ->
+            box = lock_box(id)
+
+            repo =
+              if actor.kind == :service_account,
+                do: Repo.one(Access.repos(actor, repo.id)),
+                else: Repo.one(repo_query)
+
+            with :ok <- new_policy(input["expiry"]),
+                 :ok <- usable_repo(repo),
+                 :ok <- admission(actor, box, repo, input) do
+              create_on(actor, repo, box, input, names)
+            end
+          end)
+
+        case result do
+          {:error, {:placement, _error}} when is_nil(explicit) -> {:cont, @no_box}
+          {:error, {:placement, error}} -> {:halt, error}
+          other -> {:halt, finish(other, actor, input, :create)}
+        end
+      end)
+    else
+      nil -> @not_found
+      error -> error
+    end
+  end
+
+  defp candidates(_actor, id) when is_binary(id), do: [id]
+
+  defp candidates(actor, nil) do
+    ids =
+      from(b in Access.boxes(actor),
+        order_by: [
+          desc:
+            fragment(
+              "CASE WHEN ? = ? THEN 1 ELSE 0 END",
+              b.owner_user_id,
+              type(^actor.user.id, :binary_id)
+            ),
+          asc: b.name,
+          asc: b.id
+        ],
+        select: b.id
+      )
+      |> Repo.all()
+
+    # Even an empty pool must check for a concurrently accepted receipt and
+    # report invalid expiry before it reports a placement failure.
+    if ids == [], do: [nil], else: ids
+  end
+
+  defp lock_box(nil), do: nil
+  defp lock_box(id), do: locked_one(from b in Foreman.Boxes.Box, where: b.id == ^id)
+
+  defp locked_one(query),
+    do: Repo.one(if Repo.sqlite?(), do: query, else: lock(query, "FOR UPDATE"))
+
+  defp explicit_box_visible(_actor, nil), do: :ok
+
+  defp explicit_box_visible(actor, id) do
+    if Repo.get(Access.boxes(actor), id), do: :ok, else: @not_found
+  end
+
+  defp usable_repo(nil), do: @not_found
+
+  defp usable_repo(%{devcontainer_path: nil}),
+    do: {:error, :invalid_request, "The repository has no devcontainer."}
+
+  defp usable_repo(_), do: :ok
+
+  defp admission(_actor, nil, _repo, _input), do: {:placement, @not_found}
+
+  defp admission(actor, box, repo, input) do
+    with :ok <- explicit_box_visible(actor, box.id),
+         :ok <- box_ready(box),
+         :ok <-
+           capacity(Capacity.check_placement(box, Environments.live_for_box(box.id), repo), input) do
+      :ok
+    else
+      error -> {:placement, error}
+    end
+  end
+
+  defp box_ready(box) do
+    cond do
+      not Boxes.online?(box.id) ->
+        {:error, :box_offline, "The selected box is offline."}
+
+      true ->
+        case Boxes.check_vm(box) do
+          :ok -> :ok
+          {:error, message} -> {:error, :box_vm_unavailable, message}
+        end
+    end
+  end
+
+  defp capacity({:warn, _}, %{"confirm_capacity_warning" => true}), do: :ok
+  defp capacity({:warn, message}, _), do: {:error, :capacity_confirmation_required, message}
+  defp capacity({:refuse, message}, _), do: {:error, :capacity_exceeded, message}
+  defp capacity(_, _), do: :ok
+
+  defp create_on(actor, repo, box, input, names) do
+    branch = input["branch"] || repo.default_branch
+
+    with {:ok, env} <- Environments.insert_environment(actor.user, repo, box, branch, %{}, names) do
+      expiry = input["expiry"]
+
+      env =
+        env
+        |> Ecto.Changeset.change(
+          api_grant_id: actor.grant_id,
+          expiry_at: expiry && deadline(expiry),
+          expiry_action: expiry && expiry["action"]
+        )
+        |> Repo.update!()
+
+      op =
+        Environments.queue_operation(env, "create", %{}, actor.user, api_grant_id: actor.grant_id)
+
+      EnvironmentExpiry.schedule!(env)
+
+      Audit.log(
+        actor.user,
+        "environment.create",
+        env,
+        Map.merge(audit(actor), %{"slug" => env.slug, "repo" => repo.full_name, "box" => box.name})
+      )
+
+      {:accept, env.id, op.id}
+    else
+      {:error, %Ecto.Changeset{}} ->
+        {:error, :invalid_request, "The environment could not be reserved."}
+    end
+  end
+
+  defp new_policy(nil), do: :ok
+
+  defp new_policy(expiry) do
+    if DateTime.after?(deadline(expiry), DateTime.utc_now()),
+      do: :ok,
+      else: {:error, :invalid_request, "The expiry must be in the future."}
+  end
+
+  defp deadline(%{"at" => at}) do
+    {:ok, datetime, _offset} = DateTime.from_iso8601(at)
+    datetime
+  end
+
+  defp operate_locked(actor, env, %{"action" => action} = input) do
+    active = Repo.all(Environments.active_lifecycle(env.id))
+    due = EnvironmentExpiry.due?(env)
+
+    cond do
+      env.destroyed_at && action != "destroy" ->
+        @not_found
+
+      due && action != env.expiry_action ->
+        @conflict
+
+      Enum.any?(active, &(target(&1.action) != target(action))) ->
+        @conflict
+
+      active != [] ->
+        accepted_existing(actor, env, action, hd(active).id)
+
+      due ->
+        {:ok, op} = EnvironmentExpiry.queue(env)
+        accepted_existing(actor, env, action, op.id)
+
+      stable?(env, action) ->
+        accepted_existing(actor, env, action, nil)
+
+      true ->
+        with :ok <- admit_action(env, input) do
+          {:ok, op} =
+            Environments.queue_action(
+              Scope.for_user(actor.user),
+              env,
+              String.to_existing_atom(action),
+              %{}, api_grant_id: actor.grant_id, audit: audit(actor), dedupe: false)
+
+          {:accept, env.id, op.id}
+        end
+    end
+  end
+
+  defp accepted_existing(actor, env, action, op_id) do
+    Audit.log(
+      actor.user,
+      "environment.#{action}",
+      env,
+      Map.put(audit(actor), "existing_operation_id", op_id)
+    )
+
+    {:accept, env.id, op_id}
+  end
+
+  defp target("destroy"), do: "destroyed"
+  defp target("stop"), do: "stopped"
+  defp target("suspend"), do: "suspended"
+  defp target(_), do: "running"
+
+  defp stable?(%{destroyed_at: at}, "destroy"), do: not is_nil(at)
+
+  defp stable?(env, action),
+    do:
+      env.observed_state == target(action) and env.desired_state == target(action) and
+        Boxes.online?(env.box_id)
+
+  defp admit_action(env, %{"action" => "start"} = input) do
+    env = Repo.preload(env, [:box, :repo])
+
+    with :ok <- box_ready(env.box),
+         do: capacity(Capacity.check_start(env, Environments.live_for_box(env.box_id)), input)
+  end
+
+  defp admit_action(_, _), do: :ok
+
+  defp key_hash(actor, endpoint, key) do
+    :crypto.hash(
+      :sha256,
+      :erlang.term_to_binary({actor.kind, actor.user.id, actor.client_id, endpoint, key})
+    )
+  end
+
+  defp reserve(hash, input, accept) do
+    Repo.transact(fn ->
+      case Repo.insert_all(Receipt, [%{key_hash: hash, input: input}],
+             on_conflict: :nothing,
+             conflict_target: [:key_hash]
+           ) do
+        {0, _} ->
+          {:ok, {:replay, Repo.get!(Receipt, hash)}}
+
+        {1, _} ->
+          case accept.() do
+            {:accept, env_id, op_id} ->
+              {1, _} =
+                Repo.update_all(from(r in Receipt, where: r.key_hash == ^hash),
+                  set: [environment_id: env_id, operation_id: op_id]
+                )
+
+              {:ok, {:accepted, env_id, op_id}}
+
+            error ->
+              {:error, error}
+          end
+      end
+    end)
+  end
+
+  defp finish({:ok, {:accepted, id, op}}, _actor, _input, _endpoint) do
+    unless Repo.in_transaction?() do
+      if op, do: Server.kick(id)
+      Environments.broadcast(%{id: id})
+    end
+
+    {:ok, id, op}
+  end
+
+  defp finish({:ok, {:replay, receipt}}, actor, input, endpoint),
+    do: replay(actor, receipt, input, endpoint)
+
+  defp finish({:error, reason}, _actor, _input, _endpoint), do: reason
+
+  defp replay(actor, receipt, input, endpoint) do
+    with %Environment{} = env <- Repo.one(Access.environments(actor, receipt.environment_id)),
+         :ok <-
+           if(endpoint == :create,
+             do: create_scopes(actor, input),
+             else: permit(actor, input["action"])
+           ) do
+      cond do
+        receipt.input != input ->
+          {:error, :idempotency_conflict, "This key was accepted with different input."}
+
+        endpoint == :create and not is_nil(env.destroyed_at) ->
+          {:error, :original_environment_gone, "Original environment gone."}
+
+        true ->
+          {:ok, env.id, receipt.operation_id}
+      end
+    else
+      nil -> @not_found
+      error -> error
+    end
+  end
+
+  defp create_scopes(actor, input) do
+    with :ok <- permit(actor, "create") do
+      if expiry = input["expiry"], do: permit(actor, expiry["action"]), else: :ok
+    end
+  end
+
+  defp permit(actor, action) do
+    if "environments:#{action}" in actor.scopes,
+      do: :ok,
+      else:
+        {:error, :insufficient_scope,
+         "This connection lacks permission to #{action} environments."}
+  end
+
+  defp audit(actor),
+    do: %{
+      "client_id" => actor.client_id,
+      "grant_id" => actor.grant_id,
+      "actor_kind" => to_string(actor.kind),
+      "trigger" => "request"
+    }
+
+  defp path_id(id) do
+    case MutationInput.uuid(id) do
+      {:ok, id} -> {:ok, id}
+      _ -> @not_found
+    end
+  end
+end
