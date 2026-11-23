@@ -93,8 +93,14 @@ defmodule Foreman.GitHub do
     with {:ok, tokens} <- client().exchange_code(app, code, verifier, redirect_uri),
          {:ok, profile} <- client().get_user(tokens.access_token) do
       org_member? =
-        config.allowed_org != nil and
-          client().org_membership(tokens.access_token, config.allowed_org) == {:ok, true}
+        if config.allowed_org do
+          case client().org_membership(tokens.access_token, config.allowed_org) do
+            {:ok, member?} -> member?
+            {:error, _} -> :unknown
+          end
+        else
+          false
+        end
 
       Accounts.sign_in_from_github(profile, tokens, config: config, org_member?: org_member?)
     end
@@ -140,6 +146,7 @@ defmodule Foreman.GitHub do
       user = Accounts.get_user!(user_id)
 
       cond do
+        user.disabled_at || user.service_account -> {{:error, :login_expired}, false}
         fresh?(user, min_life) -> {{:ok, user.access_token}, false}
         is_nil(user.refresh_token) -> {{:error, :login_expired}, false}
         true -> refresh(user)
@@ -165,9 +172,14 @@ defmodule Foreman.GitHub do
   defp refresh(user) do
     case client().refresh_user_token(app(), user.refresh_token) do
       {:ok, tokens} ->
-        {:ok, user} = Accounts.update_tokens(user, tokens)
-        result = recheck_access(user)
-        {result, match?({:ok, _}, result)}
+        case Accounts.update_tokens(user, tokens) do
+          {:ok, current} ->
+            result = recheck_access(current)
+            {result, match?({:ok, _}, result)}
+
+          {:error, _} = error ->
+            {error, false}
+        end
 
       {:error, :bad_refresh_token} ->
         {login_expired(user), false}

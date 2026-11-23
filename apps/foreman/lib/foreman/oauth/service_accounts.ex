@@ -236,7 +236,7 @@ defmodule Foreman.OAuth.ServiceAccounts do
 
   defp disable_client(_, _), do: {:error, :invalid_client}
 
-  defp locked_client(id), do: Store.locked(from c in Client, where: c.id == ^id)
+  defp locked_client(id), do: Repo.one_for_update(from c in Client, where: c.id == ^id)
 
   def with_credentials(id, secret, action) when is_binary(id) and is_binary(secret) do
     Repo.transact(fn ->

@@ -57,33 +57,45 @@ defmodule Foreman.Accounts do
         {:error, :disabled}
 
       not allowed?(login, existing, config, org_member?) ->
+        # A transient GitHub failure prevents this login but cannot confirm offboarding.
+        if existing && org_member? != :unknown,
+          do: revoke_access(existing, "no longer allowed at sign-in")
+
         {:error, :not_allowed}
 
       true ->
-        attrs =
-          Map.merge(token_attrs(tokens), %{
-            github_id: profile["id"],
-            login: login,
-            name: profile["name"],
-            avatar_url: profile["avatar_url"],
-            github_login_expired: false
-          })
-
         Repo.transact(fn ->
-          release_login(login, profile["id"])
-
-          result =
-            (existing || %User{})
-            |> User.github_changeset(attrs)
-            |> Ecto.Changeset.change(role_attrs(existing, login, config))
-            |> Repo.insert_or_update()
-
-          with {:ok, user} <- result do
-            Audit.log(user, "user.sign_in", user)
-            {:ok, user}
-          end
+          current = existing && Repo.one_for_update(from u in User, where: u.id == ^existing.id)
+          persist_sign_in(current, profile, tokens, config)
         end)
         |> notify_role_change(existing)
+    end
+  end
+
+  defp persist_sign_in(%User{disabled_at: disabled}, _, _, _) when not is_nil(disabled),
+    do: {:error, :disabled}
+
+  defp persist_sign_in(current, profile, tokens, config) do
+    login = profile["login"]
+    release_login(login, profile["id"])
+
+    attrs =
+      Map.merge(token_attrs(tokens), %{
+        github_id: profile["id"],
+        login: login,
+        name: profile["name"],
+        avatar_url: profile["avatar_url"],
+        github_login_expired: false
+      })
+
+    changeset =
+      (current || %User{})
+      |> User.github_changeset(attrs)
+      |> Ecto.Changeset.change(role_attrs(current, login, config))
+
+    with {:ok, user} <- Repo.insert_or_update(changeset) do
+      Audit.log(user, "user.sign_in", user)
+      {:ok, user}
     end
   end
 
@@ -249,9 +261,22 @@ defmodule Foreman.Accounts do
 
   @doc "Stores refreshed GitHub tokens."
   def update_tokens(%User{} = user, tokens) do
-    user
-    |> User.github_changeset(Map.put(token_attrs(tokens), :github_login_expired, false))
-    |> Repo.update()
+    Repo.transact(fn ->
+      current = Repo.one_for_update(from u in User, where: u.id == ^user.id)
+
+      cond do
+        current.disabled_at || current.service_account ->
+          {:error, :login_expired}
+
+        current.refresh_token != user.refresh_token ->
+          {:error, :stale_token}
+
+        true ->
+          current
+          |> User.github_changeset(Map.put(token_attrs(tokens), :github_login_expired, false))
+          |> Repo.update()
+      end
+    end)
   end
 
   @doc """
@@ -335,7 +360,21 @@ defmodule Foreman.Accounts do
   defp update_role(scope, user, attrs) do
     result =
       Repo.transact(fn ->
-        with {:ok, updated} <- user |> User.role_changeset(attrs) |> Repo.update() do
+        current = Repo.one_for_update(from u in User, where: u.id == ^user.id)
+        changeset = User.role_changeset(current, attrs)
+
+        changeset =
+          if attrs[:disabled_at] do
+            Ecto.Changeset.change(changeset,
+              access_token: nil,
+              refresh_token: nil,
+              github_login_expired: true
+            )
+          else
+            changeset
+          end
+
+        with {:ok, updated} <- Repo.update(changeset) do
           if updated.disabled_at do
             delete_user_sessions(updated)
             Foreman.OAuth.revoke_user(updated.id)
@@ -370,7 +409,22 @@ defmodule Foreman.Accounts do
   @doc "Creates a session and returns its token. Only the token's hash is stored."
   def create_session(%User{service_account: true}, _user_agent), do: nil
 
-  def create_session(%User{service_account: false, disabled_at: nil} = user, user_agent) do
+  def create_session(%User{service_account: false} = user, user_agent) do
+    {:ok, token} =
+      Repo.transact(fn ->
+        case Repo.one_for_update(from u in User, where: u.id == ^user.id) do
+          %User{service_account: false, disabled_at: nil, github_login_expired: false} ->
+            {:ok, insert_session(user, user_agent)}
+
+          _ ->
+            {:ok, nil}
+        end
+      end)
+
+    token
+  end
+
+  defp insert_session(user, user_agent) do
     raw = :crypto.strong_rand_bytes(32)
 
     Repo.insert!(%Session{
