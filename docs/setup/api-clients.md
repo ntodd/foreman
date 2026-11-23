@@ -8,12 +8,12 @@ Personal clients send a client ID and device code to exchange an approved grant,
 
 ## Personal CLI connection
 
-From the Foreman checkout on a Unix system with Python 3, run:
+Open **You → Connected apps → Install the CLI** on your Foreman instance. Run the install command on the Linux or macOS machine where you want to use Foreman. If the installer prints a command to add `~/.local/bin` to your `PATH`, run it in that shell. Then copy the login command from the same page. For example:
 
 ```sh
-bin/foreman --instance https://foreman.example.org login --scope 'repos:list environments:read'
-bin/foreman --instance https://foreman.example.org me
-bin/foreman --instance https://foreman.example.org logout
+foreman --instance https://foreman.example.org login
+foreman me
+foreman repo list
 ```
 
 Open the verification URL on a device with a browser, sign in, compare the code with the one printed in the terminal, and review the app name, client ID and permissions. The code expires in ten minutes. The built-in client ID is `foreman-cli`. Other apps get an ID when an administrator registers them under **Admin → API clients**.
@@ -50,6 +50,10 @@ Use `--json` for automation. Lists return an object with an `items` array. Diagn
 A single `op logs` read returns up to 16 whole pages and 1 MiB of text. In JSON mode it emits one object containing `text`, `next_cursor` and `truncated`. Continue with `foreman op logs "$OP_ID" --cursor "$CURSOR"` until an empty read returns the same cursor you supplied. The server sets `truncated` when earlier output has been discarded. The CLI preserves this flag on partial reads, including an empty page that advanced the cursor before a later request failed.
 
 Use `--follow` for a continuous log stream. JSON follow mode writes one page per line, including empty pages. To reconnect, run `foreman op logs "$OP_ID" --follow --cursor "$CURSOR"` using the last delivered cursor.
+
+## Update or disconnect
+
+Run `foreman update` to install the latest stable CLI release. An interactive command announces a newly available version once. Updating preserves your login, including personal connections saved by the checkout CLI. Run `foreman logout` to disconnect the selected account.
 
 ## TLS termination
 

@@ -14,6 +14,7 @@ import (
 	"syscall"
 
 	"github.com/ntodd/foreman/cli/api"
+	"github.com/ntodd/foreman/cli/internal/selfupdate"
 	"github.com/ntodd/foreman/cli/session"
 )
 
@@ -26,6 +27,7 @@ const help = `Usage: foreman [--instance ORIGIN] [--account ID] [--json] COMMAND
   me                             Show the acting identity as JSON
   logout                         Revoke the selected personal connection
 
+  update                         Install the latest stable CLI release
   repo list | box list | env list
   env show ID                    Show environment state and SSH details
   env create REPO                Create from an owner/name or repository UUID
@@ -173,6 +175,27 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		return fail(stderr, o.json, errors.New("a command is required; use foreman --help"), "invalid_invocation", 2)
 	}
 	command := args[0]
+	if command == "update" {
+		if len(args) != 1 {
+			return fail(stderr, o.json, errors.New("update takes no arguments"), "invalid_invocation", 2)
+		}
+		installed, err := selfupdate.Update(ctx, version)
+		if err != nil {
+			return fail(stderr, o.json, err, "update_failed", 1)
+		}
+		if o.json {
+			err = json.NewEncoder(stdout).Encode(map[string]string{"version": installed})
+		} else {
+			_, err = fmt.Fprintln(stdout, "foreman", installed)
+		}
+		if err != nil {
+			return fail(stderr, o.json, err, "output_error", 1)
+		}
+		return 0
+	}
+	if notice := selfupdate.Notice(ctx, version, interactive(stdout, stderr), o.json); notice != "" {
+		fmt.Fprintln(stderr, notice)
+	}
 	switch command {
 	case "repo", "box", "env", "op":
 		return runWorkload(ctx, args, o, stdout, stderr)
