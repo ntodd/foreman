@@ -41,12 +41,13 @@ defmodule ForemanAgent.OutboxTest do
   end
 
   test "readiness evidence is live-only and is sampled again on join", %{outbox: outbox} do
-    sample = event("box.workspaces", %{environments: %{@op => ["container"]}})
-    Outbox.push(outbox, sample)
+    started = System.monotonic_time()
+    entries = %{@op => ["container"]}
+    Outbox.workspace_sample(outbox, started, entries)
     Outbox.attach(outbox, self())
-    refute_receive {:outbox_deliver, ^sample, _}, 20
-    Outbox.push(outbox, sample)
-    assert_receive {:outbox_deliver, ^sample, nil}
+    refute_receive {:workspace_sample, _, _}, 20
+    Outbox.workspace_sample(outbox, started, entries)
+    assert_receive {:workspace_sample, ^started, ^entries}
   end
 
   test "delivers straight away to an attached connection", %{outbox: outbox} do

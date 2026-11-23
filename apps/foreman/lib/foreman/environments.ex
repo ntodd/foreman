@@ -914,7 +914,7 @@ defmodule Foreman.Environments do
     |> put_if(:applied_secret_hashes, args["secret_hashes"])
     |> put_token_pushed(args)
     # Results carry repo content (devcontainer.json): take only what fits.
-    |> Map.put(:workspace_container_id, workspace_id(result, action, env))
+    |> Map.put(:workspace_container_id, workspace_id(result, env))
     |> put_if(:remote_user, string(result["remote_user"]))
     |> put_if(:workspace_folder, string(result["remote_workspace_folder"]))
     |> put_if(:services, strings(result["services"]))
@@ -1031,12 +1031,12 @@ defmodule Foreman.Environments do
 
   defp result_attrs(_op, _env), do: %{}
 
-  # Restarting only sidecars can succeed without running devcontainer up.
-  defp workspace_id(%{"container_id" => id}, _action, _env)
+  defp workspace_id(%{"container_id" => id}, _env)
        when is_binary(id) and byte_size(id) in 1..128, do: id
 
-  defp workspace_id(_result, "restart_affected", env), do: env.workspace_container_id
-  defp workspace_id(_result, _action, _env), do: nil
+  # A restored VM continues running the same containers without devcontainer up.
+  defp workspace_id(%{"resumed" => true}, env), do: env.workspace_container_id
+  defp workspace_id(_, _env), do: nil
 
   defp connect_hooks(hooks) when is_list(hooks), do: Connect.cast_hooks(hooks)
   defp connect_hooks(_), do: []
@@ -1343,11 +1343,14 @@ defmodule Foreman.Environments do
 
   @lifecycle ~w(create rebuild pull_rebuild start stop suspend destroy restart_affected restart_all)
 
-  def active_lifecycle(env_id) do
+  def lifecycle_operations do
     from o in Foreman.Operations.Operation,
-      where:
-        o.environment_id == ^env_id and o.action in @lifecycle and
-          o.status in ["queued", "dispatched", "running"],
+      where: not is_nil(o.environment_id) and o.action in @lifecycle
+  end
+
+  def active_lifecycle(env_id) do
+    from o in lifecycle_operations(),
+      where: o.environment_id == ^env_id and o.status in ["queued", "dispatched", "running"],
       order_by: [asc: o.inserted_at, asc: o.id]
   end
 

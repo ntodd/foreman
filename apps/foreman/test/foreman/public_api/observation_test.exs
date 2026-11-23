@@ -43,9 +43,57 @@ defmodule Foreman.PublicAPI.ObservationTest do
     assert Readiness.get(env) == "unknown"
   end
 
-  defp sample(env, running) do
+  test "a replaced workspace requires the successful restart's new ID and resume preserves it" do
+    env = environment_fixture() |> change(workspace_container_id: "original") |> Repo.update!()
+    :ok = Agents.register(env.box_id)
+
+    for action <- ["restart_all", "restart_affected"] do
+      op =
+        Operations.create!(%{
+          environment_id: env.id,
+          box_id: env.box_id,
+          action: action,
+          command: "env.restart",
+          status: "succeeded",
+          result: %{"container_id" => "new"}
+        })
+
+      after_restart = Environments.record_result(op)
+      assert :ok = sample(env, ["sidecar"])
+      assert Readiness.get(after_restart) == "not_ready"
+      assert :ok = sample(env, ["new", "sidecar"])
+      assert Readiness.get(after_restart) == "ready"
+
+      assert Readiness.get(
+               Environments.record_result(%{op | action: "start", result: %{"resumed" => true}})
+             ) == "ready"
+
+      old_agent = Environments.record_result(%{op | result: %{}})
+      assert Readiness.get(old_agent) == "unknown"
+    end
+  end
+
+  test "an inventory scan more than a minute old cannot refresh readiness on receipt" do
+    env = environment_fixture(created_once: true, observed_state: "running")
+    env = Repo.update!(change(env, workspace_container_id: "workspace"))
+    :ok = Agents.register(env.box_id)
+
+    Registry.update_value(Foreman.Registry, {:agent, env.box_id}, fn {joined, table} ->
+      {joined - 61_000, table}
+    end)
+
+    assert :ok = sample(env, ["workspace"], 0)
+    assert Readiness.get(env) == "unknown"
+    assert :ok = sample(env, ["workspace"], 61_000)
+    assert Readiness.get(env) == "ready"
+  end
+
+  defp sample(env, running, since_join_ms \\ 0) do
     entries = if running, do: %{env.id => running}, else: %{}
-    {:ok, event} = Event.new("box.workspaces", %{environments: entries})
+
+    {:ok, event} =
+      Event.new("box.workspaces", %{since_join_ms: since_join_ms, environments: entries})
+
     Agents.handle_event(env.box_id, event)
   end
 

@@ -353,7 +353,8 @@ defmodule Foreman.Operations do
       result: result,
       error: error,
       args: Map.delete(op.args || %{}, "timed_out"),
-      finished_at: DateTime.utc_now()
+      # A late result reconciles the workspace. The public timeout already started retention.
+      finished_at: op.finished_at || DateTime.utc_now()
     ]
   end
 

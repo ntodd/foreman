@@ -29,7 +29,7 @@ defmodule ForemanWeb.PublicReadController do
 
   def environments(conn, params) do
     collection(conn, params, "environments:list", fn p ->
-      {live(Access.environments(p)), :id, &environment_json(&1, p)}
+      {environment_fields(Access.live_environments(p)), :id, &environment_json(&1, p)}
     end)
   end
 
@@ -38,7 +38,7 @@ defmodule ForemanWeb.PublicReadController do
 
     result =
       with {:ok, id} <- uuid(raw_id),
-           {:ok, env} <- find_one(live(Access.environments(p, id))),
+           {:ok, env} <- find_one(environment_fields(Access.live_environments(p, id))),
            :ok <- permit(p, "environments:read") do
         {:ok, environment_json(env, p)}
       end
@@ -105,11 +105,8 @@ defmodule ForemanWeb.PublicReadController do
     from o in history(), where: is_nil(o.finished_at) or o.finished_at > ^cutoff
   end
 
-  defp live(query) do
-    from e in query,
-      where: is_nil(e.destroyed_at),
-      select: map(e, ^(@environment_fields ++ @observations))
-  end
+  defp environment_fields(query),
+    do: select(query, [e], map(e, ^(@environment_fields ++ @observations)))
 
   defp visible(p, id) do
     if Repo.exists?(Access.environments(p, id)), do: :ok, else: {:error, :missing}
