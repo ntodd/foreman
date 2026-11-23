@@ -35,21 +35,26 @@ defmodule Foreman.Agents.LifecycleState do
   # The reporter and the inventory command sample independently. A report
   # received during a scan may describe a change after its sample was taken.
   def accept_observation?(box_id, payload) do
-    if invalidate_pending_scan(box_id) == :pending do
-      # A buffered report cannot confirm state. It can still contradict a
-      # command that already completed on this connection.
-      forget_conflicting(box_id, payload)
+    pending? = invalidate_pending_scan(box_id) == :pending
+
+    # A passive scan may also have started before a probe and finished after
+    # its reply. Verify contradictions on this socket with a new round trip.
+    # An unrelated environment keeps its existing confirmation.
+    if Process.get({__MODULE__, box_id}) && forget_conflicting(box_id, payload) do
+      unless pending?, do: Process.put({__MODULE__, :inventory, box_id}, :needed)
       false
     else
-      true
+      not pending?
     end
   end
 
   defp forget_conflicting(box_id, %{environments: entries}) do
     states = Map.new(entries, &{&1.env_id, &1.state})
+    confirmed = for {__MODULE__, ^box_id, id} <- Registry.keys(AgentRegistry, self()), do: id
 
-    for {__MODULE__, ^box_id, env_id} <- Registry.keys(AgentRegistry, self()),
-        do: forget_conflicting(box_id, env_id, Map.get(states, env_id, "missing"))
+    Enum.reduce(Enum.uniq(confirmed ++ Map.keys(states)), false, fn id, changed ->
+      forget_conflicting(box_id, id, Map.get(states, id, "missing")) or changed
+    end)
   end
 
   defp forget_conflicting(box_id, %{env_id: id, state: state}),
@@ -59,11 +64,12 @@ defmodule Foreman.Agents.LifecycleState do
     key = {__MODULE__, box_id, id}
 
     case Registry.lookup(AgentRegistry, key) do
-      [{pid, confirmed}] when pid == self() and confirmed != state ->
-        Registry.unregister(AgentRegistry, key)
+      [{pid, ^state}] when pid == self() ->
+        false
 
       _ ->
-        :ok
+        Registry.unregister(AgentRegistry, key)
+        true
     end
   end
 
