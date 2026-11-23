@@ -19,7 +19,13 @@ defmodule Foreman.RuntimeConfigTest do
     keys =
       Map.keys(@env) ++
         ["FOREMAN_DB", "FOREMAN_TAILSCALE_DEPLOYMENT_TAG", "FOREMAN_ENCRYPTION_KEYS_RETIRED"] ++
-        ["FOREMAN_TRUSTED_PROXIES", "DATABASE_SSL", "FOREMAN_FORCE_SSL", "FOREMAN_SECURE_COOKIES"] ++
+        [
+          "FOREMAN_TLS_PROXIES",
+          "FOREMAN_TRUSTED_PROXIES",
+          "DATABASE_SSL",
+          "FOREMAN_FORCE_SSL",
+          "FOREMAN_SECURE_COOKIES"
+        ] ++
         ["FOREMAN_ALLOWED_ORG", "FOREMAN_BASE_URL", "FOREMAN_GITHUB_PRIVATE_KEY"] ++
         ["FOREMAN_GITHUB_PRIVATE_KEY_FILE", "FOREMAN_UPDATE_CHECK", "DATABASE_SSL_CACERTFILE"]
 
@@ -48,6 +54,17 @@ defmodule Foreman.RuntimeConfigTest do
 
     System.put_env("FOREMAN_TRUSTED_PROXIES", "172.16.0.0/40")
     assert_raise ArgumentError, ~r/FOREMAN_TRUSTED_PROXIES/, fn -> read_config() end
+  end
+
+  test "TLS proxy ranges are configured independently of client-IP forwarding" do
+    Application.put_env(:foreman, :database, "postgres")
+    System.put_env("FOREMAN_TRUSTED_PROXIES", "10.0.0.0/8")
+    System.delete_env("FOREMAN_TLS_PROXIES")
+    assert read_config()[:tls_proxy_ranges] == []
+    System.put_env("FOREMAN_TLS_PROXIES", "192.0.2.21")
+    assert read_config()[:tls_proxy_ranges] == [{{192, 0, 2, 21}, 32}]
+    System.put_env("FOREMAN_TLS_PROXIES", "bad")
+    assert_raise ArgumentError, ~r/FOREMAN_TLS_PROXIES/, fn -> read_config() end
   end
 
   describe "on and off settings" do
