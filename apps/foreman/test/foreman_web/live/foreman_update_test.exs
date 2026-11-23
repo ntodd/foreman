@@ -72,6 +72,28 @@ defmodule ForemanWeb.ForemanUpdateTest do
     refute has_element?(view, "#update-foreman")
   end
 
+  test "a deployment that updates some other way gets the notice and nothing to run",
+       %{conn: conn, dir: dir} do
+    Application.put_env(:foreman, :updater, false)
+    on_exit(fn -> Application.delete_env(:foreman, :updater) end)
+
+    released("0.4.7")
+    install_updater(dir)
+    {:ok, view, _html} = live(conn, ~p"/admin")
+
+    assert has_element?(view, "#update-available a[href='/admin']", "0.4.7")
+    assert has_element?(view, "#foreman-update", "Foreman 0.4.7 is available")
+    assert has_element?(view, "#foreman-update a[href$='/releases/tag/v0.4.7']")
+    assert has_element?(view, "#updated-elsewhere", "FOREMAN_UPDATER")
+    refute has_element?(view, "#install-updater")
+    refute has_element?(view, "#update-foreman")
+
+    # The button is gone; the event is refused all the same.
+    render_click(view, "update_foreman")
+    assert has_element?(view, "#flash-error", "updated outside Foreman")
+    refute File.exists?(Path.join(dir, "request/version"))
+  end
+
   test "updates from the page when the updater is installed", %{conn: conn, dir: dir} do
     released("0.4.7")
     install_updater(dir)

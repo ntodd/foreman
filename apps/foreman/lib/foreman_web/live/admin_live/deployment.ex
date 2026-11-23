@@ -35,7 +35,12 @@ defmodule ForemanWeb.AdminLive.Deployment do
     if connected?(socket) and updating?(updater),
       do: Process.send_after(self(), :refresh_update, @update_poll)
 
-    assign(socket, latest: Updates.latest(), available: Updates.available(), updater: updater)
+    assign(socket,
+      latest: Updates.latest(),
+      available: Updates.available(),
+      updater: updater,
+      updater_enabled: Updates.updater_enabled?()
+    )
   end
 
   defp updating?(%{state: state}), do: state in ["pending", "running"]
@@ -160,6 +165,7 @@ defmodule ForemanWeb.AdminLive.Deployment do
 
   defp update_error(:in_progress), do: "An update is already under way."
   defp update_error(:no_updater), do: "The host's updater isn't installed."
+  defp update_error(:disabled), do: "This deployment is updated outside Foreman."
   defp update_error(:not_available), do: "That release is no longer the newest; check again."
   defp update_error(:forbidden), do: "Only admins can update Foreman."
   defp update_error(reason), do: "Couldn't ask the host to update: #{inspect(reason)}"
@@ -282,21 +288,26 @@ defmodule ForemanWeb.AdminLive.Deployment do
                   rel="noopener"
                 >Release notes</a>
               </p>
-              <%= if @updater.installed do %>
-                <.button
-                  id="update-foreman"
-                  variant="primary"
-                  size="sm"
-                  phx-click="update_foreman"
-                  data-confirm={"Update Foreman to #{@available.version} and restart it? The host backs up the data first, and goes back if #{@available.version} doesn't come up. Environments keep running; boxes reconnect, then update their agents."}
-                >Update and restart</.button>
-              <% else %>
-                <div id="install-updater" class="space-y-2">
-                  <p class="text-ink-2">
-                    To update from here, install the updater on this host once, with the path to the control plane's compose.yml (foreman-update; see docs/setup/upgrading.md):
+              <%= cond do %>
+                <% not @updater_enabled -> %>
+                  <p id="updated-elsewhere" class="text-ink-2">
+                    This deployment is updated outside Foreman (FOREMAN_UPDATER is off): deploy {@available.version} the way this control plane was deployed.
                   </p>
-                  <.command id="install-updater-command" command={install_command()} />
-                </div>
+                <% @updater.installed -> %>
+                  <.button
+                    id="update-foreman"
+                    variant="primary"
+                    size="sm"
+                    phx-click="update_foreman"
+                    data-confirm={"Update Foreman to #{@available.version} and restart it? The host backs up the data first, and goes back if #{@available.version} doesn't come up. Environments keep running; boxes reconnect, then update their agents."}
+                  >Update and restart</.button>
+                <% true -> %>
+                  <div id="install-updater" class="space-y-2">
+                    <p class="text-ink-2">
+                      To update from here, install the updater on this host once, with the path to the control plane's compose.yml (foreman-update; see docs/setup/upgrading.md):
+                    </p>
+                    <.command id="install-updater-command" command={install_command()} />
+                  </div>
               <% end %>
             <% @latest && @latest.version -> %>
               <p class="text-ink">

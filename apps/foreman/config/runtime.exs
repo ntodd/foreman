@@ -117,6 +117,10 @@ if config_env() != :test do
     },
     tailnet_sweep: flag.("FOREMAN_TAILNET_SWEEP", true),
     update_check: flag.("FOREMAN_UPDATE_CHECK", true),
+    # Off for a deployment something else replaces (a container service,
+    # a deploy pipeline): admins still hear about releases, with nothing
+    # to run from the Deployment page.
+    updater: flag.("FOREMAN_UPDATER", true),
     update_repo: System.get_env("FOREMAN_UPDATE_REPO", "ntodd/foreman"),
     update_dir: System.get_env("FOREMAN_UPDATE_DIR", "/var/lib/foreman-update")
 end

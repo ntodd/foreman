@@ -27,7 +27,8 @@ defmodule Foreman.RuntimeConfigTest do
           "FOREMAN_SECURE_COOKIES"
         ] ++
         ["FOREMAN_ALLOWED_ORG", "FOREMAN_BASE_URL", "FOREMAN_GITHUB_PRIVATE_KEY"] ++
-        ["FOREMAN_GITHUB_PRIVATE_KEY_FILE", "FOREMAN_UPDATE_CHECK", "DATABASE_SSL_CACERTFILE"]
+        ["FOREMAN_GITHUB_PRIVATE_KEY_FILE", "FOREMAN_UPDATE_CHECK", "DATABASE_SSL_CACERTFILE"] ++
+        ["FOREMAN_UPDATER"]
 
     saved_env = Map.new(keys, &{&1, System.get_env(&1)})
     saved_database = Application.get_env(:foreman, :database)
@@ -100,10 +101,12 @@ defmodule Foreman.RuntimeConfigTest do
     test "still turn off with false" do
       System.put_env("DATABASE_SSL", "false")
       System.put_env("FOREMAN_UPDATE_CHECK", "0")
+      System.put_env("FOREMAN_UPDATER", "false")
 
       config = read_config()
       assert config[Foreman.Repo][:ssl] == false
       refute config[:update_check]
+      assert config[:updater] == false
     end
 
     test "a value that's neither stops the boot" do

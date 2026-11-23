@@ -16,6 +16,10 @@ defmodule Foreman.Updates do
       nothing.
     * `status/` is the host's, read-only in here: `updater` exists once
       the updater is installed, and `state.json` describes its last run.
+
+  A deployment with no host to do that (one a container service or a
+  deploy pipeline replaces) sets `FOREMAN_UPDATER=false`: releases are
+  still checked for and announced, and nothing is asked of a host.
   """
 
   require Logger
@@ -47,6 +51,9 @@ defmodule Foreman.Updates do
   def enabled?, do: Application.get_env(:foreman, :update_check, true)
 
   def repo, do: Application.get_env(:foreman, :update_repo, "ntodd/foreman")
+
+  @doc "Whether this deployment updates through the host's updater (`FOREMAN_UPDATER`)."
+  def updater_enabled?, do: Application.get_env(:foreman, :updater, true)
 
   def newer?(a, b), do: Version.compare(a, b) == :gt
 
@@ -116,12 +123,13 @@ defmodule Foreman.Updates do
   @doc """
   The host's updater: whether it's installed, and its last run, if any.
   A request it hasn't picked up yet shows as `"pending"`, and a run that
-  stopped reporting as `"stale"`.
+  stopped reporting as `"stale"`. Turned off, it's never installed,
+  whatever the directory holds.
   """
   def updater do
     status = Path.join(dir(), "status")
 
-    if File.regular?(Path.join(status, "updater")) do
+    if updater_enabled?() and File.regular?(Path.join(status, "updater")) do
       Map.merge(%{installed: true}, run(status))
     else
       %{installed: false, state: nil}
@@ -189,6 +197,7 @@ defmodule Foreman.Updates do
 
     cond do
       not Scope.admin?(scope) -> {:error, :forbidden}
+      not updater_enabled?() -> {:error, :disabled}
       not match?(%{version: ^version}, available()) -> {:error, :not_available}
       not updater.installed -> {:error, :no_updater}
       updater.state in ["pending", "running"] -> {:error, :in_progress}
