@@ -35,6 +35,8 @@ type fixture struct {
 	polls                                            []string
 	sleeps                                           []time.Duration
 	rejected                                         string
+	dropRefresh                                      bool
+	refreshAttempts                                  int
 	revoked, rotations, bearers                      []string
 	revokeObserved                                   []string
 	endpointOverride, verifyOverride, issuerOverride string
@@ -52,7 +54,8 @@ func setup(t *testing.T) *fixture {
 		f.now.Add(int64(d / time.Second))
 		return ctx.Err()
 	}
-	f.server = httptest.NewServer(http.HandlerFunc(f.serve))
+	f.server = httptest.NewUnstartedServer(http.HandlerFunc(f.serve))
+	f.server.Start()
 	t.Cleanup(f.server.Close)
 	return f
 }
@@ -101,12 +104,16 @@ func (f *fixture) serve(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		case "refresh_token":
+			f.refreshAttempts++
 			prev := form("refresh_token")
 			if slices.Contains(f.rotations, prev) {
 				reject("invalid_grant")
 				return
 			}
 			f.rotations = append(f.rotations, prev)
+			if f.dropRefresh {
+				panic(http.ErrAbortHandler)
+			}
 			refresh = prev + "-rotated"
 		default:
 			f.t.Errorf("unknown grant %q", form("grant_type"))

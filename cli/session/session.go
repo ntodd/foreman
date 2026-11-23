@@ -54,7 +54,7 @@ func Open(ctx context.Context, instance, account string) (*Session, error) {
 }
 
 func (s *Store) Open(ctx context.Context, instance, account string) (*Session, error) {
-	instance, account, err := s.selectConnection(instance, account, false)
+	instance, account, err := s.selectConnection(instance, account, "open")
 	if err != nil {
 		return nil, err
 	}
@@ -71,11 +71,11 @@ func (s *Store) Open(ctx context.Context, instance, account string) (*Session, e
 	if err != nil {
 		return nil, err
 	}
-	client := public.WithBearer(func(ctx context.Context) (string, error) { return s.accessToken(ctx, public, path) })
+	client := public.WithBearer(func(ctx context.Context) (string, error) { return s.accessToken(ctx, public, instance, path) })
 	return &Session{Connection: Connection{Instance: instance, Account: account, Scope: state.Scope}, StateDir: s.root, Client: client}, nil
 }
 
-func (s *Store) accessToken(ctx context.Context, public *api.Client, path string) (string, error) {
+func (s *Store) accessToken(ctx context.Context, public *api.Client, instance, path string) (string, error) {
 	var token string
 	err := withLock(ctx, path, func() error {
 		state, err := readCredential(path)
@@ -85,24 +85,20 @@ func (s *Store) accessToken(ctx context.Context, public *api.Client, path string
 		if err != nil {
 			return err
 		}
-		if err = s.retire(ctx, public, path, &state); err != nil {
+		state, err = s.recoverRotation(path, state)
+		if err != nil {
+			return err
+		}
+		if state.RefreshPending {
+			return rotationUncertain(instance, state.Account, errors.New("the refresh outcome is unknown"))
+		}
+		if err = s.retire(ctx, public, instance, path, &state); err != nil {
 			return err
 		}
 		if state.Expires <= unixSeconds(s.now())+30 {
-			reply, err := public.ObtainToken(ctx, api.RefreshTokenGrant{GrantType: "refresh_token", ClientID: ClientID, RefreshToken: state.RefreshToken})
-			if err != nil {
-				var p *api.HTTPError
-				if errors.As(err, &p) && p.Code == "invalid_grant" {
-					return fmt.Errorf("connection expired or revoked; run login to approve a new connection: %w", err)
-				}
-				return err
-			}
-			state, err = s.credentials(reply.Value, state.Account)
+			state, err = s.rotate(ctx, public, instance, path, state)
 			if err != nil {
 				return err
-			}
-			if err = s.save(path, state); err != nil {
-				return fmt.Errorf("could not persist the rotated connection: %w", err)
 			}
 		}
 		token = state.AccessToken
@@ -125,7 +121,7 @@ func revoke(ctx context.Context, public *api.Client, token string) error {
 	return err
 }
 
-func (s *Store) retire(ctx context.Context, public *api.Client, path string, state *credential) error {
+func (s *Store) retire(ctx context.Context, public *api.Client, instance, path string, state *credential) error {
 	if len(state.PendingRevocations) == 0 {
 		return nil
 	}
@@ -136,7 +132,7 @@ func (s *Store) retire(ctx context.Context, public *api.Client, path string, sta
 	}
 	for _, prev := range state.PendingRevocations {
 		if err := revoke(ctx, public, prev); err != nil {
-			return fmt.Errorf("replacement credentials saved; revocation of a previous connection is pending. Run me or logout again to retry: %w", err)
+			return fmt.Errorf("replacement credentials saved; revocation of a previous connection is pending. Retry with %s: %w", accountCommand(instance, state.Account, "me"), err)
 		}
 	}
 	state.PendingRevocations = nil
@@ -144,7 +140,7 @@ func (s *Store) retire(ctx context.Context, public *api.Client, path string, sta
 }
 
 func (s *Store) Login(ctx context.Context, instance, account, scope string, prompt func(DevicePrompt) error) (Connection, error) {
-	instance, account, err := s.selectConnection(instance, account, true)
+	instance, account, err := s.selectConnection(instance, account, "login")
 	if err != nil {
 		return Connection{}, err
 	}
@@ -277,6 +273,12 @@ func (s *Store) install(ctx context.Context, public *api.Client, instance, accou
 	err = withLock(ctx, path, func() error {
 		old, err := readCredential(path)
 		if err == nil {
+			// A successful exchange may have left its successor awaiting
+			// publication. Retire the most recent token of the old grant.
+			old, err = s.recoverRotation(path, old)
+			if err != nil {
+				return err
+			}
 			for _, token := range append(old.PendingRevocations, old.RefreshToken) {
 				if token != state.RefreshToken {
 					state.PendingRevocations = append(state.PendingRevocations, token)
@@ -291,7 +293,12 @@ func (s *Store) install(ctx context.Context, public *api.Client, instance, accou
 			return err
 		}
 		saved = true
-		if err = s.retire(ctx, public, path, &state); err != nil {
+		// A replacement login retires the entire previous grant, including any
+		// successor left by an interrupted refresh. Never replay it over this login.
+		if err = removeRotation(path); err != nil {
+			return err
+		}
+		if err = s.retire(ctx, public, instance, path, &state); err != nil {
 			return err
 		}
 		return s.remember(ctx, instance, id.ID, false)
@@ -300,25 +307,50 @@ func (s *Store) install(ctx context.Context, public *api.Client, instance, accou
 }
 
 func (s *Store) Logout(ctx context.Context, instance, account string) (string, error) {
-	instance, account, err := s.selectConnection(instance, account, false)
+	implicitAccount := account == ""
+	instance, account, err := s.selectConnection(instance, account, "logout")
 	if err != nil {
 		return "", err
 	}
 	dir := s.directory(instance)
 	path := accountPath(dir, account)
-	public, err := discover(ctx, instance)
-	if err != nil {
-		return "", err
-	}
 	err = withLock(ctx, path, func() error {
 		state, err := readCredential(path)
 		if errors.Is(err, os.ErrNotExist) {
+			if implicitAccount {
+				if err := s.syncDir(dir); err != nil {
+					return err
+				}
+				accounts, err := accountsIn(dir)
+				if err != nil {
+					return err
+				}
+				if len(accounts) > 0 {
+					return fmt.Errorf("the selected account %s was already removed; select --account from %s", account, strings.Join(accounts, ", "))
+				}
+				return fmt.Errorf("the selected account %s was already removed", account)
+			}
 			return noConnection()
 		}
 		if err != nil {
 			return err
 		}
-		if err = s.retire(ctx, public, path, &state); err != nil {
+		if implicitAccount {
+			// Legacy accounts may have no selection yet. Persist the exact target
+			// before revoking it and retain it across unlink, sync, and restart.
+			if err := s.remember(ctx, instance, account, true); err != nil {
+				return err
+			}
+		}
+		state, err = s.recoverRotation(path, state)
+		if err != nil {
+			return err
+		}
+		public, err := discover(ctx, instance)
+		if err != nil {
+			return err
+		}
+		if err = s.retire(ctx, public, instance, path, &state); err != nil {
 			return err
 		}
 		if err = revoke(ctx, public, state.RefreshToken); err != nil {
@@ -327,10 +359,7 @@ func (s *Store) Logout(ctx context.Context, instance, account string) (string, e
 		if err = os.Remove(path); err != nil {
 			return err
 		}
-		if err = s.syncDir(dir); err != nil {
-			return err
-		}
-		return s.remember(ctx, instance, account, true)
+		return s.syncDir(dir)
 	})
 	return account, err
 }

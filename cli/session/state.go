@@ -62,6 +62,8 @@ type credential struct {
 	Expires            float64  `json:"expires"`
 	Scope              string   `json:"scope"`
 	PendingRevocations []string `json:"pending_revocations,omitempty"`
+	RefreshPending     bool     `json:"refresh_pending,omitempty"`
+	VerifyRotation     bool     `json:"verify_rotation,omitempty"`
 }
 
 type selections struct {
@@ -238,27 +240,30 @@ func (s *Store) preferences() (selections, error) {
 }
 
 // Call while holding the account lock; no path takes these two locks in reverse.
-func (s *Store) remember(ctx context.Context, instance, account string, logout bool) error {
+func (s *Store) remember(ctx context.Context, instance, account string, pinLogout bool) error {
 	path := filepath.Join(s.root, "selection.json")
 	return withLock(ctx, path, func() error {
 		p, err := s.preferences()
 		if err != nil {
 			return err
 		}
-		if logout {
-			if p.Accounts[instance] != account {
-				return nil
+		if pinLogout {
+			if saved := p.Accounts[instance]; saved != "" {
+				if saved != account {
+					return errors.New("the selected account changed; specify --account to log out")
+				}
+				// A previous pin can be visible after its directory sync failed.
+				return s.syncDir(s.root)
 			}
-			delete(p.Accounts, instance)
 		} else {
 			p.Instance = instance
-			p.Accounts[instance] = account
 		}
+		p.Accounts[instance] = account
 		return s.save(path, p)
 	})
 }
 
-func (s *Store) selectConnection(instance, account string, login bool) (string, string, error) {
+func (s *Store) selectConnection(instance, account, command string) (string, string, error) {
 	var p selections
 	if instance == "" || account == "" {
 		var err error
@@ -280,7 +285,7 @@ func (s *Store) selectConnection(instance, account string, login bool) (string, 
 	dir := s.directory(origin)
 	if err = checkDirectory(dir); err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			if login {
+			if command == "login" {
 				return origin, account, nil
 			}
 			return "", "", noConnection()
@@ -290,12 +295,17 @@ func (s *Store) selectConnection(instance, account string, login bool) (string, 
 	if account != "" {
 		return origin, account, nil
 	}
-	// A checkout CLI can remove a saved account. Fall back to the same
-	// instance's remaining connections if that selection no longer exists.
+	// The checkout CLI may have removed a selected account. Reads can still
+	// discover the origin's remaining connections.
 	if saved := p.Accounts[origin]; saved != "" {
+		// A destructive retry stays pinned even if an earlier logout already
+		// unlinked the file. Only an explicit selection may move it elsewhere.
+		if command == "logout" {
+			return origin, saved, nil
+		}
 		_, err = os.Lstat(accountPath(dir, saved))
 		if err == nil {
-			if login {
+			if command == "login" {
 				// The browser may approve a new account on this origin.
 				return origin, "", nil
 			}
@@ -305,9 +315,26 @@ func (s *Store) selectConnection(instance, account string, login bool) (string, 
 			return "", "", err
 		}
 	}
-	entries, err := os.ReadDir(dir)
+	accounts, err := accountsIn(dir)
 	if err != nil {
 		return "", "", err
+	}
+	if len(accounts) > 1 {
+		return "", "", fmt.Errorf("select --account from %s", strings.Join(accounts, ", "))
+	}
+	if command == "login" {
+		return origin, "", nil
+	}
+	if len(accounts) == 1 {
+		return origin, accounts[0], nil
+	}
+	return "", "", noConnection()
+}
+
+func accountsIn(dir string) ([]string, error) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil, err
 	}
 	var accounts []string
 	for _, entry := range entries {
@@ -319,21 +346,12 @@ func (s *Store) selectConnection(instance, account string, login bool) (string, 
 			continue
 		}
 		if err != nil {
-			return "", "", err
+			return nil, err
 		}
 		accounts = append(accounts, c.Account)
 	}
-	if len(accounts) > 1 {
-		slices.Sort(accounts)
-		return "", "", fmt.Errorf("select --account from %s", strings.Join(accounts, ", "))
-	}
-	if login {
-		return origin, "", nil
-	}
-	if len(accounts) == 1 {
-		return origin, accounts[0], nil
-	}
-	return "", "", noConnection()
+	slices.Sort(accounts)
+	return accounts, nil
 }
 
 func noConnection() error { return errors.New("no connection for this account; run login first") }
