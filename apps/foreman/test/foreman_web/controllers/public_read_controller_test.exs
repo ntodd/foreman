@@ -165,6 +165,54 @@ defmodule ForemanWeb.PublicReadControllerTest do
     assert read(ctx.principal, :operation, params) == before
   end
 
+  test "upgrading settles reopened timeouts without changing the environment or its history",
+       ctx do
+    first = DateTime.add(DateTime.utc_now(), -60)
+
+    legacy =
+      op(ctx.env, %{
+        status: "running",
+        args: %{"timed_out" => true},
+        error: "first timeout",
+        finished_at: first,
+        dispatched_at: DateTime.add(first, -7200)
+      })
+
+    active = op(ctx.env, %{status: "running", dispatched_at: first})
+    migration = Foreman.Repo.Migrations.SettleReopenedTimeouts
+    version = 20_261_123_030_001
+    opts = [log: false, migration_lock: false]
+
+    Code.require_file(
+      Path.join(
+        :code.priv_dir(:foreman),
+        "repo/migrations/#{version}_settle_reopened_timeouts.exs"
+      )
+    )
+
+    assert :ok = Ecto.Migrator.down(Repo, version, migration, opts)
+    assert :ok = Ecto.Migrator.up(Repo, version, migration, opts)
+
+    assert %{
+             status: "failed",
+             timeout_error: "first timeout",
+             error: "first timeout",
+             finished_at: ^first
+           } = Operations.get!(legacy.id)
+
+    assert Repo.reload!(ctx.env) == ctx.env
+    assert Operations.get!(active.id) == active
+
+    params = %{"id" => legacy.id}
+    before = read(ctx.principal, :operation, params)
+    assert %{"status" => "failed", "error" => %{"code" => "operation_timeout"}} = before
+
+    assert {:ok, %{status: "succeeded", finished_at: ^first}} =
+             Operations.finish(legacy.id, "ok", %{}, nil)
+
+    assert read(ctx.principal, :operation, params) == before
+  end
+
   test "discovery and environment lists only show accessible records and permitted fields", ctx do
     arbitrary = environment_fixture()
     env = ctx.env
