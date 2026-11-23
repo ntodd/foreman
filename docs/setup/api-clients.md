@@ -24,6 +24,27 @@ Access tokens last 15 minutes. Each successful refresh returns a replacement ref
 
 When you replace a connection with another login, the CLI saves and syncs the new credentials before revoking the old grant. If the old grant cannot be revoked immediately, the CLI records it in the private account file and retries on the next `me`, `login` or `logout`. If saving and revoking the new grant both fail, the CLI directs you to **Connected apps** for manual recovery.
 
+## Environments with the installed CLI
+
+After device login, run these commands from any directory.
+
+```sh
+foreman repo list
+foreman box list
+foreman env create acme/payments --branch topic --timeout 15m
+foreman env show "$ENV_ID"
+foreman op list "$ENV_ID"
+foreman op logs "$OP_ID" --follow
+```
+
+`env create` accepts a repository UUID or an exact owner/name. Omit `--branch` to use the repository default. Omit `--box` for automatic placement, or supply a box UUID or exact name. With a create-only grant, use UUIDs and add `--no-wait`. To request expiry, supply both `--expires-at` with an absolute RFC 3339 timestamp and `--on-expiry stop` or `--on-expiry destroy`.
+
+Create, start, stop and destroy print the accepted IDs and wait up to 30 minutes by default. Use `--no-wait` for submission alone. After an interruption, use `foreman op wait "$OP_ID"` to check the outcome. `foreman env show "$ENV_ID"` reads current readiness. In a script, use `--confirm-capacity-warning` on create or start to acknowledge a capacity warning, and `--yes` on destroy to confirm disk removal.
+
+Before sending a create request, the CLI prints its key to stderr and saves the key and resolved inputs in the private `create-requests` directory under the Foreman state root. If the process dies or its response is lost, use the same instance and account and run `foreman env create --resume "$KEY"`. If stderr is unavailable, the saved JSON record contains `request_key`, the instance, account, and request body. Scripts that keep their own inputs can supply `--request-key "$KEY"` on the original request and on retries. If a start, stop or destroy response is lost, inspect the environment and its operation history before resubmitting.
+
+Use `--json` for automation. Lists return an object with an `items` array. A follow-mode log stream writes one page per line, including its `next_cursor` and `truncated` flag. Reconnect with `foreman op logs "$OP_ID" --follow --cursor "$CURSOR"`. Diagnostics go to stderr. On a failed command the final JSON diagnostic includes `code`, `message`, and any known recovery IDs.
+
 ## TLS termination
 
 Tailscale Serve on the same host can forward HTTPS to Foreman's loopback listener. The Docker image also trusts the bridge gateway for installations using the documented loopback-only published port. For an external TLS terminator, set `FOREMAN_TLS_PROXIES` to its peer address and configure it to replace incoming `X-Forwarded-Proto` with the actual connection scheme. If migrating an existing reverse proxy, set this variable before upgrading. `FOREMAN_TRUSTED_PROXIES` controls client-address forwarding for rate limits and logs separately.
