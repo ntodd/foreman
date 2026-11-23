@@ -26,16 +26,45 @@ defmodule Foreman.PublicAPI.RepositoryAccess do
     end
   end
 
-  def visible_ids(query, user) do
+  # Both adapters support concatenation and TEXT casts. Repository names cannot
+  # contain a colon. Compute the same key in both statements so a transfer,
+  # installation change, or switch to manual verification invalidates the proof.
+  defmacrop identity(r, o) do
+    quote do
+      fragment(
+        "CAST(? AS TEXT) || ':' || CAST(? AS TEXT) || ':' || lower(?) || ':' || CASE WHEN ? THEN 'manual' ELSE 'synced' END || ':' || coalesce(CAST(? AS TEXT), '')",
+        unquote(r).id,
+        unquote(r).github_id,
+        unquote(r).full_name,
+        unquote(r).manual,
+        unquote(o).installation_id
+      )
+    end
+  end
+
+  def verified_query(query, user) do
     candidates =
+      from r in query,
+        join: o in assoc(r, :owner),
+        as: :repository_owner,
+        where: not is_nil(r.github_id)
+
+    records =
       Repo.all(
-        from r in query,
-          join: o in assoc(r, :owner),
-          where: not is_nil(r.github_id),
-          select: {r.id, r.github_id, r.full_name, r.manual, o.installation_id}
+        from [r, repository_owner: o] in candidates,
+          select: {identity(r, o), r.github_id, r.full_name, r.manual, o.installation_id}
       )
 
-    if candidates == [], do: [], else: verify(candidates, user)
+    keys = if records == [], do: [], else: verify(records, user)
+    # One bound parameter keeps large installations below database placeholder limits.
+    if Repo.sqlite?() do
+      from [r, repository_owner: o] in candidates,
+        where:
+          fragment("? IN (SELECT value FROM json_each(?))", identity(r, o), ^Jason.encode!(keys))
+    else
+      from [r, repository_owner: o] in candidates,
+        where: fragment("? = ANY(?)", identity(r, o), type(^keys, {:array, :string}))
+    end
   end
 
   defp verify(candidates, user) do

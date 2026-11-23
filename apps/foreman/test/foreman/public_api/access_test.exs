@@ -239,12 +239,9 @@ defmodule Foreman.PublicAPI.AccessTest do
     github_config()
     user = user_fixture()
     actor = principal(user)
-    repo = repo_fixture() |> change(manual: true, github_id: 812) |> Repo.update!()
+    repo = repo_fixture() |> change(manual: true) |> Repo.update!()
     env = environment_fixture(user: user, repo: repo)
-
-    Repo.update!(
-      change(repo, github_identity_bound_at: DateTime.add(env.inserted_at, 1, :microsecond))
-    )
+    Repo.update!(change(repo, github_id: 812, github_identity_bound_at: DateTime.utc_now()))
 
     deny(ClientMock, :get_repo, 2)
     assert ids(Access.environments(actor, env.id)) == []
@@ -337,18 +334,27 @@ defmodule Foreman.PublicAPI.AccessTest do
 
     {:ok, service} = Foreman.OAuth.authorize_grant(legacy_grant.id)
     # Recreate the preceding release's schema and apply the actual migration inside this sandbox.
-    version = 20_261_123_010_000
-    migration = Foreman.Repo.Migrations.RecordRepoIdentityBinding
+    migrations = [
+      {20_261_123_010_000, Foreman.Repo.Migrations.RecordRepoIdentityBinding,
+       "record_repo_identity_binding"},
+      {20_261_123_010_001, Foreman.Repo.Migrations.SnapshotRepositoryBindings,
+       "snapshot_repository_bindings"}
+    ]
 
-    Code.require_file(
-      Path.join(
-        :code.priv_dir(:foreman),
-        "repo/migrations/#{version}_record_repo_identity_binding.exs"
+    for {version, _, name} <- migrations do
+      Code.require_file(
+        Path.join(:code.priv_dir(:foreman), "repo/migrations/#{version}_#{name}.exs")
       )
-    )
+    end
 
-    assert :ok = Ecto.Migrator.down(Repo, version, migration, log: false, migration_lock: false)
-    assert :ok = Ecto.Migrator.up(Repo, version, migration, log: false, migration_lock: false)
+    for {version, migration, _} <- Enum.reverse(migrations) do
+      assert :ok = Ecto.Migrator.down(Repo, version, migration, log: false, migration_lock: false)
+    end
+
+    for {version, migration, _} <- migrations do
+      assert :ok = Ecto.Migrator.up(Repo, version, migration, log: false, migration_lock: false)
+    end
+
     assert DateTime.after?(Repo.reload!(manual).github_identity_bound_at, old.inserted_at)
     assert is_nil(Repo.reload!(synced).github_identity_bound_at)
     assert is_nil(Repo.reload!(unbound).github_identity_bound_at)
@@ -357,6 +363,113 @@ defmodule Foreman.PublicAPI.AccessTest do
     assert ids(Access.environments(actor, live.id)) == [live.id]
     assert ids(Access.repos(service)) == [synced.id]
     assert Foreman.OAuth.ServiceAccounts.repo_ids(service) == [synced.id]
+  end
+
+  test "retained personal queries keep the verified repository and installation across transfers" do
+    github_config()
+    actor = principal(user_fixture())
+    owner = owner_fixture()
+    target = owner_fixture()
+    repo = repo_fixture(owner: owner) |> github_id(92)
+    workspace = environment_fixture(user: actor.user, repo: repo)
+    stub(ClientMock, :user_installation_membership, fn _, _, wanted -> {:ok, wanted} end)
+
+    catalog = Access.repos(actor)
+    history = Access.environments(actor, workspace.id)
+    assert ids(catalog) == [repo.id]
+    assert ids(history) == [workspace.id]
+
+    {:ok, transferred} =
+      Foreman.Repos.upsert_repo(target, %{
+        github_id: 92,
+        full_name: target.login <> "/" <> repo.name,
+        name: repo.name
+      })
+
+    assert transferred.id == repo.id
+    assert ids(catalog) == []
+    assert ids(history) == []
+
+    verified = Access.repos(actor)
+    Repo.update!(change(target, installation_id: target.installation_id + 1000))
+    assert ids(verified) == []
+
+    verified = Access.repos(actor)
+    Repo.update!(change(transferred, manual: true))
+    assert ids(verified) == []
+  end
+
+  test "a workspace records the repository identity observed at submission" do
+    github_config()
+    actor = principal(user_fixture())
+    unbound = repo_fixture() |> change(manual: true) |> Repo.update!()
+
+    {:ok, bound} =
+      Foreman.Repos.upsert_repo(unbound.owner, %{
+        full_name: unbound.full_name,
+        name: unbound.name,
+        github_id: 814
+      })
+
+    # Both rows are inserted after the bind. Only one creator saw that identity.
+    stale = environment_fixture(user: actor.user, repo: unbound)
+    fresh = environment_fixture(user: actor.user, repo: bound)
+    stub(ClientMock, :get_repo, fn _, name -> {:ok, %{"id" => 814, "full_name" => name}} end)
+    assert ids(Access.environments(actor)) == [fresh.id]
+    assert ids(Access.environments(actor, stale.id)) == []
+  end
+
+  test "service credentials retain an archived primary only for an accessible workspace" do
+    github_config()
+    alias Foreman.OAuth.ServiceAccounts
+    admin = Foreman.Scope.for_user(user_fixture(role: "admin"))
+    primary = repo_fixture() |> github_id(890)
+    secondary = repo_fixture() |> github_id(891)
+    box = box_fixture()
+
+    {:ok, %{grant: grant}} =
+      ServiceAccounts.register(admin, "service", %{
+        "name" => "CI",
+        "scopes" => ["repos:list"],
+        "repo_ids" => [primary.id, secondary.id],
+        "box_ids" => [box.id]
+      })
+
+    {:ok, actor} = Foreman.OAuth.authorize_grant(grant.id)
+    workspace = environment_fixture(user: actor.user, repo: primary, box: box)
+    Repo.update!(change(primary, archived: true))
+    Repo.update!(change(secondary, archived: true))
+    assert ids(Access.environments(actor)) == [workspace.id]
+    assert ids(Access.repos(actor)) == []
+    assert ServiceAccounts.repo_ids(actor) == []
+    assert ServiceAccounts.repo_ids(actor, secondary.id) == []
+    assert ServiceAccounts.repo_ids(actor, primary.id) == [primary.id]
+    Repo.update!(change(workspace, created_once: false))
+    assert ServiceAccounts.repo_ids(actor, primary.id) == []
+    Repo.update!(change(Repo.reload!(workspace), created_once: true))
+    Repo.update!(change(box, revoked_at: DateTime.utc_now()))
+    assert ServiceAccounts.repo_ids(actor, primary.id) == []
+  end
+
+  test "a grant approves the selected numeric repository even if a binding write commits later" do
+    github_config()
+    alias Foreman.OAuth.ServiceAccounts
+    repo = repo_fixture() |> github_id(920)
+    earlier = DateTime.utc_now()
+
+    {:ok, %{grant: grant}} =
+      ServiceAccounts.register(Foreman.Scope.for_user(user_fixture(role: "admin")), "service", %{
+        "name" => "Build",
+        "scopes" => ["repos:list"],
+        "repo_ids" => [repo.id]
+      })
+
+    {:ok, actor} = Foreman.OAuth.authorize_grant(grant.id)
+    query = Access.repos(actor)
+    assert ids(query) == [repo.id]
+    Repo.update!(change(repo, github_id: 921, github_identity_bound_at: earlier))
+    assert ids(query) == []
+    assert ServiceAccounts.repo_ids(actor) == []
   end
 
   defp principal(user) do
