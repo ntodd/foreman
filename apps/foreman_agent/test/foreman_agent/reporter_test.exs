@@ -53,12 +53,70 @@ defmodule ForemanAgent.ReporterTest do
     assert Reporter.running_containers(entries) == %{"partial" => ["app"], "offline" => []}
   end
 
+  test "a scan still collecting at rejoin cannot publish on the new session" do
+    parent = self()
+    prev = ForemanAgent.Config.get()
+    ForemanAgent.Config.put(%{prev | mode: :guest})
+    on_exit(fn -> ForemanAgent.Config.put(prev) end)
+    stub(RunnerMock, :run, fn _, _, _ -> {:ok, %{status: 0, output: ""}} end)
+    stub(DockerMock, :info, fn -> {:ok, %{}} end)
+
+    expect(DockerMock, :list_containers, fn ["foreman.env_id"] ->
+      send(parent, {:scan_started, self()})
+      receive do: (:release -> {:ok, []})
+    end)
+
+    :ok = ForemanAgent.Outbox.attach(self())
+    reporter = start_supervised!(Reporter)
+    send(reporter, :inventory)
+    assert_receive {:scan_started, collector}, 1_000
+    :ok = ForemanAgent.Outbox.detach()
+    local_join = System.monotonic_time()
+    :ok = ForemanAgent.Outbox.attach(self())
+    send(collector, :release)
+    assert_receive {:workspace_sample, started_at, %{}} = sample, 1_000
+    assert started_at < local_join
+
+    socket =
+      Slipstream.Socket.assign(Slipstream.Socket.new(),
+        joined: true,
+        workspace_joined_at: local_join
+      )
+
+    assert ExUnit.CaptureLog.capture_log(fn ->
+             assert {:noreply, ^socket} = ForemanAgent.Connection.handle_info(sample, socket)
+           end) == ""
+  end
+
+  test "indeterminate host probes do not report a stopped VM" do
+    id = ForemanProtocol.uuid()
+
+    for reply <- [
+          {:error, :timeout},
+          {:ok, %{status: 1, output: ""}},
+          {:ok, %{status: 0, output: "Result=success\n"}}
+        ] do
+      expect(RunnerMock, :run, fn "systemctl", ["show" | _], _ -> reply end)
+      assert Cloud.inventory_state(id, nil) == :unknown
+    end
+  end
+
+  test "a collected transient unit still establishes that a VM is off" do
+    id = ForemanProtocol.uuid()
+
+    expect(RunnerMock, :run, fn "systemctl", ["show" | _], _ ->
+      {:ok, %{status: 4, output: "LoadState=not-found\nActiveState=inactive\n"}}
+    end)
+
+    assert Cloud.inventory_state(id, nil) == :stopped
+  end
+
   test "only a systemd OOM result supplies an exit time" do
     id = "6f1c1d1e-9a3b-4c1f-8f5e-2d7a9b0c1e2f"
 
     args = [
       "show",
-      "--property=ActiveState,Result,ExecMainExitTimestamp",
+      "--property=LoadState,ActiveState,Result,ExecMainExitTimestamp",
       "foreman-vm-#{id}.service"
     ]
 
@@ -73,7 +131,8 @@ defmodule ForemanAgent.ReporterTest do
         {:ok,
          %{
            status: 0,
-           output: "ExecMainExitTimestamp=Wed 2025-01-01 00:00:00 UTC\nResult=#{result}\n"
+           output:
+             "ActiveState=inactive\nExecMainExitTimestamp=Wed 2025-01-01 00:00:00 UTC\nResult=#{result}\n"
          }}
       end)
 

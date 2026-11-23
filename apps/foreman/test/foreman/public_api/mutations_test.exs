@@ -225,6 +225,12 @@ defmodule Foreman.PublicAPI.MutationsTest do
     online(ctx.box)
     assert {:ok, env, op} = Mutations.create(ctx.actor, "create", ctx.input)
     complete(ctx.box, op)
+
+    Repo.update!(
+      change(Repo.get!(Operation, op), finished_at: DateTime.add(DateTime.utc_now(), -91, :day))
+    )
+
+    assert {:history_expired, ^env, ^op} = Mutations.create(ctx.actor, "create", ctx.input)
     Repo.delete!(Repo.get!(Operation, op))
     assert {:history_expired, ^env, ^op} = Mutations.create(ctx.actor, "create", ctx.input)
     Repo.update!(change(ctx.repo, private: true))

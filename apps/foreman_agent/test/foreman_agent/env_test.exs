@@ -1449,9 +1449,11 @@ defmodule ForemanAgent.EnvTest do
       {:ok, _} = Env.run("env.create", payload(), with_feature(ctx, tmp, "1.0.0"))
       _ = runs()
 
-      assert {:ok, %{"restarted" => ["app"], "feature_version" => "1.1.0"}} =
+      assert {:ok, %{"restarted" => ["app"], "feature_version" => "1.1.0", "container_id" => id}} =
                Env.run("env.restart", restart_payload("affected", []), ctx)
 
+      assert id == Agent.get(fake_containers(), & &1.id)
+      refute id == "abc123"
       assert rebuilt?()
 
       assert {:ok, _} = Env.run("env.start", start_payload(), ctx)
@@ -1462,7 +1464,8 @@ defmodule ForemanAgent.EnvTest do
       stub_tools()
       {:ok, _} = Env.run("env.create", payload(), ctx)
 
-      assert {:ok, %{"restarted" => "all", "feature_version" => "1.1.0"}} =
+      assert {:ok,
+              %{"restarted" => "all", "feature_version" => "1.1.0", "container_id" => "abc123"}} =
                Env.run("env.restart", restart_payload("all", []), ctx)
     end
 

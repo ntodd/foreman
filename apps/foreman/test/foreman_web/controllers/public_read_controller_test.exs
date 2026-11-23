@@ -83,6 +83,60 @@ defmodule ForemanWeb.PublicReadControllerTest do
              "resource_not_found"
   end
 
+  test "start returns a readable Location when a dashboard rebuild already targets running",
+       ctx do
+    rebuild = op(ctx.env, %{action: "rebuild", command: "env.rebuild", status: "running"})
+    internal = op(ctx.env, %{action: "secrets_write", command: "env.secrets.write"})
+    scopes = ["environments:start", "operations:read", "operations:list", "logs:read"]
+    {_, grant} = Foreman.PublicAPIMutationFixtures.principal(ctx.principal.user, scopes)
+    token = Foreman.OAuth.issue(grant, scopes, :user).access_token
+    authed = fn -> put_req_header(build_conn(), "authorization", "Bearer " <> token) end
+    history = "/api/v1/environments/#{ctx.env.id}/operations"
+
+    res =
+      authed.()
+      |> put_req_header("idempotency-key", "follow")
+      |> post(history, %{action: "start"})
+
+    assert json_response(res, 202)["operation_id"] == rebuild.id
+    [location] = get_resp_header(res, "location")
+    assert json_response(get(authed.(), location), 200)["action"] == "rebuild"
+    assert json_response(get(authed.(), location <> "/logs"), 200)["text"] == ""
+
+    assert Enum.map(json_response(get(authed.(), history), 200)["items"], & &1["id"]) == [
+             rebuild.id
+           ]
+
+    assert json_response(get(authed.(), "/api/v1/operations/#{internal.id}"), 404)
+  end
+
+  test "a late result cannot reopen logs or extend terminal history", ctx do
+    for days <- [31, 91] do
+      deadline = DateTime.add(DateTime.utc_now(), -days, :day)
+
+      op =
+        op(ctx.env, %{
+          status: "failed",
+          timeout_error: "expired",
+          error: "expired",
+          args: %{"timed_out" => true},
+          finished_at: deadline
+        })
+
+      id = %{"id" => op.id}
+      LogStore.append(op.id, "old output")
+      assert read(ctx.principal, :logs, id, 404)
+      assert {:ok, _} = Operations.finish(op.id, "ok", %{}, nil)
+      assert read(ctx.principal, :logs, id, 404)
+      assert read(ctx.principal, :operation, id, if(days == 31, do: 200, else: 404))
+      assert :ok = Foreman.Jobs.Housekeeping.perform(%{})
+
+      if days == 31,
+        do: assert({"", 0, false} == LogStore.page(op, 0)),
+        else: refute(Operations.get(op.id))
+    end
+  end
+
   test "expiry and terminal timeout survive reads after a late success", ctx do
     at = DateTime.add(DateTime.utc_now(), 2, :day)
     Repo.update!(Ecto.Changeset.change(ctx.env, expiry_at: at, expiry_action: "stop"))
