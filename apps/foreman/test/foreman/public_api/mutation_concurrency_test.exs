@@ -8,7 +8,10 @@ defmodule Foreman.PublicAPI.MutationConcurrencyTest do
   alias Ecto.Adapters.SQL.Sandbox
 
   alias Foreman.{
+    Agents,
+    Environments,
     Environments.Environment,
+    Jobs.EnvironmentExpiry,
     Operations,
     Operations.Operation,
     PublicAPI.Mutations,
@@ -101,6 +104,99 @@ defmodule Foreman.PublicAPI.MutationConcurrencyTest do
       assert reconciled.finished_at == failed.finished_at
       assert reconciled.timeout_error == failed.timeout_error
     end)
+  end
+
+  test "a late stop during retry dispatch keeps the public state and both operation outcomes",
+       ctx do
+    handler = make_ref()
+    :ok = :telemetry.attach(handler, [:foreman, :repo, :query], &__MODULE__.pause_claim/4, self())
+    on_exit(fn -> :telemetry.detach(handler) end)
+
+    Sandbox.unboxed_run(Repo, fn ->
+      env = environment_fixture(user: ctx.actor.user, box: ctx.box, repo: ctx.repo)
+      env_id = env.id
+
+      on_exit(fn ->
+        Sandbox.unboxed_run(Repo, fn ->
+          Repo.delete_all(from j in Oban.Job, where: j.args["environment_id"] == ^env_id)
+          Repo.delete_all(from e in Foreman.Audit.Event, where: e.subject_id == ^env_id)
+        end)
+      end)
+
+      {reader, _} = principal(ctx.actor.user, ~w(environments:read operations:list))
+      conn = Phoenix.ConnTest.build_conn() |> Plug.Conn.assign(:api_principal, reader)
+      params = %{"id" => env.id}
+
+      Repo.update!(
+        Ecto.Changeset.change(env, expiry_at: DateTime.utc_now(), expiry_action: "stop")
+      )
+
+      job = %{args: %{"environment_id" => env.id}}
+      :ok = EnvironmentExpiry.perform(job)
+      assert_receive {:dispatch, %{type: "env.stop", op_id: first}}
+
+      assert {:ok, timeout, _} =
+               Operations.timed_out(
+                 Operations.get!(first),
+                 "original timeout",
+                 &Environments.record_result/1
+               )
+
+      dispatch =
+        Task.async(fn ->
+          Sandbox.unboxed_run(Repo, fn ->
+            Process.put(:expiry_claim, :waiting)
+            EnvironmentExpiry.perform(job)
+          end)
+        end)
+
+      assert_receive {:claim_visible, dispatcher}, 5_000
+      {:ok, late} = ForemanProtocol.Event.new("op.result", %{op_id: first, status: "ok"})
+      :ok = Agents.handle_event(ctx.box.id, late)
+      assert Repo.reload!(env).expiry_consumed_at
+      send(dispatcher, :continue)
+      assert :ok = Task.await(dispatch)
+      assert_receive {:dispatch, %{type: "env.stop", op_id: retry}}
+      {:ok, success} = ForemanProtocol.Event.new("op.result", %{op_id: retry, status: "ok"})
+      :ok = Agents.handle_event(ctx.box.id, success)
+
+      history = ForemanWeb.PublicReadController.operations(conn, params)
+
+      assert [
+               %{"id" => ^retry, "trigger" => "expiry", "status" => "succeeded"},
+               %{
+                 "id" => ^first,
+                 "trigger" => "expiry",
+                 "status" => "failed",
+                 "error" => %{"code" => "operation_timeout", "message" => "original timeout"}
+               }
+             ] = Phoenix.ConnTest.json_response(history, 200)["items"]
+
+      assert Operations.get!(first).finished_at == timeout.finished_at
+      response = ForemanWeb.PublicReadController.environment(conn, params)
+      assert Phoenix.ConnTest.json_response(response, 200)["observed_state"] == "stopped"
+    end)
+  end
+
+  # Stop at the first point where another connection can see the retry's claim.
+  def pause_claim(_, _, meta, parent) do
+    if Process.get(:expiry_claim) == :waiting and meta.source == "operations" and
+         String.starts_with?(meta.query, "UPDATE") and
+         String.contains?(meta.query, "dispatched_at") do
+      Process.put(:expiry_claim, :claimed)
+    end
+
+    if Process.get(:expiry_claim) == :claimed and
+         (not Repo.in_transaction?() or String.downcase(meta.query) == "commit") do
+      Process.delete(:expiry_claim)
+      send(parent, {:claim_visible, self()})
+
+      receive do
+        :continue -> :ok
+      after
+        5_000 -> raise "original expiry result did not release dispatch"
+      end
+    end
   end
 
   test "independent transactions cannot see an uncommitted reservation or dispatch and identical retries recover it",
