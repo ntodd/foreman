@@ -451,6 +451,66 @@ defmodule Foreman.PublicAPI.AccessTest do
     assert ServiceAccounts.repo_ids(actor, primary.id) == []
   end
 
+  test "personal verification updates shared catalog and workload eligibility for manual repos" do
+    github_config()
+    alias Foreman.OAuth.ServiceAccounts
+    admin = user_fixture(role: "admin")
+    scope = Foreman.Scope.for_user(admin)
+    person = principal(admin)
+    repo = repo_fixture() |> change(manual: true, github_id: 892) |> Repo.update!()
+    box = box_fixture()
+
+    {:ok, %{grant: grant}} =
+      ServiceAccounts.register(scope, "service", %{
+        "name" => "CI",
+        "scopes" => ["repos:list"],
+        "repo_ids" => [repo.id],
+        "box_ids" => [box.id]
+      })
+
+    {:ok, service} = Foreman.OAuth.authorize_grant(grant.id)
+    existing = environment_fixture(user: service.user, repo: repo, box: box)
+    personal_history = environment_fixture(user: admin, repo: repo)
+    catalog = Access.repos(service)
+    assert ids(catalog) == [repo.id]
+
+    expect(ClientMock, :get_repo, fn _, name ->
+      {:ok, %{"id" => 892, "full_name" => name, "archived" => true}}
+    end)
+
+    assert ids(Access.repos(person, repo.id)) == []
+    assert Repo.reload!(repo).archived
+    assert ids(catalog) == []
+    assert ServiceAccounts.repo_ids(service, Ecto.UUID.generate()) == []
+    assert ServiceAccounts.repo_ids(service, repo.id) == [repo.id]
+    assert ids(Access.environments(service)) == [existing.id]
+
+    expect(ClientMock, :get_repo, fn _, name ->
+      {:ok, %{"id" => 892, "full_name" => name, "archived" => true}}
+    end)
+
+    assert ids(Access.environments(person, personal_history.id)) == [personal_history.id]
+
+    expect(ClientMock, :get_repo, fn _, _ -> {:error, :timeout} end)
+    assert_raise Access.Unavailable, fn -> Access.environments(person, personal_history.id) end
+    assert Repo.reload!(repo).archived
+
+    expect(ClientMock, :get_repo, fn _, name ->
+      {:ok, %{"id" => 893, "full_name" => name, "archived" => false}}
+    end)
+
+    assert ids(Access.repos(person, repo.id)) == []
+    assert Repo.reload!(repo).archived
+
+    expect(ClientMock, :get_repo, fn _, name ->
+      {:ok, %{"id" => 892, "full_name" => name, "archived" => false}}
+    end)
+
+    assert ids(Access.repos(person)) == [repo.id]
+    refute Repo.reload!(repo).archived
+    assert ids(catalog) == [repo.id]
+  end
+
   test "a grant approves the selected numeric repository even if a binding write commits later" do
     github_config()
     alias Foreman.OAuth.ServiceAccounts
