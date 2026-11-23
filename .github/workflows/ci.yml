@@ -56,6 +56,10 @@ jobs:
             echo "$files"
             exit 1
           fi
+      - name: Verify the checked-in OpenAPI client
+        run: |
+          go generate ./api
+          git diff --exit-code -- api
       - run: go vet ./...
       - run: go test -race ./...
       - run: go build -o "$RUNNER_TEMP/foreman" ./cmd/foreman
