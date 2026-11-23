@@ -625,7 +625,9 @@ wait_for "the restarted control plane" 120 curl -fsS "$url/healthz"
 public_api pending-expiry --workspace keep &
 keep_poll=$!
 expiry_failed=0
-service_api pending-expiry || expiry_failed=1
+if ! service_api pending-expiry; then
+  expiry_failed=1
+fi
 wait "$keep_poll" || expiry_failed=1
 [ "$expiry_failed" -eq 0 ] || fail "expiry did not queue at the deadline while offline"
 cp_eval "E2E.check_expiry_times([\"$keep\", \"$drop\"])" || fail "expiry was queued prematurely"
