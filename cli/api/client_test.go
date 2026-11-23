@@ -135,3 +135,35 @@ func TestOriginsRedirectsAndErrors(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestServiceExchangeUsesBasicAuthOnlyOnTokenEndpoints(t *testing.T) {
+	mux := http.NewServeMux()
+	s := httptest.NewServer(mux)
+	defer s.Close()
+	mux.HandleFunc("/oauth/token", func(w http.ResponseWriter, r *http.Request) {
+		id, secret, ok := r.BasicAuth()
+		if !ok || id != "installation" || secret != "service-secret" || r.PostFormValue("grant_type") != "client_credentials" ||
+			r.PostFormValue("scope") != "logs:read" || r.PostFormValue("client_id") != "" || r.PostFormValue("client_secret") != "" {
+			t.Error("incorrect service grant encoding")
+		}
+		io.WriteString(w, `{"access_token":"access","expires_in":900,"token_type":"Bearer","scope":"logs:read"}`)
+	})
+	mux.HandleFunc("/.well-known/oauth-authorization-server", func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "" {
+			t.Error("credentials on discovery")
+		}
+		io.WriteString(w, "{}")
+	})
+	client, err := NewClient(s.URL, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	client = client.WithBasicAuth("installation", "service-secret")
+	if _, err = client.GetOAuthMetadata(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	res, err := client.ObtainToken(context.Background(), ClientCredentialsGrant{GrantType: "client_credentials", Scope: new("logs:read")})
+	if err != nil || res.Value.AccessToken != "access" || res.Value.RefreshToken != nil {
+		t.Fatal(res, err)
+	}
+}

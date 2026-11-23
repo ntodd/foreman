@@ -1,6 +1,7 @@
 package session
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"crypto/sha256"
@@ -146,7 +147,10 @@ m=runpy.run_path("../../bin/foreman")
 origin,action,account=sys.argv[1:4]
 d=m["state_dir"](origin)
 if action=="seed":
-    m["save"](m["account_path"](d,account),dict(account=account,scope="repos:list",access_token="old-access",refresh_token="old",expires=0.5))
+    state=dict(account=account,scope="repos:list",access_token="old-access",refresh_token="old",expires=0.5)
+    if sys.argv[4:]:
+        state["pending_revocations"]=sys.argv[4:]
+    m["save"](m["account_path"](d,account),state)
 else:
     m["use_connection"](action,origin,m["discover"](origin),d,account)
 `
@@ -384,5 +388,130 @@ func TestReplacementDurabilityAndRevocationRecovery(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestPythonLockBlocksGoRefresh(t *testing.T) {
+	f := setup(t)
+	f.seed("user")
+	s, err := f.store.Open(context.Background(), f.server.URL, "user")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command("python3", "-c", `import runpy,sys
+from pathlib import Path
+with runpy.run_path("../../bin/foreman")["locked"](Path(sys.argv[1])):
+    print("locked",flush=True)
+    sys.stdin.read(1)
+`, f.path("user"))
+	in, err := cmd.StdinPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := cmd.StdoutPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		in.Close()
+		if err := cmd.Wait(); err != nil {
+			t.Error(err)
+		}
+	}()
+	line, err := bufio.NewReader(out).ReadString('\n')
+	if err != nil || line != "locked\n" {
+		t.Fatal(line, err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	if _, err = s.Client.GetIdentity(ctx); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatal("did not respect legacy lock", err)
+	}
+	if len(f.rotations) != 0 {
+		t.Fatal("spent refresh token while locked")
+	}
+}
+
+func TestLogoutRetriesPendingAndThenCurrent(t *testing.T) {
+	f := setup(t)
+	if out, err := f.python("seed", "user", "oldest", "previous").CombinedOutput(); err != nil {
+		t.Fatalf("Python credential writer: %v %s", err, out)
+	}
+	state, err := f.read("user")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	f.rejected = "previous"
+	if _, err = f.store.Logout(ctx, f.server.URL, "user"); err == nil {
+		t.Fatal("logout succeeded during pending failure")
+	}
+	saved, err := f.read("user")
+	if err != nil || !reflect.DeepEqual(saved, state) {
+		t.Fatal(err, "lost pending entries")
+	}
+	f.rejected = "old"
+	if _, err = f.store.Logout(ctx, f.server.URL, "user"); err == nil {
+		t.Fatal("logout succeeded during current revocation failure")
+	}
+	saved, err = f.read("user")
+	if err != nil || len(saved.PendingRevocations) > 0 || saved.RefreshToken != "old" {
+		t.Fatal(err, "lost current grant")
+	}
+	f.rejected = ""
+	if _, err = f.store.Logout(ctx, f.server.URL, "user"); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(f.revoked, []string{"oldest", "previous", "oldest", "previous", "old", "old"}) {
+		t.Error(f.revoked)
+	}
+}
+
+func TestSavedAccountIsPerOrigin(t *testing.T) {
+	first := setup(t)
+	first.seed("other")
+	if _, err := first.login("user"); err != nil {
+		t.Fatal(err)
+	}
+	second := setup(t)
+	second.store = first.store
+	second.identity = "second-account"
+	if _, err := second.login("second-account"); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, tc := range []struct{ instance, account, wantOrigin, wantAccount string }{
+		{"", "", second.server.URL, "second-account"},
+		{first.server.URL, "", first.server.URL, "user"},
+		{first.server.URL, "other", first.server.URL, "other"},
+	} {
+		s, err := first.store.Open(context.Background(), tc.instance, tc.account)
+		if err != nil || s.Instance != tc.wantOrigin || s.Account != tc.wantAccount {
+			t.Fatalf("selected wrong connection for %q, %q: %v, %v", tc.instance, tc.account, s, err)
+		}
+	}
+	if _, err := first.store.Open(context.Background(), "", "user"); err == nil {
+		t.Error("borrowed user from another instance")
+	}
+}
+
+func TestInvalidGrantRequestsNewApproval(t *testing.T) {
+	f := setup(t)
+	f.seed("user")
+	f.rotations = []string{"old"}
+	ctx := context.Background()
+	s, err := f.store.Open(ctx, f.server.URL, "user")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = s.Client.GetIdentity(ctx)
+	if err == nil || !strings.Contains(err.Error(), "invalid_grant") || !strings.Contains(err.Error(), "run login") {
+		t.Fatal(err)
+	}
+	if len(f.bearers) != 0 {
+		t.Fatal("sent expired access token")
 	}
 }
