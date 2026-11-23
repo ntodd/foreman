@@ -432,6 +432,9 @@ defmodule ForemanAgent.VM.Link do
 
   def handle_info(_other, state), do: {:noreply, state}
 
+  defp socket_path(resolve) when is_function(resolve, 0), do: resolve.()
+  defp socket_path(path), do: {:ok, path}
+
   # Any step after the socket opens can fail; the socket goes with it.
   defp connect(state) do
     opts = [
@@ -442,7 +445,8 @@ defmodule ForemanAgent.VM.Link do
       send_timeout_close: true
     ]
 
-    with {:ok, socket} <- :gen_tcp.connect({:local, state.path}, 0, opts, @connect_timeout) do
+    with {:ok, path} <- socket_path(state.path),
+         {:ok, socket} <- :gen_tcp.connect({:local, path}, 0, opts, @connect_timeout) do
       case open(socket, state) do
         :ok ->
           {:ok, socket}

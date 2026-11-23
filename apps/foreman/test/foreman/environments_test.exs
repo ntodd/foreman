@@ -352,7 +352,7 @@ defmodule Foreman.EnvironmentsTest do
           })
         )
 
-      assert_receive {:op_log, ^op_id, "sidecar token=[redacted]\n"}
+      assert_receive {:op_log, ^op_id, _, "sidecar token=[redacted]\n"}
 
       :ok =
         Agents.handle_event(

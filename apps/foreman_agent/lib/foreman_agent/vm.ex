@@ -28,19 +28,51 @@ defmodule ForemanAgent.VM do
 
   @doc "Remove VM storage, reporting the path that needs operator attention on failure."
   def remove_tree(path) do
-    with {:ok, _} <- File.rm_rf(path),
-         {:error, :enoent} <- File.lstat(path) do
-      :ok
-    else
-      {:error, reason, file} ->
-        {:error, "couldn't remove #{file}: #{:file.format_error(reason)}"}
-
-      {:error, reason} ->
-        {:error, "couldn't verify removal of #{path}: #{:file.format_error(reason)}"}
-
-      {:ok, _stat} ->
-        {:error, "#{path} still exists after removal"}
+    case System.cmd(file_helper(), ["remove-tree", Path.dirname(path), Path.basename(path)],
+           stderr_to_stdout: true
+         ) do
+      {_, 0} -> :ok
+      {reason, _} -> {:error, "couldn't remove #{path}: #{String.trim(reason)}"}
     end
+  end
+
+  def remove_tree!(path) do
+    case remove_tree(path) do
+      :ok -> :ok
+      {:error, message} -> raise message
+    end
+  end
+
+  def mkdir_private(path) do
+    case System.cmd(file_helper(), ["mkdir-private", path]) do
+      {_, 0} -> :ok
+      _ -> {:error, "couldn't create #{path}"}
+    end
+  end
+
+  @doc "Pin the VM's socket inode in the agent's directory before connecting."
+  def pin_socket(config, env_id, kind) when kind in [:api, :vsock] do
+    source = Map.fetch!(paths(config, env_id), kind)
+    pin = socket_pin(config, env_id, kind)
+    dir = Path.dirname(pin)
+    tmp = Path.join(dir, Base.url_encode64(:crypto.strong_rand_bytes(12)))
+
+    unless File.dir?(dir), do: mkdir_private(dir)
+
+    with {:ok, %{type: :directory}} <- File.lstat(dir),
+         {_, 0} <- System.cmd(file_helper(), ["pin-socket", source, tmp, pin]) do
+      {:ok, pin}
+    else
+      _ -> {:error, :unavailable}
+    end
+  end
+
+  def socket_pin(config, env_id, kind) do
+    Path.join([
+      config.vm_root,
+      ".s",
+      String.replace(env_id, "-", "") <> "." <> Atom.to_string(kind)
+    ])
   end
 
   @doc "The files of an environment's VM."

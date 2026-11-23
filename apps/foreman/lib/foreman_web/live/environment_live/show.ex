@@ -30,6 +30,7 @@ defmodule ForemanWeb.EnvironmentLive.Show do
      |> assign(:page_title, env.slug)
      |> assign(:selected_op, nil)
      |> assign(:log, "")
+     |> assign(:log_cursor, 0)
      |> assign(:destroy_check, nil)
      |> assign(:later, false)
      |> assign(:sync, nil)
@@ -105,8 +106,8 @@ defmodule ForemanWeb.EnvironmentLive.Show do
       Operations.subscribe(op_id)
     end
 
-    op = Operations.get!(op_id)
-    socket |> assign(:selected_op, op_id) |> assign(:log, Operations.log(op))
+    {log, cursor} = Foreman.Operations.LogBuffer.snapshot(op_id)
+    assign(socket, selected_op: op_id, log: trim_log(log), log_cursor: cursor)
   end
 
   # -- events ------------------------------------------------------------------
@@ -331,11 +332,20 @@ defmodule ForemanWeb.EnvironmentLive.Show do
   # -- live updates ----------------------------------------------------------------
 
   @impl true
-  def handle_info({:op_log, op_id, data}, %{assigns: %{selected_op: op_id}} = socket) do
-    {:noreply, update(socket, :log, &trim_log(&1 <> data))}
+  def handle_info(
+        {:op_log, op_id, sequence, data},
+        %{assigns: %{selected_op: op_id, log_cursor: cursor}} = socket
+      )
+      when sequence > cursor do
+    {:noreply,
+     push_event(socket, "operation-log", %{
+       cursor: to_string(cursor),
+       text: trim_log(data),
+       reset: byte_size(data) > 400_000
+     })}
   end
 
-  def handle_info({:op_log, _op_id, _data}, socket), do: {:noreply, socket}
+  def handle_info({:op_log, _, _, _}, socket), do: {:noreply, socket}
 
   def handle_info(
         {:connect_offer, op_id, offer},
@@ -930,7 +940,13 @@ defmodule ForemanWeb.EnvironmentLive.Show do
             </li>
             <li :if={@ops == []} class="px-4 py-6 text-sm text-ink-3">Nothing yet.</li>
           </ul>
-          <pre id="op-log" phx-hook="LogTail" class="log-view h-[28rem] p-4 md:rounded-br-xl">{@log}<span :if={@log == ""} class="text-studio-ink-2">No output yet.</span></pre>
+          <pre
+            id={"op-log-#{@log_cursor}"}
+            data-cursor={@log_cursor}
+            phx-update="ignore"
+            phx-hook="LogTail"
+            class="log-view h-[28rem] p-4 md:rounded-br-xl"
+          >{@log}<span :if={@log == ""} class="text-studio-ink-2">No output yet.</span></pre>
         </div>
       </.panel>
 

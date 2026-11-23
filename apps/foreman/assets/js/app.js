@@ -11,6 +11,29 @@ import topbar from "../vendor/topbar"
 const LogTail = {
   mounted() {
     this.pinned = true
+    const encoder = new TextEncoder()
+    const placeholder = this.el.querySelector("span")
+    let bytes = placeholder ? 0 : encoder.encode(this.el.textContent).length
+    const output = document.createTextNode(placeholder ? "" : this.el.textContent)
+    if (!placeholder) this.el.replaceChildren(output)
+    this.handleEvent("operation-log", ({cursor, text, reset}) => {
+      if (cursor !== this.el.dataset.cursor) return
+      if (!output.parentNode) this.el.replaceChildren(output)
+      if (reset) {
+        bytes = 0
+        output.data = ""
+      }
+      output.appendData(text)
+      bytes += encoder.encode(text).length
+      if (bytes > 400000) {
+        const encoded = encoder.encode(output.data)
+        let start = encoded.length - 300000
+        while ((encoded[start] & 0xc0) === 0x80) start++
+        output.data = new TextDecoder().decode(encoded.subarray(start))
+        bytes = encoded.length - start
+      }
+      this.scroll()
+    })
     this.el.addEventListener("scroll", () => {
       const gap = this.el.scrollHeight - this.el.scrollTop - this.el.clientHeight
       this.pinned = gap < 24

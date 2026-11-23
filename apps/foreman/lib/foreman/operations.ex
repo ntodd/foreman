@@ -6,7 +6,7 @@ defmodule Foreman.Operations do
   """
   import Ecto.Query
 
-  alias Foreman.Operations.{LogBuffer, Operation, Redactions}
+  alias Foreman.Operations.{LogBuffer, LogStore, Operation, Redactions}
   alias Foreman.Repo
 
   @active ~w(queued dispatched running)
@@ -367,13 +367,20 @@ defmodule Foreman.Operations do
 
   @doc "Clears the logs and results of operations that finished before `cutoff`. Returns how many."
   def prune_output(cutoff) do
-    {count, _} =
-      Repo.update_all(
-        from(o in Operation,
-          where: o.finished_at < ^cutoff and (not is_nil(o.log) or not is_nil(o.result))
-        ),
-        set: [log: nil, result: nil]
-      )
+    {:ok, count} =
+      Repo.transact(fn ->
+        expired = from o in Operation, where: o.finished_at < ^cutoff
+        chunk_ids = from c in LogStore, select: c.operation_id
+
+        output =
+          from o in expired,
+            where: not is_nil(o.log) or not is_nil(o.result) or o.id in subquery(chunk_ids)
+
+        {count, _} = Repo.update_all(output, set: [log: nil, result: nil])
+        ids = select(expired, [o], o.id)
+        Repo.delete_all(from c in LogStore, where: c.operation_id in subquery(ids))
+        {:ok, count}
+      end)
 
     count
   end
@@ -381,7 +388,7 @@ defmodule Foreman.Operations do
   def append_log(op_id, data), do: LogBuffer.append(op_id, data)
 
   @doc "The operation's full log, including anything not flushed yet."
-  def log(%Operation{} = op), do: (op.log || "") <> LogBuffer.pending(op.id)
+  def log(%Operation{} = op), do: elem(LogBuffer.snapshot(op.id), 0)
 
   def subscribe(op_id), do: Phoenix.PubSub.subscribe(Foreman.PubSub, "operation:" <> op_id)
 

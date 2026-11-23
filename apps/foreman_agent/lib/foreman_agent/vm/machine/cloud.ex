@@ -157,12 +157,7 @@ defmodule ForemanAgent.VM.Machine.Cloud do
   end
 
   defp vm_state(config, env_id) do
-    case Req.get(
-           url: "http://localhost/api/v1/vm.info",
-           unix_socket: VM.paths(config, env_id).api,
-           retry: false,
-           receive_timeout: 5_000
-         ) do
+    case api_request(config, env_id, :get, "vm.info", receive_timeout: 5_000) do
       {:ok, %Req.Response{status: 200, body: %{"state" => state}}} -> state
       _ -> nil
     end
@@ -224,8 +219,12 @@ defmodule ForemanAgent.VM.Machine.Cloud do
   @impl true
   def release(env_id, config) do
     case Helper.release(config, env_id) do
-      {:ok, _} -> :ok
-      {:error, message} -> {:error, "couldn't release the environment's VM: #{message}"}
+      {:ok, _} ->
+        for kind <- [:api, :vsock], do: File.rm(VM.socket_pin(config, env_id, kind))
+        :ok
+
+      {:error, message} ->
+        {:error, "couldn't release the environment's VM: #{message}"}
     end
   end
 
@@ -262,21 +261,24 @@ defmodule ForemanAgent.VM.Machine.Cloud do
   def unit(env_id), do: "foreman-vm-#{env_id}.service"
 
   defp api(config, env_id, method, endpoint, opts \\ []) do
-    socket = VM.paths(config, env_id).api
-
-    case Req.request(
-           [
-             method: method,
-             url: "http://localhost/api/v1/#{endpoint}",
-             unix_socket: socket,
-             retry: false,
-             receive_timeout: 10_000
-           ]
-           |> Keyword.merge(opts)
-         ) do
+    case api_request(config, env_id, method, endpoint, opts) do
       {:ok, %Req.Response{status: status}} when status in 200..299 -> :ok
       {:ok, %Req.Response{status: status, body: body}} -> {:error, {status, body}}
       {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp api_request(config, env_id, method, endpoint, opts) do
+    with {:ok, socket} <- VM.pin_socket(config, env_id, :api) do
+      defaults = [
+        method: method,
+        url: "http://localhost/api/v1/#{endpoint}",
+        unix_socket: socket,
+        retry: false,
+        receive_timeout: 10_000
+      ]
+
+      Req.request(Keyword.merge(defaults, opts))
     end
   end
 end

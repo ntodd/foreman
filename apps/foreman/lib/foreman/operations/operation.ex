@@ -18,7 +18,7 @@ defmodule Foreman.Operations.Operation do
     field :status, :string, default: "queued"
     field :error, :string
     field :result, :map
-    field :log, :string
+    field :log, :string, load_in_query: false
     field :log_truncated, :boolean, default: false
     field :dispatched_at, :utc_datetime_usec
     field :started_at, :utc_datetime_usec
