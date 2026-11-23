@@ -7,6 +7,8 @@ defmodule Foreman.CLIInstallTest do
 
   @moduletag :tmp_dir
   @moduletag timeout: 180_000
+  @release_feed "https://api.github.com/repos/ntodd/foreman/releases"
+  @downloads "https://github.com/ntodd/foreman/releases/download"
   setup :listener
 
   test "a member installs from Connected apps, updates from the shell and reuses the login",
@@ -28,8 +30,7 @@ defmodule Foreman.CLIInstallTest do
     ["curl", flags, url, "|", shell] = String.split(copy.("cli-install"))
     ["foreman" | login_args] = String.split(copy.("cli-login"))
 
-    # The release executable and the installer always use official origins in production.
-    # Redirect just those two release URLs into a static loopback fixture for this rehearsal.
+    # Both the control plane and the CLI query the same local release feed.
     dir = Path.join(ctx.tmp_dir, "releases")
     File.mkdir!(dir)
     plug = {Plug.Static, at: "/", from: dir}
@@ -43,10 +44,31 @@ defmodule Foreman.CLIInstallTest do
 
     {:ok, {_, port}} = ThousandIsland.listener_info(pid)
     feed = "http://127.0.0.1:#{port}"
+    feed_url = feed <> "/feed.json"
+    previous = Application.fetch_env(:foreman, :cli_release_req_options)
+    Application.put_env(:foreman, :cli_release_req_options, url: feed_url)
+    Foreman.CLIReleases.reset_cache()
+
+    on_exit(fn ->
+      case previous do
+        {:ok, opts} -> Application.put_env(:foreman, :cli_release_req_options, opts)
+        :error -> Application.delete_env(:foreman, :cli_release_req_options)
+      end
+
+      Foreman.CLIReleases.reset_cache()
+    end)
+
     root = Path.expand("../..", __DIR__)
     source = Path.join(root, "cli/internal/selfupdate/update.go")
     local = Path.join(ctx.tmp_dir, "update.go")
-    File.write!(local, fixture_urls(File.read!(source), feed))
+
+    release_client =
+      source
+      |> File.read!()
+      |> fixture_url(@release_feed, feed_url)
+      |> fixture_url(@downloads, feed <> "/assets")
+
+    File.write!(local, release_client)
     overlay = Path.join(ctx.tmp_dir, "overlay.json")
     File.write!(overlay, Jason.encode!(%{Replace: %{source => local}}))
     fixture = %{root: root, dir: dir, overlay: overlay}
@@ -54,9 +76,16 @@ defmodule Foreman.CLIInstallTest do
 
     {installer, 0} = System.cmd("curl", [flags, url])
     script = Path.join(ctx.tmp_dir, "install.sh")
-    File.write!(script, fixture_urls(installer, feed))
+    assert installer =~ ctx.origin <> "/cli/release"
+    File.write!(script, fixture_url(installer, @downloads, feed <> "/assets"))
 
-    %{ctx | cli: System.find_executable(shell)} |> launch([script]) |> finish() |> success()
+    output =
+      %{ctx | cli: System.find_executable("env")}
+      |> launch(["PATH=" <> fresh_path(ctx.tmp_dir), shell, script])
+      |> finish()
+      |> success()
+
+    assert output =~ ~S(export PATH="$HOME/.local/bin:$PATH")
     binary = Path.join(ctx.tmp_dir, ".local/bin/foreman")
     installed = %{ctx | cli: binary}
     assert version(installed) == "foreman v1.2.3"
@@ -98,14 +127,23 @@ defmodule Foreman.CLIInstallTest do
     String.trim(err)
   end
 
-  defp fixture_urls(source, origin) do
-    feed = "https://api.github.com/repos/ntodd/foreman/releases"
-    downloads = "https://github.com/ntodd/foreman/releases/download"
-    assert source =~ feed and source =~ downloads
+  defp fixture_url(source, official, local) do
+    assert source =~ official
+    String.replace(source, official, local)
+  end
 
-    source
-    |> String.replace(feed, origin <> "/feed")
-    |> String.replace(downloads, origin <> "/assets")
+  # Only the installation shell has this PATH. The test runner still needs Go
+  # to publish fixtures and Python to provide a terminal for notice checks.
+  defp fresh_path(tmp_dir) do
+    path = Path.join(tmp_dir, "system-bin")
+    File.mkdir!(path)
+    hash = if System.find_executable("sha256sum"), do: "sha256sum", else: "shasum"
+
+    for name <- [hash | ~w(awk cat chmod curl grep gzip ln mkdir mktemp mv rm sh tar uname)] do
+      File.ln_s!(System.find_executable(name), Path.join(path, name))
+    end
+
+    path
   end
 
   defp publish(f, tag) do
@@ -143,7 +181,7 @@ defmodule Foreman.CLIInstallTest do
       assets: assets
     }
 
-    File.write!(Path.join(f.dir, "feed"), Jason.encode!([row]))
+    File.write!(Path.join(f.dir, "feed.json"), Jason.encode!([row]))
     archive
   end
 end
