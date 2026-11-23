@@ -138,6 +138,23 @@ defmodule Foreman.WorkloadGrantsTest do
     assert {:ok, _, _} = Commands.build(operation(env, grant, "stop"), env)
   end
 
+  test "a running service workspace renews its archived primary without archived secondaries",
+       ctx do
+    {grant, _, env} = service(ctx)
+    github()
+    save(ctx.repo, archived: true)
+    save(ctx.extra, archived: true)
+
+    expect(ClientMock, :repo_read_token, fn _, installation, repos ->
+      assert installation == ctx.repo.owner.installation_id
+      assert repos == {:ids, [ctx.repo.github_id]}
+      {:ok, "archived-primary-read"}
+    end)
+
+    assert {:ok, cmd, _} = Commands.build(operation(env, grant, "secrets_write"), env)
+    assert cmd.payload.files["github-token"] == "archived-primary-read"
+  end
+
   test "a deferred first boot uses the start grant and rechecks launch eligibility", ctx do
     {original, env} = personal(ctx, ctx.admin)
     env = save(env, created_once: false, initial_create_deferred: true)
