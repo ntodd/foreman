@@ -88,15 +88,18 @@ defmodule Foreman.OperationsTimeoutTest do
     assert Agents.LifecycleState.confirmed?(ctx.env, "stopped")
   end
 
-  test "a late success clears the timeout", ctx do
+  test "a late success corrects the workspace and keeps the public timeout", ctx do
     op = start(ctx)
     {:ok, op} = Operations.timed_out(op, "no result after 3 hours")
     Environments.apply_result(op)
 
     :ok = report(ctx.box, op.id, %{status: "ok"})
-    op = Operations.get!(op.id)
-    assert op.status == "succeeded"
-    refute op.args["timed_out"]
+    corrected = Operations.get!(op.id)
+    assert corrected.status == "succeeded"
+    assert corrected.finished_at == op.finished_at
+    assert corrected.timeout_error == "no result after 3 hours"
+    refute corrected.args["timed_out"]
+    assert Repo.reload!(ctx.env).observed_state == "running"
   end
 
   # Housekeeping cancels what it gives up on. That cancel coming back isn't
@@ -116,6 +119,64 @@ defmodule Foreman.OperationsTimeoutTest do
     :ok = report(ctx.box, op.id, %{status: "error", error: "cancelled"})
     assert %{status: "failed", error: "no result after 3 hours"} = Operations.get!(op.id)
     assert Repo.reload!(env).desired_state == "stopped"
+  end
+
+  test "settling a reopened start timeout does not repeat its effect after a newer stop", ctx do
+    op = start(ctx)
+
+    assert {:ok, failed, _} =
+             Operations.timed_out(op, "original timeout", &Environments.record_result/1)
+
+    # An older acceptance handler reopened the row before timeout_error existed.
+    reopened = Repo.update!(Ecto.Changeset.change(failed, status: "running", timeout_error: nil))
+
+    stop =
+      Operations.create!(%{
+        box_id: op.box_id,
+        environment_id: op.environment_id,
+        action: "stop",
+        command: "env.stop",
+        status: "dispatched",
+        dispatched_at: DateTime.utc_now()
+      })
+
+    :ok = report(ctx.box, stop.id, %{status: "ok"})
+    stopped = Repo.reload!(ctx.env)
+    assert stopped.observed_state == "stopped"
+
+    result = Operations.timed_out(reopened, "late timeout", &Environments.record_result/1)
+    assert Repo.reload!(ctx.env) == stopped
+    assert result == :finished
+    settled = Operations.get!(op.id)
+    assert settled.status == "failed"
+    assert settled.finished_at == failed.finished_at
+    assert settled.error == "original timeout"
+    assert settled.timeout_error == "original timeout"
+  end
+
+  test "a late result for a previously reopened timeout cannot override a newer stop", ctx do
+    op = start(ctx)
+    assert {:ok, failed} = Operations.timed_out(op, "original timeout")
+    Repo.update!(Ecto.Changeset.change(failed, status: "running", timeout_error: nil))
+
+    stop =
+      Operations.create!(%{
+        box_id: op.box_id,
+        environment_id: op.environment_id,
+        action: "stop",
+        command: "env.stop",
+        status: "dispatched",
+        dispatched_at: DateTime.utc_now()
+      })
+
+    :ok = report(ctx.box, stop.id, %{status: "ok"})
+    :ok = report(ctx.box, op.id, %{status: "error", error: "cancelled"})
+    :ok = report(ctx.box, op.id, %{status: "ok"})
+    settled = Operations.get!(op.id)
+    assert settled.status == "succeeded"
+    assert settled.timeout_error == "original timeout"
+    assert settled.finished_at == failed.finished_at
+    assert Repo.reload!(ctx.env).observed_state == "stopped"
   end
 
   test "giving up waits if the clock was restarted since the operation was read", ctx do

@@ -5,7 +5,7 @@ defmodule Foreman.OAuth.ServiceAccounts do
   alias Foreman.{Accounts, Audit, OAuth, Repo, Scope}
   alias Foreman.Accounts.User
   alias Foreman.Boxes.Box
-  alias Foreman.OAuth.{Client, Grant, Principal, Scopes, Store, Token}
+  alias Foreman.OAuth.{Client, Grant, GrantRepository, Principal, Scopes, Store, Token}
   alias Foreman.PublicAPI.{Access, RepositoryAccess}
   alias Foreman.Repos.Repo, as: Repository
   alias Foreman.Secrets.Secret
@@ -34,6 +34,13 @@ defmodule Foreman.OAuth.ServiceAccounts do
   end
 
   def repo_ids(_), do: []
+
+  def repo_ids(%Principal{kind: :service_account} = principal, primary_repo_id)
+      when is_binary(primary_repo_id) do
+    Repo.all(from r in Access.service_workload_repos(principal, primary_repo_id), select: r.id)
+  end
+
+  def repo_ids(_, _), do: []
   def box_ids(principal), do: grant_field(principal, :box_ids) || []
   def secret_ids(principal), do: grant_field(principal, :secret_ids) || []
   def network_policy(principal), do: grant_field(principal, :network_policy)
@@ -51,46 +58,55 @@ defmodule Foreman.OAuth.ServiceAccounts do
 
   defp grant_field(_, _), do: nil
 
-  def clients(%Scope{} = scope) do
-    if Scope.admin?(scope), do: Repo.all(from c in Client, order_by: c.name), else: []
+  def inventory(scope) do
+    admin_transaction(scope, fn _actor ->
+      {:ok, %{clients: clients(), installations: installations(), choices: choices()}}
+    end)
   end
 
-  def installations(%Scope{} = scope) do
-    if Scope.admin?(scope) do
-      Repo.all(
-        from g in Grant,
-          join: c in assoc(g, :client),
-          where: c.kind == "service",
-          preload: [client: c, user: []],
-          order_by: c.name
-      )
-    else
-      []
+  def clients(%Scope{} = scope), do: admin_read(scope, &clients/0, [])
+  def installations(%Scope{} = scope), do: admin_read(scope, &installations/0, [])
+  def choices(%Scope{} = scope), do: admin_read(scope, &choices/0, nil)
+
+  defp admin_read(scope, query, fallback) do
+    case admin_transaction(scope, fn _actor -> {:ok, query.()} end) do
+      {:ok, result} -> result
+      {:error, :unauthorized} -> fallback
     end
   end
 
-  def choices(%Scope{} = scope) do
-    if Scope.admin?(scope) do
-      %{
-        repos:
-          Repo.all(
-            from r in grantable_repos(),
-              order_by: r.full_name,
-              select: {r.id, r.full_name}
-          ),
-        boxes:
-          Repo.all(
-            from b in Box, where: is_nil(b.revoked_at), order_by: b.name, select: {b.id, b.name}
-          ),
-        secrets:
-          Repo.all(
-            from s in Secret,
-              where: s.scope in ["owner", "repo"],
-              order_by: s.name,
-              select: {s.id, s.name, s.scope_key}
-          )
-      }
-    end
+  defp clients, do: Repo.all(from c in Client, order_by: c.name)
+
+  defp installations do
+    Repo.all(
+      from g in Grant,
+        join: c in assoc(g, :client),
+        where: c.kind == "service",
+        preload: [client: c, user: []],
+        order_by: c.name
+    )
+  end
+
+  defp choices do
+    %{
+      repos:
+        Repo.all(
+          from r in grantable_repos(),
+            order_by: r.full_name,
+            select: {r.id, r.full_name}
+        ),
+      boxes:
+        Repo.all(
+          from b in Box, where: is_nil(b.revoked_at), order_by: b.name, select: {b.id, b.name}
+        ),
+      secrets:
+        Repo.all(
+          from s in Secret,
+            where: s.scope in ["owner", "repo"],
+            order_by: s.name,
+            select: {s.id, s.name, s.scope_key}
+        )
+    }
   end
 
   def register(scope, kind, attrs) when kind in ["service", "public"] do
@@ -115,7 +131,7 @@ defmodule Foreman.OAuth.ServiceAccounts do
 
   defp register_client(scope, "service", name, attrs) do
     with {:ok, scopes} <- Store.validate_scopes(attrs["scopes"], Scopes.all()),
-         {:ok, ids} <- resources(attrs),
+         {:ok, ids, repositories} <- resources(attrs),
          {:ok, tags} <- tags(attrs["tailscale_tags"] || []) do
       id = Ecto.UUID.generate()
 
@@ -147,6 +163,8 @@ defmodule Foreman.OAuth.ServiceAccounts do
           )
         )
 
+      Repo.insert_all(GrantRepository, Enum.map(repositories, &Map.put(&1, :grant_id, grant.id)))
+
       Audit.log(scope, "oauth.installation.create", grant, %{
         "client_id" => client.id,
         "user_id" => user.id
@@ -158,11 +176,19 @@ defmodule Foreman.OAuth.ServiceAccounts do
 
   defp resources(attrs) do
     with {:ok, repos} <-
-           selected(attrs["repo_ids"], grantable_repos()),
-         {:ok, boxes} <- selected(attrs["box_ids"], from(b in Box, where: is_nil(b.revoked_at))),
+           selected(
+             attrs["repo_ids"],
+             from(r in grantable_repos(), select: %{repo_id: r.id, github_id: r.github_id})
+           ),
+         {:ok, boxes} <-
+           selected(attrs["box_ids"], from(b in Box, where: is_nil(b.revoked_at), select: b.id)),
          {:ok, secrets} <-
-           selected(attrs["secret_ids"], from(s in Secret, where: s.scope in ["owner", "repo"])) do
-      {:ok, %{repo_ids: repos, box_ids: boxes, secret_ids: secrets}}
+           selected(
+             attrs["secret_ids"],
+             from(s in Secret, where: s.scope in ["owner", "repo"], select: s.id)
+           ) do
+      {:ok, %{repo_ids: Enum.map(repos, & &1.repo_id), box_ids: boxes, secret_ids: secrets},
+       repos}
     end
   end
 
@@ -174,9 +200,9 @@ defmodule Foreman.OAuth.ServiceAccounts do
 
   defp selected(ids, query) when is_list(ids) do
     if Enum.all?(ids, &match?({:ok, _}, Ecto.UUID.cast(&1))) do
-      available = Repo.all(from r in query, where: r.id in ^ids, select: r.id)
+      available = Repo.all(from r in query, where: r.id in ^ids)
 
-      if MapSet.new(ids) == MapSet.new(available),
+      if MapSet.size(MapSet.new(ids)) == length(available),
         do: {:ok, available},
         else: {:error, :invalid_resource}
     else

@@ -87,10 +87,12 @@ defmodule Foreman.Operations do
   def restart_clock([]), do: :ok
 
   def restart_clock(ids) do
-    Repo.update_all(
-      from(o in Operation, where: o.id in ^ids and o.status in ["dispatched", "running"]),
-      set: [dispatched_at: DateTime.utc_now()]
-    )
+    missing = from o in Operation, where: o.id in ^ids and o.status in ["dispatched", "running"]
+    # An agent that lost this replace-all write no longer owns it. Returning it
+    # to the queue lets a shutdown supersede it even during a provider outage.
+    writes = where(missing, [o], o.action == "secrets_write" and is_nil(o.cancel_requested_at))
+    Repo.update_all(writes, set: [status: "queued", dispatched_at: nil, started_at: nil])
+    Repo.update_all(missing, set: [dispatched_at: DateTime.utc_now()])
 
     :ok
   end
@@ -127,9 +129,16 @@ defmodule Foreman.Operations do
   end
 
   def mark_running(op_id) do
-    case get(op_id) do
-      %Operation{status: "dispatched"} = op -> mark(op, "running", started_at: DateTime.utc_now())
-      other -> other
+    now = DateTime.utc_now()
+
+    query =
+      from o in Operation,
+        where: o.id == ^op_id and o.status == "dispatched" and is_nil(o.finished_at),
+        select: o
+
+    case Repo.update_all(query, set: [status: "running", started_at: now, updated_at: now]) do
+      {1, [op]} -> tap(op, &broadcast/1)
+      {0, _} -> get(op_id)
     end
   end
 
@@ -187,7 +196,7 @@ defmodule Foreman.Operations do
         else
           changes = outcome(op, status, result, error)
           updated = op |> Ecto.Changeset.change(changes) |> Repo.update!()
-          applied = unless superseded_timeout?(op), do: apply.(updated)
+          applied = unless superseded_result?(op, updated.status), do: apply.(updated)
           {:ok, {updated, applied}}
         end
       end)
@@ -205,15 +214,15 @@ defmodule Foreman.Operations do
   end
 
   defp already_finished?(op, error) do
-    Operation.finished?(op) and (not timed_out?(op) or error == "cancelled")
+    if awaiting_result?(op), do: error == "cancelled", else: Operation.finished?(op)
   end
 
   # The late result corrects its own history. Once a later lifecycle command
   # was dispatched, it owns the environment state. Also serialize competing
   # results on the environment row so neither can race the visibility check.
-  defp superseded_timeout?(%Operation{environment_id: nil}), do: false
+  defp superseded_result?(%Operation{environment_id: nil}, _status), do: false
 
-  defp superseded_timeout?(op) do
+  defp superseded_result?(op, status) do
     query =
       from e in Foreman.Environments.Environment,
         where: e.id == ^op.environment_id,
@@ -221,7 +230,11 @@ defmodule Foreman.Operations do
 
     destroyed_at = Repo.one!(if Repo.sqlite?(), do: query, else: lock(query, "FOR UPDATE"))
 
-    timed_out?(op) and
+    # A successful expiry attempt confirms the same cleanup as its retry.
+    # A different lifecycle command still supersedes that old result.
+    expiry_success? = op.trigger == "expiry" and status == "succeeded"
+
+    awaiting_result?(op) and
       (not is_nil(destroyed_at) or
          Repo.exists?(
            from newer in Operation,
@@ -229,7 +242,9 @@ defmodule Foreman.Operations do
                newer.environment_id == ^op.environment_id and newer.id != ^op.id and
                  newer.dispatched_at >= ^op.finished_at,
              where:
-               newer.action in ~w(create rebuild pull_rebuild start stop restart_all restart_affected suspend destroy)
+               newer.action in ~w(create rebuild pull_rebuild start stop restart_all restart_affected suspend destroy),
+             where:
+               not (^expiry_success? and newer.trigger == "expiry" and newer.action == ^op.action)
          ))
   end
 
@@ -258,14 +273,45 @@ defmodule Foreman.Operations do
 
   defp result_size(result), do: result |> JSON.encode_to_iodata!() |> IO.iodata_length()
 
+  defp awaiting_result?(%Operation{status: "failed", args: %{"awaiting_result" => true}}),
+    do: true
+
+  defp awaiting_result?(op), do: timed_out?(op)
+
+  @workload_denied "Workload authorization is no longer valid."
+  def workload_denial_message, do: @workload_denied
+
+  def deny_workload(op, phase) do
+    statuses = if phase == :queued, do: ["queued"], else: ["dispatched", "running"]
+    query = from o in Operation, where: o.id == ^op.id and o.status in ^statuses
+    args = op.args || %{}
+    args = if phase == :reconnect, do: Map.put(args, "awaiting_result", true), else: args
+
+    case transition(op, query,
+           status: "failed",
+           workload_denied: true,
+           error: @workload_denied,
+           args: args,
+           finished_at: DateTime.utc_now()
+         ) do
+      {:ok, failed} ->
+        Redactions.delete(op.id)
+        Foreman.Activity.operation_finished(failed)
+        {:ok, failed}
+
+      :error ->
+        :error
+    end
+  end
+
   @doc "Whether Housekeeping failed the operation for taking too long (see `timed_out/2`)."
-  def timed_out?(%Operation{status: "failed", args: %{"timed_out" => true}}), do: true
+  def timed_out?(%Operation{finished_at: %DateTime{}, args: %{"timed_out" => true}}), do: true
   def timed_out?(%Operation{}), do: false
 
   @doc """
   Fails an operation that never reported back. A late result still
-  replaces this. `:finished` if a result landed since `op` was read: the
-  check and the update are one statement, so this never overwrites it.
+  reconciles the physical outcome. Returns `:finished` if a timeout or
+  result was already recorded, even if an older release reopened the row.
   """
   def timed_out(%Operation{} = op, error) do
     case timed_out(op, error, fn _op -> nil end) do
@@ -281,12 +327,10 @@ defmodule Foreman.Operations do
   `:finished`.
 
   `dispatched_before:` only fails it if it was still dispatched before
-  then, checked in the same statement: Housekeeping works from a list read
-  earlier, and a reconnect may have restarted the clock since.
+  then. The transaction locks the current row before applying the timeout
+  because a reconnect may have restarted the clock since Housekeeping read it.
   """
-  def timed_out(%Operation{id: id} = op, error, apply, opts \\ []) do
-    now = DateTime.utc_now()
-
+  def timed_out(%Operation{id: id}, error, apply, opts \\ []) do
     query =
       from(o in Operation, where: o.id == ^id and o.status in ["queued", "dispatched", "running"])
 
@@ -298,24 +342,9 @@ defmodule Foreman.Operations do
 
     {:ok, outcome} =
       Repo.transact(fn ->
-        {count, _} =
-          query
-          |> Repo.update_all(
-            set: [
-              status: "failed",
-              error: error,
-              timeout_error: error,
-              args: Map.put(op.args || %{}, "timed_out", true),
-              finished_at: now,
-              updated_at: now
-            ]
-          )
-
-        if count == 1 do
-          op = get!(id)
-          {:ok, {op, apply.(op)}}
-        else
-          {:ok, :finished}
+        case Repo.one_for_update(query) do
+          nil -> {:ok, :finished}
+          op -> {:ok, record_timeout(op, error, apply)}
         end
       end)
 
@@ -328,6 +357,32 @@ defmodule Foreman.Operations do
 
       :finished ->
         :finished
+    end
+  end
+
+  defp record_timeout(op, error, apply) do
+    if timed_out?(op) do
+      # An older release could reopen a finished row after its timeout had taken effect.
+      original = op.timeout_error || op.error
+
+      op
+      |> Ecto.Changeset.change(status: "failed", error: original, timeout_error: original)
+      |> Repo.update!()
+
+      :finished
+    else
+      failed =
+        op
+        |> Ecto.Changeset.change(
+          status: "failed",
+          error: error,
+          timeout_error: op.timeout_error || error,
+          args: Map.put(op.args || %{}, "timed_out", true),
+          finished_at: op.finished_at || DateTime.utc_now()
+        )
+        |> Repo.update!()
+
+      {failed, apply.(failed)}
     end
   end
 
@@ -352,7 +407,9 @@ defmodule Foreman.Operations do
       status: finished_status(status, error),
       result: result,
       error: error,
-      args: Map.delete(op.args || %{}, "timed_out"),
+      # A pre-upgrade timeout may have stored its first error only in the physical result.
+      timeout_error: op.timeout_error || if(timed_out?(op), do: op.error),
+      args: Map.drop(op.args || %{}, ["timed_out", "awaiting_result"]),
       # A late result reconciles the workspace. The public timeout already started retention.
       finished_at: op.finished_at || DateTime.utc_now()
     ]
@@ -374,6 +431,10 @@ defmodule Foreman.Operations do
       {:ok, op} -> {:ok, op}
       :error -> {:error, :not_queued}
     end
+  end
+
+  def cancel_unsent_write(%Operation{action: "secrets_write"} = op) do
+    transition(op, "dispatched", status: "cancelled", finished_at: DateTime.utc_now())
   end
 
   @doc "Fails a queued operation that couldn't be sent. `:error` if it isn't queued any more."

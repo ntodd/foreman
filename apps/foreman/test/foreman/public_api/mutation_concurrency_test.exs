@@ -9,6 +9,7 @@ defmodule Foreman.PublicAPI.MutationConcurrencyTest do
 
   alias Foreman.{
     Environments.Environment,
+    Operations,
     Operations.Operation,
     PublicAPI.Mutations,
     PublicAPI.Receipt,
@@ -38,6 +39,67 @@ defmodule Foreman.PublicAPI.MutationConcurrencyTest do
       end)
 
       %{actor: actor, repo: repo, box: box}
+    end)
+  end
+
+  test "concurrent agent acceptance cannot reopen a timeout or reset its retention deadline",
+       ctx do
+    parent = self()
+    handler = make_ref()
+
+    # Stop after the acceptance's first statement on the operation. A separate
+    # read followed by an unconditional write would overwrite the committed timeout.
+    :ok =
+      :telemetry.attach(
+        handler,
+        [:foreman, :repo, :query],
+        fn _, _, meta, owner ->
+          if meta.source == "operations" and Process.delete(:pause_acceptance) do
+            send(owner, {:accepting, self()})
+
+            receive do
+              :continue -> :ok
+            after
+              5_000 -> raise "timeout writer did not release the accepting connection"
+            end
+          end
+        end,
+        parent
+      )
+
+    on_exit(fn -> :telemetry.detach(handler) end)
+
+    Sandbox.unboxed_run(Repo, fn ->
+      env = environment_fixture(user: ctx.actor.user, box: ctx.box, repo: ctx.repo)
+
+      op =
+        Operations.create!(%{
+          environment_id: env.id,
+          box_id: ctx.box.id,
+          action: "start",
+          command: "env.start",
+          status: "dispatched",
+          dispatched_at: DateTime.utc_now()
+        })
+
+      acceptance =
+        Task.async(fn ->
+          Sandbox.unboxed_run(Repo, fn ->
+            Process.put(:pause_acceptance, true)
+            Operations.mark_running(op.id)
+          end)
+        end)
+
+      assert_receive {:accepting, pid}, 5_000
+      assert {:ok, failed} = Operations.timed_out(op, "timeout")
+      send(pid, :continue)
+      Task.await(acceptance)
+
+      refute Operations.active?(env.id)
+      assert :finished = Operations.timed_out(op, "second timeout")
+      assert {:ok, reconciled} = Operations.finish(op.id, "ok", %{}, nil)
+      assert reconciled.finished_at == failed.finished_at
+      assert reconciled.timeout_error == failed.timeout_error
     end)
   end
 
@@ -110,6 +172,55 @@ defmodule Foreman.PublicAPI.MutationConcurrencyTest do
 
       assert Repo.aggregate(from(o in Operation, where: o.environment_id == ^env), :count) == 1
       assert Repo.aggregate(from(r in Receipt, where: r.environment_id == ^env), :count) == 1
+    end)
+  end
+
+  test "a concurrent create replay survives its repo leaving the launch catalog", ctx do
+    handler = make_ref()
+
+    :ok =
+      :telemetry.attach(
+        handler,
+        [:foreman, :repo, :query],
+        fn _, _, meta, parent ->
+          if meta.source == "api_mutation_receipts" and String.starts_with?(meta.query, "SELECT") and
+               Process.delete(:pause_after_receipt_read) do
+            send(parent, {:receipt_read, self()})
+
+            receive do
+              :continue -> :ok
+            after
+              5000 -> raise "concurrent create did not finish"
+            end
+          end
+        end,
+        self()
+      )
+
+    on_exit(fn -> :telemetry.detach(handler) end)
+
+    input = %{"repo_id" => ctx.repo.id}
+
+    retry =
+      Task.async(fn ->
+        Sandbox.unboxed_run(Repo, fn ->
+          Process.put(:pause_after_receipt_read, true)
+          Mutations.create(ctx.actor, "same", input)
+        end)
+      end)
+
+    assert_receive {:receipt_read, pid}, 5000
+
+    Sandbox.unboxed_run(Repo, fn ->
+      assert {:ok, env, op} = Mutations.create(ctx.actor, "same", input)
+      Repo.update!(Ecto.Changeset.change(ctx.repo, archived: true))
+      send(pid, :continue)
+      assert {:ok, ^env, ^op} = Task.await(retry)
+      assert {:error, :resource_not_found, _} = Mutations.create(ctx.actor, "new-key", input)
+      refute Repo.get(Receipt, Receipt.key_hash(ctx.actor, "environments", "new-key"))
+
+      Repo.update!(Ecto.Changeset.change(ctx.repo, private: true))
+      assert {:error, :resource_not_found, _} = Mutations.create(ctx.actor, "same", input)
     end)
   end
 

@@ -38,13 +38,29 @@ defmodule Foreman.PublicAPI.Access do
   end
 
   def repos(principal, id \\ :all) do
-    query = from r in GitRepo, where: not r.archived and is_nil(r.removed_at)
-    query = by_id(query, id)
-    authorized_repos(query, principal)
+    # Personal verification can observe an archive or unarchive for manual
+    # repos outside an installation. Apply the launch filter after it runs.
+    from(r in GitRepo, where: is_nil(r.removed_at) and (not r.archived or r.manual))
+    |> by_id(id)
+    |> authorized_repos(principal)
+    |> where([r], not r.archived)
   rescue
     # A selector alone does not establish that a private repo exists.
     error in Unavailable ->
       if id == :all, do: reraise(error, __STACKTRACE__), else: where(GitRepo, false)
+  end
+
+  @doc "Approved clone repositories, including an archived primary on an existing accessible workspace."
+  def service_workload_repos(%{kind: :service_account} = principal, primary_id) do
+    existing =
+      from e in environments(principal),
+        where: e.repo_id == ^primary_id and e.created_once and is_nil(e.destroyed_at),
+        select: e.repo_id
+
+    from(r in GitRepo,
+      where: is_nil(r.removed_at) and (not r.archived or r.id in subquery(existing))
+    )
+    |> authorized_repos(principal)
   end
 
   def environments(principal, id \\ :all),
@@ -68,13 +84,13 @@ defmodule Foreman.PublicAPI.Access do
   end
 
   defp authorized_repos(query, %{kind: :service_account} = principal) do
-    query
-    |> RepositoryAccess.grantable()
-    |> service_resources(principal, :repo_ids)
-    |> where(
-      [r, ..., grant],
-      is_nil(r.github_identity_bound_at) or grant.inserted_at > r.github_identity_bound_at
-    )
+    resources = service_resources(RepositoryAccess.grantable(query), principal, :repo_ids)
+
+    from [r, ..., grant] in resources,
+      join: approved in Foreman.OAuth.GrantRepository,
+      on: approved.grant_id == grant.id and approved.repo_id == r.id,
+      where:
+        approved.github_id == r.github_id or (is_nil(approved.github_id) and is_nil(r.github_id))
   end
 
   defp authorized_repos(query, %{kind: :user, user: user} = principal) do
@@ -83,8 +99,7 @@ defmodule Foreman.PublicAPI.Access do
 
     cond do
       GitHub.configured?() ->
-        ids = RepositoryAccess.visible_ids(query, user)
-        where(query, [r], r.id in ^ids)
+        RepositoryAccess.verified_query(query, user)
 
       RepositoryAccess.local_git?() ->
         where(query, [r], not r.private)
@@ -99,7 +114,8 @@ defmodule Foreman.PublicAPI.Access do
 
     from e in Environment,
       join: r in assoc(e, :repo),
-      where: is_nil(r.github_identity_bound_at) or r.github_identity_bound_at <= e.inserted_at,
+      where:
+        e.repo_github_id == r.github_id or (is_nil(e.repo_github_id) and is_nil(r.github_id)),
       where: e.user_id == ^principal.user.id and e.box_id in subquery(box_ids)
   end
 

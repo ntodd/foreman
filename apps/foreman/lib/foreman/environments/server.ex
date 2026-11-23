@@ -159,6 +159,12 @@ defmodule Foreman.Environments.Server do
     dispatch_next(env.id)
   end
 
+  defp dispatch(%{action: "secrets_write"} = op, %{desired_state: state} = env)
+       when state in ["stopped", "destroyed"] do
+    Operations.cancel_queued(op)
+    dispatch_next(env.id)
+  end
+
   # Builds the command fresh (current secrets and token), takes the
   # operation off the queue and records the transitional state, then
   # sends. The state goes first so a fast result can't be overwritten by
@@ -173,7 +179,7 @@ defmodule Foreman.Environments.Server do
 
       {:error, :unauthorized} ->
         with {:ok, failed} <-
-               Operations.fail_queued(op, "Workload authorization is no longer valid."),
+               Operations.deny_workload(op, :queued),
              do: Environments.dispatch_denied(failed, env)
 
         :denied
@@ -211,9 +217,14 @@ defmodule Foreman.Environments.Server do
       :ok ->
         :ok
 
+      :superseded ->
+        Operations.cancel_unsent_write(op)
+        dispatch_next(env.id)
+        :ok
+
       {:error, :unauthorized} ->
         if state, do: Environments.update_env!(updated, %{observed_state: env.observed_state})
-        deny_sent(op, env)
+        deny_sent(op, env, :claimed)
         {:error, :unauthorized}
 
       :retry ->
@@ -246,9 +257,8 @@ defmodule Foreman.Environments.Server do
 
   defp remember_enrollment(_payload, _env), do: :ok
 
-  defp deny_sent(op, env) do
-    with {:ok, failed, _} <-
-           Operations.timed_out(op, "Workload authorization is no longer valid.", fn _ -> nil end),
+  defp deny_sent(op, env, phase) do
+    with {:ok, failed} <- Operations.deny_workload(op, phase),
          do: Environments.dispatch_denied(failed, env)
   end
 
@@ -279,7 +289,7 @@ defmodule Foreman.Environments.Server do
 
         case deliver(op, env, cmd, policy) do
           :retry -> retry(op)
-          {:error, :unauthorized} -> deny_sent(op, env)
+          {:error, :unauthorized} -> deny_sent(op, env, :reconnect)
           other -> other
         end
 
@@ -287,7 +297,7 @@ defmodule Foreman.Environments.Server do
         retry(op)
 
       {:error, :unauthorized} ->
-        deny_sent(op, env)
+        deny_sent(op, env, :reconnect)
 
       {:error, message} ->
         Logger.warning("couldn't resend #{op.action} for #{env.slug}: #{message}")

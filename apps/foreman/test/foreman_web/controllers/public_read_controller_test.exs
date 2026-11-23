@@ -33,6 +33,33 @@ defmodule ForemanWeb.PublicReadControllerTest do
     json_response(apply(PublicReadController, action, [conn, params]), status)
   end
 
+  test "denial during reconnect remains an authorization failure on public reads", ctx do
+    {_actor, grant} =
+      Foreman.PublicAPIMutationFixtures.principal(ctx.principal.user, ["environments:start"])
+
+    op =
+      op(ctx.env, %{
+        action: "start",
+        command: "env.start",
+        status: "dispatched",
+        user_id: grant.user_id,
+        api_grant_id: grant.id,
+        dispatched_at: DateTime.utc_now()
+      })
+
+    Foreman.OAuth.revoke_grant(grant.id)
+    Foreman.Environments.Server.resend(ctx.env.id, op.id)
+    params = %{"id" => op.id}
+
+    assert %{"status" => "failed", "error" => %{"code" => "workload_unauthorized"}} =
+             read(ctx.principal, :operation, params)
+
+    assert {:ok, _} = Operations.finish(op.id, "ok", %{}, nil)
+
+    assert %{"status" => "failed", "error" => %{"code" => "workload_unauthorized"}} =
+             read(ctx.principal, :operation, params)
+  end
+
   defp op(env, attrs) do
     Map.merge(
       %{environment_id: env.id, box_id: env.box_id, action: "create", command: "env.create"},
@@ -110,7 +137,7 @@ defmodule ForemanWeb.PublicReadControllerTest do
     assert json_response(get(authed.(), "/api/v1/operations/#{internal.id}"), 404)
   end
 
-  test "a late result cannot reopen logs or extend terminal history", ctx do
+  test "late agent messages cannot reopen logs or extend terminal history", ctx do
     for days <- [31, 91] do
       deadline = DateTime.add(DateTime.utc_now(), -days, :day)
 
@@ -126,7 +153,19 @@ defmodule ForemanWeb.PublicReadControllerTest do
       id = %{"id" => op.id}
       LogStore.append(op.id, "old output")
       assert read(ctx.principal, :logs, id, 404)
-      assert {:ok, _} = Operations.finish(op.id, "ok", %{}, nil)
+
+      for {type, fields} <- [
+            {"op.accepted", %{}},
+            {"op.log", %{stream: "stdout", data: "late output\n"}},
+            {"op.result", %{status: "error", error: "cancelled"}},
+            {"op.result", %{status: "ok"}},
+            {"op.result", %{status: "error", error: "duplicate"}}
+          ] do
+        {:ok, event} = ForemanProtocol.Event.new(type, Map.put(fields, :op_id, op.id))
+        assert :ok = Foreman.Agents.handle_event(ctx.box.id, event)
+        assert Operations.get!(op.id).finished_at == deadline
+      end
+
       assert read(ctx.principal, :logs, id, 404)
       assert read(ctx.principal, :operation, id, if(days == 31, do: 200, else: 404))
       assert :ok = Foreman.Jobs.Housekeeping.perform(%{})
@@ -150,6 +189,56 @@ defmodule ForemanWeb.PublicReadControllerTest do
     before = read(ctx.principal, :operation, params)
     assert %{"status" => "failed", "error" => %{"code" => "operation_timeout"}} = before
     assert {:ok, _} = Operations.finish(op.id, "ok", %{}, nil)
+    assert read(ctx.principal, :operation, params) == before
+  end
+
+  test "upgrading settles reopened timeouts without changing the environment or its history",
+       ctx do
+    first = DateTime.add(DateTime.utc_now(), -60)
+
+    legacy =
+      op(ctx.env, %{
+        status: "running",
+        args: %{"timed_out" => true},
+        error: "first timeout",
+        finished_at: first,
+        dispatched_at: DateTime.add(first, -7200)
+      })
+
+    active = op(ctx.env, %{status: "running", dispatched_at: first})
+    migration = Foreman.Repo.Migrations.SettleReopenedTimeouts
+    version = 20_261_123_030_001
+    opts = [log: false, migration_lock: false]
+
+    unless Code.ensure_loaded?(migration) do
+      Code.require_file(
+        Path.join(
+          :code.priv_dir(:foreman),
+          "repo/migrations/#{version}_settle_reopened_timeouts.exs"
+        )
+      )
+    end
+
+    assert :ok = Ecto.Migrator.down(Repo, version, migration, opts)
+    assert :ok = Ecto.Migrator.up(Repo, version, migration, opts)
+
+    assert %{
+             status: "failed",
+             timeout_error: "first timeout",
+             error: "first timeout",
+             finished_at: ^first
+           } = Operations.get!(legacy.id)
+
+    assert Repo.reload!(ctx.env) == ctx.env
+    assert Operations.get!(active.id) == active
+
+    params = %{"id" => legacy.id}
+    before = read(ctx.principal, :operation, params)
+    assert %{"status" => "failed", "error" => %{"code" => "operation_timeout"}} = before
+
+    assert {:ok, %{status: "succeeded", finished_at: ^first}} =
+             Operations.finish(legacy.id, "ok", %{}, nil)
+
     assert read(ctx.principal, :operation, params) == before
   end
 

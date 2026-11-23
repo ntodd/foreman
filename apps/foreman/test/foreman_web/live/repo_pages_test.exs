@@ -106,6 +106,27 @@ defmodule ForemanWeb.RepoPagesTest do
       {path, _flash} = assert_redirect(view)
       assert path =~ ~r"^/repos/"
     end
+
+    test "adding and rechecking a manual repo records GitHub's archive status", %{conn: conn} do
+      Foreman.Settings.put("github_app", %{"id" => 1})
+      name = "external/widgets"
+
+      for archived <- [true, false] do
+        {:ok, view, _html} = live(conn, ~p"/repos")
+
+        Mox.expect(Foreman.GitHub.ClientMock, :get_repo, fn _, ^name ->
+          {:ok, %{"id" => 371, "full_name" => name, "archived" => archived}}
+        end)
+
+        Mox.allow(Foreman.GitHub.ClientMock, self(), view.pid)
+        view |> form("#add-repo-form", repo: %{full_name: name}) |> render_submit()
+        repo = Foreman.Repos.get_repo_by_full_name(name)
+        assert_redirect(view, ~p"/repos/#{repo.id}")
+        assert repo.github_id == 371
+        assert repo.archived == archived
+        assert Enum.any?(Foreman.Repos.list_repos(), &(&1.id == repo.id)) == not archived
+      end
+    end
   end
 
   describe "a repo's page" do

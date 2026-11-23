@@ -5,18 +5,21 @@ defmodule Foreman.Environments.WorkloadAccess do
   All other work, including reconciliation, needs a live owner.
   """
   import Ecto.Query
-  alias Foreman.{Accounts, OAuth, Repo, Repos}
+  alias Foreman.{Accounts, Config, GitHub, OAuth, Repo, Repos, Secrets, Tailscale}
   alias Foreman.OAuth.ServiceAccounts
   alias Foreman.PublicAPI.Access
 
   @denied {:error, :unauthorized}
+  @empty %{policy: nil, workspaces: %{}, secondaries: %{}}
 
   def authorize(op, env, mode \\ :remote)
 
   def authorize(%{trigger: "expiry", action: action, api_grant_id: nil, user_id: nil}, env, _mode)
       when action in ["stop", "destroy"] and action == env.expiry_action and
              is_nil(env.expiry_consumed_at) and not is_nil(env.expiry_at) do
-    if DateTime.compare(env.expiry_at, DateTime.utc_now()) != :gt, do: {:ok, nil}, else: @denied
+    if DateTime.compare(env.expiry_at, DateTime.utc_now()) != :gt,
+      do: {:ok, @empty},
+      else: @denied
   end
 
   def authorize(%{trigger: "expiry"}, _env, _mode), do: @denied
@@ -60,16 +63,18 @@ defmodule Foreman.Environments.WorkloadAccess do
   defp intent_applies?(_, _, _), do: false
 
   defp authorize_request(op, env, mode) do
-    with {:ok, actor} <- actor(op, env, mode) do
+    with {:ok, actor} <- actor(op, env),
+         {:ok, workspaces} <- workspace_access(actor, env, mode, %{}) do
       if authorized_shutdown?(op, actor) do
-        {:ok, nil}
+        {:ok, %{@empty | workspaces: workspaces}}
       else
-        with {:ok, origin} <- owner(op, env, actor, mode),
+        with {:ok, origin} <- owner(op, env, actor),
+             {:ok, workspaces} <- workspace_access(origin, env, mode, workspaces),
              true <- launchable?(op, env, origin || actor),
              :ok <- automatic_scope(op, origin),
-             {:ok, policy} <- policy(origin || actor, env, mode),
+             {:ok, policy, secondaries} <- policy(origin || actor, env, mode),
              true <- still_active?(actor) and still_active?(origin) do
-          {:ok, policy}
+          {:ok, %{policy: policy, workspaces: workspaces, secondaries: secondaries}}
         else
           false -> @denied
           other -> other
@@ -131,8 +136,8 @@ defmodule Foreman.Environments.WorkloadAccess do
 
   defp eligible?(_), do: false
 
-  defp actor(%{api_grant_id: id} = op, env, mode) when not is_nil(id) do
-    with {:ok, principal} <- grant(id, op.user_id, env, mode),
+  defp actor(%{api_grant_id: id} = op, env) when not is_nil(id) do
+    with {:ok, principal} <- grant(id, op.user_id),
          true <- scope?(principal, op.action),
          true <-
            op.action != "create" or is_nil(env.expiry_action) or
@@ -143,9 +148,9 @@ defmodule Foreman.Environments.WorkloadAccess do
     end
   end
 
-  defp actor(%{user_id: nil}, _env, _mode), do: {:ok, nil}
+  defp actor(%{user_id: nil}, _env), do: {:ok, nil}
 
-  defp actor(op, env, _mode) do
+  defp actor(op, env) do
     user = Accounts.get_user(op.user_id)
 
     if eligible?(user) and (user.id == env.user_id or user.role == "admin") and
@@ -165,21 +170,21 @@ defmodule Foreman.Environments.WorkloadAccess do
 
   # An independently authorized personal start may take over an existing workspace.
   # The source of every request and the creator's grant remain on their original rows.
-  defp owner(%{action: action}, env, %{kind: :user} = actor, _mode)
+  defp owner(%{action: action}, env, %{kind: :user} = actor)
        when action in ["start", "secrets_write"] and actor.user.id == env.user_id,
        do: {:ok, actor}
 
-  defp owner(_op, %{workload_grant_id: id} = env, actor, mode) when not is_nil(id),
-    do: workload_owner(id, "start", env, actor, mode)
+  defp owner(_op, %{workload_grant_id: id} = env, actor) when not is_nil(id),
+    do: workload_owner(id, "start", env, actor)
 
-  defp owner(_op, %{api_grant_id: id} = env, actor, mode) when not is_nil(id),
-    do: workload_owner(id, "create", env, actor, mode)
+  defp owner(_op, %{api_grant_id: id} = env, actor) when not is_nil(id),
+    do: workload_owner(id, "create", env, actor)
 
-  defp owner(_op, env, _actor, mode) do
+  defp owner(_op, env, _actor) do
     case Accounts.get_user(env.user_id) do
       %{service_account: true} = user ->
         with {:ok, principal} <- ServiceAccounts.principal_for_user(user.id),
-             true <- eligible?(user) and visible?(principal, env, mode) do
+             true <- eligible?(user) do
           {:ok, principal}
         else
           _ -> @denied
@@ -190,42 +195,41 @@ defmodule Foreman.Environments.WorkloadAccess do
     end
   end
 
-  defp workload_owner(id, action, env, %{grant_id: id} = actor, _mode) do
+  defp workload_owner(id, action, env, %{grant_id: id} = actor) do
     if actor.user.id == env.user_id and scope?(actor, action), do: {:ok, actor}, else: @denied
   end
 
-  defp workload_owner(id, action, env, _, mode) do
-    with {:ok, principal} <- grant(id, env.user_id, env, mode),
+  defp workload_owner(id, action, env, _) do
+    with {:ok, principal} <- grant(id, env.user_id),
          true <- scope?(principal, action),
          do: {:ok, principal},
          else: (_ -> @denied)
   end
 
-  defp grant(id, user_id, env, mode) do
+  defp grant(id, user_id) do
     with {:ok, principal} <- OAuth.authorize_grant(id),
          true <- principal.user.id == user_id and eligible?(principal.user),
-         true <- visible?(principal, env, mode),
          do: {:ok, principal},
          else: (_ -> @denied)
   end
 
-  defp visible?(principal, env, :remote), do: Repo.exists?(Access.environments(principal, env.id))
-
-  defp visible?(%{kind: :service_account} = principal, env, _),
-    do: Repo.exists?(Access.environments(principal, env.id))
-
-  defp visible?(principal, env, _delivery) do
-    if Foreman.GitHub.configured?() do
-      bound_at = env.repo.github_identity_bound_at
-
-      principal.user.id == env.user_id and not is_nil(env.repo.github_id) and
-        is_nil(env.repo.removed_at) and
-        (is_nil(bound_at) or DateTime.compare(bound_at, env.inserted_at) != :gt) and
-        Repo.exists?(from b in Access.boxes(principal), where: b.id == ^env.box_id)
+  # Keep the exact query that established each actor's access, including the
+  # immutable GitHub identity predicates. Executing it again is local SQL.
+  defp workspace_access(%{grant_id: id} = principal, env, mode, checks) do
+    if Map.has_key?(checks, id) do
+      {:ok, checks}
     else
-      Repo.exists?(Access.environments(principal, env.id))
+      query =
+        case mode do
+          :remote -> Access.live_environments(principal, env.id)
+          prepared -> prepared.workspaces[id]
+        end
+
+      if query && Repo.exists?(query), do: {:ok, Map.put(checks, id, query)}, else: @denied
     end
   end
+
+  defp workspace_access(_, _env, _mode, checks), do: {:ok, checks}
 
   defp automatic_scope(%{user_id: nil, action: action}, %{scopes: _} = origin)
        when action in ["create", "start", "stop", "destroy", "suspend"] do
@@ -241,8 +245,8 @@ defmodule Foreman.Environments.WorkloadAccess do
 
   defp scope?(_principal, _action), do: false
 
-  defp policy(nil, _env, _mode), do: {:ok, nil}
-  defp policy(%{kind: :browser}, _env, _mode), do: {:ok, nil}
+  defp policy(nil, _env, _mode), do: {:ok, nil, %{}}
+  defp policy(%{kind: :browser}, _env, _mode), do: {:ok, nil, %{}}
 
   defp policy(principal, env, mode) do
     repo = Repo.preload(env, repo: :owner).repo
@@ -258,71 +262,96 @@ defmodule Foreman.Environments.WorkloadAccess do
           select: {r.id, r.github_id}
       )
 
-    ids =
+    selected =
       for {id, github_id} <- extras,
           is_integer(github_id),
-          approved_repo?(principal, id, github_id, mode),
-          do: github_id
+          query = secondary_query(principal, id, mode),
+          Repo.exists?(query),
+          do: {id, github_id, query}
 
-    if Foreman.GitHub.configured?() and is_nil(repo.github_id) do
+    if GitHub.configured?() and is_nil(repo.github_id) do
       @denied
     else
-      network(%{principal: principal, repository_ids: Enum.uniq([repo.github_id | ids])})
+      ids = Enum.uniq([repo.github_id | Enum.map(selected, &elem(&1, 1))])
+
+      with {:ok, policy} <- network(%{principal: principal, repository_ids: ids}) do
+        {:ok, policy, Map.new(selected, fn {id, _, query} -> {id, query} end)}
+      end
     end
   end
 
-  defp approved_repo?(%{kind: :user}, _id, github_id, {:delivery, ids}), do: github_id in ids
-
-  defp approved_repo?(principal, id, _github_id, _mode),
-    do: Repo.exists?(Access.repos(principal, id))
+  defp secondary_query(principal, id, :remote), do: Access.repos(principal, id)
+  defp secondary_query(_principal, id, prepared), do: prepared.secondaries[id]
 
   # The remote membership checks and the credential mint are complete. Serialize the
   # final local mailbox send with disables, grant revocations and box sharing changes.
   # No GitHub or tailnet call is permitted inside this transaction.
-  def deliver(op, env, policy, send_command) do
+  def deliver(op, env, prepared, send_command) do
     Repo.transact(fn ->
       lock_row(Foreman.Boxes.Box, env.box_id)
       env = Foreman.Environments.locked_environment(env.id) |> Repo.preload(repo: :owner)
-      selected_ids = if policy, do: Enum.reject(policy.repository_ids, &is_nil/1), else: []
 
-      lock_query(
-        from r in Repos.Repo, where: r.id == ^env.repo_id or r.github_id in ^selected_ids
-      )
-
-      grants =
-        [
-          op.api_grant_id,
-          env.api_grant_id,
-          env.workload_grant_id,
-          (env.desired_authority || %{})["grant_id"],
-          policy && policy.principal.grant_id
-        ]
-        |> Enum.reject(&is_nil/1)
-        |> Enum.uniq()
-
-      grant_query = from g in OAuth.Grant, where: g.id in ^grants
-      clients = Repo.all(select(grant_query, [g], g.client_id))
-
-      users =
-        [env.user_id, op.user_id, (env.desired_authority || %{})["user_id"]]
-        |> Enum.reject(&is_nil/1)
-
-      # Admin mutations lock their human actor before a client, then its service
-      # identity and grant. Follow the same order for personal and service work.
-      lock_query(from u in Accounts.User, where: u.id in ^users and not u.service_account)
-      lock_rows(OAuth.Client, clients)
-      lock_query(from u in Accounts.User, where: u.id in ^users and u.service_account)
-      lock_rows(OAuth.Grant, grants)
-      env = Repo.preload(env, :repo, force: true)
-      mode = {:delivery, if(policy, do: policy.repository_ids, else: [])}
-
-      case authorize(op, env, mode) do
-        {:ok, ^policy} -> {:ok, send_command.(env)}
-        {:ok, _changed} -> {:ok, :retry}
-        other -> {:ok, other}
+      if op.action == "secrets_write" and
+           (env.desired_state in ["stopped", "destroyed"] or
+              Foreman.Jobs.EnvironmentExpiry.due?(env)) do
+        {:ok, :superseded}
+      else
+        deliver_current(op, env, prepared, send_command)
       end
     end)
     |> elem(1)
+  end
+
+  defp deliver_current(op, env, prepared, send_command) do
+    policy = prepared.policy
+
+    repositories = [env.repo_id | Map.keys(prepared.secondaries)]
+    lock_rows(Repos.Repo, repositories)
+    owner_ids = Repo.all(from r in Repos.Repo, where: r.id in ^repositories, select: r.owner_id)
+    lock_rows(Repos.Owner, owner_ids)
+
+    grants =
+      [
+        op.api_grant_id,
+        env.api_grant_id,
+        env.workload_grant_id,
+        (env.desired_authority || %{})["grant_id"],
+        policy && policy.principal.grant_id
+      ]
+      |> Enum.reject(&is_nil/1)
+      |> Enum.uniq()
+
+    grant_query = from g in OAuth.Grant, where: g.id in ^grants
+    clients = Repo.all(select(grant_query, [g], g.client_id))
+
+    users =
+      [env.user_id, op.user_id, (env.desired_authority || %{})["user_id"]]
+      |> Enum.reject(&is_nil/1)
+
+    # Admin mutations lock their human actor before a client, then its service
+    # identity and grant. Follow the same order for personal and service work.
+    lock_query(from u in Accounts.User, where: u.id in ^users and not u.service_account)
+    lock_rows(OAuth.Client, clients)
+    lock_query(from u in Accounts.User, where: u.id in ^users and u.service_account)
+    lock_rows(OAuth.Grant, grants)
+    env = Repo.preload(env, [:user, :box, repo: :owner], force: true)
+
+    # Waiting for a credential writer can cross a grant deadline. Check the
+    # retained access queries after all material locks have been acquired.
+    current? = current_material?(env, prepared, true)
+
+    case authorize(op, env, prepared) do
+      {:ok, %{policy: ^policy}} ->
+        if current?,
+          do: {:ok, send_command.(env)},
+          else: {:ok, :retry}
+
+      {:ok, _changed} ->
+        {:ok, :retry}
+
+      other ->
+        {:ok, other}
+    end
   end
 
   defp lock_row(schema, id), do: lock_rows(schema, [id])
@@ -340,6 +369,53 @@ defmodule Foreman.Environments.WorkloadAccess do
           lock: "FOR SHARE"
       )
     end
+  end
+
+  # Bind credential-bearing payloads to the settings actually used to build
+  # them. Only keyed hashes of selected secret values live in this proof.
+  def settings(env, policy) do
+    repo = env.repo
+    owner = repo.owner
+
+    tags =
+      if policy && Map.has_key?(policy, :tags),
+        do: policy.tags,
+        else: Tailscale.tags_for(repo, env.user)
+
+    {repo.github_id, repo.full_name, repo.owner_id, repo.devcontainer_path, owner.login,
+     owner.installation_id, Config.git_base_url(), GitHub.token_permissions(repo),
+     GitHub.configured?(), Tailscale.configured?(), tags,
+     is_nil(policy) &&
+       {repo.token_mode, Repos.token_repos(repo), owner.registry_host, owner.registry_username,
+        owner.registry_token}, env.user.access_generation}
+    |> :erlang.term_to_binary()
+    |> then(&:crypto.hash(:sha256, &1))
+  end
+
+  def current_material?(_env, %{material: nil}, _lock), do: true
+
+  def current_material?(env, %{policy: policy, material: material}, lock?) do
+    options = Keyword.put(material.options, :lock, lock?)
+
+    settings(env, policy) == material.settings and
+      (is_nil(material.source) or
+         GitHub.credential_version(env.user.access_token) == material.source) and
+      current_enrollment?(env, policy, material.enrollment) and
+      Secrets.hashes(Secrets.resolve(env, options)) == material.hashes
+  end
+
+  defp current_enrollment?(_env, _policy, nil), do: true
+
+  defp current_enrollment?(env, policy, {selected, previous}) do
+    enabled = Tailscale.configured?()
+
+    tags =
+      if enabled,
+        do: (policy && policy[:tags]) || Tailscale.tags_for(env.repo, env.user),
+        else: []
+
+    selected == %{enabled: enabled, tags: tags} and
+      previous == {env.ts_authkey, env.ts_authkey_tags, env.tailscale_device_id}
   end
 
   defp network(%{principal: %{kind: :service_account} = principal} = policy) do

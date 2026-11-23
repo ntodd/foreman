@@ -282,7 +282,7 @@ defmodule Foreman.Secrets do
     ids = Keyword.get_lazy(opts, :approved_ids, fn -> service_secret_ids(env) end)
 
     env
-    |> env_secrets(Keyword.get(opts, :include_shared, true), ids)
+    |> env_secrets(Keyword.get(opts, :include_shared, true), ids, Keyword.get(opts, :lock, false))
     |> Enum.concat()
     |> Enum.reduce(%{}, fn s, acc -> Map.put(acc, s.name, s.value) end)
   end
@@ -309,7 +309,12 @@ defmodule Foreman.Secrets do
 
   # The secrets that reach an environment, one list per scope from owner
   # to environment. A user secret limited to other repos doesn't.
-  defp env_secrets(%Environment{} = env, include_shared \\ true, approved_ids \\ :all) do
+  defp env_secrets(
+         %Environment{} = env,
+         include_shared \\ true,
+         approved_ids \\ :all,
+         lock? \\ false
+       ) do
     env = Foreman.Repo.preload(env, :repo)
 
     shared = if include_shared, do: shared_keys(env), else: []
@@ -322,6 +327,8 @@ defmodule Foreman.Secrets do
         do: query,
         else: where(query, [s], s.id in ^approved_ids and s.scope in ["owner", "repo"])
 
+    query = lock_selected(query, approved_ids, lock?)
+
     by_key =
       query
       |> Foreman.Repo.all()
@@ -331,6 +338,27 @@ defmodule Foreman.Secrets do
       |> Enum.group_by(& &1.scope_key)
 
     Enum.map(keys, &Map.get(by_key, &1, []))
+  end
+
+  defp lock_selected(query, _ids, false), do: query
+
+  defp lock_selected(query, ids, true) do
+    cond do
+      Foreman.Repo.sqlite?() ->
+        # The delivery transaction already holds the database write reservation.
+        query
+
+      ids == :all ->
+        # A new, higher-priority row can shadow an existing value. Hold inserts
+        # as well as rotations until the short, local mailbox handoff finishes.
+        Foreman.Repo.query!("LOCK TABLE secrets IN SHARE MODE")
+        query
+
+      true ->
+        # The allowlist names existing immutable IDs. Unrelated inserts cannot
+        # affect these values and should proceed during service-account delivery.
+        lock(order_by(query, [s], s.id), "FOR SHARE")
+    end
   end
 
   @doc """

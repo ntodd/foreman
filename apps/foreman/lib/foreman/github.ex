@@ -269,20 +269,31 @@ defmodule Foreman.GitHub do
   user's own token when the repo is set to `broad`. The token lasts until
   the environment's next scheduled one.
   """
-  def environment_token(%User{} = user, %Repos.Repo{} = repo) do
+  def environment_token(user, repo) do
+    with {:ok, value, _source} <- environment_credential(user, repo), do: {:ok, value}
+  end
+
+  @doc false
+  def environment_credential(%User{} = user, %Repos.Repo{} = repo) do
     repo = Foreman.Repo.preload(repo, :owner)
 
     with {:ok, token} <- user_token(user, @environment_token_life),
          {:ok, credential} <- browser_credential(token, repo),
          %User{disabled_at: nil, workload_access_revoked_at: nil} = current <-
            Accounts.get_user(user.id),
+         true <-
+           current.access_generation == user.access_generation and current.access_token == token,
          true <- Accounts.access(current) != :denied do
-      {:ok, credential}
+      {:ok, credential, credential_version(token)}
     else
       {:error, _} = error -> error
       _ -> {:error, :login_expired}
     end
   end
+
+  @doc false
+  def credential_version(token) when is_binary(token), do: :crypto.hash(:sha256, token)
+  def credential_version(nil), do: nil
 
   defp browser_credential(token, %{token_mode: "broad"}), do: {:ok, token}
   defp browser_credential(token, repo), do: scope_token(token, repo, Repos.token_repos(repo))
@@ -314,7 +325,7 @@ defmodule Foreman.GitHub do
 
   defp issue_workload_token(%{kind: :service_account} = principal, repo, requested_ids) do
     import Ecto.Query
-    ids = Foreman.OAuth.ServiceAccounts.repo_ids(principal)
+    ids = Foreman.OAuth.ServiceAccounts.repo_ids(principal, repo.id)
 
     approved =
       Foreman.Repo.all(
@@ -325,9 +336,11 @@ defmodule Foreman.GitHub do
           select: r.github_id
       )
 
-    if Enum.all?(requested_ids, &(&1 in approved)),
-      do: client().repo_read_token(app(), repo.owner.installation_id, {:ids, requested_ids}),
-      else: {:error, :unauthorized}
+    cond do
+      not Enum.all?(requested_ids, &(&1 in approved)) -> {:error, :unauthorized}
+      token_permissions(repo)["contents"] not in ["read", "write"] -> {:error, :contents_disabled}
+      true -> client().repo_read_token(app(), repo.owner.installation_id, {:ids, requested_ids})
+    end
   end
 
   defp issue_workload_token(%{kind: :user} = principal, repo, ids) do
@@ -340,12 +353,15 @@ defmodule Foreman.GitHub do
          )
   end
 
+  def token_permissions(repo) do
+    Repos.TokenPermissions.request(
+      Repos.Repo.permissions(repo),
+      repo.owner.installation_permissions
+    )
+  end
+
   defp scope_token(token, repo, names) do
-    permissions =
-      Repos.TokenPermissions.request(
-        Repos.Repo.permissions(repo),
-        repo.owner.installation_permissions
-      )
+    permissions = token_permissions(repo)
 
     with {:ok, %{token: scoped}} <-
            client().scope_user_token(app(), token, repo.owner.login, names, permissions),
