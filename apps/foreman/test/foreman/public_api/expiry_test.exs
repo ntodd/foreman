@@ -217,6 +217,98 @@ defmodule Foreman.PublicAPI.ExpiryTest do
     end
   end
 
+  test "a successful expiry retry confirms the buffered stop on the current connection" do
+    {env, retry} = buffered_stop_with_retry()
+    assert :ok = finish(env, retry)
+    assert Foreman.Agents.LifecycleState.confirmed?(env, "stopped")
+  end
+
+  test "a superseded expiry retry cannot confirm the outcome of a later stop" do
+    {env, retry} = buffered_stop_with_retry()
+
+    assert {:ok, _, _} =
+             Foreman.Operations.timed_out(
+               Repo.get!(Operation, retry),
+               "timeout",
+               &Foreman.Environments.record_result/1
+             )
+
+    scope = Foreman.Scope.for_user(Repo.preload(env, :user).user)
+    {:ok, _} = Foreman.Environments.start(scope, Repo.reload!(env))
+    assert_receive {:dispatch, %{type: "env.secrets.write", op_id: files}}
+    :ok = finish(env, files)
+    assert_receive {:dispatch, %{type: "env.start", op_id: start}}
+    :ok = finish(env, start)
+    {:ok, _} = Foreman.Environments.stop(scope, Repo.reload!(env))
+    assert_receive {:dispatch, %{type: "env.stop", op_id: later_stop}}
+    :ok = finish(env, later_stop)
+    assert Foreman.Agents.LifecycleState.confirmed?(env, "stopped")
+
+    {:ok, changed} = ForemanProtocol.Event.new("env.state", %{env_id: env.id, state: "partial"})
+    :ok = Foreman.Agents.handle_event(env.box_id, changed)
+    settled = Repo.reload!(env)
+    assert settled.observed_state == "stopped"
+    refute Foreman.Agents.LifecycleState.confirmed?(env, "stopped")
+    assert :ok = finish(env, retry)
+    refute Foreman.Agents.LifecycleState.confirmed?(env, "stopped")
+    assert Repo.reload!(env) == settled
+  end
+
+  test "an older expiry stop cannot re-confirm a newer retry after a contradictory report" do
+    {env, job, first} = timed_out_stop()
+    :ok = EnvironmentExpiry.perform(job)
+    assert_receive {:dispatch, %{op_id: retry}}
+    :ok = finish(env, retry)
+    assert Repo.reload!(env).expiry_consumed_at
+    assert Foreman.Agents.LifecycleState.confirmed?(env, "stopped")
+
+    {:ok, changed} = ForemanProtocol.Event.new("env.state", %{env_id: env.id, state: "partial"})
+    :ok = Foreman.Agents.handle_event(env.box_id, changed)
+    refute Foreman.Agents.LifecycleState.confirmed?(env, "stopped")
+    :ok = finish(env, first)
+    refute Foreman.Agents.LifecycleState.confirmed?(env, "stopped")
+  end
+
+  defp buffered_stop_with_retry do
+    {env, job, first} = timed_out_stop()
+    Registry.unregister(Foreman.Registry, {:agent, env.box_id})
+    :ok = Foreman.Agents.register(env.box_id)
+    :ok = EnvironmentExpiry.perform(job)
+    assert_receive {:dispatch, %{op_id: retry}}
+
+    assert :ok = finish(env, first)
+    assert Repo.reload!(env).expiry_consumed_at
+    refute Foreman.Agents.LifecycleState.confirmed?(env, "stopped")
+    {env, retry}
+  end
+
+  defp timed_out_stop do
+    env = environment_fixture()
+
+    Repo.update!(
+      change(env, expiry_at: DateTime.add(DateTime.utc_now(), -1), expiry_action: "stop")
+    )
+
+    job = %{args: %{"environment_id" => env.id}}
+    :ok = Foreman.Agents.register(env.box_id)
+    :ok = EnvironmentExpiry.perform(job)
+    assert_receive {:dispatch, %{op_id: first}}
+
+    assert {:ok, _, _} =
+             Foreman.Operations.timed_out(
+               Repo.get!(Operation, first),
+               "timeout",
+               &Foreman.Environments.record_result/1
+             )
+
+    {env, job, first}
+  end
+
+  defp finish(env, id) do
+    {:ok, success} = ForemanProtocol.Event.new("op.result", %{op_id: id, status: "ok"})
+    Foreman.Agents.handle_event(env.box_id, success)
+  end
+
   test "start can provision an initial create that expiry stopped before first dispatch" do
     env = environment_fixture(created_once: false, observed_state: "pending")
     Foreman.Environments.queue_operation(env, "create", %{}, nil)
