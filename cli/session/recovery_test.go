@@ -3,11 +3,14 @@ package session
 import (
 	"context"
 	"errors"
+	"net"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"slices"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -187,6 +190,43 @@ func TestLostRotationStopsAutomaticReplay(t *testing.T) {
 	}
 	if _, err = f.store.Logout(ctx, f.server.URL, "user"); err != nil || !slices.Equal(f.revoked, []string{"old-rotated", "old"}) {
 		t.Fatal(err, f.revoked)
+	}
+}
+
+func TestRefusedDialPreservesRefreshForRestart(t *testing.T) {
+	f := setup(t)
+	f.seed("user")
+	ctx := context.Background()
+	s, err := f.store.Open(ctx, f.server.URL, "user")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Discovery succeeded, but the instance is offline when the session
+	// next needs to refresh. The POST cannot reach the closed listener.
+	addr := f.server.Listener.Addr().String()
+	f.server.Close()
+	if _, err = s.Client.GetIdentity(ctx); !errors.Is(err, syscall.ECONNREFUSED) {
+		t.Fatalf("expected the dial to be refused: %v", err)
+	}
+
+	listener, err := net.Listen("tcp", addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := &http.Server{Handler: http.HandlerFunc(f.serve)}
+	go server.Serve(listener)
+	t.Cleanup(func() { server.Close() })
+
+	s, err = NewStore(f.store.root).Open(ctx, f.server.URL, "user")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = s.Client.GetIdentity(ctx); err != nil {
+		t.Fatalf("instance is back but refresh failed: %v", err)
+	}
+	if f.refreshAttempts != 1 || !slices.Equal(f.rotations, []string{"old"}) {
+		t.Fatalf("got %d refresh attempts and rotations %v", f.refreshAttempts, f.rotations)
 	}
 }
 
