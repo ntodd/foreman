@@ -35,6 +35,7 @@ const help = `Usage: foreman [--instance ORIGIN] [--account ID] [--json] COMMAND
     [--request-key KEY] [--confirm-capacity-warning]
   env create --resume KEY        Replay a saved submission
   env start|stop|destroy ID      Change the environment state (--yes confirms destroy)
+  env restart ID [--all]         Recreate the services whose secrets changed, or all of them
   op list ENV_ID | op show OP_ID
   op wait OP_ID                  Wait for completion
   op logs OP_ID [--follow] [--cursor CURSOR]

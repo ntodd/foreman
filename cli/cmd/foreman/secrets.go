@@ -20,6 +20,7 @@ const secretsHelp = `Usage: foreman [--instance ORIGIN] [--account ID] [--json] 
   secrets list                   List secret names at one level. Values are never shown.
   secrets set NAME=value ...     Set one or more secrets in a single request.
           NAME=@file             Read the value from a file (its final newline is dropped).
+          NAME=-                 Read the value from standard input, for one secret.
           NAME                   Ask for the value without showing it.
   secrets unset NAME ...         Remove secrets. A name that isn't set is left alone.
   secrets import FILE            Set every NAME=value line of a dotenv file (- for standard input).
@@ -32,11 +33,12 @@ Choose the level with one of:
 
 An environment gets owner, then repository, then your own, then its own secrets, and a
 later level wins. A request changes everything it names or nothing. In a running
-environment new shells see a change at once; processes and services already running keep
-their previous values until it restarts: foreman env stop ID, then foreman env start ID.
+environment new shells pick a change up shortly; processes and services already running
+keep their previous values until foreman env restart ID recreates them. Stopping and
+starting is not enough: the services come back in the containers they already had.
 
-A value typed as NAME=value is saved in your shell history. Use NAME=@file or NAME for
-anything sensitive.
+A value typed as NAME=value is saved in your shell history. Use NAME=@file, NAME=- or NAME
+for anything sensitive. A value that itself begins with @ has to come one of those ways.
 
 Secrets need permissions a default login leaves out. Connect with:
   foreman login --scope "` + secretsScope + `"

@@ -90,13 +90,12 @@ defmodule ForemanWeb.SecretAPITest do
 
     test "is all or nothing, and names the secret that was refused", ctx do
       path = "environment/#{ctx.env.id}"
-
-      reply =
-        change(ctx.conn, token(ctx.user), path, %{secrets: set([{"A", "1"}, {"9LIVES", "x"}])})
+      body = %{secrets: set([{"A", "1"}, {"FOREMAN_TOKEN", "x"}])}
+      reply = change(ctx.conn, token(ctx.user), path, body)
 
       assert %{"code" => "invalid_request", "message" => message} = json_response(reply, 422)
-      assert message =~ "9LIVES"
-      assert message =~ "must start with a letter"
+      assert message =~ "FOREMAN_TOKEN"
+      assert message =~ "reserves"
       assert Repo.aggregate(Secret, :count) == 0
     end
 
@@ -264,6 +263,74 @@ defmodule ForemanWeb.SecretAPITest do
     end
   end
 
+  describe "authority that changes while a request is in flight" do
+    # The principal is what authentication loaded; the database has moved on.
+    defp stale(ctx, user, path_params, body) do
+      {principal, grant} = principal(user, @scopes)
+      conn = ctx.conn |> assign(:api_principal, principal)
+
+      call = fn ->
+        ForemanWeb.SecretMutationController.update(%{conn | body_params: body}, path_params)
+      end
+
+      {call, grant}
+    end
+
+    test "an admin demoted since authenticating cannot finish a repository change", ctx do
+      body = %{"secrets" => [%{"name" => "A", "value" => "1"}]}
+
+      for params <- [
+            %{"scope" => "repo", "subject" => ctx.repo.id},
+            %{"scope" => "owner", "subject" => ctx.owner.login}
+          ] do
+        admin = user_fixture(role: "admin")
+        {call, _grant} = stale(ctx, admin, params, body)
+        admin |> Ecto.Changeset.change(role: "member") |> Repo.update!()
+
+        assert json_response(call.(), 403)["code"] == "forbidden"
+      end
+
+      assert Repo.aggregate(Secret, :count) == 0
+    end
+
+    test "a connection revoked since authenticating changes nothing", ctx do
+      body = %{"secrets" => [%{"name" => "A", "value" => "1"}]}
+      {call, grant} = stale(ctx, ctx.user, %{"scope" => "user", "subject" => "me"}, body)
+      OAuth.revoke_grant(grant.id)
+
+      assert json_response(call.(), 404)["code"] == "resource_not_found"
+      assert Repo.aggregate(Secret, :count) == 0
+    end
+
+    test "an environment the caller can no longer reach is neither changed nor named", ctx do
+      lender = user_fixture()
+      shared = box_fixture(owner_user_id: lender.id, shared_user_ids: [ctx.user.id])
+
+      env =
+        environment_fixture(user: ctx.user, repo: ctx.repo, box: shared)
+        |> Ecto.Changeset.change(
+          applied_secret_hashes: %{},
+          pending_restart: false,
+          pending_changes: []
+        )
+        |> Repo.update!()
+
+      shared |> Ecto.Changeset.change(shared_user_ids: []) |> Repo.update!()
+      token = token(ctx.user)
+
+      assert json_response(
+               change(ctx.conn, token, "environment/#{env.id}", %{secrets: set([{"A", "1"}])}),
+               404
+             )
+
+      # The caller's own secrets still reach it, but the response doesn't name it.
+      reply = change(ctx.conn, token, "user/me", %{secrets: set([{"MINE", "1"}])})
+      assert %{"pending_restart" => pending} = json_response(reply, 200)
+      refute env.id in Enum.map(pending, & &1["id"])
+      assert Repo.reload!(env).pending_restart
+    end
+  end
+
   describe "request validation" do
     test "rejects bodies that aren't a list of names and values", ctx do
       token = token(ctx.user)
@@ -281,7 +348,11 @@ defmodule ForemanWeb.SecretAPITest do
         %{secrets: set([{"A", "1"}]), other: true},
         %{secrets: set([{"A", "1"}, {"A", "2"}])},
         %{secrets: set([{"A", "1"}]), unset: ["A"]},
-        %{unset: Enum.map(1..101, &"N#{&1}")}
+        %{unset: Enum.map(1..101, &"N#{&1}")},
+        %{unset: ["has space"]},
+        %{unset: ["NUL\0BYTE"]},
+        %{secrets: [%{name: "NUL\0BYTE", value: "1"}]},
+        %{secrets: [%{name: "", value: "1"}]}
       ]
 
       for body <- bad do
@@ -297,12 +368,27 @@ defmodule ForemanWeb.SecretAPITest do
                "resource_not_found"
     end
 
-    test "values stay out of the request log" do
+    test "a name that isn't one is refused without being repeated back", ctx do
+      body = %{secrets: [%{name: "sk live 4242 pasted in the wrong field", value: "1"}]}
+      reply = change(ctx.conn, token(ctx.user), "user/me", body)
+
+      assert %{"code" => "invalid_request"} = json_response(reply, 422)
+      refute reply.resp_body =~ "4242"
+    end
+
+    test "values stay out of the request log, in a well-formed body or not" do
       params = %{"secrets" => [%{"name" => "A", "value" => "hunter2"}], "unset" => ["B"]}
       filtered = Phoenix.Logger.filter_values(params)
 
       refute inspect(filtered) =~ "hunter2"
       assert filtered["unset"] == ["B"]
+
+      for misshapen <- [
+            %{"name" => "A", "value" => "hunter2"},
+            %{"x" => [%{"value" => "hunter2"}]}
+          ] do
+        refute inspect(Phoenix.Logger.filter_values(misshapen)) =~ "hunter2"
+      end
     end
   end
 

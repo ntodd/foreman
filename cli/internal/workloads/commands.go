@@ -187,7 +187,7 @@ func (o Options) dispatch(ctx context.Context, v invocation) error {
 		}
 		_, err = outcome(r.Value)
 		return err
-	case "env create", "env start", "env stop", "env destroy":
+	case "env create", "env start", "env stop", "env restart", "env destroy":
 		return o.lifecycle(ctx, v)
 	case "op wait":
 		ctx, cancel := context.WithTimeout(ctx, v.timeout)

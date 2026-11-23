@@ -129,7 +129,7 @@ defmodule Foreman.CLIAcceptanceTest do
     assert hint =~ ~s(foreman login --scope ")
     assert hint =~ "secrets:write"
 
-    login(ctx, ctx.user, "repos:list secrets:list secrets:write")
+    login(ctx, ctx.user, "repos:list secrets:list secrets:write environments:start environments:stop")
     File.write!(Path.join(ctx.tmp_dir, "key.txt"), "from a file\n")
 
     File.write!(
@@ -138,8 +138,22 @@ defmodule Foreman.CLIAcceptanceTest do
     )
 
     args = ["secrets", "set", "PLAIN=hunter2", "FROM_FILE=@key.txt", "--env", env.id]
-    assert %{"set" => ["PLAIN", "FROM_FILE"], "unset" => []} = json(ctx, args)
+    env_id = env.id
+
+    assert %{
+             "set" => ["PLAIN", "FROM_FILE"],
+             "unset" => [],
+             "pending_restart" => [%{"id" => ^env_id}]
+           } = json(ctx, args)
+
     assert Foreman.Secrets.resolve(env) == %{"PLAIN" => "hunter2", "FROM_FILE" => "from a file"}
+
+    # The running services still hold what they started with; a restart recreates them.
+    assert %{"environment_id" => ^env_id, "operation_id" => restart} =
+             json(ctx, ["env", "restart", env.id, "--no-wait"])
+
+    assert %{action: "restart_affected", args: %{"changed" => ["FROM_FILE", "PLAIN"]}} =
+             Repo.get!(Operation, restart)
 
     {0, human, ""} = ctx |> launch(["secrets", "list", "--env", env.id]) |> finish()
     assert ["NAME\tUPDATED", "FROM_FILE\t" <> _, "PLAIN\t" <> _] = String.split(human, "\n", trim: true)

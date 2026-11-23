@@ -330,3 +330,33 @@ func TestShowReportsTerminalFailureAfterPrintingOperation(t *testing.T) {
 		})
 	}
 }
+
+func TestRestartRecreatesChangedServicesOrAllOfThem(t *testing.T) {
+	var sent []string
+	h := setup(t, fake{act: func(_ context.Context, id, key string, b api.Action) (*api.Response[api.OperateEnvironmentResult], error) {
+		if id != envID || key == "" {
+			t.Fatal(id, key)
+		}
+		sent = append(sent, b.Action)
+		return &api.Response[api.OperateEnvironmentResult]{StatusCode: 202, Value: api.OperateEnvironmentResult{EnvironmentID: envID, OperationID: ptr(opID)}}, nil
+	}})
+	h.success(t, "env", "restart", envID, "--no-wait")
+	h.success(t, "env", "restart", envID, "--all", "--no-wait")
+	if strings.Join(sent, " ") != "restart_affected restart_all" {
+		t.Fatal(sent)
+	}
+
+	// Nothing waiting on a restart is a success with nothing queued.
+	h = setup(t, fake{act: func(_ context.Context, _, _ string, b api.Action) (*api.Response[api.OperateEnvironmentResult], error) {
+		return &api.Response[api.OperateEnvironmentResult]{StatusCode: 200, Value: api.OperateEnvironmentResult{EnvironmentID: envID}}, nil
+	}})
+	h.JSON = false
+	h.success(t, "env", "restart", envID)
+	if !strings.Contains(h.out.String(), "No services are waiting on a restart") {
+		t.Fatal(h.out.String())
+	}
+
+	h.JSON = true
+	h.failure(t, "invalid_invocation", "env", "restart", envID, "--all=yes")
+	h.failure(t, "invalid_invocation", "env", "restart", envID, "--yes")
+}

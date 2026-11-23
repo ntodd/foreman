@@ -11,6 +11,7 @@ import (
 	"regexp"
 	"slices"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/ntodd/foreman/cli/api"
 )
@@ -83,9 +84,21 @@ const usage = "Use foreman secrets list, set, unset or import. See foreman help 
 
 var (
 	uuidPattern = regexp.MustCompile(`^[[:xdigit:]]{8}-[[:xdigit:]]{4}-[[:xdigit:]]{4}-[[:xdigit:]]{4}-[[:xdigit:]]{12}$`)
-	// Looser than the server's rule on purpose: this only tells a name from
-	// a typo. The server owns which names are allowed.
-	namePattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
+	// The shape of a name. The server owns which well-formed names are allowed.
+	namePattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]{0,127}$`)
+	// A level selector that doesn't look like what it names is refused
+	// here: it would otherwise travel in the request path, which nothing
+	// filters from logs, and a misplaced NAME=value would go with it.
+	repoPattern  = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9-]*/[A-Za-z0-9._-]+$`)
+	ownerPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9-]*$`)
+)
+
+// Diagnostics never repeat an operand. What looks like a mistyped name or
+// option may be a value in the wrong place.
+const (
+	notAName = "A secret name starts with a letter or underscore and holds only letters, digits and underscores."
+	noValue  = "%s has an empty value. Give it one, or remove it with secrets unset."
+	notText  = "The value for %s is not valid UTF-8 text."
 )
 
 type target struct{ scope, subject, label string }
@@ -141,7 +154,7 @@ func (o Options) run(ctx context.Context, args []string) error {
 		}
 		for _, name := range v.args {
 			if !namePattern.MatchString(name) {
-				return invalid("%q is not a secret name.", name)
+				return invalid("secrets unset takes names alone. %s", notAName)
 			}
 		}
 		if err := unique(v.args); err != nil {
@@ -177,7 +190,7 @@ func parse(args []string) (invocation, error) {
 		case flags && strings.HasPrefix(word, "-"):
 			key, value, attached := strings.Cut(strings.TrimPrefix(word, "--"), "=")
 			if !strings.HasPrefix(word, "--") || !slices.Contains([]string{"env", "repo", "owner", "user"}, key) {
-				return v, invalid("Unknown option %q for secrets %s.", word, v.command)
+				return v, invalid("Unknown option for secrets %s. The options are --env, --repo, --owner and --user.", v.command)
 			}
 			if _, duplicate := v.flags[key]; duplicate {
 				return v, invalid("--%s was supplied more than once.", key)
@@ -194,8 +207,12 @@ func parse(args []string) (invocation, error) {
 				}
 				value = args[i]
 			}
-			if strings.TrimSpace(value) == "" {
-				return v, invalid("--%s requires a non-empty value.", key)
+			shaped := map[string]*regexp.Regexp{"env": uuidPattern, "owner": ownerPattern}[key]
+			switch {
+			case key == "repo" && !uuidPattern.MatchString(value) && !repoPattern.MatchString(value):
+				return v, invalid("--repo takes an owner/name or a repository ID.")
+			case shaped != nil && !shaped.MatchString(value):
+				return v, invalid("--%s takes %s.", key, map[string]string{"env": "an environment ID", "owner": "an owner's login"}[key])
 			}
 			v.flags[key] = value
 		default:
@@ -281,39 +298,67 @@ func (o Options) list(ctx context.Context, v invocation) error {
 	return nil
 }
 
-// pairs turns NAME=value, NAME=@file and NAME (asked for) into values.
-// Nothing is sent unless every value could be read.
+// pairs turns NAME=value, NAME=@file, NAME=- (standard input) and NAME
+// (asked for) into values. Nothing is sent unless every value could be read.
 func (o Options) pairs(args []string) ([]api.SecretValue, error) {
 	if len(args) == 0 {
-		return nil, invalid("Give at least one NAME=value, NAME=@file or NAME.")
+		return nil, invalid("Give at least one NAME=value, NAME=@file, NAME=- or NAME.")
 	}
 	set := make([]api.SecretValue, 0, len(args))
 	names := make([]string, 0, len(args))
+	piped := false
 	for _, arg := range args {
 		name, value, assigned := strings.Cut(arg, "=")
 		if !namePattern.MatchString(name) {
-			return nil, invalid("%q is not a secret name.", name)
+			return nil, invalid("secrets set takes NAME=value, NAME=@file, NAME=- or NAME. %s", notAName)
 		}
 		switch {
 		case !assigned && o.Prompt == nil:
-			return nil, invalid("%s has no value and there is no terminal to ask on. Use %s=value or %s=@file.", name, name, name)
+			return nil, invalid("%s has no value and there is no terminal to ask on. Use %s=value, %s=@file or %s=-.", name, name, name, name)
 		case !assigned:
 			typed, err := o.Prompt(name)
 			if err != nil {
-				return nil, invalid("Could not read a value for %s: %v", name, err)
+				return nil, invalid("Could not read a value for %s.", name)
 			}
 			value = typed
+		case value == "-":
+			if piped {
+				return nil, invalid("Only one secret can take its value from standard input.")
+			}
+			piped = true
+			body, err := io.ReadAll(o.In)
+			if err != nil {
+				return nil, invalid("Could not read standard input for %s.", name)
+			}
+			value = trimNewline(string(body))
 		case strings.HasPrefix(value, "@"):
 			body, err := o.ReadFile(value[1:])
 			if err != nil {
-				return nil, invalid("Could not read the file for %s: %v", name, err)
+				// The path stays out of the message: a literal value that
+				// happens to start with @ lands here too.
+				return nil, invalid("Could not read the file given for %s. For a value that itself starts with @, use %s=- or %s alone.", name, name, name)
 			}
 			value = trimNewline(string(body))
+		}
+		if err := sendable(name, value); err != nil {
+			return nil, err
 		}
 		set = append(set, api.SecretValue{Name: name, Value: value})
 		names = append(names, name)
 	}
 	return set, unique(names)
+}
+
+// sendable refuses what the server would refuse, or what JSON would
+// quietly rewrite: invalid UTF-8 becomes U+FFFD on the way out.
+func sendable(name, value string) error {
+	switch {
+	case value == "":
+		return invalid(noValue, name)
+	case !utf8.ValidString(value):
+		return invalid(notText, name)
+	}
+	return nil
 }
 
 // A file's last line ending is the editor's, not the secret's.
@@ -372,12 +417,11 @@ func (o Options) change(ctx context.Context, v invocation, set []api.SecretValue
 		fmt.Fprintf(w, "Not set there, so left alone: %s.\n", strings.Join(skipped, ", "))
 	}
 	if len(result.PendingRestart) > 0 {
-		fmt.Fprintln(w, "New shells in these running environments see the change now. Their running processes and services keep the previous values until a restart:")
+		fmt.Fprintln(w, "New shells in these running environments pick the change up shortly. Their running processes and services keep the previous values until a restart:")
 		for _, env := range result.PendingRestart {
 			fmt.Fprintf(w, "  %s  %s\n", env.Slug, env.ID)
 		}
-		id := result.PendingRestart[0].ID
-		fmt.Fprintf(w, "Restart one with: foreman env stop %s && foreman env start %s\n", id, id)
+		fmt.Fprintf(w, "Apply it with: foreman env restart %s\n", result.PendingRestart[0].ID)
 	}
 	if n := result.OthersPendingRestart; n > 0 {
 		_, err = fmt.Fprintf(w, "%d running environment(s) of other people are waiting on a restart too.\n", n)
@@ -387,8 +431,9 @@ func (o Options) change(ctx context.Context, v invocation, set []api.SecretValue
 
 // dotenv reads KEY=value lines: blank lines and # comments are skipped,
 // a leading "export " is allowed, single quotes are literal, double
-// quotes take \n, \r, \t, \" and \\, and an unquoted value ends at a
-// trailing " #comment". Errors name the line, never its value.
+// quotes take \n, \r, \t, \" and \\ and leave any other backslash as
+// written, and an unquoted value ends at a "#" that starts a word.
+// Errors name the line, never its value.
 func (o Options) dotenv(path string) ([]api.SecretValue, error) {
 	var body []byte
 	var err error
@@ -413,9 +458,12 @@ func (o Options) dotenv(path string) ([]api.SecretValue, error) {
 		if !assigned || !namePattern.MatchString(name) {
 			return nil, invalid("Line %d of %s is not NAME=value.", i+1, path)
 		}
-		value, ok := dotenvValue(strings.TrimSpace(raw))
+		value, ok := dotenvValue(raw)
 		if !ok {
 			return nil, invalid("Line %d of %s (%s) has a quote that is not closed, or text after the closing quote.", i+1, path, name)
+		}
+		if err := sendable(name, value); err != nil {
+			return nil, invalid("Line %d of %s: %s", i+1, path, failure(err).Message)
 		}
 		set = append(set, api.SecretValue{Name: name, Value: value})
 		names = append(names, name)
@@ -430,6 +478,9 @@ func (o Options) dotenv(path string) ([]api.SecretValue, error) {
 }
 
 func dotenvValue(raw string) (string, bool) {
+	// A comment starts at a "#" that begins the value or follows a space,
+	// so it is found before the surrounding space is trimmed away.
+	raw = strings.TrimLeft(raw, " \t")
 	switch {
 	case strings.HasPrefix(raw, "'"):
 		end := strings.Index(raw[1:], "'")
@@ -452,7 +503,12 @@ func dotenvValue(raw string) (string, bool) {
 					b.WriteByte('\r')
 				case 't':
 					b.WriteByte('\t')
+				case '"', '\\':
+					b.WriteByte(raw[i])
 				default:
+					// Not an escape this reader knows: keep both bytes,
+					// so the value is never silently different.
+					b.WriteByte('\\')
 					b.WriteByte(raw[i])
 				}
 			default:
@@ -461,6 +517,9 @@ func dotenvValue(raw string) (string, bool) {
 		}
 		return "", false
 	default:
+		if strings.HasPrefix(raw, "#") {
+			return "", true
+		}
 		if at := strings.Index(raw, " #"); at >= 0 {
 			raw = raw[:at]
 		}

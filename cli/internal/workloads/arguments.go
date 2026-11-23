@@ -17,7 +17,7 @@ var uuidPattern = regexp.MustCompile(`^[[:xdigit:]]{8}-[[:xdigit:]]{4}-[[:xdigit
 var commandFlags = map[string]string{
 	"repo list": "", "box list": "", "env list": "", "env show": "",
 	"env create": "branch box expires-at on-expiry resume request-key confirm-capacity-warning no-wait timeout",
-	"env start":  "confirm-capacity-warning no-wait timeout", "env stop": "no-wait timeout", "env destroy": "yes no-wait timeout",
+	"env start":  "confirm-capacity-warning no-wait timeout", "env stop": "no-wait timeout", "env restart": "all no-wait timeout", "env destroy": "yes no-wait timeout",
 	"op list": "", "op show": "", "op wait": "timeout", "op logs": "cursor follow timeout",
 }
 
@@ -57,7 +57,7 @@ func parse(args []string) (invocation, error) {
 				return v, invalid("--%s was supplied more than once.", key)
 			}
 			switch key {
-			case "no-wait", "follow", "yes", "confirm-capacity-warning":
+			case "no-wait", "follow", "yes", "all", "confirm-capacity-warning":
 				if attached {
 					return v, invalid("--%s takes no value.", key)
 				}

@@ -222,10 +222,10 @@ func TestImportReadsADotenvFile(t *testing.T) {
 		"export EXPORTED=yes",
 		"SPACED = padded value  ",
 		`DOUBLE="two words # kept\nnext \"quoted\" \\ done"`,
+		`ODD="a\qb \$HOME"`,
 		`SINGLE='raw $HOME \n # kept'`,
 		"INLINE=value # trailing comment",
 		"HASH=abc#def",
-		"EMPTYQ=\"\"",
 		"EQUALS=a=b=c",
 	}, "\n")
 	read := func(string) ([]byte, error) { return []byte(body), nil }
@@ -237,7 +237,7 @@ func TestImportReadsADotenvFile(t *testing.T) {
 	want := map[string]string{
 		"PLAIN": "value", "EXPORTED": "yes", "SPACED": "padded value",
 		"DOUBLE": "two words # kept\nnext \"quoted\" \\ done", "SINGLE": `raw $HOME \n # kept`,
-		"INLINE": "value", "HASH": "abc#def", "EMPTYQ": "", "EQUALS": "a=b=c",
+		"INLINE": "value", "HASH": "abc#def", "EQUALS": "a=b=c", "ODD": `a\qb \$HOME`,
 	}
 	if !reflect.DeepEqual(f.changes[0].set, want) || f.changes[0].scope != "repo" {
 		t.Fatalf("%+v", f.changes[0].set)
@@ -262,6 +262,10 @@ func TestImportRefusesWhatItCannotRead(t *testing.T) {
 		"junk after":     "A=\"x\" y\n",
 		"duplicate":      "A=1\nA=2\n",
 		"nothing to set": "# only a comment\n",
+		"empty quoted":   "A=\"\"\n",
+		"only a comment": "A=   # nothing before this\n",
+		"empty":          "A=\n",
+		"not utf-8":      "A=caf\xe9\n",
 		"too many":       many.String(),
 	} {
 		f := &fake{}
@@ -305,7 +309,7 @@ func TestOutputSaysWhatNeedsARestart(t *testing.T) {
 	}}
 	r := invoke(t, f, Options{}, "set", "A=1", "B=2", "--repo", repoID)
 	out := r.out.String()
-	for _, want := range []string{"Set A, B", "storefront-alice-1", envID, "foreman env stop " + envID, "2 "} {
+	for _, want := range []string{"Set A, B", "storefront-alice-1", envID, "foreman env restart " + envID, "2 "} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("missing %q in:\n%s", want, out)
 		}
@@ -330,5 +334,75 @@ func TestRemoteErrorsKeepTheirCodeAndAMissingPermissionSaysHowToGetIt(t *testing
 	var doc Failure
 	if err := json.Unmarshal(r.err.Bytes(), &doc); err != nil || doc.Code != "invalid_request" || doc.HTTPStatus != 422 || r.out.Len() != 0 {
 		t.Fatalf("%v %s", err, r.err.String())
+	}
+}
+
+func TestNothingTheCallerTypedIsRepeatedBack(t *testing.T) {
+	read := func(string) ([]byte, error) { return nil, errors.New("open sk-live-4242: no such file") }
+	for _, args := range [][]string{
+		{"unset", "TOKEN=sk-live-4242"},
+		{"set", "A=1", "--token=sk-live-4242"},
+		{"set", "A=1", "--env", "TOKEN=sk-live-4242"},
+		{"set", "A=1", "--owner", "TOKEN=sk-live-4242"},
+		{"set", "A=1", "--repo", "TOKEN=sk-live-4242"},
+		{"set", "TOKEN=@sk-live-4242"},
+		{"set", "sk-live-4242"},
+		{"list", "sk-live-4242"},
+	} {
+		f := &fake{}
+		r := invoke(t, f, Options{ReadFile: read}, args...)
+		if code(r.failure) != "invalid_invocation" || len(f.changes) != 0 {
+			t.Fatalf("%v: %v %+v", args, r.failure, f.changes)
+		}
+		if strings.Contains(r.out.String()+r.err.String(), "4242") {
+			t.Fatalf("%v repeated its operand: %s", args, r.err.String())
+		}
+	}
+}
+
+func TestLevelSelectorsMustLookLikeWhatTheyName(t *testing.T) {
+	for _, flags := range [][]string{
+		{"--env", "not-a-uuid"}, {"--env", "acme/storefront"},
+		{"--repo", "justaname"}, {"--repo", "acme/store front"}, {"--repo", "a/b/c"},
+		{"--owner", "acme/storefront"}, {"--owner", "-acme"}, {"--owner", "ac me"},
+	} {
+		f := &fake{}
+		r := invoke(t, f, Options{}, append([]string{"set", "A=1"}, flags...)...)
+		if code(r.failure) != "invalid_invocation" || len(f.changes) != 0 {
+			t.Fatalf("%v: %v %+v", flags, r.failure, f.changes)
+		}
+	}
+}
+
+func TestOneValueCanComeFromStandardInput(t *testing.T) {
+	f := &fake{}
+	r := invoke(t, f, Options{In: strings.NewReader("@starts with at\nsecond line\n")}, "set", "PIPED=-", "OTHER=x")
+	if r.failure != nil || f.changes[0].set["PIPED"] != "@starts with at\nsecond line" || f.changes[0].set["OTHER"] != "x" {
+		t.Fatalf("%v %+v", r.failure, f.changes)
+	}
+
+	f = &fake{}
+	r = invoke(t, f, Options{In: strings.NewReader("v")}, "set", "A=-", "B=-")
+	if code(r.failure) != "invalid_invocation" || len(f.changes) != 0 {
+		t.Fatalf("%v %+v", r.failure, f.changes)
+	}
+}
+
+func TestEmptyAndUnencodableValuesAreRefusedBeforeSending(t *testing.T) {
+	files := map[string]string{"empty": "", "newline": "\n", "latin1": "caf\xe9"}
+	read := func(path string) ([]byte, error) { return []byte(files[path]), nil }
+	for _, args := range [][]string{
+		{"set", "A="}, {"set", "A=@empty"}, {"set", "A=@newline"}, {"set", "A=@latin1"}, {"set", "A=caf\xe9"},
+	} {
+		f := &fake{}
+		r := invoke(t, f, Options{ReadFile: read, Prompt: func(string) (string, error) { return "", nil }}, args...)
+		if code(r.failure) != "invalid_invocation" || len(f.changes) != 0 {
+			t.Fatalf("%v: %v %+v", args, r.failure, f.changes)
+		}
+	}
+	f := &fake{}
+	r := invoke(t, f, Options{Prompt: func(string) (string, error) { return "", nil }}, "set", "ASKED")
+	if code(r.failure) != "invalid_invocation" || len(f.changes) != 0 {
+		t.Fatalf("%v %+v", r.failure, f.changes)
 	}
 }

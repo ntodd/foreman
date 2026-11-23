@@ -124,17 +124,27 @@ defmodule Foreman.Secrets do
   `{:error, {:invalid, name, message}}` for the first secret refused.
   `opts[:audit]` is merged into each audit entry, for a caller that acts
   through something worth recording (an API client, say).
+
+  `opts[:recheck]` runs inside the transaction, before anything is
+  written, and its error ends the batch: for a caller whose authority
+  was established earlier in the request and may have gone since.
+
+  Batches at one scope run one at a time, so two that touch the same
+  name can't both find it absent, or both remove it.
   """
   def apply_changes(%Scope{} = scope, scope_name, subject, set, unset, opts \\ []) do
     audit = Keyword.get(opts, :audit, %{})
+    recheck = Keyword.get(opts, :recheck, fn -> :ok end)
+
+    change = fn ->
+      with :ok <- recheck.() do
+        serialize(scope_key(scope_name, subject))
+        change_all(scope, scope_name, subject, set, unset, audit)
+      end
+    end
 
     with :ok <- authorize(scope, scope_name, subject),
-         {:ok, changed} <-
-           Foreman.Repo.transact(fn ->
-             while_live(subject, fn ->
-               change_all(scope, scope_name, subject, set, unset, audit)
-             end)
-           end) do
+         {:ok, changed} <- Foreman.Repo.transact(fn -> while_live(subject, change) end) do
       Foreman.Environments.secrets_changed(affected_environment_ids(scope_name, subject))
       {:ok, changed}
     end
@@ -157,24 +167,31 @@ defmodule Foreman.Secrets do
     end
   end
 
+  # SQLite's write transactions already run one at a time. On Postgres a
+  # lock on the scope, held to the end of the transaction, does the same.
+  defp serialize(key) do
+    unless Foreman.Repo.sqlite?() do
+      Foreman.Repo.query!("SELECT pg_advisory_xact_lock(hashtext($1))", ["secrets:" <> key])
+    end
+
+    :ok
+  end
+
   defp remove_secret(scope, scope_name, subject, name, audit) do
     key = scope_key(scope_name, subject)
 
-    case Foreman.Repo.get_by(Secret, scope_key: key, name: name) do
-      nil ->
-        false
+    with %Secret{} = secret <- Foreman.Repo.get_by(Secret, scope_key: key, name: name),
+         {1, _} <- Foreman.Repo.delete_all(from s in Secret, where: s.id == ^secret.id) do
+      Audit.log(
+        scope,
+        "secret.delete",
+        secret,
+        Map.merge(audit, %{"scope" => key, "name" => name})
+      )
 
-      secret ->
-        Foreman.Repo.delete!(secret)
-
-        Audit.log(
-          scope,
-          "secret.delete",
-          secret,
-          Map.merge(audit, %{"scope" => key, "name" => name})
-        )
-
-        true
+      true
+    else
+      _ -> false
     end
   end
 
@@ -227,7 +244,9 @@ defmodule Foreman.Secrets do
       |> Secret.changeset(attrs)
       |> Ecto.Changeset.put_change(:updated_by_id, Scope.user_id(scope))
 
-    with {:ok, saved} <- Foreman.Repo.insert_or_update(changeset) do
+    # Ecto logs a write's parameters as they were cast, before the column
+    # type encrypts them, so this write stays out of the query log.
+    with {:ok, saved} <- Foreman.Repo.insert_or_update(changeset, log: false) do
       Audit.log(
         scope,
         if(existing, do: "secret.update", else: "secret.create"),
@@ -325,7 +344,7 @@ defmodule Foreman.Secrets do
     |> Map.merge(subject_fields(to, target))
     |> Secret.changeset(Map.merge(attrs, %{"name" => secret.name, "value" => secret.value}))
     |> Ecto.Changeset.put_change(:updated_by_id, Scope.user_id(scope))
-    |> Foreman.Repo.insert()
+    |> Foreman.Repo.insert(log: false)
   end
 
   defp subject_fields("owner", %Owner{id: id}), do: %{owner_id: id}

@@ -94,7 +94,7 @@ defmodule ForemanWeb.PublicReadController do
         resource = {:secrets, Foreman.Secrets.scope_key(scope, subject)}
 
         page(
-          Secrets.listing(scope, subject),
+          Secrets.listing(p, scope, subject),
           :name,
           &Map.take(&1, [:name, :updated_at]),
           p,

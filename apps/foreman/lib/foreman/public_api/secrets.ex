@@ -12,16 +12,23 @@ defmodule Foreman.PublicAPI.Secrets do
   """
   import Ecto.Query
 
-  alias Foreman.{Repo, Repos, Scope}
+  alias Foreman.{Accounts, Repo, Repos, Scope}
   alias Foreman.Environments.Environment
   alias Foreman.OAuth.Principal
   alias Foreman.PublicAPI.Access
   alias Foreman.Secrets.Secret
 
   @max_changes 100
+  # The shape of a name, checked before anything is looked up by it. The
+  # changeset says which well-formed names are reserved.
+  @name ~r/\A[A-Za-z_][A-Za-z0-9_]{0,127}\z/
+  # Never repeats what was sent: a value pasted where a name belongs
+  # would come back in the error.
   @invalid {:error, :invalid_request,
             "Send secrets as a list of {name, value} and unset as a list of names, " <>
-              "with at least one change and at most #{@max_changes}, and each name once."}
+              "with at least one change and at most #{@max_changes}, and each name once. " <>
+              "A name starts with a letter or underscore and holds only letters, digits " <>
+              "and underscores."}
 
   @doc """
   The scope and subject a path names, for a caller who may manage it.
@@ -78,10 +85,15 @@ defmodule Foreman.PublicAPI.Secrets do
     end
   end
 
-  @doc "A scope's secrets as rows without values, for a keyset page by name."
-  def listing(scope, subject) do
+  @doc """
+  A scope's secrets as rows without values, for a keyset page by name.
+  The connection's grant is checked in the statement that reads them.
+  """
+  def listing(principal, scope, subject) do
     key = Foreman.Secrets.scope_key(scope, subject)
-    from s in Secret, where: s.scope_key == ^key, select: map(s, [:id, :name, :updated_at])
+
+    from(s in Secret, where: s.scope_key == ^key, select: map(s, [:id, :name, :updated_at]))
+    |> Access.while_connected(principal)
   end
 
   @doc """
@@ -93,20 +105,51 @@ defmodule Foreman.PublicAPI.Secrets do
     with {:ok, set, unset} <- input(params) do
       actor = Scope.for_user(principal.user)
 
-      case Foreman.Secrets.apply_changes(actor, scope, subject, set, unset,
-             audit: audit(principal)
-           ) do
+      opts = [
+        audit: audit(principal),
+        recheck: fn -> still_allowed(principal, scope, subject) end
+      ]
+
+      case Foreman.Secrets.apply_changes(actor, scope, subject, set, unset, opts) do
         {:ok, changed} ->
           {:ok, Map.merge(changed, pending(principal, scope, subject))}
 
         {:error, {:invalid, name, message}} ->
           {:error, :invalid_request, "#{name}: #{message}"}
 
+        {:error, :role} ->
+          {:error, :role}
+
         # The subject was the caller's a moment ago: it has just been
-        # destroyed, or their role has just changed.
-        {:error, :unauthorized} ->
+        # destroyed, or the connection has just been revoked.
+        {:error, _} ->
           {:error, :resource_not_found, "Resource not found."}
       end
+    end
+  end
+
+  # Authentication and `subject/3` ran before the transaction opened, and
+  # a repository lookup can wait on GitHub in between. Inside it, with
+  # the rows locked: the grant is still live, an admin is still one, and
+  # an environment is still the caller's to reach.
+  defp still_allowed(principal, scope, subject) do
+    cond do
+      not Access.connected?(principal) ->
+        {:error, :missing}
+
+      scope in ["repo", "owner"] ->
+        case Accounts.lock_admin(Scope.for_user(principal.user)) do
+          {:ok, _} -> :ok
+          _ -> {:error, :role}
+        end
+
+      scope == "environment" ->
+        if Repo.exists?(Access.live_environments(principal, subject.id)),
+          do: :ok,
+          else: {:error, :missing}
+
+      true ->
+        :ok
     end
   end
 
@@ -115,7 +158,8 @@ defmodule Foreman.PublicAPI.Secrets do
          {:ok, set} <- pairs(Map.get(params, "secrets", [])),
          {:ok, unset} <- names(Map.get(params, "unset", [])),
          all = Enum.map(set, &elem(&1, 0)) ++ unset,
-         true <- all != [] and length(all) <= @max_changes and all == Enum.uniq(all) do
+         true <- all != [] and length(all) <= @max_changes and all == Enum.uniq(all),
+         true <- Enum.all?(all, &Regex.match?(@name, &1)) do
       {:ok, set, unset}
     else
       _ -> @invalid
@@ -149,12 +193,17 @@ defmodule Foreman.PublicAPI.Secrets do
   # Environments of the caller's are named, since the caller can see
   # those; everyone else's are only counted.
   defp pending(principal, scope, subject) do
-    waiting =
-      from e in Environment,
-        where: e.id in ^Foreman.Secrets.affected_environment_ids(scope, subject),
-        where: e.pending_restart and is_nil(e.destroyed_at)
+    ids = Foreman.Secrets.affected_environment_ids(scope, subject)
 
-    own = from e in waiting, where: e.user_id == ^principal.user.id, order_by: e.slug
+    waiting =
+      from e in Environment, where: e.id in ^ids and e.pending_restart and is_nil(e.destroyed_at)
+
+    # Named only if the connection could list it: one on a box no longer
+    # shared with the caller is theirs, and still not theirs to see here.
+    own =
+      from e in Access.live_environments(principal),
+        where: e.id in ^ids and e.pending_restart,
+        order_by: e.slug
 
     %{
       pending_restart: Repo.all(from e in own, select: map(e, [:id, :slug])),

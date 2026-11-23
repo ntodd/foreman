@@ -506,6 +506,37 @@ defmodule Foreman.SecretsTest do
       assert Enum.all?(events, &(&1.metadata["scope"] == "environment:" <> env.id))
     end
 
+    test "a value never reaches the query log, set either way", %{user: user, env: env} do
+      u = Scope.for_user(user)
+      level = Logger.level()
+      Logger.configure(level: :debug)
+      on_exit(fn -> Logger.configure(level: level) end)
+
+      log =
+        ExUnit.CaptureLog.capture_log([level: :debug], fn ->
+          {:ok, _} = Secrets.apply_changes(u, "environment", env, [{"A", "hunter2-batch"}], [])
+
+          {:ok, _} =
+            Secrets.put_secret(u, "user", user, %{"name" => "B", "value" => "hunter2-one"})
+
+          {:ok, _} = Secrets.apply_changes(u, "environment", env, [{"A", "hunter2-again"}], [])
+        end)
+
+      # The capture is live: the audit rows written beside the secrets are in it.
+      assert log =~ "audit_events"
+      refute log =~ "hunter2"
+    end
+
+    test "an in-transaction check can still refuse the batch", %{user: user, env: env} do
+      u = Scope.for_user(user)
+      refuse = fn -> {:error, :role} end
+
+      assert {:error, :role} =
+               Secrets.apply_changes(u, "environment", env, [{"A", "1"}], [], recheck: refuse)
+
+      assert Repo.aggregate(Secret, :count) == 0
+    end
+
     test "a destroyed environment takes no changes", %{user: user, env: env} do
       env = env |> Ecto.Changeset.change(destroyed_at: DateTime.utc_now()) |> Repo.update!()
 

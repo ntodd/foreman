@@ -20,11 +20,12 @@ defmodule Foreman.PublicAPI.MutationInput do
 
   def create(_), do: invalid("The create body must be an object.")
 
-  def action(%{"action" => action} = input) when action in ~w(start stop destroy) do
+  def action(%{"action" => action} = input)
+      when action in ~w(start stop destroy restart_affected restart_all) do
     with :ok <- only(input, ~w(action confirm_capacity_warning)), do: confirmation(input)
   end
 
-  def action(_), do: invalid("Choose start, stop or destroy.")
+  def action(_), do: invalid("Choose start, stop, destroy, restart_affected or restart_all.")
 
   def uuid(value) when is_binary(value) and byte_size(value) == 36 do
     case Ecto.UUID.cast(value) do

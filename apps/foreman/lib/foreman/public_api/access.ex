@@ -136,6 +136,10 @@ defmodule Foreman.PublicAPI.Access do
   """
   def connected?(principal), do: Foreman.Repo.exists?(matching_grants(principal))
 
+  @doc "Narrows a query to nothing unless the connection's grant is still live."
+  def while_connected(query, principal),
+    do: where(query, exists(subquery(matching_grants(principal))))
+
   defp matching_grants(principal) do
     from g in OAuth.live_grants(),
       where:
