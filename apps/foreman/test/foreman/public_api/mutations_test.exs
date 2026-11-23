@@ -393,9 +393,30 @@ defmodule Foreman.PublicAPI.MutationsTest do
     :ok = Foreman.Agents.handle_event(ctx.box.id, inventory)
     refute Foreman.Agents.LifecycleState.confirmed?(env, "running")
     assert_receive {:dispatch, %{type: "box.inventory", op_id: probe}}
-    {:ok, result} = ForemanProtocol.Event.new("op.result", %{op_id: probe, status: "ok", result: %{"environments" => Enum.map(entries, fn entry -> Map.new(entry, fn {k,v} -> {to_string(k),v} end) end)}})
+
+    {:ok, buffered} = ForemanProtocol.Event.new("env.state", %{env_id: env.id, state: "running"})
+    :ok = Foreman.Agents.handle_event(ctx.box.id, buffered)
+    :ok = Foreman.Agents.handle_event(ctx.box.id, inventory)
+    refute_received {:dispatch, _}
+    refute Foreman.Agents.LifecycleState.confirmed?(env, "running")
+
+    {:ok, failed} = ForemanProtocol.Event.new("op.result", %{op_id: probe, status: "error"})
+    :ok = Foreman.Agents.handle_event(ctx.box.id, failed)
+    :ok = Foreman.Agents.handle_event(ctx.box.id, inventory)
+    assert_receive {:dispatch, %{type: "box.inventory", op_id: retry}}
+    refute Foreman.Agents.LifecycleState.confirmed?(env, "running")
+
+    {:ok, result} =
+      ForemanProtocol.Event.new("op.result", %{
+        op_id: retry,
+        status: "ok",
+        result: ForemanProtocol.Event.to_wire(inventory)["payload"]
+      })
+
     :ok = Foreman.Agents.handle_event(ctx.box.id, result)
-    assert {:ok, _, nil} = Mutations.operate(ctx.actor, env.id, "verified", %{"action" => "start"})
+
+    assert {:ok, _, nil} =
+             Mutations.operate(ctx.actor, env.id, "verified", %{"action" => "start"})
   end
 
   test "a queued start of an errored workspace reserves its boot allocation", ctx do

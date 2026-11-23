@@ -194,6 +194,7 @@ defmodule Foreman.Agents do
             if offer && op.status == "succeeded",
               do: Environments.deliver_offer(op.id, offer)
 
+            LifecycleState.inventory_result(box_id, payload)
             LifecycleState.result(box_id, op, env)
             Environments.after_result(op, env)
 
@@ -216,10 +217,15 @@ defmodule Foreman.Agents do
   end
 
   def handle_event(box_id, %Event{type: "box.inventory", payload: %{environments: envs}}) do
-    Environments.reconcile_inventory(box_id, envs)
+    if LifecycleState.receiving?(box_id),
+      do: Environments.reconcile_inventory(box_id, envs),
+      else: refresh_inventory(box_id)
   end
 
   def handle_event(box_id, %Event{type: "box.stats", payload: stats}) do
+    # Stats arrive periodically even when inventory never changes, so a lost
+    # first probe can recover without another reconnect.
+    refresh_inventory(box_id)
     slugs = Environments.live_slugs_for_box(box_id)
     stats = %{stats | environments: Map.take(stats.environments, Map.keys(slugs))}
 
@@ -259,7 +265,15 @@ defmodule Foreman.Agents do
   end
 
   def handle_event(box_id, %Event{type: "env.state", payload: %{env_id: env_id, state: state}}) do
-    Environments.observe(box_id, env_id, state)
+    if LifecycleState.receiving?(box_id),
+      do: Environments.observe(box_id, env_id, state),
+      else: :ok
+  end
+
+  defp refresh_inventory(box_id) do
+    LifecycleState.refresh_inventory(box_id, fn ->
+      send_box_command(%Scope{}, %{id: box_id}, "box.inventory", %{})
+    end)
   end
 
   defp owns_op(box_id, op_id) do

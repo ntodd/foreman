@@ -46,6 +46,7 @@ defmodule Foreman.Environments.Environment do
     field :connect_hooks, {:array, :map}, default: []
     field :tailscale_device_id, :string
     field :ts_authkey, Foreman.Encrypted.Binary, redact: true
+    field :initial_create_deferred, :boolean, default: false
     field :created_once, :boolean, default: false
     field :token_pushed_at, :utc_datetime_usec
     field :api_grant_id, :binary_id
@@ -160,6 +161,7 @@ defmodule Foreman.Environments.Environment do
       :connect_hooks,
       :tailscale_device_id,
       :ts_authkey,
+      :initial_create_deferred,
       :created_once,
       :token_pushed_at,
       :expiry_consumed_at,
