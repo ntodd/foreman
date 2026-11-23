@@ -27,6 +27,7 @@ defmodule Foreman.Environments.Environment do
     field :last_guest_oom_at, :utc_datetime
     field :last_guest_oom_processes, {:array, :string}, default: []
     field :status_message, :string
+    field :boot_reserved, :boolean, virtual: true, default: false
     field :vm_size, :map
     field :cpu_limit, :float
     field :memory_limit_mb, :integer
@@ -46,8 +47,13 @@ defmodule Foreman.Environments.Environment do
     field :connect_hooks, {:array, :map}, default: []
     field :tailscale_device_id, :string
     field :ts_authkey, Foreman.Encrypted.Binary, redact: true
+    field :initial_create_deferred, :boolean, default: false
     field :created_once, :boolean, default: false
     field :token_pushed_at, :utc_datetime_usec
+    field :api_grant_id, :binary_id
+    field :expiry_at, :utc_datetime_usec
+    field :expiry_action, :string
+    field :expiry_consumed_at, :utc_datetime_usec
     field :destroyed_at, :utc_datetime_usec
     # Set by `Environments.record_result/1` when an up applied secrets the
     # files on the box still say have changed.
@@ -79,6 +85,9 @@ defmodule Foreman.Environments.Environment do
       :user_id,
       :box_id,
       :branch,
+      :api_grant_id,
+      :expiry_at,
+      :expiry_action,
       :cpu_limit,
       :memory_limit_mb
     ])
@@ -153,8 +162,10 @@ defmodule Foreman.Environments.Environment do
       :connect_hooks,
       :tailscale_device_id,
       :ts_authkey,
+      :initial_create_deferred,
       :created_once,
       :token_pushed_at,
+      :expiry_consumed_at,
       :destroyed_at
     ])
     |> validate_inclusion(:desired_state, @desired)

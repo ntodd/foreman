@@ -84,7 +84,7 @@ defmodule Foreman.Environments.Server do
           Agents.cancel_operation(op, nil)
         else
           env = Repo.get!(Environment, env_id)
-          if op.action in @needs_files, do: rewrite_secrets(env)
+          if op.action in @needs_files and op.command != "env.create", do: rewrite_secrets(env)
           resend_op(op, env)
         end
 
@@ -114,11 +114,23 @@ defmodule Foreman.Environments.Server do
     env = Repo.get(Environment, env_id)
 
     cond do
-      is_nil(env) -> :ok
-      Operations.in_flight(env_id) -> :ok
-      not Boxes.online?(env.box_id) -> :ok
-      op = Operations.next_queued(env_id, env.created_once) -> dispatch(op, env)
-      true -> :ok
+      is_nil(env) ->
+        :ok
+
+      Operations.in_flight(env_id) ->
+        :ok
+
+      not Boxes.online?(env.box_id) ->
+        :ok
+
+      Foreman.Jobs.EnvironmentExpiry.due?(env) ->
+        if op = Foreman.Jobs.EnvironmentExpiry.next_due(env_id), do: dispatch(op, env)
+
+      op = Operations.next_queued(env_id, env.created_once) ->
+        dispatch(op, env)
+
+      true ->
+        :ok
     end
   end
 
@@ -154,23 +166,36 @@ defmodule Foreman.Environments.Server do
   end
 
   defp send_claimed(op, cmd, env, state) do
-    updated =
-      if state,
-        do: Environments.update_env!(env, %{observed_state: state, status_message: nil}),
-        else: env
-
+    if state, do: Environments.mark_dispatch_state(op, env, state)
     Foreman.Operations.Redactions.put(op.id, cmd, env)
 
     case Agents.dispatch(env.box_id, cmd) do
-      :ok ->
-        :ok
-
-      # Gone since the check: back to the queue, and to the state it was in.
-      {:error, :offline} ->
-        Operations.mark(op, "queued", dispatched_at: nil)
-        if state, do: Environments.update_env!(updated, %{observed_state: env.observed_state})
-        :ok
+      :ok -> :ok
+      {:error, :offline} -> release_claim(op, state)
     end
+  end
+
+  # Releasing the operation and restoring its environment are one decision.
+  # A sibling can have fulfilled the expiry since this operation was claimed.
+  defp release_claim(op, state) do
+    Repo.transact(fn ->
+      with {:ok, queued} <- Operations.release_claim(op), true <- is_binary(state) do
+        current = Environments.locked_environment(op.environment_id)
+
+        cond do
+          op.trigger == "expiry" and not is_nil(current.expiry_consumed_at) ->
+            Operations.cancel_queued(queued)
+
+          current.observed_state == state ->
+            Environments.update_env!(current, %{observed_state: op.args["prior_state"]})
+
+          true ->
+            :ok
+        end
+      end
+
+      {:ok, :ok}
+    end)
   end
 
   # Rebuilds the command (current secrets and token) and sends it again.

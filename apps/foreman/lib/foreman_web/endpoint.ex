@@ -51,7 +51,7 @@ defmodule ForemanWeb.Endpoint do
   plug Plug.RequestId
   plug Plug.Telemetry, event_prefix: [:phoenix, :endpoint], log: {__MODULE__, :log_level, []}
 
-  plug Plug.Parsers,
+  plug ForemanWeb.Plugs.RequestParsers,
     parsers: [:urlencoded, :multipart, :json],
     pass: ["*/*"],
     length: 2_000_000,

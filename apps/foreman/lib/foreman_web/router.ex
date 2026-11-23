@@ -37,6 +37,8 @@ defmodule ForemanWeb.Router do
   scope "/api/v1", ForemanWeb do
     pipe_through [:api, :oauth_bearer]
     get "/me", IdentityController, :show
+    post "/environments", EnvironmentMutationController, :create
+    post "/environments/:id/operations", EnvironmentMutationController, :operate
   end
 
   scope "/", ForemanWeb do

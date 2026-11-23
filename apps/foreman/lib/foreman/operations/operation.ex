@@ -12,6 +12,8 @@ defmodule Foreman.Operations.Operation do
     belongs_to :environment, Foreman.Environments.Environment
     belongs_to :box, Foreman.Boxes.Box
     belongs_to :user, Foreman.Accounts.User
+    field :api_grant_id, :binary_id
+    field :trigger, :string, default: "request"
     field :action, :string
     field :command, :string
     field :args, :map
