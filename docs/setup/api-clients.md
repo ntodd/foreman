@@ -29,3 +29,9 @@ Under **Admin → API clients**, enter a service name and select the granted act
 Save the installation client ID and the one-time client secret in the app backend. To obtain a 15-minute bearer, authenticate the client ID and secret using HTTP Basic at the discovered token endpoint and send an `application/x-www-form-urlencoded` body with `grant_type=client_credentials`. The optional space-separated `scope` requests a subset of the installation permissions. This exchange issues access tokens only. Clients can inspect their acting identity with `GET /api/v1/me`.
 
 Rotate a secret from the installation's entry on the same admin page. Rotation invalidates the previous secret and outstanding access tokens. Disabling an installation also revokes its grant and keeps its service ID, resource selections and tailnet tags visible for follow-up. Disabling its installer leaves the service active.
+
+## Offboarding workloads and SSH
+
+Disabling a user or service stops new workload commands and credential renewals. Running environments stay up. A GitHub credential already copied into a guest keeps its original expiry. Administrators can still stop or destroy environments, and scheduled expiry continues.
+
+Foreman guests use Tailscale SSH. Revoking a Tailscale SSH rule can close established sessions, so Foreman records outstanding SSH removal under **Admin → People**. For a service, **Admin → API clients** also links to the pending removal. Review the identity, groups, service tags and SSH rules with your tailnet administrator. Coordinate changes with active session owners, verify that the offboarded identity cannot start a new connection and confirm administrator access. Select **Acknowledge removal** after verification. [Tailscale SSH user revocation](https://tailscale.com/docs/features/tailscale-ssh#user-revocation)

@@ -32,8 +32,9 @@ defmodule ForemanWeb.OAuthAdminHTML do
               {Enum.join(install.network_policy["tailscale_tags"], ", ")}
             </dd>
           </dl>
-          <p :if={client.disabled_at}>
-            Review SSH access for these tags with your tailnet administrator.
+          <p :if={install.user.ssh_removal_id}>
+            Tailnet SSH removal is pending.
+            <.link href={~p"/admin/users#ssh-removals"} class="underline">Review and acknowledge removal</.link>
           </p>
           <.form
             :if={!client.disabled_at}

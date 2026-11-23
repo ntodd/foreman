@@ -9,14 +9,63 @@ defmodule Foreman.Environments.Commands do
   """
 
   alias Foreman.{Accounts, Config, GitHub, Prebuilds, Repo, Secrets, Tailscale}
-  alias Foreman.Environments.Environment
+  alias Foreman.Environments.{Environment, WorkloadAccess}
   alias Foreman.Operations.Operation
   alias ForemanProtocol.Command
 
   require Logger
 
-  @spec build(Operation.t(), Environment.t()) :: {:ok, Command.t(), map()} | {:error, String.t()}
-  def build(%Operation{action: "connect"} = op, %Environment{} = env) do
+  @spec build(Operation.t(), Environment.t()) ::
+          {:ok, Command.t(), map()} | {:error, String.t() | :unauthorized} | :retry | :superseded
+  def build(%Operation{} = op, %Environment{} = env) do
+    with {:ok, cmd, extra, _policy} <- prepare(op, env), do: {:ok, cmd, extra}
+  end
+
+  def prepare(op, env) do
+    env = Repo.preload(Repo.reload!(env), [:user, :box, repo: :owner])
+
+    with {:ok, access} <- WorkloadAccess.authorize(op, env),
+         {:ok, cmd, extra} <- build_authorized(op, env, access),
+         {secrets, extra} = Map.pop(extra, :selected_secrets),
+         prepared = Map.put(access, :material, material(env, access.policy, cmd, secrets)),
+         :ok <- recheck(op, env, prepared) do
+      {:ok, cmd, extra, prepared}
+    end
+  end
+
+  defp material(_env, _policy, _cmd, nil), do: nil
+
+  defp material(env, policy, cmd, {options, hashes, source}) do
+    enrollment =
+      if tailscale = cmd.payload[:tailscale],
+        do: {tailscale, {env.ts_authkey, env.ts_authkey_tags, env.tailscale_device_id}}
+
+    %{
+      options: options,
+      hashes: hashes,
+      settings: WorkloadAccess.settings(env, policy),
+      enrollment: enrollment,
+      source: source
+    }
+  end
+
+  # Repeat remote membership checks after a potentially slow credential mint,
+  # then use the original verified queries for the final local handoff.
+  defp recheck(op, env, prepared) do
+    env = Repo.preload(Repo.reload!(env), [:user, :box, repo: :owner])
+
+    with {:ok, current} <- WorkloadAccess.authorize(op, env),
+         true <- current.policy == prepared.policy,
+         {:ok, retained} <- WorkloadAccess.authorize(op, env, prepared),
+         true <- retained.policy == prepared.policy do
+      if WorkloadAccess.current_material?(env, prepared, false), do: :ok, else: :retry
+    else
+      false -> :retry
+      other -> other
+    end
+  end
+
+  defp build_authorized(%{action: "connect"} = op, env, _policy) do
     command(
       op,
       "env.connect",
@@ -24,20 +73,18 @@ defmodule Foreman.Environments.Commands do
     )
   end
 
-  # Expiry can stop the initial create before it ever reaches the box. Its
-  # first later start provisions the already-reserved environment.
-  def build(%Operation{action: "start", command: "env.create"} = op, env),
-    do: build(%{op | action: "create"}, env)
+  # A start can be the first physical boot after expiry deferred creation.
+  # Keep the start operation for authorization while building a create command.
+  defp build_authorized(%{action: "start", command: "env.create"} = op, env, access),
+    do: up(op, env, access, "create")
 
-  def build(%Operation{} = op, %Environment{} = env) do
-    env = Repo.preload(env, [:user, :box, repo: :owner])
-
+  defp build_authorized(op, env, %{policy: policy} = access) do
     case op.action do
       action when action in ["create", "rebuild", "pull_rebuild"] ->
-        up(op, env)
+        up(op, env, access, action)
 
       "start" ->
-        with_secrets(env, fn s ->
+        with_secrets(env, policy, fn s ->
           payload =
             base(env)
             |> with_start_limits(env)
@@ -54,12 +101,14 @@ defmodule Foreman.Environments.Commands do
         command(op, "env." <> action, base(env))
 
       "restart_all" ->
-        with_secrets(env, fn s -> command(op, "env.restart", restart(env, "all", [], s)) end)
+        with_secrets(env, policy, fn s ->
+          command(op, "env.restart", restart(env, "all", [], s))
+        end)
 
       # Everything changed since the environment last came up, as of now:
       # secrets can change between the click and the send.
       "restart_affected" ->
-        with_secrets(env, fn s ->
+        with_secrets(env, policy, fn s ->
           changed =
             Secrets.changed_names(env.applied_secret_hashes, s.hashes)
             |> Enum.concat(op.args["changed"] || [])
@@ -70,7 +119,7 @@ defmodule Foreman.Environments.Commands do
         end)
 
       "secrets_write" ->
-        secrets_write(op, env)
+        secrets_write(op, env, policy)
 
       "git_status" ->
         command(op, "env.git_status", base(env))
@@ -94,26 +143,32 @@ defmodule Foreman.Environments.Commands do
     |> put_present(:registry_auth, up_registry_auth(env, s))
   end
 
-  defp with_secrets(env, fun) do
-    secrets = secrets(env, fn -> elem(github_token(env), 0) end)
+  defp with_secrets(env, policy, fun) do
+    secrets = secrets(env, policy, fn -> github_token(env, policy) end)
 
     with {:ok, cmd, extra} <- fun.(secrets) do
-      {:ok, cmd, Map.put(extra, "secret_hashes", secrets.hashes)}
+      {:ok, cmd,
+       Map.put(extra, "secret_hashes", secrets.hashes)
+       |> Map.put(:selected_secrets, {secrets.options, secrets.hashes, secrets.source})}
     end
   end
 
   # Pull and rebuild is a rebuild that fast-forwards the clone first. A
   # create starts from the box's prebuild of the repo's branch, if it has
   # one the user may start from.
-  defp up_command("create", env, token) do
+  # Prebuild disks can contain layers fetched with the owner's registry credential.
+  # Foreman does not have a complete dependency manifest for these disks.
+  defp up_command("create", _env, _token, policy) when not is_nil(policy), do: {"env.create", %{}}
+
+  defp up_command("create", env, token, nil) do
     case prebuild_id(env, token) do
       nil -> {"env.create", %{}}
       prebuild_id -> {"env.create", %{prebuild_id: prebuild_id}}
     end
   end
 
-  defp up_command("rebuild", _env, _token), do: {"env.rebuild", %{}}
-  defp up_command("pull_rebuild", _env, _token), do: {"env.rebuild", %{pull: true}}
+  defp up_command("rebuild", _env, _token, _policy), do: {"env.rebuild", %{}}
+  defp up_command("pull_rebuild", _env, _token, _policy), do: {"env.rebuild", %{pull: true}}
 
   # A prebuild holds the repo's content (and its extra repos'), cloned with
   # the app's token, so the user's own token has to show it reads all of it
@@ -130,16 +185,19 @@ defmodule Foreman.Environments.Commands do
     end
   end
 
-  defp up(op, env) do
+  defp up(op, env, %{policy: policy} = access, action) do
     # A build shouldn't wait on GitHub: without a token it goes ahead, and
     # the token follows with the next refresh.
-    {token, token_notice, token_status} = github_token(env)
-    {type, extra} = up_command(op.action, env, token)
-    secrets = secrets(env, fn -> token end)
-    identity = Accounts.effective_identity(env.user, env.repo)
-    features = features(env)
+    {token, token_notice, token_status, source} = credential = github_token(env, policy)
+    {type, extra} = up_command(action, env, token, policy)
+    secrets = secrets(env, policy, fn -> credential end)
+    identity = identity(env, policy)
+    features = features(env, policy)
 
-    with {:ok, ts_key, env} <- tailscale_key(env, op) do
+    tags = if Tailscale.configured?(), do: tags(env, policy), else: []
+
+    with :ok <- before_enrollment(env, op, access),
+         {:ok, ts_key} <- tailscale_key(env, op, tags) do
       files =
         file_set(env, secrets, identity, token, token_notice)
         |> put_present("ts-authkey", ts_key)
@@ -156,8 +214,7 @@ defmodule Foreman.Environments.Commands do
           limits: limits(env),
           tailscale: %{
             enabled: Tailscale.configured?(),
-            tags:
-              if(Tailscale.configured?(), do: Tailscale.tags_for(env.repo, env.user), else: [])
+            tags: tags
           }
         })
         |> put_present(:dotfiles, dotfiles(identity))
@@ -168,6 +225,7 @@ defmodule Foreman.Environments.Commands do
       with {:ok, cmd, _} <- command(op, type, payload) do
         {:ok, cmd,
          %{
+           :selected_secrets => {secrets.options, secrets.hashes, source},
            "secret_hashes" => secrets.hashes,
            "token" => token != nil,
            "token_retry" => token_status == :unavailable
@@ -182,24 +240,30 @@ defmodule Foreman.Environments.Commands do
   # keep the token it has; one on protocol 1 loses it until the next
   # refresh, which this puts first in line. (An expired login is
   # different: that token is dead, and the notice says to sign in again.)
-  defp secrets_write(op, env) do
-    {token, notice, status} = github_token(env)
-    secrets = secrets(env, fn -> token end)
-    identity = Accounts.effective_identity(env.user, env.repo)
+  defp secrets_write(op, env, policy) do
+    {token, notice, status, source} = credential = github_token(env, policy)
+    secrets = secrets(env, policy, fn -> credential end)
+    identity = identity(env, policy)
 
     payload =
       %{env_id: env.id, files: file_set(env, secrets, identity, token, notice)}
-      |> put_present(:keep, keep_token(env, status))
+      |> put_present(:keep, keep_token(env, status, policy))
 
     with {:ok, cmd, _} <- command(op, "env.secrets.write", payload) do
-      {:ok, cmd, %{"token" => token != nil, "token_retry" => status == :unavailable}}
+      {:ok, cmd,
+       %{
+         :selected_secrets => {secrets.options, secrets.hashes, source},
+         "token" => token != nil,
+         "token_retry" => status == :unavailable
+       }}
     end
   end
 
-  defp keep_token(%{box: %{protocol_version: v}}, :unavailable) when is_integer(v) and v >= 2,
-    do: ["github-token"]
+  defp keep_token(%{box: %{protocol_version: v}}, :unavailable, nil)
+       when is_integer(v) and v >= 2,
+       do: ["github-token"]
 
-  defp keep_token(_env, _status), do: nil
+  defp keep_token(_env, _status, _policy), do: nil
 
   defp command(op, type, payload) do
     case Command.new(type, payload, op_id: op.id) do
@@ -214,24 +278,54 @@ defmodule Foreman.Environments.Commands do
   defp compose_env(values),
     do: Map.reject(values, fn {name, _} -> ForemanProtocol.Schema.reserved_env?(name) end)
 
-  defp secrets(env, get_token) do
-    shared? = share_credentials?(env, get_token)
-    values = Secrets.resolve(env, include_shared: shared?)
-    auth = if shared?, do: registry_auth(env.repo.owner)
-    %{values: values, hashes: Secrets.hashes(values), registry_auth: auth}
+  defp identity(_env, %{principal: %{kind: :service_account}}),
+    do: %{git_name: nil, git_email: nil, dotfiles_repository: nil}
+
+  defp identity(env, _policy), do: Accounts.effective_identity(env.user, env.repo)
+
+  defp tags(_env, %{tags: tags}), do: tags
+  defp tags(env, _policy), do: Tailscale.tags_for(env.repo, env.user)
+
+  defp secrets(env, %{secret_ids: ids}, _get_token) do
+    values = Secrets.resolve(env, approved_ids: ids)
+
+    %{
+      values: values,
+      hashes: Secrets.hashes(values),
+      registry_auth: nil,
+      source: nil,
+      options: [approved_ids: ids]
+    }
   end
 
-  defp share_credentials?(env, get_token) do
+  defp secrets(env, policy, get_token) do
+    {shared?, source} = share_credentials(env, get_token)
+    values = Secrets.resolve(env, include_shared: shared?)
+    auth = if shared? and is_nil(policy), do: registry_auth(env.repo.owner)
+
+    %{
+      values: values,
+      hashes: Secrets.hashes(values),
+      registry_auth: auth,
+      source: source,
+      options: [include_shared: shared?]
+    }
+  end
+
+  defp share_credentials(env, get_token) do
     cond do
       not GitHub.configured?() ->
-        true
+        {true, nil}
 
       is_nil(env.repo.owner.registry_token) and not Secrets.shared?(env) ->
-        false
+        {false, nil}
 
       true ->
-        token = get_token.()
-        is_binary(token) and GitHub.can_read?(token, env.repo, [])
+        {token, _, _, source} = get_token.()
+
+        if is_binary(token) and GitHub.can_read?(token, env.repo, []),
+          do: {true, source},
+          else: {false, nil}
     end
   end
 
@@ -270,52 +364,66 @@ defmodule Foreman.Environments.Commands do
     [pending, token_notice] |> Enum.reject(&is_nil/1) |> Enum.join()
   end
 
-  # {token, notice, status}: status is :ok, :expired (sign in again) or
+  # {token, notice, status, source credential version}: status is :ok, :expired (sign in again) or
   # :unavailable (GitHub failed this time; try again later).
-  defp github_token(env) do
+  defp github_token(env, policy) do
     if GitHub.configured?() do
-      case GitHub.environment_token(env.user, env.repo) do
-        {:ok, token} ->
-          {token, nil, :ok}
+      case workload_token(env, policy) do
+        {:ok, token, source} ->
+          {token, nil, :ok, source}
+
+        {:error, :contents_disabled} ->
+          {nil, "Foreman: repository policy disables GitHub contents access for this workload.\n",
+           :disabled, nil}
 
         {:error, :login_expired} ->
           {nil,
            "Foreman: your GitHub login expired, so git push and gh won't work here. Sign in to Foreman again to fix it.\n",
-           :expired}
+           :expired, nil}
 
         {:error, reason} ->
           Logger.warning("couldn't get a GitHub token for #{env.slug}: #{inspect(reason)}")
 
           {nil,
            "Foreman: couldn't get a GitHub token for this environment just now, so git push and gh won't work yet. Foreman will try again shortly.\n",
-           :unavailable}
+           :unavailable, nil}
       end
     else
-      {nil, nil, :ok}
+      {nil, nil, :ok, nil}
     end
+  end
+
+  defp workload_token(env, nil), do: GitHub.environment_credential(env.user, env.repo)
+
+  defp workload_token(env, policy) do
+    with {:ok, token} <- GitHub.workload_token(policy.principal, env.repo, policy.repository_ids),
+         do: {:ok, token, nil}
+  end
+
+  defp before_enrollment(env, op, access) do
+    if Tailscale.configured?(), do: recheck(op, env, Map.put(access, :material, nil)), else: :ok
   end
 
   # A new node needs an auth key on its first boot only; the node's state
   # volume keeps its identity after that. A rebuild can also be the first
   # boot with Tailscale enabled. A failed build drops its
   # key (keys expire after a day), so the next attempt gets a fresh one.
-  defp tailscale_key(env, %Operation{action: action, status: status})
-       when action == "create" or
+  defp tailscale_key(env, %Operation{action: action, command: command, status: status}, tags)
+       when action == "create" or command == "env.create" or
               (action in ["rebuild", "pull_rebuild"] and is_nil(env.tailscale_device_id)) do
     cond do
       not Tailscale.configured?() ->
-        {:ok, nil, env}
+        {:ok, nil}
 
       # Reconnects resend the same operation. A newly queued build can
       # inherit an expired key from an older control plane's failed build.
-      env.ts_authkey && status in ["dispatched", "running"] ->
-        {:ok, env.ts_authkey, env}
+      env.ts_authkey && status in ["dispatched", "running"] && env.ts_authkey_tags == tags ->
+        {:ok, env.ts_authkey}
 
       true ->
-        case Tailscale.create_auth_key(env, env.repo, env.user) do
+        case Tailscale.create_auth_key(env, tags) do
           {:ok, %{key: key}} ->
-            env = env |> Environment.state_changeset(%{ts_authkey: key}) |> Repo.update!()
-            {:ok, key, env}
+            {:ok, key}
 
           {:error, reason} ->
             {:error, "couldn't create a Tailscale auth key: #{inspect(reason)}"}
@@ -323,7 +431,7 @@ defmodule Foreman.Environments.Commands do
     end
   end
 
-  defp tailscale_key(env, _op), do: {:ok, env.ts_authkey, env}
+  defp tailscale_key(_env, _op, _tags), do: {:ok, nil}
 
   defp with_start_limits(payload, %{box: %{protocol_version: v}} = env)
        when is_integer(v) and v >= 7,
@@ -347,10 +455,12 @@ defmodule Foreman.Environments.Commands do
 
   # Protocol 3. An older agent would refuse the whole command, so its
   # environments build without them until it updates.
-  defp features(%{box: %{protocol_version: v}} = env) when is_integer(v) and v >= 3,
+  defp features(_env, %{principal: %{kind: :service_account}}), do: %{}
+
+  defp features(%{box: %{protocol_version: v}} = env, _policy) when is_integer(v) and v >= 3,
     do: Accounts.effective_features(env.user, env.repo)
 
-  defp features(_env), do: %{}
+  defp features(_env, _policy), do: %{}
 
   defp registry_auth(%{registry_token: token} = owner) when is_binary(token) do
     [%{host: owner.registry_host || "ghcr.io", username: owner.registry_username, token: token}]

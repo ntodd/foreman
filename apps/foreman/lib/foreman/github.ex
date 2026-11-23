@@ -146,10 +146,17 @@ defmodule Foreman.GitHub do
       user = Accounts.get_user!(user_id)
 
       cond do
-        user.disabled_at || user.service_account -> {{:error, :login_expired}, false}
-        fresh?(user, min_life) -> {{:ok, user.access_token}, false}
-        is_nil(user.refresh_token) -> {{:error, :login_expired}, false}
-        true -> refresh(user)
+        user.disabled_at || user.workload_access_revoked_at || user.service_account ->
+          {{:error, :login_expired}, false}
+
+        fresh?(user, min_life) ->
+          {{:ok, user.access_token}, false}
+
+        is_nil(user.refresh_token) ->
+          {{:error, :login_expired}, false}
+
+        true ->
+          refresh(user)
       end
     end)
   end
@@ -262,29 +269,103 @@ defmodule Foreman.GitHub do
   user's own token when the repo is set to `broad`. The token lasts until
   the environment's next scheduled one.
   """
-  def environment_token(%User{} = user, %Repos.Repo{} = repo) do
+  def environment_token(user, repo) do
+    with {:ok, value, _source} <- environment_credential(user, repo), do: {:ok, value}
+  end
+
+  @doc false
+  def environment_credential(%User{} = user, %Repos.Repo{} = repo) do
     repo = Foreman.Repo.preload(repo, :owner)
 
-    with {:ok, token} <- user_token(user, @environment_token_life) do
-      case repo.token_mode do
-        "broad" ->
-          {:ok, token}
-
-        _scoped ->
-          repos = Repos.token_repos(repo)
-
-          permissions =
-            Repos.TokenPermissions.request(
-              Repos.Repo.permissions(repo),
-              repo.owner.installation_permissions
-            )
-
-          with {:ok, %{token: scoped}} <-
-                 client().scope_user_token(app(), token, repo.owner.login, repos, permissions) do
-            {:ok, scoped}
-          end
-      end
+    with {:ok, token} <- user_token(user, @environment_token_life),
+         {:ok, credential} <- browser_credential(token, repo),
+         %User{disabled_at: nil, workload_access_revoked_at: nil} = current <-
+           Accounts.get_user(user.id),
+         true <-
+           current.access_generation == user.access_generation and current.access_token == token,
+         true <- Accounts.access(current) != :denied do
+      {:ok, credential, credential_version(token)}
+    else
+      {:error, _} = error -> error
+      _ -> {:error, :login_expired}
     end
+  end
+
+  @doc false
+  def credential_version(token) when is_binary(token), do: :crypto.hash(:sha256, token)
+  def credential_version(nil), do: nil
+
+  defp browser_credential(token, %{token_mode: "broad"}), do: {:ok, token}
+  defp browser_credential(token, repo), do: scope_token(token, repo, Repos.token_repos(repo))
+
+  @doc "Issue an API workspace credential for the authorized GitHub repository IDs."
+  def workload_token(principal, repo, [primary | _] = ids)
+      when is_integer(primary) and primary == repo.github_id do
+    with {:ok, current} <- active_workload_grant(principal),
+         {:ok, credential} <- issue_workload_token(current, repo, ids),
+         {:ok, _} <- active_workload_grant(principal) do
+      {:ok, credential}
+    end
+  end
+
+  defp active_workload_grant(principal) do
+    case Foreman.OAuth.authorize_grant(principal.grant_id) do
+      {:ok, current}
+      when current.user.id == principal.user.id and
+             is_nil(current.user.workload_access_revoked_at) ->
+        {:ok, current}
+
+      _ ->
+        {:error, :unauthorized}
+    end
+  end
+
+  defp issue_workload_token(%{kind: :service_account}, %{owner: %{installation_id: nil}}, _),
+    do: {:error, :not_installed}
+
+  defp issue_workload_token(%{kind: :service_account} = principal, repo, requested_ids) do
+    import Ecto.Query
+    ids = Foreman.OAuth.ServiceAccounts.repo_ids(principal, repo.id)
+
+    approved =
+      Foreman.Repo.all(
+        from r in Repos.Repo,
+          where:
+            r.id in ^ids and r.owner_id == ^repo.owner_id and is_nil(r.removed_at) and
+              (not r.archived or r.id == ^repo.id),
+          select: r.github_id
+      )
+
+    cond do
+      not Enum.all?(requested_ids, &(&1 in approved)) -> {:error, :unauthorized}
+      token_permissions(repo)["contents"] not in ["read", "write"] -> {:error, :contents_disabled}
+      true -> client().repo_read_token(app(), repo.owner.installation_id, {:ids, requested_ids})
+    end
+  end
+
+  defp issue_workload_token(%{kind: :user} = principal, repo, ids) do
+    with {:ok, token} <- user_token(principal.user, @environment_token_life),
+         {:ok, _} <- Foreman.OAuth.authorize_grant(principal.grant_id),
+         do: scope_token(token, repo, {:ids, ids}),
+         else: (
+           :error -> {:error, :unauthorized}
+           error -> error
+         )
+  end
+
+  def token_permissions(repo) do
+    Repos.TokenPermissions.request(
+      Repos.Repo.permissions(repo),
+      repo.owner.installation_permissions
+    )
+  end
+
+  defp scope_token(token, repo, names) do
+    permissions = token_permissions(repo)
+
+    with {:ok, %{token: scoped}} <-
+           client().scope_user_token(app(), token, repo.owner.login, names, permissions),
+         do: {:ok, scoped}
   end
 
   @doc """

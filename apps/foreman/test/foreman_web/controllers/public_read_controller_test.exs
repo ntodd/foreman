@@ -34,6 +34,33 @@ defmodule ForemanWeb.PublicReadControllerTest do
     json_response(apply(PublicReadController, action, [conn, params]), status)
   end
 
+  test "denial during reconnect remains an authorization failure on public reads", ctx do
+    {_actor, grant} =
+      Foreman.PublicAPIMutationFixtures.principal(ctx.principal.user, ["environments:start"])
+
+    op =
+      op(ctx.env, %{
+        action: "start",
+        command: "env.start",
+        status: "dispatched",
+        user_id: grant.user_id,
+        api_grant_id: grant.id,
+        dispatched_at: DateTime.utc_now()
+      })
+
+    Foreman.OAuth.revoke_grant(grant.id)
+    Foreman.Environments.Server.resend(ctx.env.id, op.id)
+    params = %{"id" => op.id}
+
+    assert %{"status" => "failed", "error" => %{"code" => "workload_unauthorized"}} =
+             read(ctx.principal, :operation, params)
+
+    assert {:ok, _} = Operations.finish(op.id, "ok", %{}, nil)
+
+    assert %{"status" => "failed", "error" => %{"code" => "workload_unauthorized"}} =
+             read(ctx.principal, :operation, params)
+  end
+
   defp op(env, attrs) do
     Map.merge(
       %{environment_id: env.id, box_id: env.box_id, action: "create", command: "env.create"},

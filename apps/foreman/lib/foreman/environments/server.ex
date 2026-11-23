@@ -17,7 +17,8 @@ defmodule Foreman.Environments.Server do
   use GenServer, restart: :temporary
 
   alias Foreman.{Agents, Boxes, Environments, Operations, Repo}
-  alias Foreman.Environments.{Commands, Environment}
+  alias Foreman.Environments.{Commands, Environment, WorkloadAccess}
+  alias Foreman.Operations.Operation
 
   require Logger
 
@@ -79,12 +80,11 @@ defmodule Foreman.Environments.Server do
     case Operations.get(op_id) do
       # Someone asked for it to stop, and the cancel may have been lost with
       # the connection. Sending the operation again would run it.
-      %{status: status} = op when status in ["dispatched", "running"] ->
+      %{status: status, environment_id: ^env_id} = op when status in ["dispatched", "running"] ->
         if Operations.cancel_requested?(op) do
           Agents.cancel_operation(op, nil)
         else
           env = Repo.get!(Environment, env_id)
-          if op.action in @needs_files and op.command != "env.create", do: rewrite_secrets(env)
           resend_op(op, env)
         end
 
@@ -93,22 +93,42 @@ defmodule Foreman.Environments.Server do
     end
   end
 
-  defp rewrite_secrets(env) do
-    op =
-      Operations.create!(%{
-        id: Ecto.UUID.generate(),
-        environment_id: env.id,
-        box_id: env.box_id,
-        action: "secrets_write",
-        command: "env.secrets.write",
-        args: %{}
-      })
+  defp rewrite_secrets(env, original) do
+    op = %Operation{
+      id: Ecto.UUID.generate(),
+      environment_id: env.id,
+      box_id: env.box_id,
+      user_id: original.user_id,
+      api_grant_id: original.api_grant_id,
+      action: "secrets_write",
+      command: "env.secrets.write",
+      args: %{}
+    }
 
-    dispatch(op, env)
+    # The source operation owns retries. A temporary verification outage must not
+    # leave detached file writes behind for each reconnect.
+    with {:ok, cmd, extra, policy} <- Commands.prepare(op, env) do
+      dispatch_built(Repo.insert!(op), env, cmd, extra, policy)
+    end
   end
 
   @impl true
   def handle_info(:timeout, env_id), do: {:noreply, env_id, :hibernate}
+
+  def handle_info({:retry, op_id}, env_id) do
+    case Operations.get(op_id) do
+      %{status: "queued"} -> dispatch_next(env_id)
+      %{status: status} when status in ["dispatched", "running"] -> do_resend(env_id, op_id)
+      _ -> :ok
+    end
+
+    {:noreply, env_id, @idle_timeout}
+  end
+
+  defp retry(op) do
+    unless sync?(), do: Process.send_after(self(), {:retry, op.id}, 30_000)
+    :retry
+  end
 
   defp dispatch_next(env_id) do
     env = Repo.get(Environment, env_id)
@@ -127,7 +147,9 @@ defmodule Foreman.Environments.Server do
         if op = Foreman.Jobs.EnvironmentExpiry.next_due(env_id), do: dispatch(op, env)
 
       op = Operations.next_queued(env_id, env.created_once) ->
-        dispatch(op, env)
+        if Environments.supersede_queued_shutdown(op),
+          do: dispatch_next(env_id),
+          else: dispatch(op, env)
 
       true ->
         :ok
@@ -139,24 +161,34 @@ defmodule Foreman.Environments.Server do
     dispatch_next(env.id)
   end
 
+  defp dispatch(%{action: "secrets_write"} = op, %{desired_state: state} = env)
+       when state in ["stopped", "destroyed"] do
+    Operations.cancel_queued(op)
+    dispatch_next(env.id)
+  end
+
   # Builds the command fresh (current secrets and token), takes the
   # operation off the queue and records the transitional state, then
   # sends. The state goes first so a fast result can't be overwritten by
   # it; the state it replaced is kept so a failed stop can go back to it.
   defp dispatch(op, env) do
-    case Commands.build(op, env) do
-      {:ok, cmd, extra} ->
-        state = Environments.transitional_state(op.action)
-        extra = if state, do: Map.put(extra, "prior_state", env.observed_state), else: extra
+    case Commands.prepare(op, env) do
+      {:ok, cmd, extra, policy} ->
+        dispatch_built(op, env, cmd, extra, policy)
 
-        case Operations.claim(op,
-               dispatched_at: DateTime.utc_now(),
-               args: Map.merge(op.args || %{}, extra)
-             ) do
-          {:ok, op} -> send_claimed(op, cmd, env, state)
-          # Cancelled since it was read.
-          :error -> dispatch_next(env.id)
-        end
+      :retry ->
+        retry(op)
+
+      :superseded ->
+        Operations.cancel_queued(op)
+        dispatch_next(env.id)
+
+      {:error, :unauthorized} ->
+        with {:ok, failed} <-
+               Operations.deny_workload(op, :queued),
+             do: Environments.dispatch_denied(failed, env)
+
+        :denied
 
       {:error, message} ->
         Logger.warning("couldn't send #{op.action} for #{env.slug}: #{message}")
@@ -165,38 +197,106 @@ defmodule Foreman.Environments.Server do
     end
   end
 
-  defp send_claimed(op, cmd, env, state) do
-    if state, do: Environments.mark_dispatch_state(op, env, state)
-    Foreman.Operations.Redactions.put(op.id, cmd, env)
+  defp dispatch_built(op, env, cmd, extra, policy) do
+    state = Environments.transitional_state(op.action)
+    extra = if state, do: Map.put(extra, "prior_state", env.observed_state), else: extra
 
-    case Agents.dispatch(env.box_id, cmd) do
-      :ok -> :ok
-      {:error, :offline} -> release_claim(op, state)
+    case Operations.claim(op,
+           dispatched_at: DateTime.utc_now(),
+           args: Map.merge(op.args || %{}, extra)
+         ) do
+      {:ok, op} -> send_claimed(op, cmd, env, state, policy)
+      # Cancelled since it was read.
+      :error -> dispatch_next(env.id)
     end
   end
 
-  # Releasing the operation and restoring its environment are one decision.
-  # A sibling can have fulfilled the expiry since this operation was claimed.
-  defp release_claim(op, state) do
-    Repo.transact(fn ->
-      with {:ok, queued} <- Operations.release_claim(op), true <- is_binary(state) do
-        current = Environments.locked_environment(op.environment_id)
+  defp send_claimed(op, cmd, env, state, policy) do
+    if state, do: Environments.mark_dispatch_state(op, env, state)
 
-        cond do
-          op.trigger == "expiry" and not is_nil(current.expiry_consumed_at) ->
-            Operations.cancel_queued(queued)
+    Foreman.Operations.Redactions.put(op.id, cmd, env)
 
-          current.observed_state == state ->
-            Environments.update_env!(current, %{observed_state: op.args["prior_state"]})
+    case deliver(op, env, cmd, policy) do
+      :ok ->
+        :ok
 
-          true ->
-            :ok
-        end
+      :superseded ->
+        settle_claim(op, state, &Operations.cancel_unsent/1)
+        dispatch_next(env.id)
+        :ok
+
+      {:error, :unauthorized} ->
+        with {:ok, failed} <- settle_claim(op, state, &Operations.deny_workload(&1, :claimed)),
+             do: Environments.dispatch_denied(failed, env)
+
+        {:error, :unauthorized}
+
+      :retry ->
+        settle_claim(op, state, &Operations.release_claim/1)
+        retry(op)
+
+      # Gone since the check: back to the queue, and to the state it was in.
+      {:error, :offline} ->
+        settle_claim(op, state, &Operations.release_claim/1)
+        :ok
+    end
+  end
+
+  defp deliver(op, env, cmd, policy, phase \\ :dispatch) do
+    WorkloadAccess.deliver(op, env, policy, phase, fn current ->
+      with :ok <- Agents.dispatch(current.box_id, cmd) do
+        remember_enrollment(cmd.payload, current)
+        bind_workload_grant(op, current)
+        :ok
       end
-
-      {:ok, :ok}
     end)
   end
+
+  defp remember_enrollment(%{files: %{"ts-authkey" => key}, tailscale: %{tags: tags}}, env)
+       when env.ts_authkey != key or env.ts_authkey_tags != tags do
+    Environments.update_env!(env, %{ts_authkey: key, ts_authkey_tags: tags})
+  end
+
+  defp remember_enrollment(_payload, _env), do: :ok
+
+  defp deny_reconnect(op, env) do
+    with {:ok, failed} <- Operations.deny_workload(op, :reconnect),
+         do: Environments.dispatch_denied(failed, env)
+  end
+
+  defp bind_workload_grant(%{action: "start", api_grant_id: id}, env)
+       when not is_nil(id) and env.workload_grant_id != id do
+    Environments.update_env!(env, %{workload_grant_id: id})
+  end
+
+  defp bind_workload_grant(_op, _env), do: :ok
+
+  # Only the winner of the operation transition may restore its transient state.
+  # A sibling can have fulfilled an expiry while this claim was being prepared.
+  defp settle_claim(op, state, transition) do
+    Repo.transact(fn ->
+      case transition.(op) do
+        {:ok, settled} ->
+          if state,
+            do: restore_unsent(settled, Environments.locked_environment(op.environment_id), state)
+
+          {:ok, settled}
+
+        :error ->
+          {:error, :already_settled}
+      end
+    end)
+  end
+
+  defp restore_unsent(%{trigger: "expiry", status: status} = op, %{expiry_consumed_at: at}, _)
+       when not is_nil(at) do
+    if status == "queued", do: Operations.cancel_queued(op)
+  end
+
+  defp restore_unsent(op, %{observed_state: state} = env, state),
+    do: Environments.update_env!(env, %{observed_state: op.args["prior_state"]})
+
+  defp restore_unsent(_op, _env, _state), do: :ok
 
   # Rebuilds the command (current secrets and token) and sends it again.
   # If it can't be rebuilt, it fails rather than sitting there as if it
@@ -206,11 +306,32 @@ defmodule Foreman.Environments.Server do
   # a token) replaces what the first send recorded, since that's what the
   # result will be judged against. The state before it began stays.
   defp resend_op(op, env) do
-    case Commands.build(op, env) do
-      {:ok, cmd, extra} ->
+    result =
+      with {:ok, _} <- WorkloadAccess.authorize(op, env),
+           :ok <- resend_files(op, env),
+           do: Commands.prepare(op, env)
+
+    case result do
+      {:ok, cmd, extra, policy} ->
         Foreman.Operations.refresh_args(op, Map.delete(extra, "prior_state"))
         Foreman.Operations.Redactions.put(op.id, cmd, env)
-        Agents.dispatch(env.box_id, cmd)
+
+        case deliver(op, env, cmd, policy, :reconnect) do
+          :retry -> retry(op)
+          {:error, :unauthorized} -> deny_reconnect(op, env)
+          other -> other
+        end
+
+      :retry ->
+        retry(op)
+
+      # The agent already owns this command. Its result still settles this
+      # operation even when a sibling has fulfilled the same expiry.
+      :superseded ->
+        :ok
+
+      {:error, :unauthorized} ->
+        deny_reconnect(op, env)
 
       {:error, message} ->
         Logger.warning("couldn't resend #{op.action} for #{env.slug}: #{message}")
@@ -219,4 +340,11 @@ defmodule Foreman.Environments.Server do
              do: Environments.after_result(op, env)
     end
   end
+
+  defp resend_files(%{action: action, command: command} = op, env)
+       when action in @needs_files and command != "env.create" do
+    rewrite_secrets(env, op)
+  end
+
+  defp resend_files(_op, _env), do: :ok
 end

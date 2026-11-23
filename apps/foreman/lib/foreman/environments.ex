@@ -17,11 +17,23 @@ defmodule Foreman.Environments do
   import Ecto.Query
 
   alias Foreman.Boxes.Box
-  alias Foreman.Environments.{Environment, Server}
+  alias Foreman.Environments.{Environment, Server, WorkloadAccess}
   alias Foreman.Jobs.EnvironmentExpiry
   alias ForemanProtocol.Connect
   alias Foreman.Repos.Repo, as: GitRepo
-  alias Foreman.{Activity, Agents, Audit, Capacity, GitHub, Operations, Repo, Scope, Secrets}
+
+  alias Foreman.{
+    Accounts,
+    Activity,
+    Agents,
+    Audit,
+    Capacity,
+    GitHub,
+    Operations,
+    Repo,
+    Scope,
+    Secrets
+  }
 
   require Logger
 
@@ -522,7 +534,7 @@ defmodule Foreman.Environments do
     "start" => ~w(stop suspend),
     "restart_affected" => ~w(stop suspend),
     "restart_all" => ~w(stop suspend),
-    "stop" => ~w(start restart_affected restart_all suspend),
+    "stop" => ~w(start restart_affected restart_all suspend secrets_write),
     "suspend" => ~w(start restart_affected restart_all stop)
   }
 
@@ -563,6 +575,50 @@ defmodule Foreman.Environments do
   end
 
   @doc false
+  def supersede_queued_shutdown(%{trigger: "request", action: action, api_grant_id: grant} = op)
+      when action in ["stop", "destroy"] and not is_nil(grant) do
+    # Check at queue selection as an undelivered claim can return to the
+    # queue after the administrator's request. Keep each request's identity.
+    candidates =
+      from s in Foreman.Operations.Operation,
+        join: u in assoc(s, :user),
+        where:
+          s.environment_id == ^op.environment_id and s.action == ^action and s.status == "queued",
+        where: s.trigger == "request" and is_nil(s.api_grant_id) and u.role == "admin",
+        where: is_nil(u.workload_access_revoked_at) and is_nil(u.disabled_at),
+        order_by: [s.inserted_at, s.id],
+        select: {s, u}
+
+    {:ok, retired?} =
+      Repo.transact(fn ->
+        candidates = if Repo.sqlite?(), do: candidates, else: lock(candidates, "FOR UPDATE")
+
+        # Lock the replacement against cancellation and check its effective
+        # local authority before changing either operation. The actual send
+        # still goes through its ordinary delivery checks.
+        admin =
+          Enum.find(Repo.all(candidates), fn {_, user} ->
+            match?({:ok, _}, Accounts.lock_admin(Scope.for_user(user)))
+          end)
+
+        with {replacement, _} <- admin, {:ok, _} <- Operations.cancel_queued(op) do
+          # Cancelling the replacement before it leaves must restore the
+          # intent that the original request superseded.
+          prior = Map.take(op.args || %{}, ["prior_desired", "prior_authority"])
+          args = Map.merge(prior, replacement.args || %{})
+          replacement |> Ecto.Changeset.change(args: args) |> Repo.update!()
+          {:ok, true}
+        else
+          _ -> {:ok, false}
+        end
+      end)
+
+    retired?
+  end
+
+  def supersede_queued_shutdown(_op), do: false
+
+  @doc false
   def locked_environment(id) do
     query = from e in Environment, where: e.id == ^id
     Repo.one(if Repo.sqlite?(), do: query, else: lock(query, "FOR UPDATE"))
@@ -570,30 +626,17 @@ defmodule Foreman.Environments do
 
   @doc false
   def queue_action(scope, env, action, args, opts \\ []) do
-    desired =
-      case action do
-        :stop ->
-          "stopped"
-
-        # Nothing starts it but a start, and a box that still says it's
-        # running is told to suspend it, not stop it.
-        :suspend ->
-          "suspended"
-
-        :destroy ->
-          "destroyed"
-
-        a when a in [:create, :start, :rebuild, :pull_rebuild, :restart_affected, :restart_all] ->
-          "running"
-
-        _ ->
-          env.desired_state
-      end
+    name = Atom.to_string(action)
+    desired = desired_for(name) || env.desired_state
 
     # Remembered so cancelling the operation can put the wish back.
     args =
       if desired != env.desired_state,
-        do: Map.put(args, "prior_desired", env.desired_state),
+        do:
+          Map.merge(args, %{
+            "prior_desired" => env.desired_state,
+            "prior_authority" => env.desired_authority
+          }),
         else: args
 
     # What the user saw when they clicked. The command adds anything that
@@ -603,12 +646,26 @@ defmodule Foreman.Environments do
         do: Map.put(args, "changed", env.pending_changes),
         else: args
 
+    # Reconciliation can happen long after operation history has been pruned.
+    # Keep the authority for this desired state until another lifecycle request replaces it.
     env =
-      if desired != env.desired_state,
-        do: update_env!(env, %{desired_state: desired}),
-        else: env
+      if desired_for(name) do
+        authority =
+          if opts[:api_grant_id] || Scope.user_id(scope) != env.user_id do
+            %{
+              "action" => name,
+              "user_id" => Scope.user_id(scope),
+              "grant_id" => opts[:api_grant_id],
+              "trigger" => Keyword.get(opts, :trigger, "request")
+            }
+          end
 
-    name = Atom.to_string(action)
+        if env.desired_state == desired and env.desired_authority == authority,
+          do: env,
+          else: update_env!(env, %{desired_state: desired, desired_authority: authority})
+      else
+        env
+      end
 
     env = prepare_queue(env, name, opts[:trigger])
 
@@ -621,7 +678,7 @@ defmodule Foreman.Environments do
   end
 
   defp prepare_queue(env, "stop", "expiry") do
-    cancelled = cancel_queued(env, &(&1 in @up or &1 == "suspend"))
+    cancelled = cancel_queued(env, &(&1 in @up or &1 in ["suspend", "secrets_write"]))
 
     if not env.created_once and Enum.any?(cancelled, &(&1.action == "create")),
       do: update_env!(env, %{initial_create_deferred: true}),
@@ -719,18 +776,36 @@ defmodule Foreman.Environments do
 
   @doc false
   def enqueue(env, action, args, user, opts \\ []) do
-    op = queue_operation(env, action, args, user, opts)
-    Server.kick(env.id)
-    op
+    if user || WorkloadAccess.automatic_active?(env, action) do
+      op = queue_operation(env, action, args, user, opts)
+      Server.kick(env.id)
+      op
+    end
   end
 
   @doc false
   def queue_operation(env, action, args, user, opts \\ []) do
+    actor_id = user && user.id
+    grant_id = opts[:api_grant_id]
+    trigger = Keyword.get(opts, :trigger, "request")
+
+    actor_filter =
+      if actor_id, do: dynamic([o], o.user_id == ^actor_id), else: dynamic([o], is_nil(o.user_id))
+
+    grant_filter =
+      if grant_id,
+        do: dynamic([o], o.api_grant_id == ^grant_id),
+        else: dynamic([o], is_nil(o.api_grant_id))
+
     existing =
       Keyword.get(opts, :dedupe, true) &&
         Repo.one(
           from o in Foreman.Operations.Operation,
-            where: o.environment_id == ^env.id and o.action == ^action and o.status == "queued",
+            where:
+              o.environment_id == ^env.id and o.action == ^action and o.status == "queued" and
+                o.trigger == ^trigger,
+            where: ^actor_filter,
+            where: ^grant_filter,
             limit: 1
         )
 
@@ -952,6 +1027,26 @@ defmodule Foreman.Environments do
     |> Oban.insert()
   end
 
+  @doc "Settle a denied command without applying a fictitious VM result."
+  def dispatch_denied(op, env) do
+    args = op.args || %{}
+    # A later queued action owns its own desired state.
+    if desired_for(op.action) == env.desired_state and is_binary(args["prior_desired"]) and
+         not lifecycle_active?(env.id) do
+      update_env!(env, %{
+        desired_state: args["prior_desired"],
+        desired_authority: args["prior_authority"]
+      })
+    end
+
+    if op.action == "create" and not env.created_once do
+      update_env!(env, %{observed_state: "error", status_message: op.error})
+    end
+
+    broadcast(env)
+    Server.kick(env.id)
+  end
+
   @doc "What follows a recorded result: tell the UI, clean up, send the next operation."
   def after_result(_op, nil), do: :ok
   def after_result(_op, {:prebuilds, _, _} = sends), do: Foreman.Prebuilds.after_result(sends)
@@ -1137,7 +1232,9 @@ defmodule Foreman.Environments do
        when status == "cancelled" or (status == "failed" and action == "suspend") do
     case args do
       %{"prior_desired" => prior} when is_binary(prior) ->
-        if env.desired_state == desired_for(action), do: %{desired_state: prior}, else: %{}
+        if env.desired_state == desired_for(action),
+          do: %{desired_state: prior, desired_authority: args["prior_authority"]},
+          else: %{}
 
       _ ->
         %{}
@@ -1280,18 +1377,28 @@ defmodule Foreman.Environments do
         id -> where(query, [e], e.user_id == ^id)
       end
 
-    query =
-      case opts[:older_than] do
-        nil -> query
-        cutoff -> where(query, [e], is_nil(e.token_pushed_at) or e.token_pushed_at < ^cutoff)
-      end
-
-    for env <- Repo.all(query) do
+    for env <- Repo.all(refresh_due(query, opts)) do
       args = if env.created_once, do: %{}, else: %{"after_first_create" => true}
       enqueue(env, "secrets_write", args, nil)
     end
 
     :ok
+  end
+
+  defp refresh_due(query, opts) do
+    case opts[:older_than] do
+      nil ->
+        query
+
+      cutoff ->
+        service_cutoff = opts[:service_older_than] || cutoff
+
+        from e in query,
+          join: u in assoc(e, :user),
+          where:
+            is_nil(e.token_pushed_at) or e.token_pushed_at < ^cutoff or
+              (u.service_account and e.token_pushed_at < ^service_cutoff)
+    end
   end
 
   # -- reconciliation ------------------------------------------------------------------

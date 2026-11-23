@@ -73,7 +73,7 @@ Example create body (the expiry is an absolute UTC instant):
 
 A ready workspace has a successful devcontainer setup result for the same container ID that its box currently sees running. A failed sidecar can leave the environment partially running while its workspace is ready. A disconnected box, an unreachable guest, or a box without a fresh workspace report yields unknown readiness. Environment connection fields require `environments:read`, including on a collection response.
 
-The v1 operation history includes create, start, stop and destroy. When Foreman times out an operation it reports a terminal `failed` with error code `operation_timeout`. A late agent result can correct the environment's observed state when that operation still controls it. The public operation keeps its timeout outcome.
+The v1 operation history includes create, start, stop and destroy. When Foreman times out an operation it reports a terminal `failed` with error code `operation_timeout`. A late agent result can correct the environment's observed state when that operation still controls it. The public operation keeps its timeout outcome. If workload authorization is withdrawn before dispatch or reconnect, the operation reports a terminal `failed` with `workload_unauthorized`. A late result for an earlier delivery may still reconcile the environment while that public outcome stays final.
 
 Proposed create errors:
 

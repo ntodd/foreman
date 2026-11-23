@@ -9,7 +9,7 @@ defmodule Foreman.Accounts do
   """
   import Ecto.Query
 
-  alias Foreman.Accounts.{RepoSetting, Session, User}
+  alias Foreman.Accounts.{RepoSetting, Session, SSHRemovals, User}
   alias Foreman.{Audit, Repo, Scope}
 
   @session_days 30
@@ -170,6 +170,7 @@ defmodule Foreman.Accounts do
       (current || %User{})
       |> User.github_changeset(attrs)
       |> Ecto.Changeset.change(role_attrs(current, login, config))
+      |> Ecto.Changeset.change(workload_access_revoked_at: nil)
 
     with {:ok, user} <- Repo.insert_or_update(changeset) do
       Audit.log(user, "user.sign_in", user)
@@ -266,6 +267,12 @@ defmodule Foreman.Accounts do
   def revoke_access(%User{id: id} = user, reason) do
     {:ok, :revoked} =
       Repo.transact(fn ->
+        {changed, _} =
+          from(u in User, where: u.id == ^id and is_nil(u.workload_access_revoked_at))
+          |> Repo.update_all(set: [workload_access_revoked_at: DateTime.utc_now()])
+
+        if changed == 1, do: SSHRemovals.record!(user)
+
         from(u in User, where: u.id == ^id)
         |> Repo.update_all(
           inc: [access_generation: 1],
@@ -344,7 +351,7 @@ defmodule Foreman.Accounts do
       current = Repo.one_for_update(from u in User, where: u.id == ^user.id)
 
       cond do
-        current.disabled_at || current.service_account ->
+        current.disabled_at || current.workload_access_revoked_at || current.service_account ->
           {:error, :login_expired}
 
         current.access_generation != user.access_generation or
@@ -456,10 +463,7 @@ defmodule Foreman.Accounts do
           end
 
         with {:ok, updated} <- Repo.update(changeset) do
-          if updated.disabled_at do
-            delete_user_sessions(updated)
-            Foreman.OAuth.revoke_user(updated.id)
-          end
+          if updated.disabled_at, do: disable_access(current, updated, attrs)
 
           Audit.log(
             scope,
@@ -474,6 +478,12 @@ defmodule Foreman.Accounts do
 
     if match?({:ok, _}, result), do: disconnect_live_views(user)
     result
+  end
+
+  defp disable_access(previous, user, attrs) do
+    delete_user_sessions(user)
+    if attrs[:disabled_at] && !previous.disabled_at, do: SSHRemovals.record!(user)
+    Foreman.OAuth.revoke_user(user.id)
   end
 
   # Open LiveViews hold the scope they mounted with. `:access_changed`

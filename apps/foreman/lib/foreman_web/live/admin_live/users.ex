@@ -6,10 +6,31 @@ defmodule ForemanWeb.AdminLive.Users do
   use ForemanWeb, :live_view
 
   alias Foreman.Accounts
+  alias Foreman.Accounts.SSHRemovals
 
   @impl true
   def mount(_params, _session, socket) do
-    {:ok, socket |> assign(:page_title, "People") |> assign(:users, Accounts.list_users())}
+    if connected?(socket), do: schedule_ssh_review()
+    {:ok, socket |> assign(:page_title, "People") |> refresh()}
+  end
+
+  @impl true
+  def handle_info(:refresh_ssh_removals, socket) do
+    schedule_ssh_review()
+    {:noreply, assign(socket, :ssh_removals, SSHRemovals.outstanding())}
+  end
+
+  defp schedule_ssh_review, do: Process.send_after(self(), :refresh_ssh_removals, 10_000)
+
+  defp refresh(socket) do
+    socket
+    |> assign(:users, Accounts.list_users())
+    |> assign(:ssh_removals, SSHRemovals.outstanding())
+  end
+
+  @impl true
+  def handle_event("acknowledge_ssh", %{"id" => id}, socket) do
+    respond(socket, SSHRemovals.acknowledge(socket.assigns.current_scope, id))
   end
 
   @impl true
@@ -29,7 +50,7 @@ defmodule ForemanWeb.AdminLive.Users do
   end
 
   defp respond(socket, {:ok, _}),
-    do: {:noreply, socket |> assign(:users, Accounts.list_users()) |> put_flash(:info, "Saved.")}
+    do: {:noreply, socket |> refresh() |> put_flash(:info, "Saved.")}
 
   defp respond(socket, {:error, :self}),
     do: {:noreply, put_flash(socket, :error, "You can't change your own access.")}
@@ -58,6 +79,39 @@ defmodule ForemanWeb.AdminLive.Users do
           Everyone who has signed in. Who may sign in is set by FOREMAN_ADMINS, FOREMAN_ALLOWED_USERS and FOREMAN_ALLOWED_ORG.
         </:subtitle>
       </.header>
+
+      <section
+        :if={@ssh_removals != []}
+        id="ssh-removals"
+        class="mb-5 rounded-xl border border-line bg-raised p-5"
+      >
+        <h2 class="font-medium text-ink">Pending SSH access removal</h2>
+        <p class="mt-2 text-sm text-ink-2">
+          These identities may still open new SSH sessions. Ask your tailnet administrator to
+          review their Tailscale identities, groups and tags, remove SSH access to Foreman
+          environments, and verify that a new login is denied and admins can still connect.
+          Tailscale policy changes can end active SSH sessions. Coordinate the change with session owners.
+        </p>
+        <ul class="mt-3 divide-y divide-line">
+          <li
+            :for={removal <- @ssh_removals}
+            class="flex flex-wrap items-center justify-between gap-3 py-2"
+          >
+            <span class="break-all text-sm font-medium">{removal.login}<span
+              :if={removal.name}
+              class="text-ink-3"
+            > · {removal.name}</span></span>
+            <.button
+              size="sm"
+              variant="secondary"
+              phx-click="acknowledge_ssh"
+              phx-value-id={removal.id}
+            >
+              Acknowledge removal
+            </.button>
+          </li>
+        </ul>
+      </section>
 
       <section class="rounded-xl border border-line bg-raised shadow-xs">
         <ul class="divide-y divide-line">
