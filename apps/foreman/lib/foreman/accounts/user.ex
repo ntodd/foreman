@@ -5,6 +5,7 @@ defmodule Foreman.Accounts.User do
   @roles ~w(admin member)
 
   schema "users" do
+    field :access_generation, :integer, default: 0
     field :service_account, :boolean, default: false
     field :github_id, :integer
     field :login, :string
@@ -23,6 +24,8 @@ defmodule Foreman.Accounts.User do
     field :dotfiles_install_command, :string
     field :dotfiles_target_path, :string
     field :devcontainer_features, :map, default: %{}
+    field :workload_access_revoked_at, :utc_datetime_usec
+    field :ssh_removal_id, :binary_id
     field :disabled_at, :utc_datetime_usec
     timestamps()
   end

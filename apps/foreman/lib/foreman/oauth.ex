@@ -18,13 +18,38 @@ defmodule Foreman.OAuth do
   end
 
   def live_grants do
-    now = DateTime.utc_now()
-
+    # The issuer uses the application clock for token deadlines. A retained
+    # query must also expire on the database clock when the statement runs.
     from g in Grant,
       join: c in assoc(g, :client),
       join: u in assoc(g, :user),
       where: is_nil(g.revoked_at) and is_nil(c.disabled_at) and is_nil(u.disabled_at),
-      where: is_nil(g.expires_at) or g.expires_at > ^now
+      where: ^unexpired_grant(DateTime.utc_now())
+  end
+
+  defp unexpired_grant(issuer_now) do
+    if Repo.sqlite?() do
+      # Both Ecto ISO timestamps and space-separated SQLite timestamps are UTC.
+      # SQLite resolves milliseconds; expire ambiguous submillisecond ties.
+      issuer_utc = issuer_now |> DateTime.to_naive() |> NaiveDateTime.to_string()
+
+      dynamic(
+        [g],
+        is_nil(g.expires_at) or
+          fragment(
+            "replace(rtrim(?, 'Z'), 'T', ' ') > max(?, strftime('%Y-%m-%d %H:%M:%f', 'now') || '999')",
+            g.expires_at,
+            ^issuer_utc
+          )
+      )
+    else
+      dynamic(
+        [g],
+        is_nil(g.expires_at) or
+          (g.expires_at > ^issuer_now and
+             g.expires_at > fragment("statement_timestamp() AT TIME ZONE 'UTC'"))
+      )
+    end
   end
 
   defp principal(grant) do

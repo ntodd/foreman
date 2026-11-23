@@ -1,9 +1,10 @@
 defmodule Foreman.Jobs.RefreshTokens do
   @moduledoc """
   Scoped GitHub tokens can't be refreshed, and the user tokens they come
-  from last 8 hours, so every environment gets a freshly scoped token
+  from last 8 hours, so a personal environment gets a freshly scoped token
   (with its other files) when its last one is over four hours old. Each
-  token it gets lasts at least five (`GitHub.environment_token/2`).
+  token it gets normally lasts at least five (`GitHub.environment_token/2`).
+  Service accounts use one-hour installation tokens and renew earlier.
 
   Environments of users whose own token has expired or will before the
   next run are pushed to as well, whatever their age, so one that was
@@ -22,7 +23,11 @@ defmodule Foreman.Jobs.RefreshTokens do
   def perform(_job) do
     if Foreman.GitHub.configured?() do
       now = DateTime.utc_now()
-      Foreman.Environments.push_secrets(older_than: DateTime.add(now, -4 * 3600))
+      # Installation tokens last an hour. This sweep runs twice an hour.
+      Foreman.Environments.push_secrets(
+        older_than: DateTime.add(now, -4 * 3600),
+        service_older_than: DateTime.add(now, -15, :minute)
+      )
 
       for user_id <- users_with_expiring_tokens(DateTime.add(now, @next_run)),
           do: Foreman.Environments.push_secrets(user_id: user_id)

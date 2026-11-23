@@ -108,7 +108,12 @@ defmodule Foreman.GitHub.Client.Req do
   def scope_user_token(app, token, target, repos, permissions) do
     req = api(auth: {:basic, "#{app.client_id}:#{app.client_secret}"})
 
-    body = %{access_token: token, target: target, repositories: repos, permissions: permissions}
+    body =
+      Map.merge(repository_selection(repos), %{
+        access_token: token,
+        target: target,
+        permissions: permissions
+      })
 
     case Req.post(req, url: "/applications/#{app.client_id}/token/scoped", json: body) do
       {:ok, %{status: 200, body: %{"token" => scoped} = body}} ->
@@ -138,12 +143,15 @@ defmodule Foreman.GitHub.Client.Req do
   def repo_read_token(app, installation_id, repos) do
     case Req.post(api(bearer(app_jwt(app))),
            url: "/app/installations/#{installation_id}/access_tokens",
-           json: %{repositories: repos, permissions: %{contents: "read"}}
+           json: Map.put(repository_selection(repos), :permissions, %{contents: "read"})
          ) do
       {:ok, %{status: 201, body: %{"token" => token}}} -> {:ok, token}
       other -> unexpected(other)
     end
   end
+
+  defp repository_selection({:ids, [_ | _] = ids}), do: %{repository_ids: ids}
+  defp repository_selection([_ | _] = names), do: %{repositories: names}
 
   @impl true
   def list_installation_repos(token) do
@@ -151,12 +159,18 @@ defmodule Foreman.GitHub.Client.Req do
   end
 
   @impl true
-  def list_user_installation_repos(token, installation_id) do
-    paginate(
-      api(bearer(token)),
-      "/user/installations/#{installation_id}/repositories",
-      & &1["repositories"]
-    )
+  def user_installation_membership(token, installation_id, wanted) do
+    path = "/user/installations/#{installation_id}/repositories"
+    req = api(bearer(token))
+
+    fetch = fn page ->
+      case Req.get(req, url: path, params: [per_page: 100, page: page], redirect: false) do
+        {:ok, %{status: 200} = response} -> {:ok, response}
+        other -> unexpected(other)
+      end
+    end
+
+    Foreman.GitHub.InstallationMembership.find(wanted, fetch)
   end
 
   @impl true

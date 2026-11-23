@@ -9,7 +9,7 @@ defmodule Foreman.Accounts do
   """
   import Ecto.Query
 
-  alias Foreman.Accounts.{RepoSetting, Session, User}
+  alias Foreman.Accounts.{RepoSetting, Session, SSHRemovals, User}
   alias Foreman.{Audit, Repo, Scope}
 
   @session_days 30
@@ -28,6 +28,21 @@ defmodule Foreman.Accounts do
       |> Repo.all()
       |> Enum.map(&effective_user/1)
 
+  @doc "Fetch the effective human administrator under the actor row lock for a mutation."
+  def lock_admin(%Scope{user: %User{} = actor}) do
+    with %User{role: "admin", disabled_at: nil, service_account: false} = current <-
+           effective_user(Repo.one_for_update(from u in User, where: u.id == ^actor.id)),
+         true <- actor.access_generation == current.access_generation,
+         verdict <- access(current),
+         true <- verdict == :allowed or (verdict == :ask_org and not current.github_login_expired) do
+      {:ok, Scope.for_user(current)}
+    else
+      _ -> {:error, :unauthorized}
+    end
+  end
+
+  def lock_admin(_scope), do: {:error, :unauthorized}
+
   def login_config do
     %{
       admins: Application.get_env(:foreman, :admins, []),
@@ -38,42 +53,65 @@ defmodule Foreman.Accounts do
 
   @doc """
   Signs a GitHub user in, creating or updating their record and storing
-  their tokens. `org_member?` says whether they're an active member of
-  the allowed org (the caller asks GitHub).
+  their tokens. Capture the identity generation before asking GitHub about
+  org membership, then compare it under the same lock used for offboarding.
+  A new callback after confirmed loss can obtain a fresh membership decision.
   """
   @spec sign_in_from_github(map(), map(), keyword()) ::
-          {:ok, User.t()} | {:error, :not_allowed | :disabled | Ecto.Changeset.t()}
+          {:ok, User.t()}
+          | {:error, :not_allowed | :disabled | :access_changed | Ecto.Changeset.t()}
   def sign_in_from_github(profile, tokens, opts) do
     config = Keyword.get_lazy(opts, :config, &login_config/0)
-    org_member? = Keyword.get(opts, :org_member?, false)
-    login = profile["login"]
-    existing = find_github_user(profile["id"], login)
+    existing = find_github_user(profile, &Repo.one/1)
 
-    cond do
-      String.starts_with?(login, "service:") or (existing && existing.service_account) ->
-        {:error, :not_allowed}
+    membership =
+      case opts[:check_membership] do
+        nil -> Keyword.get(opts, :org_member?, false)
+        check -> check.(config.allowed_org)
+      end
 
-      existing && existing.disabled_at ->
-        {:error, :disabled}
+    result =
+      Repo.transact(fn ->
+        current = find_github_user(profile, &Repo.one_for_update/1)
 
-      not allowed?(login, existing, config, org_member?) ->
-        # A transient GitHub failure prevents this login but cannot confirm offboarding.
-        if existing && org_member? != :unknown,
-          do: revoke_access(existing, "no longer allowed at sign-in")
+        if generation(current) == generation(existing) and
+             config == Keyword.get_lazy(opts, :config, &login_config/0) do
+          checked_sign_in(current, profile, tokens, config, membership)
+        else
+          {:error, :access_changed}
+        end
+      end)
 
-        {:error, :not_allowed}
-
-      true ->
-        Repo.transact(fn ->
-          current = existing && Repo.one_for_update(from u in User, where: u.id == ^existing.id)
-          persist_sign_in(current, profile, tokens, config)
-        end)
-        |> notify_role_change(existing)
+    # Confirmed loss must commit even though the sign-in is refused.
+    case result do
+      {:ok, :not_allowed} -> {:error, :not_allowed}
+      result -> notify_role_change(result, existing)
     end
   end
 
-  defp persist_sign_in(%User{disabled_at: disabled}, _, _, _) when not is_nil(disabled),
-    do: {:error, :disabled}
+  defp generation(nil), do: nil
+  defp generation(user), do: {user.id, user.access_generation}
+
+  defp checked_sign_in(current, profile, tokens, config, membership) do
+    login = profile["login"]
+
+    cond do
+      String.starts_with?(login, "service:") or (current && current.service_account) ->
+        {:error, :not_allowed}
+
+      current && current.disabled_at ->
+        {:error, :disabled}
+
+      allowed?(login, current, config, membership) ->
+        persist_sign_in(current, profile, tokens, config)
+
+      true ->
+        if current && membership != :unknown,
+          do: revoke_access(current, "no longer allowed at sign-in")
+
+        {:ok, :not_allowed}
+    end
+  end
 
   defp persist_sign_in(current, profile, tokens, config) do
     login = profile["login"]
@@ -92,6 +130,7 @@ defmodule Foreman.Accounts do
       (current || %User{})
       |> User.github_changeset(attrs)
       |> Ecto.Changeset.change(role_attrs(current, login, config))
+      |> Ecto.Changeset.change(workload_access_revoked_at: nil)
 
     with {:ok, user} <- Repo.insert_or_update(changeset) do
       Audit.log(user, "user.sign_in", user)
@@ -109,9 +148,9 @@ defmodule Foreman.Accounts do
 
   # GitHub logins can be renamed and then taken by someone else, so a
   # login only identifies a record that has no GitHub id yet.
-  defp find_github_user(github_id, login) do
-    Repo.get_by(User, github_id: github_id) ||
-      Repo.one(
+  defp find_github_user(%{"id" => github_id, "login" => login}, fetch) do
+    fetch.(from u in User, where: u.github_id == ^github_id) ||
+      fetch.(
         from u in User, where: not u.service_account and u.login == ^login and is_nil(u.github_id)
       )
   end
@@ -188,8 +227,15 @@ defmodule Foreman.Accounts do
   def revoke_access(%User{id: id} = user, reason) do
     {:ok, :revoked} =
       Repo.transact(fn ->
+        {changed, _} =
+          from(u in User, where: u.id == ^id and is_nil(u.workload_access_revoked_at))
+          |> Repo.update_all(set: [workload_access_revoked_at: DateTime.utc_now()])
+
+        if changed == 1, do: SSHRemovals.record!(user)
+
         from(u in User, where: u.id == ^id)
         |> Repo.update_all(
+          inc: [access_generation: 1],
           set: [
             github_login_expired: true,
             access_token: nil,
@@ -265,10 +311,11 @@ defmodule Foreman.Accounts do
       current = Repo.one_for_update(from u in User, where: u.id == ^user.id)
 
       cond do
-        current.disabled_at || current.service_account ->
+        current.disabled_at || current.workload_access_revoked_at || current.service_account ->
           {:error, :login_expired}
 
-        current.refresh_token != user.refresh_token ->
+        current.access_generation != user.access_generation or
+            current.refresh_token != user.refresh_token ->
           {:error, :stale_token}
 
         true ->
@@ -366,6 +413,7 @@ defmodule Foreman.Accounts do
         changeset =
           if attrs[:disabled_at] do
             Ecto.Changeset.change(changeset,
+              access_generation: current.access_generation + 1,
               access_token: nil,
               refresh_token: nil,
               github_login_expired: true
@@ -375,10 +423,7 @@ defmodule Foreman.Accounts do
           end
 
         with {:ok, updated} <- Repo.update(changeset) do
-          if updated.disabled_at do
-            delete_user_sessions(updated)
-            Foreman.OAuth.revoke_user(updated.id)
-          end
+          if updated.disabled_at, do: disable_access(current, updated, attrs)
 
           Audit.log(
             scope,
@@ -393,6 +438,12 @@ defmodule Foreman.Accounts do
 
     if match?({:ok, _}, result), do: disconnect_live_views(user)
     result
+  end
+
+  defp disable_access(previous, user, attrs) do
+    delete_user_sessions(user)
+    if attrs[:disabled_at] && !previous.disabled_at, do: SSHRemovals.record!(user)
+    Foreman.OAuth.revoke_user(user.id)
   end
 
   # Open LiveViews hold the scope they mounted with. `:access_changed`
@@ -413,7 +464,13 @@ defmodule Foreman.Accounts do
     {:ok, token} =
       Repo.transact(fn ->
         case Repo.one_for_update(from u in User, where: u.id == ^user.id) do
-          %User{service_account: false, disabled_at: nil, github_login_expired: false} ->
+          %User{
+            service_account: false,
+            disabled_at: nil,
+            github_login_expired: false,
+            access_generation: generation
+          }
+          when generation == user.access_generation ->
             {:ok, insert_session(user, user_agent)}
 
           _ ->

@@ -279,10 +279,25 @@ defmodule Foreman.Secrets do
 
   @doc "The secrets an environment gets, name => value, with later scopes winning."
   def resolve(%Environment{} = env, opts \\ []) do
+    ids = Keyword.get_lazy(opts, :approved_ids, fn -> service_secret_ids(env) end)
+
     env
-    |> env_secrets(Keyword.get(opts, :include_shared, true))
+    |> env_secrets(Keyword.get(opts, :include_shared, true), ids)
     |> Enum.concat()
     |> Enum.reduce(%{}, fn s, acc -> Map.put(acc, s.name, s.value) end)
+  end
+
+  defp service_secret_ids(env) do
+    case Foreman.Repo.preload(env, :user).user do
+      %{service_account: true} ->
+        case Foreman.OAuth.ServiceAccounts.principal_for_user(env.user_id) do
+          {:ok, principal} -> Foreman.OAuth.ServiceAccounts.secret_ids(principal)
+          :error -> []
+        end
+
+      _ ->
+        :all
+    end
   end
 
   def shared?(%Environment{} = env) do
@@ -294,14 +309,21 @@ defmodule Foreman.Secrets do
 
   # The secrets that reach an environment, one list per scope from owner
   # to environment. A user secret limited to other repos doesn't.
-  defp env_secrets(%Environment{} = env, include_shared \\ true) do
+  defp env_secrets(%Environment{} = env, include_shared \\ true, approved_ids \\ :all) do
     env = Foreman.Repo.preload(env, :repo)
 
     shared = if include_shared, do: shared_keys(env), else: []
     keys = shared ++ ["user:" <> env.user_id, "environment:" <> env.id]
 
+    query = from(s in Secret, where: s.scope_key in ^keys, order_by: s.name)
+
+    query =
+      if approved_ids == :all,
+        do: query,
+        else: where(query, [s], s.id in ^approved_ids and s.scope in ["owner", "repo"])
+
     by_key =
-      from(s in Secret, where: s.scope_key in ^keys, order_by: s.name)
+      query
       |> Foreman.Repo.all()
       |> Enum.filter(fn s ->
         s.scope != "user" or s.repo_ids == [] or env.repo_id in s.repo_ids

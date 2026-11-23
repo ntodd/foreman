@@ -110,14 +110,16 @@ defmodule Foreman.Tailscale do
     end
   end
 
-  def create_auth_key(env, repo, user) do
+  def create_auth_key(env, repo, user), do: create_auth_key(env, tags_for(repo, user))
+
+  def create_auth_key(env, tags) do
     case creds() do
       nil ->
         {:error, :not_configured}
 
       creds ->
         Client.impl().create_auth_key(creds, %{
-          tags: tags_for(repo, user),
+          tags: tags,
           description: "foreman #{env.slug}",
           expiry_seconds: @key_expiry
         })
@@ -154,7 +156,7 @@ defmodule Foreman.Tailscale do
   def delete_device(slug, device_id, replaced_by \\ nil) do
     with creds when not is_nil(creds) <- creds(),
          {:ok, devices} <- Client.impl().list_devices(creds) do
-      old = Enum.filter(devices, &(device_id?(&1, device_id) and ours?(&1, slug)))
+      old = Enum.filter(devices, &(device_id?(&1, device_id) and ours?(&1, slug, replaced_by)))
 
       with :ok <- delete_all(old, creds),
            do:
@@ -272,9 +274,29 @@ defmodule Foreman.Tailscale do
 
   # With a deployment tag, a device without it is another deployment's,
   # whatever ID the environment's container reported.
-  defp ours?(device, slug) do
-    foreman_device?(device) and hostname(device) == slug and
-      (deployment_tag() == nil or deployment_tag() in tags(device))
+  defp ours?(device, slug, replaced_by \\ nil) do
+    hostname(device) == slug and
+      ((foreman_device?(device) and (deployment_tag() == nil or deployment_tag() in tags(device))) or
+         recorded_service_device?(device, slug, replaced_by))
+  end
+
+  # Service nodes carry the installation's own tags instead of the deployment's
+  # shared tags. A replacement job carries both recorded node IDs. Match the
+  # live row as well as the service tag and reported hostname of the old node.
+  defp recorded_service_device?(device, slug, replaced_by) do
+    import Ecto.Query
+    ids = Enum.filter([device["nodeId"], device["id"], replaced_by], &is_binary/1)
+
+    query =
+      from e in Foreman.Environments.Environment,
+        join: u in assoc(e, :user),
+        where: e.slug == ^slug and e.tailscale_device_id in ^ids and u.service_account,
+        select: u.id
+
+    Enum.any?(
+      Foreman.Repo.all(query),
+      &(Foreman.OAuth.ServiceAccounts.identity_tag(&1) in tags(device))
+    )
   end
 
   # The agent reports the stable node ID; the API lists it as `nodeId`

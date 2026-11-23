@@ -17,7 +17,7 @@ defmodule Foreman.Environments do
   import Ecto.Query
 
   alias Foreman.Boxes.Box
-  alias Foreman.Environments.{Environment, Server}
+  alias Foreman.Environments.{Environment, Server, WorkloadAccess}
   alias Foreman.Jobs.EnvironmentExpiry
   alias ForemanProtocol.Connect
   alias Foreman.Repos.Repo, as: GitRepo
@@ -560,30 +560,17 @@ defmodule Foreman.Environments do
 
   @doc false
   def queue_action(scope, env, action, args, opts \\ []) do
-    desired =
-      case action do
-        :stop ->
-          "stopped"
-
-        # Nothing starts it but a start, and a box that still says it's
-        # running is told to suspend it, not stop it.
-        :suspend ->
-          "suspended"
-
-        :destroy ->
-          "destroyed"
-
-        a when a in [:create, :start, :rebuild, :pull_rebuild, :restart_affected, :restart_all] ->
-          "running"
-
-        _ ->
-          env.desired_state
-      end
+    name = Atom.to_string(action)
+    desired = desired_for(name) || env.desired_state
 
     # Remembered so cancelling the operation can put the wish back.
     args =
       if desired != env.desired_state,
-        do: Map.put(args, "prior_desired", env.desired_state),
+        do:
+          Map.merge(args, %{
+            "prior_desired" => env.desired_state,
+            "prior_authority" => env.desired_authority
+          }),
         else: args
 
     # What the user saw when they clicked. The command adds anything that
@@ -593,12 +580,27 @@ defmodule Foreman.Environments do
         do: Map.put(args, "changed", env.pending_changes),
         else: args
 
+    # Reconciliation can happen long after operation history has been pruned.
+    # Keep the authority for this desired state until another lifecycle request replaces it.
     env =
-      if desired != env.desired_state,
-        do: update_env!(env, %{desired_state: desired}),
-        else: env
+      if desired_for(name) do
+        authority =
+          if opts[:api_grant_id] || Scope.user_id(scope) != env.user_id do
+            %{
+              "action" => name,
+              "user_id" => Scope.user_id(scope),
+              "grant_id" => opts[:api_grant_id],
+              "trigger" => Keyword.get(opts, :trigger, "request")
+            }
+          end
 
-    name = Atom.to_string(action)
+        if env.desired_state == desired and env.desired_authority == authority,
+          do: env,
+          else: update_env!(env, %{desired_state: desired, desired_authority: authority})
+      else
+        env
+      end
+
     supersede(env, name)
 
     if action == :start, do: queue_operation(env, "secrets_write", %{}, scope.user, opts)
@@ -695,18 +697,36 @@ defmodule Foreman.Environments do
 
   @doc false
   def enqueue(env, action, args, user, opts \\ []) do
-    op = queue_operation(env, action, args, user, opts)
-    Server.kick(env.id)
-    op
+    if user || WorkloadAccess.automatic_active?(env, action) do
+      op = queue_operation(env, action, args, user, opts)
+      Server.kick(env.id)
+      op
+    end
   end
 
   @doc false
   def queue_operation(env, action, args, user, opts \\ []) do
+    actor_id = user && user.id
+    grant_id = opts[:api_grant_id]
+    trigger = Keyword.get(opts, :trigger, "request")
+
+    actor_filter =
+      if actor_id, do: dynamic([o], o.user_id == ^actor_id), else: dynamic([o], is_nil(o.user_id))
+
+    grant_filter =
+      if grant_id,
+        do: dynamic([o], o.api_grant_id == ^grant_id),
+        else: dynamic([o], is_nil(o.api_grant_id))
+
     existing =
       Keyword.get(opts, :dedupe, true) &&
         Repo.one(
           from o in Foreman.Operations.Operation,
-            where: o.environment_id == ^env.id and o.action == ^action and o.status == "queued",
+            where:
+              o.environment_id == ^env.id and o.action == ^action and o.status == "queued" and
+                o.trigger == ^trigger,
+            where: ^actor_filter,
+            where: ^grant_filter,
             limit: 1
         )
 
@@ -871,6 +891,26 @@ defmodule Foreman.Environments do
     |> put_if("device_id", env.tailscale_device_id)
     |> Foreman.Jobs.CleanupTailnet.new()
     |> Oban.insert()
+  end
+
+  @doc "Settle a denied command without applying a fictitious VM result."
+  def dispatch_denied(op, env) do
+    args = op.args || %{}
+    # A later queued action owns its own desired state.
+    if desired_for(op.action) == env.desired_state and is_binary(args["prior_desired"]) and
+         not lifecycle_active?(env.id) do
+      update_env!(env, %{
+        desired_state: args["prior_desired"],
+        desired_authority: args["prior_authority"]
+      })
+    end
+
+    if op.action == "create" and not env.created_once do
+      update_env!(env, %{observed_state: "error", status_message: op.error})
+    end
+
+    broadcast(env)
+    Server.kick(env.id)
   end
 
   @doc "What follows a recorded result: tell the UI, clean up, send the next operation."
@@ -1053,7 +1093,9 @@ defmodule Foreman.Environments do
        when status == "cancelled" or (status == "failed" and action == "suspend") do
     case args do
       %{"prior_desired" => prior} when is_binary(prior) ->
-        if env.desired_state == desired_for(action), do: %{desired_state: prior}, else: %{}
+        if env.desired_state == desired_for(action),
+          do: %{desired_state: prior, desired_authority: args["prior_authority"]},
+          else: %{}
 
       _ ->
         %{}
@@ -1179,18 +1221,28 @@ defmodule Foreman.Environments do
         id -> where(query, [e], e.user_id == ^id)
       end
 
-    query =
-      case opts[:older_than] do
-        nil -> query
-        cutoff -> where(query, [e], is_nil(e.token_pushed_at) or e.token_pushed_at < ^cutoff)
-      end
-
-    for env <- Repo.all(query) do
+    for env <- Repo.all(refresh_due(query, opts)) do
       args = if env.created_once, do: %{}, else: %{"after_first_create" => true}
       enqueue(env, "secrets_write", args, nil)
     end
 
     :ok
+  end
+
+  defp refresh_due(query, opts) do
+    case opts[:older_than] do
+      nil ->
+        query
+
+      cutoff ->
+        service_cutoff = opts[:service_older_than] || cutoff
+
+        from e in query,
+          join: u in assoc(e, :user),
+          where:
+            is_nil(e.token_pushed_at) or e.token_pushed_at < ^cutoff or
+              (u.service_account and e.token_pushed_at < ^service_cutoff)
+    end
   end
 
   # -- reconciliation ------------------------------------------------------------------
