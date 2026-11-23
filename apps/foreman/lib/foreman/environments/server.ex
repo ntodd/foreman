@@ -289,10 +289,17 @@ defmodule Foreman.Environments.Server do
       "trigger" => op.trigger
     }
 
-    current? = env.workload_grant_id == id and env.desired_authority == authority
+    # The grant that authorized this delivery is the one the workspace now
+    # runs on, as after a start. Who it answers to is a separate question,
+    # and stays with any newer request.
+    latest? = env.desired_state == "running" and not Environments.superseded?(op)
 
-    if env.desired_state == "running" and not current? and not Environments.superseded?(op),
-      do: Environments.update_env!(env, %{workload_grant_id: id, desired_authority: authority})
+    changes =
+      %{workload_grant_id: id}
+      |> Map.merge(if(latest?, do: %{desired_authority: authority}, else: %{}))
+      |> Map.reject(fn {field, value} -> Map.fetch!(env, field) == value end)
+
+    if changes != %{}, do: Environments.update_env!(env, changes)
   end
 
   defp bind_workload_grant(_op, _env), do: :ok

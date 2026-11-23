@@ -286,6 +286,36 @@ defmodule Foreman.PublicAPI.RestartTest do
       assert Repo.reload!(ctx.env).desired_authority == rebuilding.desired_authority
     end
 
+    test "a rebuild asked for before the restart is sent keeps its authority and still runs",
+         ctx do
+      {newer, _} = principal(ctx.user)
+      Foreman.OAuth.revoke_grant(ctx.actor.grant_id)
+
+      # The restart's file write is out; the restart itself hasn't been sent.
+      assert {:ok, _, op} = restart(newer, ctx.env, "restart_all")
+      assert_receive {:dispatch, %Command{type: "env.secrets.write", op_id: files}}
+
+      admin = user_fixture(role: "admin")
+
+      {:ok, _} =
+        Foreman.Environments.rebuild(Foreman.Scope.for_user(admin), Repo.reload!(ctx.env))
+
+      rebuilding = Repo.reload!(ctx.env).desired_authority
+      assert %{"action" => "rebuild"} = rebuilding
+
+      complete(ctx.box, files)
+      assert_receive {:dispatch, %Command{type: "env.restart", op_id: ^op}}
+
+      # The workspace now runs on the connection that restarted it, which is
+      # live, while the rebuild is still what it answers to.
+      env = Repo.reload!(ctx.env)
+      assert env.workload_grant_id == newer.grant_id
+      assert env.desired_authority == rebuilding
+
+      complete(ctx.box, op)
+      assert_receive {:dispatch, %Command{type: "env.rebuild"}}, 500
+    end
+
     test "a restart refused at dispatch leaves the authority behind the workspace alone", ctx do
       earlier = %{
         "action" => "start",
