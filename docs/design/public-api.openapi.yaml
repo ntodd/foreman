@@ -1,0 +1,491 @@
+openapi: 3.1.1
+info:
+  title: Foreman public API
+  version: 0.1.0-draft
+  description: Proposed v1 resource contract. OAuth setup and grant behavior are specified in the accompanying design document.
+servers:
+  - url: /api/v1
+paths:
+  /.well-known/oauth-authorization-server:
+    servers: [{url: /}]
+    get:
+      operationId: getOAuthMetadata
+      summary: Discover the instance issuer, endpoints, grants and scopes
+      responses:
+        '200':
+          description: RFC 8414 metadata for this HTTPS issuer
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [issuer, device_authorization_endpoint, token_endpoint, revocation_endpoint, scopes_supported, grant_types_supported, response_types_supported, token_endpoint_auth_methods_supported]
+                properties:
+                  issuer: {type: string, format: uri}
+                  device_authorization_endpoint: {type: string, format: uri}
+                  token_endpoint: {type: string, format: uri}
+                  revocation_endpoint: {type: string, format: uri}
+                  scopes_supported: {type: array, items: {type: string}}
+                  grant_types_supported: {type: array, items: {type: string}, example: [urn:ietf:params:oauth:grant-type:device_code, refresh_token, client_credentials]}
+                  response_types_supported: {type: array, items: {type: string}, example: []}
+                  token_endpoint_auth_methods_supported: {type: array, items: {type: string}, example: [none, client_secret_basic]}
+  /oauth/device/code:
+    servers: [{url: /}]
+    post:
+      operationId: requestDeviceCode
+      summary: Begin personal approval on another device
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+              required: [client_id, scope]
+              properties:
+                client_id: {type: string}
+                scope: {$ref: '#/components/schemas/ScopeString'}
+      responses:
+        '200':
+          description: Single-use device code and browser approval instructions
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [device_code, user_code, verification_uri, expires_in, interval]
+                properties:
+                  device_code: {type: string}
+                  user_code: {type: string}
+                  verification_uri: {type: string, format: uri}
+                  verification_uri_complete: {type: string, format: uri}
+                  expires_in: {type: integer, example: 600}
+                  interval: {type: integer, minimum: 1, description: Minimum seconds between polls}
+        default: {$ref: '#/components/responses/OAuthError'}
+  /oauth/token:
+    servers: [{url: /}]
+    post:
+      operationId: obtainToken
+      summary: Exchange a device code, rotate a refresh token, or obtain a service token
+      description: Public clients supply client_id. Service installations use HTTP Basic client authentication. Successful responses use Cache-Control no-store and Pragma no-cache.
+      security: [{}, {serviceCredential: []}]
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+              required: [grant_type]
+              properties:
+                grant_type: {enum: [urn:ietf:params:oauth:grant-type:device_code, refresh_token, client_credentials]}
+                client_id: {type: string}
+                device_code: {type: string}
+                refresh_token: {type: string}
+                scope: {$ref: '#/components/schemas/ScopeString'}
+              oneOf:
+                - properties: {grant_type: {const: 'urn:ietf:params:oauth:grant-type:device_code'}}
+                  required: [device_code, client_id]
+                - properties: {grant_type: {const: refresh_token}}
+                  required: [refresh_token, client_id]
+                - properties: {grant_type: {const: client_credentials}}
+      responses:
+        '200':
+          description: Personal grants include a new refresh token on each successful exchange. Service grants issue access tokens only.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [access_token, token_type, expires_in, scope]
+                properties:
+                  access_token: {type: string}
+                  token_type: {const: Bearer}
+                  expires_in: {type: integer, example: 900}
+                  scope: {$ref: '#/components/schemas/ScopeString'}
+                  refresh_token: {type: string}
+        default: {$ref: '#/components/responses/OAuthError'}
+  /oauth/revoke:
+    servers: [{url: /}]
+    post:
+      operationId: revokeToken
+      summary: Revoke the personal connection on logout or invalidate a service access token
+      description: For a personal connection, revoke the refresh token and its associated access tokens. Public clients supply client_id. Service installations authenticate with HTTP Basic.
+      security: [{}, {serviceCredential: []}]
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+              required: [token]
+              properties:
+                token: {type: string}
+                token_type_hint: {type: string, enum: [access_token, refresh_token]}
+                client_id: {type: string}
+      responses:
+        '200': {description: 'Revocation processed, including an already invalid token'}
+        default: {$ref: '#/components/responses/OAuthError'}
+  /me:
+    get:
+      operationId: getIdentity
+      summary: Show the acting identity and connected client
+      security: [{foremanToken: []}]
+      responses:
+        '200':
+          description: Success
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Identity'}
+        default: {$ref: '#/components/responses/Error'}
+  /repos:
+    get:
+      operationId: listRepos
+      x-required-permission: 'repos:list'
+      summary: List repositories available to this connection
+      security: [{foremanToken: []}]
+      parameters:
+        - {$ref: '#/components/parameters/Cursor'}
+      responses:
+        '200':
+          description: Success
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/RepositoryPage'}
+        default: {$ref: '#/components/responses/Error'}
+  /boxes:
+    get:
+      operationId: listBoxes
+      x-required-permission: 'boxes:list'
+      summary: List boxes available to this connection
+      security: [{foremanToken: []}]
+      parameters:
+        - {$ref: '#/components/parameters/Cursor'}
+      responses:
+        '200':
+          description: Success
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/BoxPage'}
+        default: {$ref: '#/components/responses/Error'}
+  /environments:
+    get:
+      operationId: listEnvironments
+      x-required-permission: 'environments:list'
+      summary: List visible environments
+      security: [{foremanToken: []}]
+      parameters:
+        - {$ref: '#/components/parameters/Cursor'}
+      responses:
+        '200':
+          description: Success
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/EnvironmentPage'}
+        default: {$ref: '#/components/responses/Error'}
+    post:
+      operationId: createEnvironment
+      x-required-permission: 'environments:create plus the expiry action scope when supplied'
+      summary: Reserve an environment and queue provisioning
+      description: With box_id omitted, prefer a provisionable box owned by the acting user, then any other provisionable box the connection may use. Service accounts select only from their granted boxes. If none qualifies, return 409 with code no_provisionable_boxes.
+      security: [{foremanToken: []}]
+      parameters:
+        - {$ref: '#/components/parameters/Key'}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/Create'}
+      responses:
+        '202':
+          description: Accepted operation or replay of the original submission
+          headers:
+            Location:
+              required: true
+              schema: {type: string, format: uri-reference}
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Accepted'}
+        '409':
+          description: Automatic placement found no provisionable box, an explicit box raised a capacity conflict, or the request key conflicts with a prior submission.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Error'}
+              examples:
+                noProvisionableBoxes:
+                  value: {code: no_provisionable_boxes, message: You have no provisionable boxes.}
+        '410':
+          description: The original environment for this accepted create key has been destroyed.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Error'}
+              example: {code: original_environment_gone, message: Original environment gone.}
+        default: {$ref: '#/components/responses/Error'}
+  /environments/{id}:
+    get:
+      operationId: getEnvironment
+      x-required-permission: 'environments:read'
+      summary: Read current environment state and connection details
+      security: [{foremanToken: []}]
+      parameters:
+        - {$ref: '#/components/parameters/Id'}
+      responses:
+        '200':
+          description: Success
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Environment'}
+        default: {$ref: '#/components/responses/Error'}
+  /environments/{id}/operations:
+    get:
+      operationId: listEnvironmentOperations
+      x-required-permission: 'operations:list'
+      summary: Read authorized operation history through its retention period, including after destroy
+      security: [{foremanToken: []}]
+      parameters:
+        - {$ref: '#/components/parameters/Id'}
+        - {$ref: '#/components/parameters/Cursor'}
+      responses:
+        '200':
+          description: History remains available for 90 days after each operation finishes, including after environment destruction.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/OperationPage'}
+        default: {$ref: '#/components/responses/Error'}
+    post:
+      operationId: operateEnvironment
+      x-required-permission: 'environments:start, environments:stop, or environments:destroy according to the requested action'
+      summary: Queue a lifecycle action
+      security: [{foremanToken: []}]
+      parameters:
+        - {$ref: '#/components/parameters/Id'}
+        - {$ref: '#/components/parameters/Key'}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/Action'}
+      responses:
+        '200':
+          description: Environment is already in the requested stable state
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [environment_id]
+                properties:
+                  environment_id: {$ref: '#/components/schemas/Id'}
+        '202':
+          description: New operation or existing operation moving toward the requested state
+          headers:
+            Location:
+              required: true
+              schema: {type: string, format: uri-reference}
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Accepted'}
+        default: {$ref: '#/components/responses/Error'}
+        '409':
+          description: The action conflicts with the current transition or due expiry, or the request key conflicts with an earlier submission.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Error'}
+              example: {code: lifecycle_conflict, message: An opposing lifecycle action is in progress.}
+  /operations/{id}:
+    get:
+      operationId: getOperation
+      x-required-permission: 'operations:read'
+      summary: Read a lifecycle operation and its outcome
+      security: [{foremanToken: []}]
+      parameters:
+        - {$ref: '#/components/parameters/Id'}
+      responses:
+        '200':
+          description: Success
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Operation'}
+        default: {$ref: '#/components/responses/Error'}
+  /operations/{id}/logs:
+    get:
+      operationId: getOperationLogs
+      x-required-permission: 'logs:read'
+      summary: Read the next portion of the operation log
+      description: Logs remain available for 30 days after operation completion, including after environment destruction.
+      security: [{foremanToken: []}]
+      parameters:
+        - {$ref: '#/components/parameters/Id'}
+        - {$ref: '#/components/parameters/Cursor'}
+      responses:
+        '200':
+          description: Success
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/LogPage'}
+        default: {$ref: '#/components/responses/Error'}
+components:
+  securitySchemes:
+    serviceCredential:
+      type: http
+      scheme: basic
+      description: Installation client ID and rotatable secret sent using HTTP Basic over HTTPS (client_secret_basic)
+    foremanToken:
+      type: http
+      scheme: bearer
+      description: Access token issued by this Foreman instance for the connected user or service account.
+  parameters:
+    Id:
+      name: id
+      in: path
+      required: true
+      schema: {type: string, format: uuid}
+    Cursor:
+      name: cursor
+      in: query
+      schema: {type: string}
+    Key:
+      name: Idempotency-Key
+      in: header
+      required: true
+      schema: {type: string, minLength: 1}
+  responses:
+    Error:
+      description: Request failed. See the stable code for recovery.
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/Error'}
+    OAuthError:
+      description: OAuth error. Device polling can return authorization_pending, slow_down, access_denied or expired_token. Invalid or expired refresh grants return invalid_grant.
+      content:
+        application/json:
+          schema:
+            type: object
+            required: [error]
+            properties:
+              error: {type: string}
+              error_description: {type: string}
+  schemas:
+    ScopeString:
+      type: string
+      description: Space-separated resource-first scope names from scopes_supported
+      example: 'environments:create operations:read'
+    Id: {type: string, format: uuid}
+    Identity:
+      type: object
+      required: [id, kind, client_id]
+      properties:
+        id: {$ref: '#/components/schemas/Id'}
+        kind: {type: string, enum: [user, service_account]}
+        client_id: {type: string}
+    Repository:
+      type: object
+      required: [id, full_name, default_branch]
+      properties:
+        id: {$ref: '#/components/schemas/Id'}
+        full_name: {type: string}
+        default_branch: {type: string}
+    Box:
+      type: object
+      required: [id, name, online]
+      properties:
+        id: {$ref: '#/components/schemas/Id'}
+        name: {type: string}
+        online: {type: boolean}
+    Expiry:
+      type: object
+      additionalProperties: false
+      required: [at, action]
+      properties:
+        at: {type: string, format: date-time}
+        action: {type: string, enum: [stop, destroy]}
+    Create:
+      type: object
+      additionalProperties: false
+      required: [repo_id]
+      properties:
+        repo_id: {$ref: '#/components/schemas/Id'}
+        box_id:
+          $ref: '#/components/schemas/Id'
+          description: Pins provisioning to this box. Omit to enable automatic placement.
+        branch: {type: string, minLength: 1}
+        expiry: {$ref: '#/components/schemas/Expiry'}
+        confirm_capacity_warning: {type: boolean, default: false}
+    Action:
+      type: object
+      additionalProperties: false
+      required: [action]
+      properties:
+        action: {type: string, enum: [start, stop, destroy]}
+        confirm_capacity_warning: {type: boolean, default: false}
+    Accepted:
+      type: object
+      required: [environment_id, operation_id]
+      properties:
+        environment_id: {$ref: '#/components/schemas/Id'}
+        operation_id: {$ref: '#/components/schemas/Id'}
+    Environment:
+      type: object
+      required: [id, slug, repo_id, branch, box_id, desired_state, observed_state, readiness]
+      properties:
+        id: {$ref: '#/components/schemas/Id'}
+        slug: {type: string}
+        repo_id: {$ref: '#/components/schemas/Id'}
+        branch: {type: string}
+        box_id: {$ref: '#/components/schemas/Id'}
+        desired_state: {type: string}
+        observed_state: {type: string}
+        readiness: {type: string, enum: [ready, not_ready, unknown]}
+        expiry: {$ref: '#/components/schemas/Expiry'}
+        hostname: {type: string}
+        ssh_user: {type: string}
+        workspace_folder: {type: string}
+    Operation:
+      type: object
+      required: [id, environment_id, action, trigger, status]
+      properties:
+        id: {$ref: '#/components/schemas/Id'}
+        environment_id: {$ref: '#/components/schemas/Id'}
+        action: {type: string}
+        trigger: {type: string, description: What initiated the operation., examples: [request, expiry]}
+        status: {type: string, enum: [queued, dispatched, running, succeeded, failed, cancelled]}
+        error: {$ref: '#/components/schemas/Error'}
+    OperationPage:
+      type: object
+      required: [items, next_cursor]
+      properties:
+        items:
+          type: array
+          items: {$ref: '#/components/schemas/Operation'}
+        next_cursor: {type: [string, 'null']}
+    LogPage:
+      type: object
+      required: [text, next_cursor, truncated]
+      properties:
+        text: {type: string}
+        next_cursor: {type: string, description: Position after the returned text. Use it to continue polling.}
+        truncated: {type: boolean}
+    Error:
+      type: object
+      required: [code, message]
+      properties:
+        code: {type: string}
+        message: {type: string}
+    EnvironmentPage:
+      type: object
+      required: [items, next_cursor]
+      properties:
+        items:
+          type: array
+          items: {$ref: '#/components/schemas/Environment'}
+        next_cursor: {type: [string, 'null']}
+    RepositoryPage:
+      type: object
+      required: [items, next_cursor]
+      properties:
+        items:
+          type: array
+          items: {$ref: '#/components/schemas/Repository'}
+        next_cursor: {type: [string, 'null']}
+    BoxPage:
+      type: object
+      required: [items, next_cursor]
+      properties:
+        items:
+          type: array
+          items: {$ref: '#/components/schemas/Box'}
+        next_cursor: {type: [string, 'null']}
