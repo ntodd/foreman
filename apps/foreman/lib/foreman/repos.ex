@@ -112,6 +112,26 @@ defmodule Foreman.Repos do
         _ -> by_name || %GitRepo{owner_id: owner.id}
       end
 
+    save_synced_repo(repo, owner, attrs, github_id)
+  end
+
+  # An admin checking the name with GitHub can bind this same row after
+  # our lookup. Claim the first binding only while the row still names
+  # the unbound repo. If the admin won, resolve the name and ID again so
+  # a replacement gets its own row, settings and archive status.
+  defp save_synced_repo(%GitRepo{id: id, github_id: nil} = repo, owner, attrs, github_id)
+       when not is_nil(id) and is_integer(github_id) do
+    row = from r in GitRepo, where: r.id == ^id and r.full_name == ^repo.full_name
+
+    Repo.transact(fn ->
+      case bind_unbound(row, github_id, []) do
+        {1, [bound]} -> save_synced_repo(bound, owner, attrs, github_id)
+        {0, _} -> upsert_repo(owner, attrs)
+      end
+    end)
+  end
+
+  defp save_synced_repo(repo, owner, attrs, _github_id) do
     repo
     |> GitRepo.sync_changeset(attrs)
     |> Ecto.Changeset.put_change(:owner_id, owner.id)
@@ -176,6 +196,7 @@ defmodule Foreman.Repos do
          {:ok, owner} <- get_or_create_owner(owner_login),
          {:ok, repo} <-
            upsert_repo(owner, Map.merge(%{full_name: full_name, name: name, manual: true}, attrs)) do
+      repo = bind_manual_repo(scope.user, repo)
       Audit.log(scope, "repo.add", repo)
       {:ok, Repo.preload(repo, :owner)}
     else
@@ -183,6 +204,63 @@ defmodule Foreman.Repos do
       error -> error
     end
   end
+
+  # Adding a public repo outside the app installation is an existing admin
+  # workflow. A verified immutable ID makes it eligible for the public API.
+  defp bind_manual_repo(user, repo) do
+    with true <- Foreman.GitHub.configured?(),
+         {:ok, token} <- Foreman.GitHub.user_token(user),
+         {:ok, remote} <- Foreman.GitHub.Client.impl().get_repo(token, repo.full_name),
+         true <- observe_manual_repo(repo, remote) do
+      Repo.reload!(repo)
+    else
+      _ -> repo
+    end
+  end
+
+  @doc "Record archive status for a matching manual repository, binding its GitHub ID on first observation."
+  def observe_manual_repo(
+        %GitRepo{manual: true, github_id: bound} = repo,
+        %{"id" => id, "full_name" => name} = remote
+      )
+      when is_integer(id) and is_binary(name) and (is_nil(bound) or bound == id) do
+    if String.downcase(name) == String.downcase(repo.full_name) do
+      row =
+        from r in GitRepo, where: r.id == ^repo.id and r.manual and r.full_name == ^repo.full_name
+
+      if is_nil(bound),
+        do: record_manual_binding(row, id, remote["archived"]),
+        else: record_manual_archive(row, id, remote["archived"])
+
+      true
+    else
+      false
+    end
+  end
+
+  def observe_manual_repo(_, _), do: false
+
+  defp record_manual_binding(row, id, archived) do
+    changes = if is_boolean(archived), do: [archived: archived], else: []
+    {bound, _} = bind_unbound(row, id, changes)
+    # An installation sync may have bound the row during the GitHub request.
+    if bound == 0, do: record_manual_archive(row, id, archived)
+  end
+
+  defp bind_unbound(row, id, changes) do
+    now = DateTime.utc_now()
+    binding = [github_id: id, github_identity_bound_at: now, updated_at: now]
+    unbound = from r in row, where: is_nil(r.github_id), select: r
+    Repo.update_all(unbound, set: binding ++ changes)
+  end
+
+  defp record_manual_archive(row, id, archived) when is_boolean(archived) do
+    row
+    |> where([r], r.github_id == ^id and r.archived != ^archived)
+    |> Repo.update_all(set: [archived: archived])
+  end
+
+  defp record_manual_archive(_, _, _), do: :ok
 
   defp get_or_create_owner(login) do
     case get_owner_by_login(login) do
