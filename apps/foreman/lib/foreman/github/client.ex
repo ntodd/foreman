@@ -46,8 +46,9 @@ defmodule Foreman.GitHub.Client do
   @callback repo_read_token(app, installation_id :: integer(), repos :: [String.t()]) ::
               {:ok, String.t()} | {:error, term()}
   @callback list_installation_repos(token :: String.t()) :: {:ok, [map()]} | {:error, term()}
-  @callback list_user_installation_repos(token :: String.t(), installation_id :: integer()) ::
-              {:ok, [map()]} | {:error, term()}
+  @callback user_installation_membership(String.t(), integer(), MapSet.t({integer(), String.t()})) ::
+              {:ok, MapSet.t({integer(), String.t()})} | {:error, term()}
+
   @callback get_repo(token :: String.t(), full_name :: String.t()) ::
               {:ok, map()} | {:error, term()}
   @callback list_branches(token :: String.t(), full_name :: String.t()) ::

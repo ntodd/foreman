@@ -6,6 +6,7 @@ defmodule Foreman.OAuth.ServiceAccounts do
   alias Foreman.Accounts.User
   alias Foreman.Boxes.Box
   alias Foreman.OAuth.{Client, Grant, Principal, Scopes, Store, Token}
+  alias Foreman.PublicAPI.{Access, RepositoryAccess}
   alias Foreman.Repos.Repo, as: Repository
   alias Foreman.Secrets.Secret
 
@@ -24,7 +25,11 @@ defmodule Foreman.OAuth.ServiceAccounts do
     end
   end
 
-  def repo_ids(principal), do: grant_field(principal, :repo_ids) || []
+  def repo_ids(%Principal{kind: :service_account} = principal) do
+    Repo.all(from r in Access.repos(principal), select: r.id)
+  end
+
+  def repo_ids(_), do: []
   def box_ids(principal), do: grant_field(principal, :box_ids) || []
   def secret_ids(principal), do: grant_field(principal, :secret_ids) || []
   def network_policy(principal), do: grant_field(principal, :network_policy)
@@ -65,8 +70,7 @@ defmodule Foreman.OAuth.ServiceAccounts do
       %{
         repos:
           Repo.all(
-            from r in Repository,
-              where: is_nil(r.removed_at),
+            from r in grantable_repos(),
               order_by: r.full_name,
               select: {r.id, r.full_name}
           ),
@@ -150,12 +154,16 @@ defmodule Foreman.OAuth.ServiceAccounts do
 
   defp resources(attrs) do
     with {:ok, repos} <-
-           selected(attrs["repo_ids"], from(r in Repository, where: is_nil(r.removed_at))),
+           selected(attrs["repo_ids"], grantable_repos()),
          {:ok, boxes} <- selected(attrs["box_ids"], from(b in Box, where: is_nil(b.revoked_at))),
          {:ok, secrets} <-
            selected(attrs["secret_ids"], from(s in Secret, where: s.scope in ["owner", "repo"])) do
       {:ok, %{repo_ids: repos, box_ids: boxes, secret_ids: secrets}}
     end
+  end
+
+  defp grantable_repos do
+    RepositoryAccess.grantable(from r in Repository, where: is_nil(r.removed_at))
   end
 
   defp selected(nil, _), do: {:ok, []}

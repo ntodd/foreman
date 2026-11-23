@@ -151,12 +151,18 @@ defmodule Foreman.GitHub.Client.Req do
   end
 
   @impl true
-  def list_user_installation_repos(token, installation_id) do
-    paginate(
-      api(bearer(token)),
-      "/user/installations/#{installation_id}/repositories",
-      & &1["repositories"]
-    )
+  def user_installation_membership(token, installation_id, wanted) do
+    path = "/user/installations/#{installation_id}/repositories"
+    req = api(bearer(token))
+
+    fetch = fn page ->
+      case Req.get(req, url: path, params: [per_page: 100, page: page], redirect: false) do
+        {:ok, %{status: 200} = response} -> {:ok, response}
+        other -> unexpected(other)
+      end
+    end
+
+    Foreman.GitHub.InstallationMembership.find(wanted, fetch)
   end
 
   @impl true

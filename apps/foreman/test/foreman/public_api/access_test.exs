@@ -30,15 +30,13 @@ defmodule Foreman.PublicAPI.AccessTest do
     _hidden = repo_fixture(owner: owner) |> github_id(123)
     _renamed = repo_fixture(owner: owner) |> github_id(124)
 
-    expect(ClientMock, :list_user_installation_repos, fn token, installation ->
+    expect(ClientMock, :user_installation_membership, fn token, installation, wanted ->
       assert token == user.access_token
       assert installation == owner.installation_id
 
-      {:ok,
-       [
-         %{"id" => 122, "full_name" => repo.full_name},
-         %{"id" => 124, "full_name" => "another/name"}
-       ]}
+      remote = MapSet.new([{122, repo.full_name}, {124, "another/name"}])
+      assert MapSet.size(wanted) == 3
+      {:ok, MapSet.intersection(wanted, remote)}
     end)
 
     assert ids(Access.repos(principal(user))) == [repo.id]
@@ -120,7 +118,7 @@ defmodule Foreman.PublicAPI.AccessTest do
     owner = owner_fixture()
     synced = repo_fixture(owner: owner) |> github_id(45)
     manual = repo_fixture(owner: owner) |> change(manual: true, github_id: 83) |> Repo.update!()
-    stub(ClientMock, :list_user_installation_repos, fn _, _ -> {:ok, []} end)
+    stub(ClientMock, :user_installation_membership, fn _, _, _ -> {:ok, MapSet.new()} end)
 
     stub(ClientMock, :get_repo, fn _, name ->
       assert name == manual.full_name
@@ -138,7 +136,7 @@ defmodule Foreman.PublicAPI.AccessTest do
     principal = principal(admin)
     legacy = repo_fixture() |> change(manual: true) |> Repo.update!()
     old = environment_fixture(repo: legacy, user: admin)
-    stub(ClientMock, :list_user_installation_repos, fn _, _ -> {:ok, []} end)
+    stub(ClientMock, :user_installation_membership, fn _, _, _ -> {:ok, MapSet.new()} end)
 
     stub(ClientMock, :get_repo, fn _, name ->
       {:ok, %{"id" => 378, "full_name" => name, "private" => true}}
@@ -165,9 +163,10 @@ defmodule Foreman.PublicAPI.AccessTest do
     assert ids(Access.environments(principal)) == []
     history = environment_fixture(repo: repo, user: user, destroyed_at: DateTime.utc_now())
 
-    expect(ClientMock, :list_user_installation_repos, 2, fn _, installation ->
+    expect(ClientMock, :user_installation_membership, 2, fn _, installation, wanted ->
       assert installation == repo.owner.installation_id
-      {:ok, [%{"id" => 442, "full_name" => repo.full_name}]}
+      assert wanted == MapSet.new([{442, repo.full_name}])
+      {:ok, wanted}
     end)
 
     assert ids(Access.environments(principal)) == [history.id]
@@ -177,7 +176,7 @@ defmodule Foreman.PublicAPI.AccessTest do
   test "service resources follow the installation, including when a grant changes before a query runs" do
     installer = user_fixture(role: "admin")
     scope = Foreman.Scope.for_user(installer)
-    granted_repo = repo_fixture()
+    granted_repo = repo_fixture() |> github_id(817)
     other_repo = repo_fixture()
     granted_box = box_fixture()
     other_box = box_fixture(owner_user_id: installer.id)
@@ -234,6 +233,130 @@ defmodule Foreman.PublicAPI.AccessTest do
     assert ids(another) == Enum.sort([owned.id, shared.id])
     Repo.update!(change(admin, disabled_at: DateTime.utc_now()))
     assert ids(another) == []
+  end
+
+  test "a pre-binding workspace never consults GitHub, including on the collection path" do
+    github_config()
+    user = user_fixture()
+    actor = principal(user)
+    repo = repo_fixture() |> change(manual: true, github_id: 812) |> Repo.update!()
+    env = environment_fixture(user: user, repo: repo)
+
+    Repo.update!(
+      change(repo, github_identity_bound_at: DateTime.add(env.inserted_at, 1, :microsecond))
+    )
+
+    deny(ClientMock, :get_repo, 2)
+    assert ids(Access.environments(actor, env.id)) == []
+    assert ids(Access.environments(actor)) == []
+  end
+
+  test "service registration and existing grants require approval of the bound identity" do
+    github_config()
+    alias Foreman.OAuth.ServiceAccounts
+    scope = Foreman.Scope.for_user(user_fixture(role: "admin"))
+    legacy = repo_fixture() |> change(manual: true) |> Repo.update!()
+    box = box_fixture()
+
+    attrs = %{
+      "name" => "Build",
+      "scopes" => ["repos:list"],
+      "repo_ids" => [legacy.id],
+      "box_ids" => [box.id]
+    }
+
+    assert {:error, :invalid_resource} = ServiceAccounts.register(scope, "service", attrs)
+    refute Enum.any?(ServiceAccounts.choices(scope).repos, fn {id, _} -> id == legacy.id end)
+
+    # A service created on the old version could approve a name-only row.
+    {:ok, %{grant: old}} = ServiceAccounts.register(scope, "service", %{attrs | "repo_ids" => []})
+    old = Repo.update!(change(old, repo_ids: [legacy.id]))
+    {:ok, actor} = Foreman.OAuth.authorize_grant(old.id)
+    prepared = Access.repos(actor)
+    # Even a tie at the database's timestamp precision cannot prove approval followed binding.
+    bound =
+      Repo.update!(change(legacy, github_id: 812, github_identity_bound_at: old.inserted_at))
+
+    env = environment_fixture(user: actor.user, repo: bound, box: box)
+    assert ids(prepared) == []
+    assert ids(Access.environments(actor, env.id)) == []
+    assert ServiceAccounts.repo_ids(actor) == []
+
+    {:ok, %{grant: fresh}} = ServiceAccounts.register(scope, "service", attrs)
+    {:ok, approved} = Foreman.OAuth.authorize_grant(fresh.id)
+    assert ids(Access.repos(approved)) == [bound.id]
+    assert ServiceAccounts.repo_ids(approved) == [bound.id]
+  end
+
+  test "a prepared query rechecks the inactivity deadline on each execution" do
+    actor = principal(user_fixture())
+    box = box_fixture(owner_user_id: actor.user.id)
+    query = Access.boxes(actor)
+    # expires_at is set after query construction, so a captured BEAM clock
+    # will still admit this grant after its subsecond deadline passes.
+    deadline = DateTime.add(DateTime.utc_now(), 150, :millisecond)
+
+    Repo.update_all(from(g in Foreman.OAuth.Grant, where: g.id == ^actor.grant_id),
+      set: [expires_at: deadline]
+    )
+
+    assert ids(query) == [box.id]
+
+    if Repo.sqlite?() do
+      Repo.query!(
+        "UPDATE oauth_grants SET expires_at = replace(rtrim(expires_at, 'Z'), 'T', ' ') WHERE id = ?",
+        [actor.grant_id]
+      )
+
+      assert ids(query) == [box.id]
+    end
+
+    Process.sleep(max(1, DateTime.diff(deadline, DateTime.utc_now(), :millisecond) + 10))
+    assert ids(query) == []
+  end
+
+  test "identity migration fences historical manual workspaces and leaves synced workspaces accessible" do
+    github_config()
+    actor = principal(user_fixture())
+    manual = repo_fixture() |> change(manual: true, github_id: 815) |> Repo.update!()
+    synced = repo_fixture() |> github_id(816)
+    unbound = repo_fixture() |> change(manual: true) |> Repo.update!()
+    old = environment_fixture(user: actor.user, repo: manual)
+    live = environment_fixture(user: actor.user, repo: synced)
+    # Both IDs were available for installation under the previous schema.
+    {:ok, %{grant: legacy_grant}} =
+      Foreman.OAuth.ServiceAccounts.register(
+        Foreman.Scope.for_user(user_fixture(role: "admin")),
+        "service",
+        %{
+          "name" => "Existing CI",
+          "scopes" => ["repos:list"],
+          "repo_ids" => [manual.id, synced.id]
+        }
+      )
+
+    {:ok, service} = Foreman.OAuth.authorize_grant(legacy_grant.id)
+    # Recreate the preceding release's schema and apply the actual migration inside this sandbox.
+    version = 20_261_123_010_000
+    migration = Foreman.Repo.Migrations.RecordRepoIdentityBinding
+
+    Code.require_file(
+      Path.join(
+        :code.priv_dir(:foreman),
+        "repo/migrations/#{version}_record_repo_identity_binding.exs"
+      )
+    )
+
+    assert :ok = Ecto.Migrator.down(Repo, version, migration, log: false, migration_lock: false)
+    assert :ok = Ecto.Migrator.up(Repo, version, migration, log: false, migration_lock: false)
+    assert DateTime.after?(Repo.reload!(manual).github_identity_bound_at, old.inserted_at)
+    assert is_nil(Repo.reload!(synced).github_identity_bound_at)
+    assert is_nil(Repo.reload!(unbound).github_identity_bound_at)
+    assert ids(Access.environments(actor, old.id)) == []
+    expect(ClientMock, :user_installation_membership, fn _, _, wanted -> {:ok, wanted} end)
+    assert ids(Access.environments(actor, live.id)) == [live.id]
+    assert ids(Access.repos(service)) == [synced.id]
+    assert Foreman.OAuth.ServiceAccounts.repo_ids(service) == [synced.id]
   end
 
   defp principal(user) do
