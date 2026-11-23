@@ -212,6 +212,10 @@ defmodule Foreman.Agents do
     end
   end
 
+  def handle_event(box_id, %Event{type: "box.workspaces", payload: %{environments: entries}}) do
+    Foreman.PublicAPI.Readiness.record(box_id, entries)
+  end
+
   def handle_event(box_id, %Event{type: "box.inventory", payload: %{environments: envs}}) do
     Environments.reconcile_inventory(box_id, envs)
   end

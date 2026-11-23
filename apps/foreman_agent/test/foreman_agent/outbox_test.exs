@@ -40,6 +40,15 @@ defmodule ForemanAgent.OutboxTest do
     assert Enum.sort(Map.keys(first) ++ Map.keys(second)) == Enum.sort([a, b])
   end
 
+  test "readiness evidence is live-only and is sampled again on join", %{outbox: outbox} do
+    sample = event("box.workspaces", %{environments: %{@op => ["container"]}})
+    Outbox.push(outbox, sample)
+    Outbox.attach(outbox, self())
+    refute_receive {:outbox_deliver, ^sample, _}, 20
+    Outbox.push(outbox, sample)
+    assert_receive {:outbox_deliver, ^sample, nil}
+  end
+
   test "delivers straight away to an attached connection", %{outbox: outbox} do
     Outbox.attach(outbox, self())
     Outbox.push(outbox, log(1))

@@ -39,6 +39,20 @@ defmodule ForemanAgent.ReporterTest do
     verify!()
   end
 
+  test "workspace samples distinguish running containers in a partial project from an unreachable guest" do
+    entries = [
+      %{
+        env_id: "partial",
+        state: "partial",
+        containers: [%{id: "app", state: "running"}, %{id: "db", state: "exited"}]
+      },
+      %{env_id: "offline", state: "stopped", containers: []},
+      %{env_id: "unreachable", state: "partial", containers: []}
+    ]
+
+    assert Reporter.running_containers(entries) == %{"partial" => ["app"], "offline" => []}
+  end
+
   test "only a systemd OOM result supplies an exit time" do
     id = "6f1c1d1e-9a3b-4c1f-8f5e-2d7a9b0c1e2f"
 

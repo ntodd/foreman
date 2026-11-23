@@ -106,6 +106,9 @@ defmodule ForemanAgent.Outbox do
     state
   end
 
+  # This is evidence of current state. The reporter samples again on join.
+  defp enqueue(state, _seq, %Event{type: "box.workspaces"}), do: state
+
   defp enqueue(state, seq, %Event{type: type} = event) when type in @reliable do
     %{state | pending: :queue.in({seq, event}, state.pending)}
   end

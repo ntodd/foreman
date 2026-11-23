@@ -136,6 +136,7 @@ defmodule ForemanAgent.Reporter do
     case Handler.inventory() do
       {:ok, envs} ->
         if envs != state.last, do: report_inventory(envs)
+        push("box.workspaces", %{environments: running_containers(envs)})
 
         states = Map.new(envs, &{&1.env_id, &1.state})
 
@@ -152,6 +153,16 @@ defmodule ForemanAgent.Reporter do
       {:error, message} ->
         Logger.warning(message)
         state
+    end
+  end
+
+  @doc false
+  def running_containers(envs) do
+    # A running VM whose guest did not answer has state partial and no
+    # container list. Keep that distinct from observing a stopped guest.
+    for env <- envs, env.state != "partial" or env.containers != [], into: %{} do
+      ids = for %{id: id, state: "running"} <- env.containers, do: id
+      {env.env_id, ids}
     end
   end
 

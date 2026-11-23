@@ -914,6 +914,7 @@ defmodule Foreman.Environments do
     |> put_if(:applied_secret_hashes, args["secret_hashes"])
     |> put_token_pushed(args)
     # Results carry repo content (devcontainer.json): take only what fits.
+    |> Map.put(:workspace_container_id, workspace_id(result, action, env))
     |> put_if(:remote_user, string(result["remote_user"]))
     |> put_if(:workspace_folder, string(result["remote_workspace_folder"]))
     |> put_if(:services, strings(result["services"]))
@@ -994,7 +995,11 @@ defmodule Foreman.Environments do
        when status in ["failed", "cancelled"] and action in @up do
     op
     |> revert_desired(env)
-    |> Map.merge(%{observed_state: "error", status_message: error || status})
+    |> Map.merge(%{
+      observed_state: "error",
+      status_message: error || status,
+      workspace_container_id: nil
+    })
     # It never came up, so its next build is a first boot and gets a
     # fresh Tailscale key; this one may have expired by then.
     |> then(
@@ -1025,6 +1030,13 @@ defmodule Foreman.Environments do
        do: %{status_message: "secrets_write failed: #{error || status}", token_pushed_at: nil}
 
   defp result_attrs(_op, _env), do: %{}
+
+  # Restarting only sidecars can succeed without running devcontainer up.
+  defp workspace_id(%{"container_id" => id}, _action, _env)
+       when is_binary(id) and byte_size(id) in 1..128, do: id
+
+  defp workspace_id(_result, "restart_affected", env), do: env.workspace_container_id
+  defp workspace_id(_result, _action, _env), do: nil
 
   defp connect_hooks(hooks) when is_list(hooks), do: Connect.cast_hooks(hooks)
   defp connect_hooks(_), do: []

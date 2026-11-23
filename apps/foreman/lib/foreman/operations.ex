@@ -6,7 +6,7 @@ defmodule Foreman.Operations do
   """
   import Ecto.Query
 
-  alias Foreman.Operations.{LogBuffer, LogStore, Operation, Redactions}
+  alias Foreman.Operations.{LogBuffer, LogStore, Operation, Redactions, Retention}
   alias Foreman.Repo
 
   @active ~w(queued dispatched running)
@@ -159,10 +159,9 @@ defmodule Foreman.Operations do
       # out operation is its own cancel coming back: the timeout stays, and
       # isn't taken for someone cancelling a stop to keep it running.
       %Operation{} = op ->
-        if (Operation.finished?(op) and not timed_out?(op)) or
-             (timed_out?(op) and error == "cancelled"),
-           do: :already,
-           else: do_finish(op_id, status, result, error, apply)
+        if already_finished?(op, error),
+          do: :already,
+          else: do_finish(op_id, status, result, error, apply)
 
       nil ->
         :unknown
@@ -178,27 +177,65 @@ defmodule Foreman.Operations do
 
     error = error && Redactions.redact(op_id, error)
 
-    {:ok, {op, applied}} =
+    {:ok, finished} =
       Repo.transact(fn ->
-        op = get!(op_id)
+        query = from o in Operation, where: o.id == ^op_id
+        op = Repo.one!(if Repo.sqlite?(), do: query, else: lock(query, "FOR UPDATE"))
 
-        op =
-          op
-          |> Ecto.Changeset.change(outcome(op, status, result, error))
-          |> Repo.update!()
-
-        {:ok, {op, apply.(op)}}
+        if already_finished?(op, error) do
+          {:ok, :already}
+        else
+          changes = outcome(op, status, result, error)
+          updated = op |> Ecto.Changeset.change(changes) |> Repo.update!()
+          applied = unless superseded_timeout?(op), do: apply.(updated)
+          {:ok, {updated, applied}}
+        end
       end)
 
-    Redactions.delete(op_id)
-    broadcast(op)
-    Foreman.Activity.operation_finished(op)
-    {:ok, op, applied}
+    case finished do
+      :already ->
+        :already
+
+      {op, applied} ->
+        Redactions.delete(op_id)
+        broadcast(op)
+        Foreman.Activity.operation_finished(op)
+        {:ok, op, applied}
+    end
+  end
+
+  defp already_finished?(op, error) do
+    Operation.finished?(op) and (not timed_out?(op) or error == "cancelled")
+  end
+
+  # The late result corrects its own history. Once a later lifecycle command
+  # was dispatched, it owns the environment state. Also serialize competing
+  # results on the environment row so neither can race the visibility check.
+  defp superseded_timeout?(%Operation{environment_id: nil}), do: false
+
+  defp superseded_timeout?(op) do
+    query =
+      from e in Foreman.Environments.Environment,
+        where: e.id == ^op.environment_id,
+        select: e.destroyed_at
+
+    destroyed_at = Repo.one!(if Repo.sqlite?(), do: query, else: lock(query, "FOR UPDATE"))
+
+    timed_out?(op) and
+      (not is_nil(destroyed_at) or
+         Repo.exists?(
+           from newer in Operation,
+             where:
+               newer.environment_id == ^op.environment_id and newer.id != ^op.id and
+                 newer.dispatched_at >= ^op.finished_at,
+             where:
+               newer.action in ~w(create rebuild pull_rebuild start stop restart_all restart_affected suspend destroy)
+         ))
   end
 
   @max_result_bytes 64 * 1024
   @result_fields ~w(branch changed_files unpushed_commits clean has_stash head base ahead
-                    resumed suspended vm_size remote_user remote_workspace_folder services
+                    container_id resumed suspended vm_size remote_user remote_workspace_folder services
                     devcontainer_service warnings host_requirements feature_version tailscale_node_id
                     connect pull_failed size_mb rebooted restart version)
 
@@ -267,6 +304,7 @@ defmodule Foreman.Operations do
             set: [
               status: "failed",
               error: error,
+              timeout_error: error,
               args: Map.put(op.args || %{}, "timed_out", true),
               finished_at: now,
               updated_at: now
@@ -367,6 +405,9 @@ defmodule Foreman.Operations do
 
   @doc "Clears the logs and results of operations that finished before `cutoff`. Returns how many."
   def prune_output(cutoff) do
+    minimum_window = Retention.log_cutoff(DateTime.utc_now())
+    cutoff = if DateTime.after?(cutoff, minimum_window), do: minimum_window, else: cutoff
+
     {:ok, count} =
       Repo.transact(fn ->
         expired = from o in Operation, where: o.finished_at < ^cutoff

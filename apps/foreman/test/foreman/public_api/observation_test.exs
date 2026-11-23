@@ -12,8 +12,17 @@ defmodule Foreman.PublicAPI.ObservationTest do
     setup_id = String.duplicate("a", 64)
     sidecar_id = String.duplicate("b", 64)
 
-    op = Operations.create!(%{environment_id: env.id, box_id: env.box_id, action: "create", command: "env.create",
-      status: "succeeded", result: %{"container_id" => setup_id}, finished_at: DateTime.utc_now()})
+    op =
+      Operations.create!(%{
+        environment_id: env.id,
+        box_id: env.box_id,
+        action: "create",
+        command: "env.create",
+        status: "succeeded",
+        result: %{"container_id" => setup_id},
+        finished_at: DateTime.utc_now()
+      })
+
     env = Environments.record_result(op)
     assert Readiness.get(env) == "unknown"
 
@@ -40,9 +49,54 @@ defmodule Foreman.PublicAPI.ObservationTest do
     Agents.handle_event(env.box_id, event)
   end
 
+  test "housekeeping ages logs and history from completion, including for destroyed environments" do
+    env = environment_fixture(destroyed_at: DateTime.utc_now())
+    now = DateTime.utc_now()
+    old = DateTime.add(now, -100, :day)
+
+    operations =
+      for {status, finished} <- [
+            {"running", nil},
+            {"succeeded", DateTime.add(now, -29, :day)},
+            {"succeeded", DateTime.add(now, -31, :day)},
+            {"failed", DateTime.add(now, -91, :day)}
+          ] do
+        op =
+          Operations.create!(%{
+            environment_id: env.id,
+            box_id: env.box_id,
+            action: "create",
+            command: "env.create",
+            status: status,
+            inserted_at: old,
+            finished_at: finished
+          })
+
+        LogStore.append(op.id, "log")
+        op
+      end
+
+    assert :ok = Foreman.Jobs.Housekeeping.perform(%{})
+    [running, recent, history, expired] = operations
+    for op <- [running, recent], do: assert({"log", 3, false} == LogStore.page(op, 0))
+    assert {"", 0, false} = LogStore.page(history, 0)
+    assert Operations.get(history.id)
+    refute Operations.get(expired.id)
+    assert Repo.reload!(env).destroyed_at
+  end
+
   test "log offsets survive legacy conversion, UTF-8 page boundaries, and loss of the old tail" do
     env = environment_fixture()
-    op = Operations.create!(%{environment_id: env.id, box_id: env.box_id, action: "create", command: "env.create", log: "old\n"})
+
+    op =
+      Operations.create!(%{
+        environment_id: env.id,
+        box_id: env.box_id,
+        action: "create",
+        command: "env.create",
+        log: "old\n"
+      })
+
     assert {"old\n", 4, false} = LogStore.page(op, 0)
     text = String.duplicate("x", 65_535) <> "━\n"
     LogStore.append(op.id, text)

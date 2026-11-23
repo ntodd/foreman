@@ -19,6 +19,7 @@ defmodule Foreman.Operations.Operation do
     field :args, :map
     field :status, :string, default: "queued"
     field :error, :string
+    field :timeout_error, :string
     field :result, :map
     field :log, :string, load_in_query: false
     field :log_truncated, :boolean, default: false

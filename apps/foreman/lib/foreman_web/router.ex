@@ -71,6 +71,18 @@ defmodule ForemanWeb.Router do
     get "/setup/github/installed", SetupController, :installed
   end
 
+  scope "/api/v1", ForemanWeb do
+    pipe_through [:api, :oauth_bearer]
+
+    get "/repos", PublicReadController, :repos
+    get "/boxes", PublicReadController, :boxes
+    get "/environments", PublicReadController, :environments
+    get "/environments/:id", PublicReadController, :environment
+    get "/environments/:id/operations", PublicReadController, :operations
+    get "/operations/:id", PublicReadController, :operation
+    get "/operations/:id/logs", PublicReadController, :logs
+  end
+
   # Agents: enrollment, the install script and release downloads. Release
   # tarballs are signed, and the agent checks the signature itself.
   scope "/", ForemanWeb do

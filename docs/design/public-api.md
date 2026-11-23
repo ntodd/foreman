@@ -65,6 +65,12 @@ Example create body (the expiry is an absolute UTC instant):
 
 **Client behavior.** Collection responses use opaque cursors; logs expose a cursor and indicate truncation. Clients can reconnect using the last cursor. API errors carry a stable code and a human-readable message. Use 401 for an expired or invalid credential, 403 for an unauthorized action on a visible resource, and 404 for an absent or invisible resource. A failed asynchronous build is a terminal operation result available by GET. Clients should tolerate additional response fields within v1.
 
+**Read responses.** Collections return up to 50 items. Repository and box lists use ascending names, environments use ascending IDs, and operation history uses newest creation time first with the operation ID as the tie-breaker. Cursors belong to the same grant and collection. Log pages contain up to 64 KiB of durable, redacted output. An empty page can be polled again after the agent flushes more output. If the 1 MiB rolling tail overtakes the reader, the next page starts at the retained text and sets `truncated` to true.
+
+A ready workspace has a successful devcontainer setup result for the same container ID that its box currently sees running. A failed sidecar can leave the environment partially running while its workspace is ready. A disconnected box, an unreachable guest, or a box without a fresh workspace report yields unknown readiness. Environment connection fields require `environments:read`, including on a collection response.
+
+The v1 operation history includes create, start, stop and destroy. When Foreman times out an operation it reports a terminal `failed` with error code `operation_timeout`. A late agent result can correct the environment's observed state when that operation still controls it. The public operation keeps its timeout outcome.
+
 Proposed create errors:
 
 | HTTP | Code | Caller action |

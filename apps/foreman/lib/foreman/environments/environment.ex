@@ -34,6 +34,7 @@ defmodule Foreman.Environments.Environment do
     field :pending_restart, :boolean, default: false
     field :pending_changes, {:array, :string}, default: []
     field :remote_user, :string
+    field :workspace_container_id, :string
     field :workspace_folder, :string
     field :services, {:array, :string}, default: []
     field :devcontainer_service, :string
@@ -150,6 +151,7 @@ defmodule Foreman.Environments.Environment do
       :pending_restart,
       :pending_changes,
       :remote_user,
+      :workspace_container_id,
       :workspace_folder,
       :services,
       :devcontainer_service,

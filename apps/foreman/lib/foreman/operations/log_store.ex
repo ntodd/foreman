@@ -21,6 +21,63 @@ defmodule Foreman.Operations.LogStore do
     tail(IO.iodata_to_binary([prefix, pending])) |> String.replace_invalid()
   end
 
+  @doc """
+  Reads a bounded page of already-redacted, durable bytes at an absolute
+  offset. Polling an empty page keeps the position until the buffer flushes.
+  A reader overtaken by the rolling tail resumes at its oldest retained byte.
+  """
+  def page(op, offset) do
+    query = chunks(op.id)
+
+    case Repo.one(from c in query, select: max(c.end_offset)) do
+      nil ->
+        # Once the first writer migrates a legacy log, its offsets continue
+        # from that log's length. An empty poll racing migration is retryable.
+        data = legacy(op.id) || ""
+        slice(data, 0, offset, op.log_truncated and offset == 0)
+
+      ending ->
+        first = max(offset, ending - @limit)
+
+        rows =
+          Repo.all(
+            from c in query,
+              where: c.end_offset > ^first and c.end_offset <= ^ending,
+              order_by: c.end_offset,
+              limit: 128,
+              select: {c.end_offset, c.data},
+              where: c.end_offset <= ^(first + 2 * @chunk_size)
+          )
+
+        case rows do
+          [] ->
+            {"", offset, false}
+
+          [{to, head} | _] ->
+            base = to - byte_size(head)
+            start = max(first, base)
+            data = rows |> Enum.map(&elem(&1, 1)) |> IO.iodata_to_binary()
+            slice(data, base, start, offset < start or (offset == 0 and op.log_truncated))
+        end
+    end
+  end
+
+  defp slice(data, base, start, truncated) do
+    skip = min(max(0, start - base), byte_size(data))
+    remaining = binary_part(data, skip, byte_size(data) - skip)
+    {aligned, position} = align(remaining, start)
+    # The row or page can end inside a code point. Leave those bytes for
+    # the next page, whose cursor counts the original stored bytes.
+    bytes = String.byte_slice(aligned, 0, @chunk_size)
+    {String.replace_invalid(bytes), position + byte_size(bytes), truncated}
+  end
+
+  # The rolling tail can cut away the leading bytes of a UTF-8 scalar.
+  defp align(<<continuation, rest::binary>>, position) when continuation in 128..191,
+    do: align(rest, position + 1)
+
+  defp align(bytes, position), do: {bytes, position}
+
   def append(op_id, text) do
     Repo.transact(fn ->
       query = from o in Operation, where: o.id == ^op_id, select: o.id
