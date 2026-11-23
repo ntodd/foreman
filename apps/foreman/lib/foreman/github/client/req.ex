@@ -151,6 +151,15 @@ defmodule Foreman.GitHub.Client.Req do
   end
 
   @impl true
+  def list_user_installation_repos(token, installation_id) do
+    paginate(
+      api(bearer(token)),
+      "/user/installations/#{installation_id}/repositories",
+      & &1["repositories"]
+    )
+  end
+
+  @impl true
   def get_repo(token, full_name) do
     case Req.get(api(bearer(token)), url: "/repos/#{full_name}") do
       {:ok, %{status: 200, body: body}} -> {:ok, body}
