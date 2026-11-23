@@ -49,6 +49,11 @@ defmodule ForemanWeb.Router do
     get "/.well-known/oauth-authorization-server", OAuthMetadataController, :show
   end
 
+  scope "/", ForemanWeb do
+    get "/cli/install.sh", CLIInstallerController, :show
+    get "/cli/release", CLIInstallerController, :release
+  end
+
   # Health checks: no session, no pipeline, and not logged (they come
   # every few seconds).
   scope "/", ForemanWeb do

@@ -48,6 +48,7 @@ defmodule ForemanWeb.ConsentController do
   def connections(conn, _) do
     render(conn, :connections,
       page_title: "Connected apps",
+      instance: Foreman.Config.base_url(),
       grants: OAuth.connections(conn.assigns.current_scope.user.id)
     )
   end

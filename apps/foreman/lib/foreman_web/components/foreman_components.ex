@@ -338,7 +338,6 @@ defmodule ForemanWeb.ForemanComponents do
         <button
           type="button"
           id={"#{@id}-copy"}
-          phx-hook="Copy"
           data-copy={@command}
           class="inline-flex shrink-0 items-center gap-1.5 rounded-lg border border-line-strong bg-canvas px-3 text-xs font-medium text-ink-2 shadow-control transition-colors hover:bg-subtle hover:text-ink"
         >

@@ -16,6 +16,7 @@ defmodule ForemanWeb.Plugs.OAuthTransport do
   # Phoenix.Router dispatches on URI.decode/1 applied once to each segment.
   def policy(path_info), do: path_info |> Enum.map(&URI.decode/1) |> route_policy()
 
+  defp route_policy(["cli", name]) when name in ["install.sh", "release"], do: :installer
   defp route_policy(["oauth" | _]), do: :oauth
   defp route_policy(["api", "v1" | _]), do: :resource
   defp route_policy([".well-known", "oauth-authorization-server"]), do: :oauth
@@ -56,6 +57,9 @@ defmodule ForemanWeb.Plugs.OAuthTransport do
       |> halt()
     end
   end
+
+  defp transport_error(:installer),
+    do: %{code: "insecure_transport", message: "The CLI installer requires a secure origin."}
 
   defp transport_error(:resource),
     do: %{

@@ -43,7 +43,7 @@ jobs:
           HAS_PRIVATE_KEY: ${{ secrets.FOREMAN_RELEASE_PRIVATE_KEY != '' }}
         run: |
           version="${GITHUB_REF_NAME#v}"
-          echo "$version" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$' || { echo "::error::$GITHUB_REF_NAME isn't vX.Y.Z"; exit 1; }
+          echo "$version" | grep -Eq '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$' || { echo "::error::$GITHUB_REF_NAME isn't vX.Y.Z"; exit 1; }
           [ -n "$PUBLIC_KEY" ] || { echo "::error::Set the FOREMAN_RELEASE_PUBLIC_KEY variable"; exit 1; }
           [ "$HAS_PRIVATE_KEY" = true ] || { echo "::error::Set the FOREMAN_RELEASE_PRIVATE_KEY secret"; exit 1; }
           echo "version=$version" >> "$GITHUB_OUTPUT"
@@ -118,6 +118,37 @@ jobs:
           path: out/foreman-guest-*.tar
           if-no-files-found: error
 
+  cli:
+    needs: check
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {os: linux, arch: amd64, runner: ubuntu-24.04}
+          - {os: linux, arch: arm64, runner: ubuntu-24.04-arm}
+          - {os: darwin, arch: amd64, runner: macos-15-intel}
+          - {os: darwin, arch: arm64, runner: macos-15}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: cli/go.mod
+          cache: false
+      - name: Package and run the CLI on its target
+        env:
+          TARGET_OS: ${{ matrix.os }}
+          TARGET_ARCH: ${{ matrix.arch }}
+        run: |
+          scripts/package-cli.sh "$GITHUB_REF_NAME" "$TARGET_OS" "$TARGET_ARCH" out
+          scripts/smoke-cli.sh "$GITHUB_REF_NAME" "out/foreman-cli-$GITHUB_REF_NAME-$TARGET_OS-$TARGET_ARCH.tar.gz"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: cli-${{ matrix.os }}-${{ matrix.arch }}
+          path: out/foreman-cli-*.tar.gz
+          if-no-files-found: error
+
   agent:
     needs: [check, guest]
     strategy:
@@ -190,10 +221,10 @@ jobs:
   # A skipped CI job is expected only when wait observed a successful run
   # on this commit. Check gate results explicitly, including timeouts.
   sign:
-    needs: [check, wait, ci, agent]
+    needs: [check, wait, ci, agent, cli]
     if: >-
       ${{ !cancelled() && needs.check.result == 'success' && needs.wait.result == 'success' &&
-          needs.agent.result == 'success' &&
+          needs.agent.result == 'success' && needs.cli.result == 'success' &&
           ((needs.wait.outputs.ci == 'passed' && needs.ci.result == 'skipped') ||
            (needs.wait.outputs.ci == 'run' && needs.ci.result == 'success')) }}
     runs-on: ubuntu-24.04
@@ -326,6 +357,13 @@ jobs:
         with:
           name: guest
           path: out
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: cli-*
+          path: out
+          merge-multiple: true
+      - name: Verify the complete CLI release and write its manifest
+        run: scripts/checksum-cli.sh "$GITHUB_REF_NAME" out
       - name: Publish the GitHub release
         env:
           VERSION: ${{ needs.check.outputs.version }}
@@ -364,4 +402,4 @@ jobs:
             echo "To register these agents on a control plane by hand: \`scripts/publish-agent-release.sh $VERSION\`"
           } > notes.md
           gh release create "$GITHUB_REF_NAME" --verify-tag --title "Foreman $VERSION" \
-            --notes-file notes.md out/*.tar.gz out/*.sig out/foreman-guest-*.tar
+            --notes-file notes.md "out/foreman-cli-$GITHUB_REF_NAME-SHA256SUMS" out/*.tar.gz out/*.sig out/foreman-guest-*.tar
