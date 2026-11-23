@@ -346,17 +346,6 @@ func TestRestartRecreatesChangedServicesOrAllOfThem(t *testing.T) {
 		t.Fatal(sent)
 	}
 
-	// Nothing waiting on a restart is a success with nothing queued.
-	h = setup(t, fake{act: func(_ context.Context, _, _ string, b api.Action) (*api.Response[api.OperateEnvironmentResult], error) {
-		return &api.Response[api.OperateEnvironmentResult]{StatusCode: 200, Value: api.OperateEnvironmentResult{EnvironmentID: envID}}, nil
-	}})
-	h.JSON = false
-	h.success(t, "env", "restart", envID)
-	if !strings.Contains(h.out.String(), "No services are waiting on a restart") {
-		t.Fatal(h.out.String())
-	}
-
-	h.JSON = true
 	h.failure(t, "invalid_invocation", "env", "restart", envID, "--all=yes")
 	h.failure(t, "invalid_invocation", "env", "restart", envID, "--yes")
 }

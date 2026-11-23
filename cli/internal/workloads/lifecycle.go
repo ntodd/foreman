@@ -13,15 +13,13 @@ import (
 )
 
 type submission struct {
-	EnvironmentID           string `json:"environment_id,omitempty"`
-	OperationID             string `json:"operation_id,omitempty"`
-	OperationHistoryExpired bool   `json:"operation_history_expired,omitempty"`
-	AlreadyReached          bool   `json:"already_reached,omitempty"`
-	// nothingToRestart words an already-reached restart for a person.
-	nothingToRestart bool
-	RequestKey       string           `json:"request_key,omitempty"`
-	Operation        *api.Operation   `json:"operation,omitempty"`
-	Environment      *api.Environment `json:"environment,omitempty"`
+	EnvironmentID           string           `json:"environment_id,omitempty"`
+	OperationID             string           `json:"operation_id,omitempty"`
+	OperationHistoryExpired bool             `json:"operation_history_expired,omitempty"`
+	AlreadyReached          bool             `json:"already_reached,omitempty"`
+	RequestKey              string           `json:"request_key,omitempty"`
+	Operation               *api.Operation   `json:"operation,omitempty"`
+	Environment             *api.Environment `json:"environment,omitempty"`
 }
 
 const capacityWarningCode = "capacity_confirmation_required"
@@ -34,7 +32,6 @@ func (o Options) lifecycle(ctx context.Context, v invocation) error {
 		result, err = o.create(ctx, v)
 	} else {
 		result, err = o.operate(ctx, v, action)
-		result.nothingToRestart = action == "restart" && result.AlreadyReached
 	}
 	if err != nil {
 		return err
@@ -55,9 +52,6 @@ func (o Options) lifecycle(ctx context.Context, v invocation) error {
 	if result.AlreadyReached {
 		event = "already_reached"
 		message = "Environment " + result.EnvironmentID + " is already in the requested state."
-		if result.nothingToRestart {
-			message = "No services in environment " + result.EnvironmentID + " are waiting on a restart."
-		}
 	}
 	if err := o.progress(event, result, message); err != nil {
 		return attach(err, result)
@@ -105,11 +99,7 @@ func (o Options) result(r submission) error {
 		return err
 	}
 	if r.AlreadyReached {
-		message := "The environment is already in the requested state."
-		if r.nothingToRestart {
-			message = "No services are waiting on a restart. Use --all to stop and start every container."
-		}
-		if _, err := fmt.Fprintln(o.Out, message); err != nil {
+		if _, err := fmt.Fprintln(o.Out, "The environment is already in the requested state."); err != nil {
 			return err
 		}
 	}

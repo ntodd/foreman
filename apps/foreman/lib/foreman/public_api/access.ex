@@ -141,16 +141,26 @@ defmodule Foreman.PublicAPI.Access do
   revocation that hasn't committed yet waits for the caller, and one
   that has is seen. Shared, and on the grant alone, so two writers
   through one client don't queue behind each other on its row.
+
+  The user's row is taken first, the order token refresh and
+  offboarding take the two in. A write that audits itself needs that
+  row anyway, for the audit entry's reference to its actor, and taking
+  it after the grant would cross with a refresh in flight.
   """
   def lock_connection(principal) do
-    query = from g in matching_grants(principal), select: g.id
+    grant = from g in matching_grants(principal), select: g.id
 
-    query =
+    unless Foreman.Repo.sqlite?() do
+      user = from u in Foreman.Accounts.User, where: u.id == ^principal.user.id, select: u.id
+      Foreman.Repo.one(lock(user, "FOR SHARE"))
+    end
+
+    grant =
       if Foreman.Repo.sqlite?(),
-        do: query,
-        else: lock(query, [g], fragment("FOR SHARE OF ?", g))
+        do: grant,
+        else: lock(grant, [g], fragment("FOR SHARE OF ?", g))
 
-    not is_nil(Foreman.Repo.one(query))
+    not is_nil(Foreman.Repo.one(grant))
   end
 
   @doc "Narrows a query to nothing unless the connection's grant is still live."

@@ -31,6 +31,17 @@ defmodule Foreman.PublicAPI.RestartTest do
     assert :ok = Foreman.Agents.handle_event(box.id, result)
   end
 
+  # Acknowledge whatever the box is sent until `op` itself has finished.
+  defp complete_all(box, op) do
+    receive do
+      {:dispatch, %ForemanProtocol.Command{op_id: id}} ->
+        complete(box, id)
+        if id != op, do: complete_all(box, op)
+    after
+      500 -> flunk("the box was never sent #{op}")
+    end
+  end
+
   defp flush do
     receive do
       {:dispatch, _} -> flush()
@@ -64,17 +75,20 @@ defmodule Foreman.PublicAPI.RestartTest do
     assert Repo.aggregate(from(o in Operation, where: o.action == "restart_all"), :count) == 1
   end
 
-  test "restart_affected restarts what the changed secrets touch, and nothing when none have",
-       ctx do
+  test "restart_affected always restarts, and carries the names known to have changed", ctx do
     env_id = ctx.env.id
 
-    assert {:ok, ^env_id, nil} =
+    # Queued even with nothing pending: whether a restart happens must not
+    # say whether a secret just sent matched the one already applied.
+    assert {:ok, ^env_id, quiet} =
              restart(ctx.actor, ctx.env, "restart_affected", "nothing pending")
 
-    refute Repo.exists?(from o in Operation, where: o.action == "restart_affected")
+    assert %Operation{action: "restart_affected", args: %{"changed" => []}} =
+             Repo.get!(Operation, quiet)
 
-    pending(ctx.env, ["API_KEY", "DATABASE_URL"])
+    complete_all(ctx.box, quiet)
 
+    pending(Repo.reload!(ctx.env), ["API_KEY", "DATABASE_URL"])
     assert {:ok, ^env_id, op_id} = restart(ctx.actor, ctx.env, "restart_affected", "now pending")
 
     assert %Operation{action: "restart_affected", args: %{"changed" => changed}} =
@@ -186,28 +200,40 @@ defmodule Foreman.PublicAPI.RestartTest do
     test "the owner's new connection can restart a workspace an earlier one launched", ctx do
       {newer, _} = principal(ctx.user)
       assert ctx.env.api_grant_id == ctx.actor.grant_id
+
+      # The workspace is running on the authority of a start through the
+      # connection that launched it, and that connection is then replaced.
+      launched = %{
+        "action" => "start",
+        "user_id" => ctx.user.id,
+        "grant_id" => ctx.actor.grant_id,
+        "trigger" => "request"
+      }
+
+      ctx.env |> change(desired_authority: launched) |> Repo.update!()
       Foreman.OAuth.revoke_grant(ctx.actor.grant_id)
+      owner = Foreman.Scope.for_user(ctx.user)
 
-      # With the launching connection gone, a changed secret can't be
-      # written to the box on its authority.
-      {:ok, _} =
-        Foreman.Secrets.apply_changes(
-          Foreman.Scope.for_user(ctx.user),
-          "environment",
-          ctx.env,
-          [{"A", "1"}],
-          []
-        )
-
+      # A changed secret can no longer be written to the box on that authority.
+      {:ok, _} = Foreman.Secrets.apply_changes(owner, "environment", ctx.env, [{"A", "1"}], [])
       refute_receive {:dispatch, %Command{type: "env.secrets.write"}}
 
-      # The restart delivers it on the new connection's, before anything restarts.
+      # The restart delivers it on the new connection's, before anything restarts,
+      # and the workspace runs on the new connection's authority from then on.
       assert {:ok, _, op} = restart(newer, ctx.env, "restart_all")
       files_then_restart(ctx.box, op)
-      assert Repo.reload!(ctx.env).workload_grant_id == newer.grant_id
+      env = Repo.reload!(ctx.env)
+      assert env.workload_grant_id == newer.grant_id
+      assert %{"grant_id" => grant, "action" => "restart_all"} = env.desired_authority
+      assert grant == newer.grant_id
+      complete(ctx.box, op)
+
+      # So the next change reaches the box without another restart.
+      {:ok, _} = Foreman.Secrets.apply_changes(owner, "environment", ctx.env, [{"A", "2"}], [])
+      assert_receive {:dispatch, %Command{type: "env.secrets.write"}}
     end
 
-    test "a restart leaves the authority behind the workspace alone, refused or not", ctx do
+    test "a restart refused at dispatch leaves the authority behind the workspace alone", ctx do
       earlier = %{
         "action" => "start",
         "user_id" => ctx.user.id,

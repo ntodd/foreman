@@ -264,10 +264,29 @@ defmodule Foreman.Environments.Server do
          do: Environments.dispatch_denied(failed, env)
   end
 
-  defp bind_workload_grant(%{action: action, api_grant_id: id}, env)
-       when action in ["start", "restart_affected", "restart_all"] and not is_nil(id) and
-              env.workload_grant_id != id do
+  defp bind_workload_grant(%{action: "start", api_grant_id: id}, env)
+       when not is_nil(id) and env.workload_grant_id != id do
     Environments.update_env!(env, %{workload_grant_id: id})
+  end
+
+  # A restart sent on a connection's authority is that connection asking
+  # for the workspace to be running, as a start is. Recorded here, once
+  # the restart has been authorized, and not when it was queued: a
+  # restart that is cancelled or refused then changes nothing. Without
+  # it the workspace would go on answering to the connection that
+  # launched it, and after that one is revoked no changed secret could be
+  # written to the box.
+  defp bind_workload_grant(%{action: action, api_grant_id: id} = op, env)
+       when action in ["restart_affected", "restart_all"] and not is_nil(id) do
+    authority = %{
+      "action" => action,
+      "user_id" => op.user_id,
+      "grant_id" => id,
+      "trigger" => op.trigger
+    }
+
+    if env.workload_grant_id != id or env.desired_authority != authority,
+      do: Environments.update_env!(env, %{workload_grant_id: id, desired_authority: authority})
   end
 
   defp bind_workload_grant(_op, _env), do: :ok

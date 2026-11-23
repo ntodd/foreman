@@ -307,10 +307,9 @@ defmodule Foreman.PublicAPI.Mutations do
       not env.created_once or not stable?(env, "start") ->
         @not_running
 
-      # Nothing has changed since the services last came up.
-      action == "restart_affected" and env.pending_changes == [] ->
-        accepted_existing(actor, env, action, nil)
-
+      # Queued whether or not anything is known to have changed. Answering
+      # "nothing to restart" would tell a caller who had just set a secret
+      # that the value it sent was the one already applied.
       true ->
         {:ok, op} =
           Environments.queue_action(
