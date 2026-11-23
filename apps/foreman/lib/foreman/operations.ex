@@ -400,6 +400,10 @@ defmodule Foreman.Operations do
     end
   end
 
+  @doc "Returns an undelivered claim to the queue if it is still dispatched."
+  def release_claim(%Operation{} = op),
+    do: transition(op, "dispatched", status: "queued", dispatched_at: nil)
+
   @doc "Fails a queued operation that couldn't be sent. `:error` if it isn't queued any more."
   def fail_queued(%Operation{} = op, error),
     do: transition(op, "queued", status: "failed", error: error, finished_at: DateTime.utc_now())

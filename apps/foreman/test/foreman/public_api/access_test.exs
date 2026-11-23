@@ -579,6 +579,24 @@ defmodule Foreman.PublicAPI.AccessTest do
     assert Repo.reload!(repo).archived
   end
 
+  test "a rejected installation update rolls back its first binding" do
+    repo = repo_fixture() |> change(manual: true) |> Repo.update!()
+
+    assert {:error, changeset} =
+             Foreman.Repos.upsert_repo(repo.owner, %{
+               name: "",
+               full_name: repo.full_name,
+               github_id: 899,
+               archived: true
+             })
+
+    assert changeset.errors[:name]
+    unchanged = Repo.reload!(repo)
+    refute unchanged.github_id
+    refute unchanged.github_identity_bound_at
+    refute unchanged.archived
+  end
+
   test "a concurrent first binding accepts an archive observation only for the same identity" do
     github_config()
     scope = Foreman.Scope.for_user(user_fixture(role: "admin"))

@@ -832,7 +832,8 @@ defmodule Foreman.Environments do
 
   @doc """
   Writes a finished operation's outcome to its environment. Returns the
-  environment, or `:expiry_already_consumed` when a sibling fulfilled its policy.
+  environment if the result can confirm its state. A superseded expiry result
+  returns `:expiry_already_consumed` and leaves the environment alone.
   Box operations return the work left by `Foreman.Prebuilds.record_result/1`.
   """
   def record_result(%Foreman.Operations.Operation{environment_id: nil} = op) do
@@ -848,6 +849,27 @@ defmodule Foreman.Environments do
 
   # A dispatched retry can finish after its sibling consumed the expiry.
   # Keep its operation history without reapplying its old state or cleanup.
+  defp record_environment_result(
+         %{
+           id: id,
+           trigger: "expiry",
+           action: "stop",
+           status: "succeeded",
+           dispatched_at: %DateTime{} = sent
+         },
+         %{expiry_consumed_at: at, observed_state: "stopped", desired_state: "stopped"} = env
+       )
+       when not is_nil(at) do
+    # The current socket may have performed the redundant stop. Its result
+    # confirms only that stop, never a state established by a later action.
+    superseded =
+      from o in Foreman.Operations.Operation,
+        where: o.environment_id == ^env.id and o.id != ^id and o.action in @lifecycle,
+        where: o.dispatched_at >= ^sent
+
+    if Repo.exists?(superseded), do: :expiry_already_consumed, else: env
+  end
+
   defp record_environment_result(%{trigger: "expiry"}, %{expiry_consumed_at: at})
        when not is_nil(at),
        do: :expiry_already_consumed
@@ -1173,6 +1195,23 @@ defmodule Foreman.Environments do
     broadcast(env)
     env
   end
+
+  @doc false
+  def mark_dispatch_state(%{trigger: "expiry"}, env, state) do
+    # A sibling success can commit after the retry's claim. Serialize this
+    # write with consumption on the environment row, including on Postgres.
+    query = from e in Environment, where: e.id == ^env.id and is_nil(e.expiry_consumed_at)
+
+    {changed, _} =
+      Repo.update_all(query,
+        set: [observed_state: state, status_message: nil, updated_at: DateTime.utc_now()]
+      )
+
+    if changed == 1, do: broadcast(env)
+  end
+
+  def mark_dispatch_state(_op, env, state),
+    do: update_env!(env, %{observed_state: state, status_message: nil})
 
   @doc "The transitional state shown while an operation runs."
   def transitional_state("create"), do: "creating"

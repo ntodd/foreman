@@ -112,21 +112,31 @@ defmodule Foreman.Repos do
         _ -> by_name || %GitRepo{owner_id: owner.id}
       end
 
+    save_synced_repo(repo, owner, attrs, github_id)
+  end
+
+  # An admin checking the name with GitHub can bind this same row after
+  # our lookup. Claim the first binding only while the row still names
+  # the unbound repo. If the admin won, resolve the name and ID again so
+  # a replacement gets its own row, settings and archive status.
+  defp save_synced_repo(%GitRepo{id: id, github_id: nil} = repo, owner, attrs, github_id)
+       when not is_nil(id) and is_integer(github_id) do
+    row = from r in GitRepo, where: r.id == ^id and r.full_name == ^repo.full_name
+
+    Repo.transact(fn ->
+      case bind_unbound(row, github_id, []) do
+        {1, [bound]} -> save_synced_repo(bound, owner, attrs, github_id)
+        {0, _} -> upsert_repo(owner, attrs)
+      end
+    end)
+  end
+
+  defp save_synced_repo(repo, owner, attrs, _github_id) do
     repo
     |> GitRepo.sync_changeset(attrs)
-    |> record_first_binding(repo, github_id)
     |> Ecto.Changeset.put_change(:owner_id, owner.id)
     |> Repo.insert_or_update()
   end
-
-  # Historical workspaces on a manually entered name predate our first
-  # evidence of which GitHub repository occupied it.
-  defp record_first_binding(changeset, %GitRepo{id: id, github_id: nil}, github_id)
-       when not is_nil(id) and is_integer(github_id) do
-    Ecto.Changeset.put_change(changeset, :github_identity_bound_at, DateTime.utc_now())
-  end
-
-  defp record_first_binding(changeset, _, _), do: changeset
 
   # A row with the same name but another GitHub id is another repo: the
   # first one was renamed or deleted and this one took its name. It
@@ -231,11 +241,17 @@ defmodule Foreman.Repos do
   def observe_manual_repo(_, _), do: false
 
   defp record_manual_binding(row, id, archived) do
-    binding = [github_id: id, github_identity_bound_at: DateTime.utc_now()]
-    changes = if is_boolean(archived), do: [{:archived, archived} | binding], else: binding
-    {bound, _} = Repo.update_all(where(row, [r], is_nil(r.github_id)), set: changes)
+    changes = if is_boolean(archived), do: [archived: archived], else: []
+    {bound, _} = bind_unbound(row, id, changes)
     # An installation sync may have bound the row during the GitHub request.
     if bound == 0, do: record_manual_archive(row, id, archived)
+  end
+
+  defp bind_unbound(row, id, changes) do
+    now = DateTime.utc_now()
+    binding = [github_id: id, github_identity_bound_at: now, updated_at: now]
+    unbound = from r in row, where: is_nil(r.github_id), select: r
+    Repo.update_all(unbound, set: binding ++ changes)
   end
 
   defp record_manual_archive(row, id, archived) when is_boolean(archived) do
