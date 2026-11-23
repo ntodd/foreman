@@ -39,7 +39,7 @@ defmodule Foreman.PublicAPI.RepositoryBindingConcurrencyTest do
         Repo.delete_all(from o in Foreman.Operations.Operation, where: o.box_id == ^box.id)
         Repo.delete_all(from e in Environments.Environment, where: e.box_id == ^box.id)
         Repo.delete!(box)
-        Repo.delete!(repo)
+        Repo.delete_all(from r in Repos.Repo, where: r.owner_id == ^owner.id)
         Repo.delete!(owner)
         Repo.delete!(user)
       end)
@@ -87,6 +87,117 @@ defmodule Foreman.PublicAPI.RepositoryBindingConcurrencyTest do
     send(creator, :bound)
     assert {:ok, workspace} = Task.await(pending)
     refute Repo.exists?(Access.environments(ctx.principal, workspace.id))
+  end
+
+  test "sync separates a replacement when manual verification commits the first binding", ctx do
+    github_config()
+    workspace = environment_fixture(user: ctx.user, box: ctx.box, repo: ctx.repo)
+
+    sync =
+      Task.async(fn ->
+        :ok = Sandbox.checkout(Repo, sandbox: false)
+
+        receive do
+          :start -> :ok
+        end
+
+        Repos.upsert_repo(ctx.owner, %{
+          name: ctx.repo.name,
+          full_name: ctx.repo.full_name,
+          github_id: 702,
+          archived: false
+        })
+      end)
+
+    pause_after_read(sync, "repos", :sync_read_name)
+    send(sync.pid, :start)
+    assert_receive :sync_read_name, 3000
+
+    expect(Foreman.GitHub.ClientMock, :get_repo, fn _, name ->
+      {:ok, %{"id" => 701, "full_name" => name, "archived" => true}}
+    end)
+
+    {:ok, first} = Repos.add_repo(Scope.for_user(ctx.user), ctx.repo.full_name)
+    assert first.id == ctx.repo.id and first.github_id == 701 and first.archived
+    old_service = approve_repo(ctx, first)
+
+    send(sync.pid, :continue)
+    assert {:ok, replacement} = Task.await(sync)
+    original = Repo.reload!(first)
+    assert original.github_id == 701 and original.archived
+    assert original.removed_at
+    assert replacement.id != original.id and replacement.github_id == 702
+    refute Repo.reload!(replacement).archived
+    assert Repos.get_repo_by_full_name(ctx.repo.full_name).id == replacement.id
+    assert Repo.reload!(workspace).repo_id == original.id
+    refute Repo.exists?(Access.environments(ctx.principal, workspace.id))
+    assert OAuth.ServiceAccounts.repo_ids(old_service) == []
+    assert OAuth.ServiceAccounts.repo_ids(approve_repo(ctx, replacement)) == [replacement.id]
+  end
+
+  test "a late manual observation cannot archive the identity already committed by sync", ctx do
+    github_config()
+    parent = self()
+
+    expect(Foreman.GitHub.ClientMock, :get_repo, fn _, name ->
+      send(parent, {:manual_check, self()})
+
+      receive do
+        :continue -> {:ok, %{"id" => 703, "full_name" => name, "archived" => true}}
+      after
+        5000 -> flunk("manual verification did not resume")
+      end
+    end)
+
+    manual =
+      Task.async(fn ->
+        :ok = Sandbox.checkout(Repo, sandbox: false)
+        Repos.add_repo(Scope.for_user(ctx.user), ctx.repo.full_name)
+      end)
+
+    assert_receive {:manual_check, checking}, 3000
+
+    assert {:ok, synced} =
+             Repos.upsert_repo(ctx.owner, %{
+               name: ctx.repo.name,
+               full_name: ctx.repo.full_name,
+               github_id: 704,
+               archived: false
+             })
+
+    send(checking, :continue)
+    assert {:ok, checked} = Task.await(manual)
+    assert checked.id == synced.id and checked.github_id == 704
+    refute Repo.reload!(synced).archived
+    assert OAuth.ServiceAccounts.repo_ids(approve_repo(ctx, synced)) == [synced.id]
+  end
+
+  defp github_config do
+    config(:github_app, %{app_id: "1", client_id: "fixture", client_secret: "s", private_key: "k"})
+  end
+
+  defp approve_repo(ctx, repo) do
+    {:ok, %{grant: grant, client: client}} =
+      OAuth.ServiceAccounts.register(
+        Scope.for_user(ctx.user),
+        "service",
+        %{
+          "name" => repo.id,
+          "repo_ids" => [repo.id],
+          "box_ids" => [ctx.box.id],
+          "scopes" => ["repos:list"]
+        }
+      )
+
+    on_exit(fn ->
+      Sandbox.unboxed_run(Repo, fn ->
+        Repo.delete!(client)
+        Repo.delete!(Repo.get!(Foreman.Accounts.User, grant.user_id))
+      end)
+    end)
+
+    {:ok, service} = OAuth.authorize_grant(grant.id)
+    service
   end
 
   test "installation changes committed during remote verification invalidate the returned query",
@@ -143,17 +254,7 @@ defmodule Foreman.PublicAPI.RepositoryBindingConcurrencyTest do
         })
       end)
 
-    handler = make_ref()
-
-    :ok =
-      :telemetry.attach(
-        handler,
-        [:foreman, :repo, :query],
-        &__MODULE__.after_resource_read/4,
-        {pending.pid, parent}
-      )
-
-    on_exit(fn -> :telemetry.detach(handler) end)
+    pause_after_read(pending, "boxes", :registration_selected)
     send(pending.pid, :register)
     # Registration selected the unbound repository and is still in its transaction.
     assert_receive :registration_selected, 3000
@@ -189,15 +290,30 @@ defmodule Foreman.PublicAPI.RepositoryBindingConcurrencyTest do
     assert OAuth.ServiceAccounts.repo_ids(actor) == []
   end
 
+  defp pause_after_read(task, source, message) do
+    handler = make_ref()
+
+    :ok =
+      :telemetry.attach(
+        handler,
+        [:foreman, :repo, :query],
+        &__MODULE__.after_resource_read/4,
+        {handler, task.pid, self(), source, message}
+      )
+
+    on_exit(fn -> :telemetry.detach(handler) end)
+  end
+
   @doc false
-  def after_resource_read(_, _, %{source: "boxes"}, {registrar, parent})
-      when registrar == self() do
-    send(parent, :registration_selected)
+  def after_resource_read(_, _, %{source: source}, {handler, pid, parent, source, message})
+      when pid == self() do
+    :telemetry.detach(handler)
+    send(parent, message)
 
     receive do
       :continue -> :ok
     after
-      5000 -> raise "registration did not resume"
+      5000 -> raise "database read did not resume"
     end
   end
 
