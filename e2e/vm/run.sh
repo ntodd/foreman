@@ -230,8 +230,9 @@ echo "PROBE user \$(id -un)"
 # the devcontainer CLI's \`up\`) and gives the container's user its uid, so
 # the 0600 secrets and the clone are the user's own.
 [ "\$(stat -c %u /run/foreman/secrets.env)" = "\$(id -u)" ] && echo "PROBE secrets-owner self" || echo "PROBE secrets-owner other"
-[ -s .workspace-marker ] || cat /proc/sys/kernel/random/uuid > .workspace-marker
-echo "PROBE workspace-marker \$(cat .workspace-marker)"
+marker=".workspace-marker-\${FOREMAN_ENV:?}"
+[ -s "\$marker" ] || cat /proc/sys/kernel/random/uuid > "\$marker"
+echo "PROBE workspace-marker \$(cat "\$marker")"
 touch .probe-write 2>/dev/null; echo "PROBE workspace-writable \$?"
 secret=\$(. /run/foreman/secrets.env 2>/dev/null; printf %s "\${SIDECAR_TOKEN:-none}" | sha256sum | cut -c1-16)
 echo "PROBE secret \$secret"
@@ -340,7 +341,7 @@ cp_eval 'E2E.vm_status()' | grep "^VM"
 # queued from an eval (a VM of its own) waits for the dispatch sweep, up
 # to a minute each time.
 public_api() {
-  python3 "$root/e2e/vm/public_api.py" "$url" "$work/api-client.json" "$1"
+  python3 "$root/e2e/vm/public_api.py" "$url" "$work/api-client.json" "$@"
 }
 cookie=$(cp_eval 'E2E.session_cookie()' | sed -n 's/^COOKIE=//p')
 [ -n "$cookie" ] || fail "no session cookie"
@@ -578,9 +579,40 @@ wait_for "the environment page shows the box-reported OOM" 90 oom_visible
 
 say "destroy"
 cp_eval 'E2E.act("hello-1", "destroy")' >/dev/null
+wait_for_env hello-1 destroyed 180
+
+say "expiry survives a control-plane restart and an offline box"
+# Both policies are submitted through the API and come due on the wall
+# clock. Leave time for both prebuilt guests to boot before stopping the
+# agent. The control plane restarts against its original data volume.
+expires=$(date -u -d '5 minutes' '+%Y-%m-%dT%H:%M:%SZ')
+keep=$(public_api create --workspace keep --expiry stop "$expires")
+drop=$(public_api create --workspace drop --expiry destroy "$expires")
+public_api ready --workspace keep --wait 240
+public_api ready --workspace drop --wait 240
+marker=$(public_api marker --workspace keep)
+sudo systemctl stop foreman-agent
+docker restart "$cp_name" >/dev/null
+wait_for "the restarted control plane" 120 curl -fsS "$url/healthz"
+public_api pending-expiry --workspace keep
+public_api pending-expiry --workspace drop
+sudo test -s "/srv/foreman/vms/$keep/data.raw" || fail "offline stop lost its disk"
+sudo test -s "/srv/foreman/vms/$drop/data.raw" || fail "offline destroy reported premature cleanup"
+sudo systemctl start foreman-agent
+public_api not_ready --workspace keep --wait 180
+wait_for "the expired destroy removed the VM disk" 180 sudo test ! -e "/srv/foreman/vms/$drop"
+wait_for "the API records the expiry destroy" 60 public_api destroyed --workspace drop
+sudo test -s "/srv/foreman/vms/$keep/data.raw" || fail "expiry stop removed the workspace disk"
+public_api start --workspace keep
+public_api ready --workspace keep --wait 300
+[ "$(public_api marker --workspace keep)" = "$marker" ] || fail "the workspace changed after expiry stop"
+public_api destroy --workspace keep
+wait_for "the restarted workspace is destroyed" 180 sudo test ! -e "/srv/foreman/vms/$keep"
+wait_for "the API records manual destroy" 60 public_api destroyed --workspace keep
+public_api logout
+
 lv_click "/repos/$repo_id" delete_prebuild "{\"id\":\"$prebuild\"}" >/dev/null ||
   fail "couldn't delete the prebuild"
-wait_for_env hello-1 destroyed 180
 [ -z "$(ls -A /srv/foreman/vms 2>/dev/null)" ] || fail "VM disks left behind: $(ls /srv/foreman/vms)"
 wait_for "the prebuild's disk is deleted" 30 sh -c "[ -z \"\$(sudo ls -A /srv/foreman/prebuilds)\" ]"
 ip -br link | grep -q '^fm-vm' && fail "taps left behind"

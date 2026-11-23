@@ -2,8 +2,10 @@
 
 import argparse
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime
 import json
 import os
+import re
 from html.parser import HTMLParser
 from pathlib import Path
 import tempfile
@@ -121,15 +123,22 @@ def run():
     if args.action == "login":
         save(connect())
         return
-    state = json.loads(args.state.read_text())
+    connection = json.loads(args.state.read_text())
     tokens, _ = request("/oauth/token", form={
-        "grant_type": "refresh_token", "client_id": CLIENT, "refresh_token": state["refresh_token"],
+        "grant_type": "refresh_token", "client_id": CLIENT, "refresh_token": connection["refresh_token"],
     })
-    state["refresh_token"] = tokens["refresh_token"]
-    save(state)
+    connection["refresh_token"] = tokens["refresh_token"]
+    save(connection)
+    workspaces = connection.setdefault("workspaces", {})
+    state = workspaces.setdefault(args.workspace, {})
     token = tokens["access_token"]
     me, _ = request("/api/v1/me", token=token)
     assert me["kind"] == "user" and me["client_id"] == CLIENT
+    if args.action == "logout":
+        request("/oauth/revoke", form={"client_id": CLIENT, "token": tokens["refresh_token"]})
+        request("/api/v1/me", token=token, status=401)
+        args.state.unlink()
+        return
     if args.action == "create":
         before, _ = request("/api/v1/environments", token=token)
         repos, _ = request("/api/v1/repos", token=token)
@@ -138,6 +147,9 @@ def run():
         repo, = [r for r in repos["items"] if r["full_name"] == "acme/hello"]
         key = str(uuid4())
         body = {"repo_id": repo["id"]}
+        if args.expiry:
+            action, at = args.expiry
+            body["expiry"] = {"action": action, "at": at}
         path = "/api/v1/environments"
         with ThreadPoolExecutor(max_workers=2) as clients:
             submissions = [clients.submit(request, path, token=token, key=key, body=body, status=202)
@@ -149,8 +161,9 @@ def run():
         prior_ids = {env["id"] for env in before["items"]}
         assert {env["id"] for env in after["items"]} - prior_ids == {first["environment_id"]}
         assert urlsplit(headers["Location"]).path == "/api/v1/operations/" + first["operation_id"]
-        save({**state, **first, "create_operation_id": first["operation_id"], "key": key,
-              "body": body, "branch": repo["default_branch"]})
+        state.update({**first, "create_operation_id": first["operation_id"], "key": key,
+                      "body": body, "branch": repo["default_branch"]})
+        save(connection)
         print(first["environment_id"])
         return
 
@@ -160,38 +173,72 @@ def run():
                                   body={"action": args.action}, status=202)
         assert action["environment_id"] == state["environment_id"]
         assert urlsplit(headers["Location"]).path == "/api/v1/operations/" + action["operation_id"]
-        save({**state, "operation_id": action["operation_id"]})
+        state["operation_id"] = action["operation_id"]
+        save(connection)
+        return
+
+    if args.action == "pending-expiry":
+        policy = state["body"]["expiry"]
+        due = datetime.fromisoformat(policy["at"].replace("Z", "+00:00")).timestamp()
+        env, _ = request(path, token=token)
+        assert env["readiness"] == "unknown" and env["expiry"]["action"] == policy["action"]
+        assert datetime.fromisoformat(env["expiry"]["at"].replace("Z", "+00:00")).timestamp() == due
+        while time.time() < due + 90:
+            history, _ = request(path + "/operations", token=token)
+            matches = [op for op in history["items"] if op["trigger"] == "expiry"]
+            if matches:
+                op, = matches
+                assert op["action"] == policy["action"] and op["status"] == "queued"
+                state["operation_id"] = op["id"]
+                save(connection)
+                return
+            time.sleep(2)
+        raise AssertionError("No queued expiry operation appeared while the box was offline")
+
+    if args.action == "marker":
+        log_path = "/api/v1/operations/" + state["operation_id"] + "/logs"
+        next_page = log_path
+        output = ""
+        while True:
+            page, _ = request(next_page, token=token)
+            assert not page["truncated"]
+            output += page["text"]
+            if not page["text"]:
+                break
+            next_page = log_path + "?" + urlencode({"cursor": page["next_cursor"]})
+        markers = re.findall(r"^PROBE workspace-marker ([0-9a-f-]{36})$", output, re.MULTILINE)
+        assert markers, "The workspace did not report its disk marker"
+        print(markers[-1])
         return
 
     if args.action == "destroyed":
         history, _ = request(path + "/operations", token=token)
+        trigger = "expiry" if state["body"].get("expiry", {}).get("action") == "destroy" else "request"
         assert any(op["id"] == state["operation_id"] and op["action"] == "destroy"
-                   and op["trigger"] == "request" and op["status"] == "succeeded"
+                   and op["trigger"] == trigger and op["status"] == "succeeded"
                    for op in history["items"])
         logs, _ = request("/api/v1/operations/" + state["create_operation_id"] + "/logs", token=token)
         assert logs["text"], "Creation logs should still be readable after destroy"
         gone, _ = request("/api/v1/environments", token=token, key=state["key"],
                           body=state["body"], status=410)
         assert gone["code"] == "original_environment_gone"
-        request("/oauth/revoke", form={"client_id": CLIENT, "token": tokens["refresh_token"]})
-        request("/api/v1/me", token=token, status=401)
-        args.state.unlink()
         return
 
     # Inventory can arrive shortly after the agent confirms the operation.
-    deadline = time.monotonic() + 100
+    op_path = "/api/v1/operations/" + state["operation_id"]
+    deadline = time.monotonic() + args.wait
     while time.monotonic() < deadline:
         env, _ = request(path, token=token)
         assert env["branch"] == state["branch"]
-        if env["readiness"] == args.action:
+        op, _ = request(op_path, token=token)
+        assert op["environment_id"] == state["environment_id"]
+        assert op["status"] not in ("cancelled", "failed"), f"{op['action']} {op['status']}"
+        if env["readiness"] == args.action and op["status"] == "succeeded":
             break
         time.sleep(2)
     else:
         raise AssertionError(f"Workspace readiness was {env['readiness']}, expected {args.action}")
 
-    op_path = "/api/v1/operations/" + state["operation_id"]
-    op, _ = request(op_path, token=token)
-    assert op["status"] == "succeeded" and op["environment_id"] == state["environment_id"]
     log, _ = request(op_path + "/logs", token=token)
     assert isinstance(log["text"], str) and isinstance(log["truncated"], bool)
     request(op_path + "/logs?" + urlencode({"cursor": log["next_cursor"]}), token=token)
@@ -202,6 +249,10 @@ if __name__ == "__main__":
     parser.add_argument("url")
     parser.add_argument("state", type=Path)
     parser.add_argument("action", choices=["login", "create", "ready", "not_ready",
-                                          "stop", "start", "destroy", "destroyed"])
+                                          "stop", "start", "destroy", "destroyed",
+                                          "pending-expiry", "marker", "logout"])
+    parser.add_argument("--workspace", default="primary")
+    parser.add_argument("--expiry", nargs=2, metavar=("ACTION", "AT"))
+    parser.add_argument("--wait", type=int, default=100)
     args = parser.parse_args()
     run()
