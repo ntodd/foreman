@@ -86,6 +86,11 @@ paths:
                 - properties: {grant_type: {const: refresh_token}}
                   required: [refresh_token, client_id]
                 - properties: {grant_type: {const: client_credentials}}
+                  description: Send the installation ID and secret together in the HTTP Basic Authorization header.
+                  not:
+                    anyOf:
+                      - required: [client_id]
+                      - required: [client_secret]
       responses:
         '200':
           description: Personal grants include a new refresh token on each successful exchange. Service grants issue access tokens only.

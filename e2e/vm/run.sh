@@ -236,6 +236,11 @@ echo "PROBE workspace-marker \$(cat "\$marker")"
 touch .probe-write 2>/dev/null; echo "PROBE workspace-writable \$?"
 secret=\$(. /run/foreman/secrets.env 2>/dev/null; printf %s "\${SIDECAR_TOKEN:-none}" | sha256sum | cut -c1-16)
 echo "PROBE secret \$secret"
+(
+  . /run/foreman/secrets.env
+  if [ -n "\${API_TEST_APPROVED:-}" ]; then echo 'PROBE approved-secret present'; else echo 'PROBE approved-secret absent'; fi
+  if [ -n "\${API_TEST_UNAPPROVED:-}" ]; then echo 'PROBE unapproved-secret present'; else echo 'PROBE unapproved-secret absent'; fi
+)
 try gateway 10.250.0.1 1
 try box $box_ip 1
 try first-guest 10.250.0.2 1
@@ -585,23 +590,27 @@ say "expiry survives a control-plane restart and an offline box"
 # Both policies are submitted through the API and come due on the wall
 # clock. Leave time for both prebuilt guests to boot before stopping the
 # agent. The control plane restarts against its original data volume.
+service_api() { python3 "$root/e2e/vm/public_api.py" "$url" "$work/service-client.json" "$@"; }
+(umask 077; cp_eval 'E2E.service_client()' | sed -n 's/^E2E_SERVICE=//p' > "$work/service-client.json")
+[ -s "$work/service-client.json" ] || fail "the service account fixture was not created"
 expires=$(date -u -d '5 minutes' '+%Y-%m-%dT%H:%M:%SZ')
 keep=$(public_api create --workspace keep --expiry stop "$expires")
-drop=$(public_api create --workspace drop --expiry destroy "$expires")
-public_api ready --workspace keep --wait 240
-public_api ready --workspace drop --wait 240
+drop=$(service_api create --expiry destroy "$expires" --hidden "$keep")
+public_api ready --workspace keep --wait 240 --hidden "$drop"
+service_api ready --wait 240
+service_api marker >/dev/null
 marker=$(public_api marker --workspace keep)
 sudo systemctl stop foreman-agent
 docker restart "$cp_name" >/dev/null
 wait_for "the restarted control plane" 120 curl -fsS "$url/healthz"
 public_api pending-expiry --workspace keep
-public_api pending-expiry --workspace drop
+service_api pending-expiry
 sudo test -s "/srv/foreman/vms/$keep/data.raw" || fail "offline stop lost its disk"
 sudo test -s "/srv/foreman/vms/$drop/data.raw" || fail "offline destroy reported premature cleanup"
 sudo systemctl start foreman-agent
 public_api not_ready --workspace keep --wait 180
 wait_for "the expired destroy removed the VM disk" 180 sudo test ! -e "/srv/foreman/vms/$drop"
-wait_for "the API records the expiry destroy" 60 public_api destroyed --workspace drop
+wait_for "the API records the expiry destroy" 60 service_api destroyed
 sudo test -s "/srv/foreman/vms/$keep/data.raw" || fail "expiry stop removed the workspace disk"
 public_api start --workspace keep
 public_api ready --workspace keep --wait 300
@@ -610,6 +619,7 @@ public_api destroy --workspace keep
 wait_for "the restarted workspace is destroyed" 180 sudo test ! -e "/srv/foreman/vms/$keep"
 wait_for "the API records manual destroy" 60 public_api destroyed --workspace keep
 public_api logout
+service_api logout
 
 lv_click "/repos/$repo_id" delete_prebuild "{\"id\":\"$prebuild\"}" >/dev/null ||
   fail "couldn't delete the prebuild"

@@ -1,6 +1,7 @@
 """Exercise a personal app connection against the throwaway VM suite's local instance."""
 
 import argparse
+import base64
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 import json
@@ -25,7 +26,7 @@ class NoRedirect(HTTPRedirectHandler):
         return None
 
 
-def request(path, *, form=None, body=None, token=None, key=None, status=200):
+def request(path, *, form=None, body=None, token=None, key=None, basic=None, status=200):
     url = urljoin(args.url, path)
     if urlsplit(url).netloc != urlsplit(args.url).netloc or urlsplit(url).scheme != urlsplit(args.url).scheme:
         raise ValueError("Foreman returned an endpoint on a different origin")
@@ -39,6 +40,8 @@ def request(path, *, form=None, body=None, token=None, key=None, status=200):
         headers["Content-Type"] = "application/json"
     if token:
         headers["Authorization"] = f"Bearer {token}"
+    if basic:
+        headers["Authorization"] = "Basic " + base64.b64encode(basic.encode()).decode("ascii")
     if key:
         headers["Idempotency-Key"] = key
 
@@ -124,18 +127,36 @@ def run():
         save(connect())
         return
     connection = json.loads(args.state.read_text())
-    tokens, _ = request("/oauth/token", form={
-        "grant_type": "refresh_token", "client_id": CLIENT, "refresh_token": connection["refresh_token"],
-    })
-    connection["refresh_token"] = tokens["refresh_token"]
-    save(connection)
+    service = "client_secret" in connection
+    client_id = connection["client_id"] if service else CLIENT
+    basic = None
+    if service:
+        basic = f"{client_id}:{connection['client_secret']}"
+        tokens, _ = request("/oauth/token", basic=basic, form={"grant_type": "client_credentials"})
+        assert "refresh_token" not in tokens
+    else:
+        tokens, _ = request("/oauth/token", form={
+            "grant_type": "refresh_token", "client_id": client_id,
+            "refresh_token": connection["refresh_token"],
+        })
+        connection["refresh_token"] = tokens["refresh_token"]
+        save(connection)
     workspaces = connection.setdefault("workspaces", {})
     state = workspaces.setdefault(args.workspace, {})
     token = tokens["access_token"]
     me, _ = request("/api/v1/me", token=token)
-    assert me["kind"] == "user" and me["client_id"] == CLIENT
+    assert me["kind"] == ("service_account" if service else "user") and me["client_id"] == client_id
+    if args.hidden:
+        hidden, _ = request("/api/v1/environments/" + args.hidden, token=token, status=404)
+        assert hidden["code"] == "resource_not_found"
+        visible, _ = request("/api/v1/environments", token=token)
+        assert args.hidden not in [env["id"] for env in visible["items"]]
     if args.action == "logout":
-        request("/oauth/revoke", form={"client_id": CLIENT, "token": tokens["refresh_token"]})
+        credential = token if service else connection["refresh_token"]
+        revocation = {"token": credential}
+        if not service:
+            revocation["client_id"] = client_id
+        request("/oauth/revoke", basic=basic, form=revocation)
         request("/api/v1/me", token=token, status=401)
         args.state.unlink()
         return
@@ -206,6 +227,9 @@ def run():
             if not page["text"]:
                 break
             next_page = log_path + "?" + urlencode({"cursor": page["next_cursor"]})
+        if service:
+            assert "PROBE approved-secret present" in output
+            assert "PROBE unapproved-secret absent" in output
         markers = re.findall(r"^PROBE workspace-marker ([0-9a-f-]{36})$", output, re.MULTILINE)
         assert markers, "The workspace did not report its disk marker"
         print(markers[-1])
@@ -253,6 +277,7 @@ if __name__ == "__main__":
                                           "pending-expiry", "marker", "logout"])
     parser.add_argument("--workspace", default="primary")
     parser.add_argument("--expiry", nargs=2, metavar=("ACTION", "AT"))
+    parser.add_argument("--hidden", help="environment owned by the other test identity")
     parser.add_argument("--wait", type=int, default=100)
     args = parser.parse_args()
     run()

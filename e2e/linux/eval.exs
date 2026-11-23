@@ -169,6 +169,25 @@ defmodule E2E do
     IO.puts("set #{name} on #{slug}")
   end
 
+  # Two synthetic repository secrets distinguish installation grants inside the guest.
+  def service_client do
+    scope = Scope.for_user(admin())
+    repo = Foreman.Repos.get_repo_by_full_name("acme/hello")
+    new_secret = fn name ->
+      {:ok, secret} = Foreman.Secrets.put_secret(scope, "repo", repo, %{
+        "name" => name, "value" => Base.url_encode64(:crypto.strong_rand_bytes(24), padding: false)
+      })
+      secret.id
+    end
+    allowed = new_secret.("API_TEST_APPROVED")
+    new_secret.("API_TEST_UNAPPROVED")
+    {:ok, installation} = Foreman.OAuth.ServiceAccounts.register(scope, "service", %{
+      "name" => "VM acceptance", "scopes" => Foreman.OAuth.Scopes.all(),
+      "repo_ids" => [repo.id], "box_ids" => [box().id], "secret_ids" => [allowed]
+    })
+    IO.puts("E2E_SERVICE=" <> JSON.encode!(%{client_id: installation.client.id, client_secret: installation.secret}))
+  end
+
   # An environment made on its page (see e2e/vm/run.sh's create_env).
   def env_id(slug) do
     admin()
