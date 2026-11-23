@@ -26,6 +26,10 @@ class OAuthError(Failure):
     pass
 
 
+class DurabilityError(Failure):
+    """Atomic replacement succeeded, but the directory sync did not complete."""
+
+
 class NoRedirect(HTTPRedirectHandler):
     def redirect_request(self, req, fp, code, msg, headers, newurl):
         return None
@@ -88,16 +92,33 @@ def locked(path):
         yield
 
 
+def sync_directory(directory):
+    fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
 def save(path, state):
-    with tempfile.NamedTemporaryFile(dir=path.parent, mode="w", delete=False) as temp:
-        try:
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile(dir=path.parent, mode="w", delete=False) as temp:
+            temporary = temp.name
             json.dump(state, temp)
             temp.flush()
             os.fsync(temp.fileno())
-            os.replace(temp.name, path)
-        finally:
-            if os.path.exists(temp.name):
-                os.unlink(temp.name)
+        os.replace(temporary, path)
+    except BaseException:
+        if temporary is not None:
+            os.unlink(temporary)
+        raise
+
+    try:
+        sync_directory(path.parent)
+    except OSError as exc:
+        raise DurabilityError("Credentials replaced; could not sync the account directory. "
+                              "Run me again to retry before retiring the previous connection.") from exc
 
 
 def credentials(reply, account):
@@ -127,16 +148,55 @@ def login(instance, meta, directory, requested, account):
     else:
         raise Failure("Device code expired. Run login again.")
 
-    identity = request(instance + "/api/v1/me", token=reply["access_token"])
-    if identity["kind"] != "user" or identity["client_id"] != CLIENT or (account and account != identity["id"]):
-        request(meta["revocation_endpoint"], {"client_id": CLIENT, "token": reply["refresh_token"]})
-        raise Failure("The approved account does not match the selected connection.")
-    path = account_path(directory, identity["id"])
-    with locked(path):
-        if path.exists():
-            old = json.loads(path.read_text())
-            request(meta["revocation_endpoint"], {"client_id": CLIENT, "token": old["refresh_token"]})
-        save(path, credentials(reply, identity["id"]))
+    install_connection(instance, meta, directory, account, reply)
+
+
+def revoke(meta, token):
+    request(meta["revocation_endpoint"], {"client_id": CLIENT, "token": token})
+
+
+def retire_previous(path, state, meta):
+    pending = state.get("pending_revocations", [])
+    if not pending:
+        return
+    # A prior process might have replaced the file and failed to sync its directory.
+    sync_directory(path.parent)
+    try:
+        for credential in pending:
+            revoke(meta, credential)
+    except (Failure, OSError, ValueError) as exc:
+        raise Failure("Replacement credentials saved. Revocation of a previous connection is pending. "
+                      "Run me or logout again to retry.") from exc
+    del state["pending_revocations"]
+    save(path, state)
+
+
+def install_connection(instance, meta, directory, account, reply):
+    saved = False
+    try:
+        identity = request(instance + "/api/v1/me", token=reply["access_token"])
+        if identity["kind"] != "user" or identity["client_id"] != CLIENT or (account and account != identity["id"]):
+            raise Failure("The approved account does not match the selected connection.")
+        path = account_path(directory, identity["id"])
+        with locked(path):
+            state = credentials(reply, identity["id"])
+            if path.exists():
+                old = json.loads(path.read_text())
+                state["pending_revocations"] = old.get("pending_revocations", []) + [old["refresh_token"]]
+            save(path, state)
+            saved = True
+            retire_previous(path, state, meta)
+    except DurabilityError:
+        # The new file is visible. Keep both grants usable until a retry confirms durability.
+        raise
+    except (Failure, OSError, KeyError, ValueError) as exc:
+        if not saved:
+            try:
+                revoke(meta, reply["refresh_token"])
+            except (Failure, OSError, KeyError, ValueError):
+                raise Failure("Could not save or revoke the new connection. "
+                              "Revoke the new Foreman CLI connection under Connected apps.") from exc
+        raise
     print("Connected " + identity["id"] + " with permissions " + reply["scope"])
 
 
@@ -154,8 +214,9 @@ def use_connection(command, instance, meta, directory, account):
         if not path.exists():
             raise Failure("No connection for this account. Run login first.")
         state = json.loads(path.read_text())
+        retire_previous(path, state, meta)
         if command == "logout":
-            request(meta["revocation_endpoint"], {"client_id": CLIENT, "token": state["refresh_token"]})
+            revoke(meta, state["refresh_token"])
             path.unlink()
             print("Disconnected " + state["account"])
             return

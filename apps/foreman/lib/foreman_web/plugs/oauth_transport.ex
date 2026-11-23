@@ -1,5 +1,5 @@
 defmodule ForemanWeb.Plugs.OAuthTransport do
-  @moduledoc "Validate the configured OAuth origin and real transport before Plug.SSL rewrites the scheme."
+  @moduledoc "Require a secure configured OAuth origin and a verified request scheme."
   import Plug.Conn
   alias ForemanWeb.ClientIP
 
@@ -24,7 +24,7 @@ defmodule ForemanWeb.Plugs.OAuthTransport do
         when is_binary(host) and host != "" and path in [nil, ""] ->
           case uri.scheme do
             "https" ->
-              conn.scheme == :https or via_tls_proxy?(conn)
+              conn.scheme == :https
 
             "http" when host in ["127.0.0.1", "localhost", "::1"] ->
               ClientIP.loopback?(conn.remote_ip) and get_req_header(conn, "x-forwarded-for") == [] and
@@ -54,9 +54,4 @@ defmodule ForemanWeb.Plugs.OAuthTransport do
       |> halt()
     end
   end
-
-  defp via_tls_proxy?(conn),
-    do:
-      ClientIP.trusted_proxy?(conn.remote_ip) and
-        get_req_header(conn, "x-forwarded-proto") == ["https"]
 end
