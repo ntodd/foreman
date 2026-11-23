@@ -88,21 +88,21 @@ defmodule Foreman.GitHub do
   @doc "Finishes sign-in: trades the code for tokens and signs the user in."
   def complete_sign_in(code, verifier, redirect_uri) do
     app = app()
-    config = Accounts.login_config()
 
     with {:ok, tokens} <- client().exchange_code(app, code, verifier, redirect_uri),
          {:ok, profile} <- client().get_user(tokens.access_token) do
-      org_member? =
-        if config.allowed_org do
-          case client().org_membership(tokens.access_token, config.allowed_org) do
-            {:ok, member?} -> member?
-            {:error, _} -> :unknown
-          end
-        else
-          false
-        end
+      Accounts.sign_in_from_github(profile, tokens,
+        check_membership: &sign_in_membership(tokens.access_token, &1)
+      )
+    end
+  end
 
-      Accounts.sign_in_from_github(profile, tokens, config: config, org_member?: org_member?)
+  defp sign_in_membership(_token, nil), do: false
+
+  defp sign_in_membership(token, org) do
+    case client().org_membership(token, org) do
+      {:ok, member?} -> member?
+      {:error, _} -> :unknown
     end
   end
 

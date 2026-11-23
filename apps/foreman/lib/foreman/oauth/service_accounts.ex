@@ -2,7 +2,7 @@ defmodule Foreman.OAuth.ServiceAccounts do
   @moduledoc "Installation identities and their explicitly approved workload resources."
   import Ecto.Query
 
-  alias Foreman.{Audit, OAuth, Repo, Scope}
+  alias Foreman.{Accounts, Audit, OAuth, Repo, Scope}
   alias Foreman.Accounts.User
   alias Foreman.Boxes.Box
   alias Foreman.OAuth.{Client, Grant, Principal, Scopes, Store, Token}
@@ -92,13 +92,13 @@ defmodule Foreman.OAuth.ServiceAccounts do
   def register(scope, kind, attrs) when kind in ["service", "public"] do
     name = attrs["name"]
 
-    with :ok <- admin(scope),
-         true <- is_binary(name) and String.trim(name) != "" and String.length(name) <= 120 do
-      Repo.transact(fn -> register_client(scope, kind, String.trim(name), attrs) end)
-    else
-      false -> {:error, :invalid_name}
-      error -> error
-    end
+    admin_transaction(scope, fn actor ->
+      if is_binary(name) and String.trim(name) != "" and String.length(name) <= 120 do
+        register_client(actor, kind, String.trim(name), attrs)
+      else
+        {:error, :invalid_name}
+      end
+    end)
   end
 
   def register(_, _, _), do: {:error, :invalid_request}
@@ -193,36 +193,31 @@ defmodule Foreman.OAuth.ServiceAccounts do
 
   defp tags(_), do: {:error, :invalid_network_policy}
 
-  defp admin(scope), do: if(Scope.admin?(scope), do: :ok, else: {:error, :unauthorized})
+  defp admin_transaction(scope, mutate) do
+    Repo.transact(fn ->
+      with {:ok, actor} <- Accounts.lock_admin(scope), do: mutate.(actor)
+    end)
+  end
 
   def rotate(scope, client_id) do
-    with :ok <- admin(scope) do
-      Repo.transact(fn ->
-        case locked_client(client_id) do
-          %Client{kind: "service", disabled_at: nil} = client ->
-            secret = Store.random_secret()
+    admin_transaction(scope, fn actor ->
+      case locked_client(client_id) do
+        %Client{kind: "service", disabled_at: nil} = client ->
+          secret = Store.random_secret()
+          client = Repo.update!(Ecto.Changeset.change(client, secret_hash: Store.digest(secret)))
+          grant = Repo.get_by!(Grant, client_id: client.id)
+          Repo.delete_all(from t in Token, where: t.grant_id == ^grant.id)
+          Audit.log(actor, "oauth.installation.rotate", grant, %{"client_id" => client.id})
+          {:ok, %{client: client, secret: secret}}
 
-            client =
-              Repo.update!(Ecto.Changeset.change(client, secret_hash: Store.digest(secret)))
-
-            grant = Repo.get_by!(Grant, client_id: client.id)
-            Repo.delete_all(from t in Token, where: t.grant_id == ^grant.id)
-            Audit.log(scope, "oauth.installation.rotate", grant, %{"client_id" => client.id})
-            {:ok, %{client: client, secret: secret}}
-
-          _ ->
-            {:error, :invalid_client}
-        end
-      end)
-    end
+        _ ->
+          {:error, :invalid_client}
+      end
+    end)
   end
 
   def disable(scope, client_id) do
-    with :ok <- admin(scope) do
-      Repo.transact(fn ->
-        disable_client(scope, locked_client(client_id))
-      end)
-    end
+    admin_transaction(scope, fn actor -> disable_client(actor, locked_client(client_id)) end)
   end
 
   defp disable_client(scope, %Client{id: id} = client) when id != "foreman-cli" do
