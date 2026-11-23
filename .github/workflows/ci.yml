@@ -68,6 +68,8 @@ jobs:
       - run: '"$RUNNER_TEMP/foreman" --help'
       - name: Share a rotating connection with the checkout CLI
         run: python3 -B ../e2e/cli-upgrade.py "$RUNNER_TEMP/foreman"
+      - name: Verify release publication recovery
+        run: python3 -B ../scripts/test_publish_release.py
 
   protocol:
     if: github.event_name != 'schedule'

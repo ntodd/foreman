@@ -20,9 +20,9 @@ Open the verification URL on a device with a browser, sign in, compare the code 
 
 The CLI validates the discovery issuer against the selected HTTPS origin. Local development supports loopback HTTP. It saves each connection under `$XDG_STATE_HOME/foreman` (default `~/.local/state/foreman`) in an owner-only file. For multiple accounts on an instance, supply `--account UUID` before the command. The login output includes the account UUID and granted permissions.
 
-Access tokens last 15 minutes. Each successful refresh returns a replacement refresh token and starts a fresh 90-day inactivity period. The CLI locks each account file during refresh and replaces it atomically. If a refresh succeeds on the server but its response is lost, reuse of the old refresh token revokes the connection. Run `login` again to approve a new one. Logout revokes the connection server-side. **You → Connected apps** also lets you revoke a connection from the browser.
+Access tokens last 15 minutes. Each successful refresh returns a replacement refresh token and starts a fresh 90-day inactivity period. The CLI locks the account file during refresh and saves the replacement atomically. If the server receives the refresh but the response is lost, follow the printed login command to reauthorize the affected account. Replaying the previous refresh token can revoke the grant. Logout revokes the selected connection server-side. **You → Connected apps** also lets you revoke a connection from the browser.
 
-When you replace a connection with another login, the CLI saves and syncs the new credentials before revoking the old grant. If the old grant cannot be revoked immediately, the CLI records it in the private account file and retries on the next `me`, `login` or `logout`. If saving and revoking the new grant both fail, the CLI directs you to **Connected apps** for manual recovery.
+When you replace a connection with another login, the CLI saves and syncs the new credentials before revoking the old grant. If revocation is delayed, use the printed `me` command. It selects the exact instance and account and retries the pending revocation. If saving and revoking the new grant both fail, the CLI directs you to **Connected apps** for manual recovery.
 
 ## Environments with the installed CLI
 
