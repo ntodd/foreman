@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -207,5 +208,64 @@ func TestFinalDrainReadsPastAdvancingEmptyPage(t *testing.T) {
 	h.success(t, "op", "logs", opID, "--follow")
 	if requests != 4 || !strings.Contains(h.out.String(), "drained") {
 		t.Fatal(h.out.String())
+	}
+}
+
+func TestSingleLogReadBoundAndContinuation(t *testing.T) {
+	for _, machine := range []bool{true, false} {
+		reads := 0
+		chunk := strings.Repeat("x", 65536)
+		h := setup(t, fake{logs: func(_ context.Context, _ string, cursor string) (*api.Response[api.LogPage], error) {
+			reads++
+			if reads > 16 {
+				t.Fatal("snapshot kept following an active writer")
+			}
+			return response(api.LogPage{Text: chunk, NextCursor: strconv.Itoa(reads)})
+		}})
+		h.JSON = machine
+		h.success(t, "op", "logs", opID)
+		if reads != 16 {
+			t.Fatal(reads)
+		}
+		if machine {
+			doc := h.doc(t)
+			if len(doc["text"].(string)) != 1<<20 || doc["next_cursor"] != "16" || doc["truncated"] != false {
+				t.Fatal("incomplete snapshot or incorrect continuation")
+			}
+		} else if h.out.Len() != 1<<20 || !strings.Contains(h.diag.String(), "16") {
+			t.Fatal(h.out.Len(), h.diag.String())
+		}
+		h.API = fake{logs: func(_ context.Context, _ string, cursor string) (*api.Response[api.LogPage], error) {
+			switch cursor {
+			case "16":
+				return response(api.LogPage{Text: "remaining", NextCursor: "17"})
+			case "17":
+				return response(api.LogPage{NextCursor: "17"})
+			default:
+				t.Fatalf("cursor %q", cursor)
+				return nil, nil
+			}
+		}}
+		h.success(t, "op", "logs", opID, "--cursor", "16")
+		if !strings.Contains(h.out.String(), "remaining") {
+			t.Fatal(h.out.String())
+		}
+	}
+}
+
+func TestPartialLogKeepsEmptyTruncation(t *testing.T) {
+	h := setup(t, fake{logs: func(_ context.Context, _ string, cursor string) (*api.Response[api.LogPage], error) {
+		if cursor == "begin" {
+			return response(api.LogPage{Truncated: true, NextCursor: "after-gap"})
+		}
+		return nil, errors.New("interrupted connection")
+	}})
+	info := h.failure(t, "request_failed", "op", "logs", opID, "--cursor", "begin")
+	if info["cursor"] != "after-gap" {
+		t.Fatal(info)
+	}
+	page := h.doc(t)
+	if page["truncated"] != true || page["next_cursor"] != "after-gap" || page["text"] != "" {
+		t.Fatal(page)
 	}
 }

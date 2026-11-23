@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -198,10 +199,13 @@ func TestAcceptedWaitReportsIDsAndCurrentReadiness(t *testing.T) {
 		t.Fatal(doc)
 	}
 	f.op = func(context.Context, string) (*api.Response[api.Operation], error) {
-		return nil, &api.HTTPError{StatusCode: 403, Code: "insufficient_scope", Message: "missing operations:read"}
+		return nil, &api.HTTPError{StatusCode: 403, Code: "insufficient_scope", Message: "The connection does not have the required scope."}
 	}
 	h.API = f
 	info := h.failure(t, "insufficient_scope", "env", "create", repoID)
+	if msg := info["message"].(string); !strings.Contains(msg, "operations:read") || !strings.Contains(msg, "foreman op wait "+opID) {
+		t.Fatal(info)
+	}
 	if info["environment_id"] != envID || info["operation_id"] != opID {
 		t.Fatal(info)
 	}
@@ -255,5 +259,74 @@ func TestAlreadyStartedShowsCurrentReadinessWithoutPolling(t *testing.T) {
 	doc := h.doc(t)
 	if doc["already_reached"] != true || doc["environment"] == nil || doc["operation_id"] != nil {
 		t.Fatal(doc)
+	}
+}
+
+func TestWaitTimeoutStartsAfterLifecycleSubmission(t *testing.T) {
+	for _, action := range []string{"create", "start"} {
+		for _, noWait := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/noWait=%t", action, noWait), func(t *testing.T) {
+				checkSubmit := func(ctx context.Context) {
+					if _, ok := ctx.Deadline(); ok {
+						t.Error("wait timeout was applied to submission")
+					}
+				}
+				polls := 0
+				h := setup(t, fake{
+					create: func(ctx context.Context, _ string, _ api.Create) (*api.Response[api.Accepted], error) {
+						checkSubmit(ctx)
+						return accepted()
+					},
+					act: func(ctx context.Context, id, _ string, _ api.Action) (*api.Response[api.OperateEnvironmentResult], error) {
+						checkSubmit(ctx)
+						return &api.Response[api.OperateEnvironmentResult]{StatusCode: 202, Value: api.OperateEnvironmentResult{EnvironmentID: id, OperationID: ptr(opID)}}, nil
+					},
+					op: func(ctx context.Context, id string) (*api.Response[api.Operation], error) {
+						polls++
+						if d, ok := ctx.Deadline(); !ok || time.Until(d) > time.Second {
+							t.Error("wait has no command deadline")
+						}
+						return response(api.Operation{ID: id, EnvironmentID: envID, Status: "succeeded"})
+					},
+				})
+				h.Scopes = []string{"operations:read"}
+				id := envID
+				if action == "create" {
+					id = repoID
+				}
+				args := []string{"env", action, id, "--timeout", "1s"}
+				if noWait {
+					args = append(args, "--no-wait")
+				}
+				h.success(t, args...)
+				if noWait && polls != 0 || !noWait && polls != 1 {
+					t.Fatal(polls)
+				}
+			})
+		}
+	}
+}
+
+func TestShowReportsTerminalFailureAfterPrintingOperation(t *testing.T) {
+	for _, status := range []string{"queued", "running", "succeeded", "failed", "cancelled"} {
+		t.Run(status, func(t *testing.T) {
+			op := api.Operation{ID: opID, EnvironmentID: envID, Status: status}
+			failed := status == "failed" || status == "cancelled"
+			if failed {
+				op.Error = &api.Error{Code: "server_" + status, Message: "operation detail"}
+			}
+			h := setup(t, fake{op: func(context.Context, string) (*api.Response[api.Operation], error) { return response(op) }})
+			if failed {
+				info := h.failure(t, "server_"+status, "op", "show", opID)
+				if info["operation_id"] != opID || info["environment_id"] != envID {
+					t.Fatal(info)
+				}
+			} else {
+				h.success(t, "op", "show", opID)
+			}
+			if h.doc(t)["status"] != status {
+				t.Fatal(h.out.String())
+			}
+		})
 	}
 }
