@@ -11,6 +11,7 @@
 # back with its data restored.
 #
 #   e2e/updater/run.sh          build images, run, leave the host up
+#   e2e/updater/run.sh --build-only  build the fixture images for SKIP_BUILD=1
 #   e2e/updater/run.sh --down   tear it down (and its volumes)
 #   e2e/updater/run.sh --logs   the host's journal for the updater
 #
@@ -99,17 +100,19 @@ request_raw() {
   wait_for "the updater finished" 600 finished_since "$before"
 }
 
-if [ "${SKIP_BUILD:-}" != "1" ]; then
+if [ "${1:-}" = "--build-only" ] || [ "${SKIP_BUILD:-}" != "1" ]; then
   say "build the control plane (0.9.1, 0.9.2, and a broken 0.9.3) and the host"
-  docker build -q -f docker/control-plane.Dockerfile --build-arg FOREMAN_VERSION=0.9.1 -t "$cp_image:0.9.1" . > /dev/null
+  docker build --progress=plain -f docker/control-plane.Dockerfile --build-arg FOREMAN_VERSION=0.9.1 -t "$cp_image:0.9.1" .
   # 0.9.2 is 0.9.1 relabelled: the updater goes by the image's version label.
   printf 'FROM %s\nLABEL org.opencontainers.image.version=0.9.2\n' "$cp_image:0.9.1" |
-    docker build -q -t "$cp_image:0.9.2" - > /dev/null
+    docker build --progress=plain -t "$cp_image:0.9.2" -
   # Writes into the data volume, then exits: the rollback must undo both.
   printf 'FROM %s\nLABEL org.opencontainers.image.version=0.9.3\nCMD ["sh", "-c", "echo 0.9.3 > /var/lib/foreman/broken; exit 1"]\n' "$cp_image:0.9.1" |
-    docker build -q -t "$cp_image:0.9.3" - > /dev/null
-  docker build -q -f docker/box.Dockerfile --target box -t "$E2E_BOX_IMAGE" . > /dev/null
+    docker build --progress=plain -t "$cp_image:0.9.3" -
+  docker build --progress=plain -f docker/box.Dockerfile --target box -t "$E2E_BOX_IMAGE" .
 fi
+
+[ "${1:-}" != "--build-only" ] || exit 0
 
 say "boot the host and fill its registry"
 $compose down --volumes --remove-orphans > /dev/null 2>&1 || true

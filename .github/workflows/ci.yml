@@ -438,9 +438,23 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: ./.github/actions/crew-docker
-      - run: e2e/updater/run.sh
+      - name: Build updater fixture images
+        run: |
+          status=0
+          timeout --kill-after=15s 8m e2e/updater/run.sh --build-only || status=$?
+          case "$status" in
+            0) ;;
+            124|137)
+              echo "::warning::Updater fixture build timed out or was killed. Retrying once."
+              timeout --kill-after=15s 8m e2e/updater/run.sh --build-only
+              ;;
+            *) exit "$status" ;;
+          esac
+      - name: Test the updater and rollback
+        id: updater
+        run: SKIP_BUILD=1 e2e/updater/run.sh
       - name: Logs
-        if: failure()
+        if: failure() && steps.updater.outcome == 'failure'
         run: e2e/updater/run.sh --logs
       - name: Remove the host and its images
         if: always()
