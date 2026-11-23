@@ -13,6 +13,36 @@ defmodule Foreman.AccountsSignInTest do
   end
 
   describe "identity" do
+    test "a confirmed membership loss fences the first sign-in across a login rename" do
+      config = %{admins: [], allowed_users: [], allowed_org: "acme"}
+
+      check = fn "acme" ->
+        assert {:error, :not_allowed} = sign_in(101, "renamed", config, org_member?: false)
+        assert Accounts.list_users() == []
+        true
+      end
+
+      assert {:error, :access_changed} =
+               sign_in(101, "first-login", config, check_membership: check)
+
+      assert Accounts.list_users() == []
+      assert {:ok, user} = sign_in(101, "renamed", config, org_member?: true)
+      assert is_binary(Accounts.create_session(user, "fresh membership"))
+    end
+
+    test "an unknown membership or a different GitHub identity does not cancel a first sign-in" do
+      config = %{admins: [], allowed_users: [], allowed_org: "acme"}
+
+      check = fn "acme" ->
+        assert {:error, :not_allowed} = sign_in(101, "first-login", config, org_member?: :unknown)
+        assert {:error, :not_allowed} = sign_in(102, "first-login", config, org_member?: false)
+        true
+      end
+
+      assert {:ok, user} = sign_in(101, "first-login", config, check_membership: check)
+      assert user.github_id == 101
+    end
+
     test "a new GitHub account that takes a renamed user's old login gets a new account" do
       alice = user_fixture(login: "alice", github_id: 100, role: "admin")
       config = %{admins: ["root"], allowed_users: ["alice"], allowed_org: nil}

@@ -5,15 +5,20 @@ defmodule ForemanWeb.Plugs.OAuthTransport do
 
   def init(opts), do: opts
 
-  def call(%{path_info: ["oauth" | _]} = conn, _), do: secure(conn)
-  def call(%{path_info: ["api", "v1" | _]} = conn, _), do: secure(conn)
+  def call(conn, _) do
+    case policy(conn.path_info) do
+      :other -> conn
+      _ -> secure(conn)
+    end
+  end
 
-  def call(%{path_info: [".well-known", "oauth-authorization-server"]} = conn, _),
-    do: secure(conn)
-
-  def call(%{path_info: ["admin", "apps" | _]} = conn, _), do: secure(conn)
-  def call(%{path_info: ["settings", "connections" | _]} = conn, _), do: secure(conn)
-  def call(conn, _), do: conn
+  @doc false
+  def policy(["oauth" | _]), do: :oauth
+  def policy(["api", "v1" | _]), do: :resource
+  def policy([".well-known", "oauth-authorization-server"]), do: :oauth
+  def policy(["admin", "apps" | _]), do: :oauth
+  def policy(["settings", "connections" | _]), do: :oauth
+  def policy(_), do: :other
 
   defp secure(conn) do
     uri = URI.parse(Foreman.Config.base_url())
