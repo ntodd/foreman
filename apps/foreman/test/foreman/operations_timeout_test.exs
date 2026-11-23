@@ -88,15 +88,18 @@ defmodule Foreman.OperationsTimeoutTest do
     assert Agents.LifecycleState.confirmed?(ctx.env, "stopped")
   end
 
-  test "a late success clears the timeout", ctx do
+  test "a late success corrects the workspace and keeps the public timeout", ctx do
     op = start(ctx)
     {:ok, op} = Operations.timed_out(op, "no result after 3 hours")
     Environments.apply_result(op)
 
     :ok = report(ctx.box, op.id, %{status: "ok"})
-    op = Operations.get!(op.id)
-    assert op.status == "succeeded"
-    refute op.args["timed_out"]
+    corrected = Operations.get!(op.id)
+    assert corrected.status == "succeeded"
+    assert corrected.finished_at == op.finished_at
+    assert corrected.timeout_error == "no result after 3 hours"
+    refute corrected.args["timed_out"]
+    assert Repo.reload!(ctx.env).observed_state == "running"
   end
 
   # Housekeeping cancels what it gives up on. That cancel coming back isn't

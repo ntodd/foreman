@@ -271,8 +271,8 @@ defmodule Foreman.Operations do
 
   @doc """
   Fails an operation that never reported back. A late result still
-  replaces this. `:finished` if a result landed since `op` was read: the
-  check and the update are one statement, so this never overwrites it.
+  reconciles the physical outcome. Returns `:finished` if a timeout or
+  result was already recorded, even if an older release reopened the row.
   """
   def timed_out(%Operation{} = op, error) do
     case timed_out(op, error, fn _op -> nil end) do
@@ -288,12 +288,10 @@ defmodule Foreman.Operations do
   `:finished`.
 
   `dispatched_before:` only fails it if it was still dispatched before
-  then, checked in the same statement: Housekeeping works from a list read
-  earlier, and a reconnect may have restarted the clock since.
+  then. The transaction locks the current row before applying the timeout
+  because a reconnect may have restarted the clock since Housekeeping read it.
   """
-  def timed_out(%Operation{id: id} = op, error, apply, opts \\ []) do
-    now = DateTime.utc_now()
-
+  def timed_out(%Operation{id: id}, error, apply, opts \\ []) do
     query =
       from(o in Operation, where: o.id == ^id and o.status in ["queued", "dispatched", "running"])
 
@@ -305,28 +303,9 @@ defmodule Foreman.Operations do
 
     {:ok, outcome} =
       Repo.transact(fn ->
-        # An older agent acceptance handler could leave a timed-out operation active.
-        # Settle it using the first public timeout and its original retention clock.
-        timeout =
-          from o in query,
-            update: [
-              set: [
-                status: "failed",
-                error: ^error,
-                timeout_error: coalesce(o.timeout_error, ^error),
-                args: ^Map.put(op.args || %{}, "timed_out", true),
-                finished_at: coalesce(o.finished_at, ^now),
-                updated_at: ^now
-              ]
-            ]
-
-        {count, _} = Repo.update_all(timeout, [])
-
-        if count == 1 do
-          op = get!(id)
-          {:ok, {op, apply.(op)}}
-        else
-          {:ok, :finished}
+        case Repo.one_for_update(query) do
+          nil -> {:ok, :finished}
+          op -> {:ok, record_timeout(op, error, apply)}
         end
       end)
 
@@ -339,6 +318,32 @@ defmodule Foreman.Operations do
 
       :finished ->
         :finished
+    end
+  end
+
+  defp record_timeout(op, error, apply) do
+    if timed_out?(op) do
+      # An older release could reopen a finished row after its timeout had taken effect.
+      original = op.timeout_error || op.error
+
+      op
+      |> Ecto.Changeset.change(status: "failed", error: original, timeout_error: original)
+      |> Repo.update!()
+
+      :finished
+    else
+      failed =
+        op
+        |> Ecto.Changeset.change(
+          status: "failed",
+          error: error,
+          timeout_error: op.timeout_error || error,
+          args: Map.put(op.args || %{}, "timed_out", true),
+          finished_at: op.finished_at || DateTime.utc_now()
+        )
+        |> Repo.update!()
+
+      {failed, apply.(failed)}
     end
   end
 
@@ -363,6 +368,8 @@ defmodule Foreman.Operations do
       status: finished_status(status, error),
       result: result,
       error: error,
+      # A pre-upgrade timeout may have stored its first error only in the physical result.
+      timeout_error: op.timeout_error || if(timed_out?(op), do: op.error),
       args: Map.delete(op.args || %{}, "timed_out"),
       # A late result reconciles the workspace. The public timeout already started retention.
       finished_at: op.finished_at || DateTime.utc_now()

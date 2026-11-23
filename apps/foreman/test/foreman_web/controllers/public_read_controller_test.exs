@@ -183,12 +183,14 @@ defmodule ForemanWeb.PublicReadControllerTest do
     version = 20_261_123_030_001
     opts = [log: false, migration_lock: false]
 
-    Code.require_file(
-      Path.join(
-        :code.priv_dir(:foreman),
-        "repo/migrations/#{version}_settle_reopened_timeouts.exs"
+    unless Code.ensure_loaded?(migration) do
+      Code.require_file(
+        Path.join(
+          :code.priv_dir(:foreman),
+          "repo/migrations/#{version}_settle_reopened_timeouts.exs"
+        )
       )
-    )
+    end
 
     assert :ok = Ecto.Migrator.down(Repo, version, migration, opts)
     assert :ok = Ecto.Migrator.up(Repo, version, migration, opts)
