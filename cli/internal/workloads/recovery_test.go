@@ -235,7 +235,10 @@ func TestDeclinedCapacityAndHardLimitDoNotPromptScripts(t *testing.T) {
 		}
 		return nil, &api.HTTPError{StatusCode: 409, Code: "capacity_exceeded", Message: "Hard limit"}
 	}}
-	h.failure(t, "capacity_confirmation_required", "env", "create", repoID, "--request-key", "warning")
+	warning := h.failure(t, "capacity_confirmation_required", "env", "create", repoID, "--request-key", "warning")
+	if warning["http_status"] != float64(409) || warning["request_key"] != "warning" || !strings.Contains(warning["message"].(string), "--confirm-capacity-warning") {
+		t.Fatal(warning)
+	}
 	h.failure(t, "capacity_exceeded", "env", "create", "--resume", "warning", "--confirm-capacity-warning")
 	if keys != 2 {
 		t.Fatal(keys)
@@ -466,24 +469,29 @@ func TestOnlyDefinitiveRejectionsAllowCorrectedInputs(t *testing.T) {
 }
 
 func TestLostResponseKeepsInputLockedAfterRejection(t *testing.T) {
-	h := setup(t, fake{create: func(context.Context, string, api.Create) (*api.Response[api.Accepted], error) {
-		return nil, io.ErrUnexpectedEOF
-	}})
-	h.failure(t, "outcome_unknown", "env", "create", repoID, "--request-key", "uncertain")
 	for _, tc := range []struct {
 		status int
 		code   string
-	}{{422, "invalid_request"}, {409, "capacity_confirmation_required"}} {
-		h.API = fake{create: func(context.Context, string, api.Create) (*api.Response[api.Accepted], error) {
-			return nil, &api.HTTPError{StatusCode: tc.status, Code: tc.code}
-		}}
-		h.failure(t, tc.code, "env", "create", "--resume", "uncertain")
-		h.API = fake{create: func(context.Context, string, api.Create) (*api.Response[api.Accepted], error) {
-			t.Fatal("changed an uncertain submission")
-			return nil, nil
-		}}
-		h.failure(t, "idempotency_conflict", "env", "create", repoID, "--branch", "changed", "--request-key", "uncertain")
-		h.failure(t, "idempotency_conflict", "env", "create", "--resume", "uncertain", "--confirm-capacity-warning")
+	}{{422, "invalid_request"}, {409, "capacity_confirmation_required"}, {409, "capacity_exceeded"}} {
+		t.Run(tc.code, func(t *testing.T) {
+			h := setup(t, fake{create: func(context.Context, string, api.Create) (*api.Response[api.Accepted], error) {
+				return nil, io.ErrUnexpectedEOF
+			}})
+			h.failure(t, "outcome_unknown", "env", "create", repoID, "--request-key", "uncertain")
+			h.API = fake{create: func(context.Context, string, api.Create) (*api.Response[api.Accepted], error) {
+				return nil, &api.HTTPError{StatusCode: tc.status, Code: tc.code, Message: "Server rejected this attempt."}
+			}}
+			info := h.failure(t, "outcome_unknown", "env", "create", "--resume", "uncertain")
+			if info["remote_code"] != tc.code || info["http_status"] != float64(tc.status) || info["request_key"] != "uncertain" {
+				t.Fatal(info)
+			}
+			if message := info["message"].(string); !strings.Contains(message, "Server rejected this attempt.") || !strings.Contains(message, "--resume") || strings.Contains(message, "--confirm-capacity-warning") {
+				t.Fatal(message)
+			}
+			h.API = fake{} // Any submission with changed inputs fails the test.
+			h.failure(t, "idempotency_conflict", "env", "create", repoID, "--branch", "changed", "--request-key", "uncertain")
+			h.failure(t, "idempotency_conflict", "env", "create", "--resume", "uncertain", "--confirm-capacity-warning")
+		})
 	}
 }
 
