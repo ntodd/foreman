@@ -58,6 +58,8 @@ jobs:
           fi
       - name: Verify the checked-in OpenAPI client
         run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends ruby
           go generate ./api
           git diff --exit-code -- api
       - run: go vet ./...
