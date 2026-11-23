@@ -10,6 +10,7 @@ defmodule Foreman.Agents do
   import Ecto.Query
 
   alias Foreman.{Boxes, Environments, Metrics, Operations, Prebuilds, Repo, Scope}
+  alias Foreman.Agents.LifecycleState
   alias Foreman.Capacity.Tracker
   alias Foreman.Environments.Environment
   alias Foreman.Operations.Operation
@@ -25,6 +26,7 @@ defmodule Foreman.Agents do
            {System.monotonic_time(:millisecond), nil}
          ) do
       {:ok, _} ->
+        LifecycleState.joined(box_id)
         :ok
 
       {:error, {:already_registered, old}} ->
@@ -196,6 +198,7 @@ defmodule Foreman.Agents do
             if offer && op.status == "succeeded",
               do: Environments.deliver_offer(op.id, offer)
 
+            LifecycleState.result(box_id, op, env)
             Environments.after_result(op, env)
 
           :already ->

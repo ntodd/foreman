@@ -26,6 +26,7 @@ defmodule Foreman.Environments.Environment do
     field :last_guest_oom_at, :utc_datetime
     field :last_guest_oom_processes, {:array, :string}, default: []
     field :status_message, :string
+    field :boot_reserved, :boolean, virtual: true, default: false
     field :vm_size, :map
     field :cpu_limit, :float
     field :memory_limit_mb, :integer

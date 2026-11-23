@@ -298,7 +298,7 @@ defmodule Foreman.PublicAPI.Mutations do
   defp stable?(env, action),
     do:
       env.observed_state == target(action) and env.desired_state == target(action) and
-        Boxes.online?(env.box_id)
+        Foreman.Agents.LifecycleState.confirmed?(env, target(action))
 
   defp admit_action(env, %{"action" => "start"} = input) do
     env = Repo.preload(env, [:box, :repo])

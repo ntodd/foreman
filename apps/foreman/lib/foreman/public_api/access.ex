@@ -6,7 +6,8 @@ defmodule Foreman.PublicAPI.Access do
   """
   import Ecto.Query
 
-  alias Foreman.{Config, GitHub, OAuth}
+  alias Foreman.{GitHub, OAuth}
+  alias Foreman.PublicAPI.RepositoryAccess
   alias Foreman.Boxes.Box
   alias Foreman.Environments.Environment
   alias Foreman.Repos.Repo, as: GitRepo
@@ -63,13 +64,17 @@ defmodule Foreman.PublicAPI.Access do
 
     from e in owned,
       join: r in subquery(allowed),
-      on: r.id == e.repo_id,
-      where: is_nil(r.github_identity_bound_at) or r.github_identity_bound_at <= e.inserted_at
+      on: r.id == e.repo_id
   end
 
   defp authorized_repos(query, %{kind: :service_account} = principal) do
-    query = if GitHub.configured?(), do: where(query, [r], not is_nil(r.github_id)), else: query
-    service_resources(query, principal, :repo_ids)
+    query
+    |> RepositoryAccess.grantable()
+    |> service_resources(principal, :repo_ids)
+    |> where(
+      [r, ..., grant],
+      is_nil(r.github_identity_bound_at) or grant.inserted_at > r.github_identity_bound_at
+    )
   end
 
   defp authorized_repos(query, %{kind: :user, user: user} = principal) do
@@ -78,10 +83,10 @@ defmodule Foreman.PublicAPI.Access do
 
     cond do
       GitHub.configured?() ->
-        ids = Foreman.PublicAPI.RepositoryAccess.visible_ids(query, user)
+        ids = RepositoryAccess.visible_ids(query, user)
         where(query, [r], r.id in ^ids)
 
-      local_git?() ->
+      RepositoryAccess.local_git?() ->
         where(query, [r], not r.private)
 
       true ->
@@ -93,6 +98,8 @@ defmodule Foreman.PublicAPI.Access do
     box_ids = select(boxes(principal), [b], b.id)
 
     from e in Environment,
+      join: r in assoc(e, :repo),
+      where: is_nil(r.github_identity_bound_at) or r.github_identity_bound_at <= e.inserted_at,
       where: e.user_id == ^principal.user.id and e.box_id in subquery(box_ids)
   end
 
@@ -115,14 +122,4 @@ defmodule Foreman.PublicAPI.Access do
 
   defp by_id(query, :all), do: query
   defp by_id(query, id), do: where(query, [r], r.id == ^id)
-
-  defp local_git? do
-    case URI.parse(Config.git_base_url()) do
-      %URI{host: host, scheme: scheme} when is_binary(host) and scheme in ["http", "https"] ->
-        String.downcase(host) not in ["github.com", "www.github.com"]
-
-      _ ->
-        false
-    end
-  end
 end

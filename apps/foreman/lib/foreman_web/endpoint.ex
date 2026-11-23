@@ -45,12 +45,13 @@ defmodule ForemanWeb.Endpoint do
     param_key: "request_logger",
     cookie_key: "request_logger"
 
+  plug :forwarded_https
   plug ForemanWeb.Plugs.OAuthTransport
   plug :force_ssl
   plug Plug.RequestId
   plug Plug.Telemetry, event_prefix: [:phoenix, :endpoint], log: {__MODULE__, :log_level, []}
 
-  plug Plug.Parsers,
+  plug ForemanWeb.Plugs.RequestParsers,
     parsers: [:urlencoded, :multipart, :json],
     pass: ["*/*"],
     length: 2_000_000,
@@ -66,15 +67,27 @@ defmodule ForemanWeb.Endpoint do
   def log_level(%Plug.Conn{path_info: ["healthz"]}), do: false
   def log_level(_conn), do: :info
 
-  # Redirects to HTTPS unless the request arrived over it (directly, or
-  # through `tailscale serve`, which sets X-Forwarded-Proto) or from
-  # loopback. On in production (FOREMAN_FORCE_SSL).
+  # Normalize the protocol once, before both the OAuth transport check and
+  # the browser login pipeline. A TLS terminator must replace incoming XFP.
+  defp forwarded_https(conn, _) do
+    ranges = Application.get_env(:foreman, :tls_proxy_ranges, [])
+
+    if get_req_header(conn, "x-forwarded-proto") == ["https"] and
+         ForemanWeb.ClientIP.trusted_proxy?(conn.remote_ip, ranges) do
+      %{conn | scheme: :https}
+    else
+      conn
+    end
+  end
+
   defp force_ssl(conn, _opts) do
     if Application.get_env(:foreman, :force_ssl, false) do
-      Plug.SSL.call(
-        conn,
-        Plug.SSL.init(rewrite_on: [:x_forwarded_proto], exclude: ["localhost", "127.0.0.1"])
-      )
+      exclude =
+        if ForemanWeb.ClientIP.loopback?(conn.remote_ip),
+          do: ["localhost", "127.0.0.1", "[::1]"],
+          else: []
+
+      Plug.SSL.call(conn, Plug.SSL.init(exclude: exclude))
     else
       conn
     end

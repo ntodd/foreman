@@ -211,7 +211,7 @@ defmodule ForemanWeb.OAuthControllerTest do
   } do
     installer = user_fixture(role: "admin")
     scope = Scope.for_user(installer)
-    repo = repo_fixture()
+    repo = repo_fixture() |> Ecto.Changeset.change(github_id: 882) |> Repo.update!()
     box = box_fixture(owner_user_id: installer.id)
     secret = secret_fixture("repo", repo, "BUILD_KEY", "test", actor: installer)
 

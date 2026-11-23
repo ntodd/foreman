@@ -26,6 +26,8 @@ defmodule Foreman.Environments do
   require Logger
 
   @preloads [:box, :user, repo: :owner]
+  @up ~w(create rebuild pull_rebuild start restart_affected restart_all)
+  @lifecycle @up ++ ~w(stop suspend destroy)
 
   # -- queries ----------------------------------------------------------------------
 
@@ -55,8 +57,16 @@ defmodule Foreman.Environments do
   def get!(id), do: Environment |> Repo.get!(id) |> Repo.preload(@preloads)
 
   def live_for_box(box_id) do
+    boots =
+      from o in Foreman.Operations.Operation,
+        where:
+          o.box_id == ^box_id and o.action in @up and
+            o.status in ["queued", "dispatched", "running"],
+        select: o.environment_id
+
     from(e in Environment,
       where: e.box_id == ^box_id and is_nil(e.destroyed_at),
+      select_merge: %{boot_reserved: type(fragment("?", e.id in subquery(boots)), :boolean)},
       preload: ^@preloads
     )
     |> Repo.all()
@@ -599,7 +609,12 @@ defmodule Foreman.Environments do
         else: env
 
     name = Atom.to_string(action)
-    supersede(env, name)
+
+    if opts[:trigger] == "expiry" and action == :stop do
+      cancel_queued(env, &(&1 in @up or &1 == "suspend"))
+    else
+      supersede(env, name)
+    end
 
     if action == :start, do: queue_operation(env, "secrets_write", %{}, scope.user, opts)
 
@@ -678,6 +693,7 @@ defmodule Foreman.Environments do
 
   defp allowed?(%Environment{destroyed_at: nil} = env, action)
        when action in [
+              :create,
               :start,
               :stop,
               :destroy,
@@ -789,7 +805,6 @@ defmodule Foreman.Environments do
 
   # -- results -----------------------------------------------------------------------
 
-  @up ~w(create rebuild pull_rebuild start restart_affected restart_all)
   @fresh_build ~w(create rebuild pull_rebuild)
 
   @doc """
@@ -821,10 +836,22 @@ defmodule Foreman.Environments do
     attrs = result_attrs(op, env)
 
     attrs =
-      if env.expiry_at && is_nil(env.expiry_consumed_at) &&
-           (op.trigger == "expiry" or attrs[:destroyed_at]),
-         do: Map.put(attrs, :expiry_consumed_at, DateTime.utc_now()),
-         else: attrs
+      cond do
+        is_nil(env.expiry_at) or not is_nil(env.expiry_consumed_at) ->
+          attrs
+
+        attrs[:destroyed_at] || (op.trigger == "expiry" and op.status == "succeeded") ->
+          Map.put(attrs, :expiry_consumed_at, DateTime.utc_now())
+
+        op.trigger == "expiry" ->
+          # The failed attempt stays in history. Its replacement must survive a
+          # restart and run as system cleanup even after the owner loses access.
+          EnvironmentExpiry.retry!(env)
+          attrs
+
+        true ->
+          attrs
+      end
 
     case attrs do
       attrs when attrs == %{} ->
@@ -1219,6 +1246,7 @@ defmodule Foreman.Environments do
 
   defp reconcile_entry(env, inv) do
     observed = if inv, do: inv.state, else: "missing"
+    Agents.LifecycleState.record(env.box_id, env.id, observed)
 
     size =
       if inv && inv[:vm_size],
@@ -1331,6 +1359,8 @@ defmodule Foreman.Environments do
   def observe(box_id, env_id, state) do
     case Repo.get(Environment, env_id) do
       %Environment{box_id: ^box_id, destroyed_at: nil} = env ->
+        Agents.LifecycleState.record(box_id, env_id, state)
+
         unless lifecycle_active?(env.id) or env.observed_state == state,
           do: update_env!(env, %{observed_state: state})
 
@@ -1340,8 +1370,6 @@ defmodule Foreman.Environments do
         {:error, :not_yours}
     end
   end
-
-  @lifecycle ~w(create rebuild pull_rebuild start stop suspend destroy restart_affected restart_all)
 
   def lifecycle_operations do
     from o in Foreman.Operations.Operation,
