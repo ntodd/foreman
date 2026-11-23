@@ -84,7 +84,7 @@ defmodule Foreman.Environments.Server do
           Agents.cancel_operation(op, nil)
         else
           env = Repo.get!(Environment, env_id)
-          if op.action in @needs_files, do: rewrite_secrets(env)
+          if op.action in @needs_files and op.command != "env.create", do: rewrite_secrets(env)
           resend_op(op, env)
         end
 

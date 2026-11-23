@@ -24,6 +24,11 @@ defmodule Foreman.Environments.Commands do
     )
   end
 
+  # Expiry can stop the initial create before it ever reaches the box. Its
+  # first later start provisions the already-reserved environment.
+  def build(%Operation{action: "start", command: "env.create"} = op, env),
+    do: build(%{op | action: "create"}, env)
+
   def build(%Operation{} = op, %Environment{} = env) do
     env = Repo.preload(env, [:user, :box, repo: :owner])
 

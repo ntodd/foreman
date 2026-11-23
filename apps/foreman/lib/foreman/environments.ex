@@ -610,17 +610,27 @@ defmodule Foreman.Environments do
 
     name = Atom.to_string(action)
 
-    if opts[:trigger] == "expiry" and action == :stop do
-      cancel_queued(env, &(&1 in @up or &1 == "suspend"))
-    else
-      supersede(env, name)
-    end
+    env = prepare_queue(env, name, opts[:trigger])
 
-    if action == :start, do: queue_operation(env, "secrets_write", %{}, scope.user, opts)
+    if action == :start and not env.initial_create_deferred,
+      do: queue_operation(env, "secrets_write", %{}, scope.user, opts)
 
     op = queue_operation(env, name, args, scope.user, opts)
     Audit.log(scope, "environment.#{action}", env, Keyword.get(opts, :audit, %{}))
     {:ok, op}
+  end
+
+  defp prepare_queue(env, "stop", "expiry") do
+    cancelled = cancel_queued(env, &(&1 in @up or &1 == "suspend"))
+
+    if not env.created_once and Enum.any?(cancelled, &(&1.action == "create")),
+      do: update_env!(env, %{initial_create_deferred: true}),
+      else: env
+  end
+
+  defp prepare_queue(env, name, _) do
+    supersede(env, name)
+    env
   end
 
   defp supersede(env, "destroy"), do: cancel_queued(env, &(&1 != "destroy"))
@@ -638,11 +648,9 @@ defmodule Foreman.Environments do
             from o in Foreman.Operations.Operation,
               where: o.environment_id == ^env.id and o.status == "queued"
           ),
-        which?.(op.action) do
-      Operations.cancel_queued(op)
-    end
-
-    :ok
+        which?.(op.action),
+        {:ok, cancelled} <- [Operations.cancel_queued(op)],
+        do: cancelled
   end
 
   # A revoked box can never reconnect, so its environments are marked
@@ -735,7 +743,11 @@ defmodule Foreman.Environments do
         api_grant_id: opts[:api_grant_id],
         trigger: Keyword.get(opts, :trigger, "request"),
         action: action,
-        command: command_type(action),
+        command:
+          if(action == "start" and env.initial_create_deferred,
+            do: "env.create",
+            else: command_type(action)
+          ),
         args: args
       })
   end
@@ -831,7 +843,7 @@ defmodule Foreman.Environments do
   end
 
   def record_result(%Foreman.Operations.Operation{} = op) do
-    env = Repo.get!(Environment, op.environment_id)
+    env = locked_environment(op.environment_id)
 
     attrs = result_attrs(op, env)
 
@@ -841,6 +853,8 @@ defmodule Foreman.Environments do
           attrs
 
         attrs[:destroyed_at] || (op.trigger == "expiry" and op.status == "succeeded") ->
+          # A late physical success can race a queued replacement for its timeout.
+          retire_queued_expiry(env.id)
           Map.put(attrs, :expiry_consumed_at, DateTime.utc_now())
 
         op.trigger == "expiry" ->
@@ -864,6 +878,14 @@ defmodule Foreman.Environments do
         if attrs[:destroyed_at], do: Secrets.delete_environment_secrets(updated)
         Map.put(updated, :stale_notice, stale_notice?(op, env))
     end
+  end
+
+  defp retire_queued_expiry(env_id) do
+    from(o in Foreman.Operations.Operation,
+      where: o.environment_id == ^env_id and o.trigger == "expiry" and o.status == "queued"
+    )
+    |> Repo.all()
+    |> Enum.each(&Operations.cancel_queued/1)
   end
 
   # The files on the box were sent with the secrets that applied before
@@ -935,6 +957,7 @@ defmodule Foreman.Environments do
       observed_state: "running",
       status_message: nil,
       created_once: true,
+      initial_create_deferred: false,
       pending_restart: changed != [],
       pending_changes: changed
     }
@@ -954,7 +977,12 @@ defmodule Foreman.Environments do
     # Every up from an agent that runs hooks reports them; one that doesn't
     # is older (a box rolled back) and can't run them.
     |> Map.put(:connect_hooks, connect_hooks(result["connect"]))
-    |> then(&if(action in @fresh_build, do: Map.put(&1, :ts_authkey, nil), else: &1))
+    |> then(
+      &if(op.command == "env.create" or action in @fresh_build,
+        do: Map.put(&1, :ts_authkey, nil),
+        else: &1
+      )
+    )
   end
 
   # Nothing's running with the old secrets any more; a start picks up
