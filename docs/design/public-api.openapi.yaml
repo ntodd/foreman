@@ -1,8 +1,8 @@
 openapi: 3.1.1
 info:
   title: Foreman public API
-  version: 0.1.0-draft
-  description: Proposed v1 resource contract. OAuth setup and grant behavior are specified in the accompanying design document.
+  version: 1.0.0
+  description: Version 1 of the Foreman environment API. Connect to the authorization server at the instance origin, then use the bearer token under /api/v1.
 servers:
   - url: /api/v1
 paths:
@@ -25,9 +25,10 @@ paths:
                   token_endpoint: {type: string, format: uri}
                   revocation_endpoint: {type: string, format: uri}
                   scopes_supported: {type: array, items: {type: string}}
-                  grant_types_supported: {type: array, items: {type: string}, example: [urn:ietf:params:oauth:grant-type:device_code, refresh_token, client_credentials]}
+                  grant_types_supported: {type: array, items: {type: string}, example: ['urn:ietf:params:oauth:grant-type:device_code', refresh_token, client_credentials]}
                   response_types_supported: {type: array, items: {type: string}, example: []}
                   token_endpoint_auth_methods_supported: {type: array, items: {type: string}, example: [none, client_secret_basic]}
+                  revocation_endpoint_auth_methods_supported: {type: array, items: {type: string}, example: [none, client_secret_basic]}
   /oauth/device/code:
     servers: [{url: /}]
     post:
@@ -74,7 +75,7 @@ paths:
               type: object
               required: [grant_type]
               properties:
-                grant_type: {enum: [urn:ietf:params:oauth:grant-type:device_code, refresh_token, client_credentials]}
+                grant_type: {enum: ['urn:ietf:params:oauth:grant-type:device_code', refresh_token, client_credentials]}
                 client_id: {type: string}
                 device_code: {type: string}
                 refresh_token: {type: string}
@@ -193,7 +194,7 @@ paths:
             schema: {$ref: '#/components/schemas/Create'}
       responses:
         '202':
-          description: Accepted operation or replay of the original submission
+          description: Accepted operation or replay of the original submission. The Location identifies the original operation even after its history expires.
           headers:
             Location:
               required: true
@@ -335,6 +336,7 @@ components:
       required: true
       schema: {type: string, format: uuid}
     Cursor:
+      description: Opaque position issued for this grant and collection. Omit on the first request.
       name: cursor
       in: query
       schema: {type: string}
@@ -418,6 +420,9 @@ components:
       properties:
         environment_id: {$ref: '#/components/schemas/Id'}
         operation_id: {$ref: '#/components/schemas/Id'}
+        operation_history_expired:
+          type: boolean
+          description: Present and true on replay when the original operation has passed its retention window. Use the environment ID to read its current state.
     Environment:
       type: object
       required: [id, slug, repo_id, branch, box_id, desired_state, observed_state, readiness]
@@ -440,7 +445,7 @@ components:
       properties:
         id: {$ref: '#/components/schemas/Id'}
         environment_id: {$ref: '#/components/schemas/Id'}
-        action: {type: string}
+        action: {type: string, description: Lifecycle action reported by the operation.}
         trigger: {type: string, description: What initiated the operation., examples: [request, expiry]}
         status: {type: string, enum: [queued, dispatched, running, succeeded, failed, cancelled]}
         error: {$ref: '#/components/schemas/Error'}
