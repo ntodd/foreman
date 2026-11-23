@@ -162,12 +162,12 @@ defmodule Foreman.CLIAcceptanceTest do
     assert %{"environment_id" => ^env_id, "operation_id" => restart} =
              json(ctx, ["env", "restart", env_id, "--no-wait"])
 
-    assert %{
-             action: "restart_affected",
-             status: "dispatched",
-             args: %{"changed" => ["FROM_FILE", "PLAIN"]}
-           } = Repo.get!(Operation, restart)
+    assert %{action: "restart_affected", args: %{"changed" => ["FROM_FILE", "PLAIN"]}} =
+             Repo.get!(Operation, restart)
 
+    # The box gets the current files before anything restarts.
+    assert deliver_files(ctx.box, env_id) > 0
+    assert Repo.get!(Operation, restart).status == "dispatched"
     complete(ctx.box, restart)
     assert %{"status" => "succeeded"} = json(ctx, ["op", "wait", restart])
 
@@ -462,6 +462,25 @@ defmodule Foreman.CLIAcceptanceTest do
 
   defp sample(box, id, ids),
     do: event(box, "box.workspaces", %{since_join_ms: 0, environments: %{id => ids}})
+
+  # Acknowledge each secrets file write the box has been sent, oldest first.
+  defp deliver_files(box, env_id, done \\ 0) do
+    sent =
+      Repo.one(
+        from o in Operation,
+          where: o.environment_id == ^env_id and o.action == "secrets_write",
+          where: o.status == "dispatched",
+          order_by: o.inserted_at,
+          limit: 1
+      )
+
+    if sent do
+      complete(box, sent.id)
+      deliver_files(box, env_id, done + 1)
+    else
+      done
+    end
+  end
 
   defp complete(box, id),
     do:

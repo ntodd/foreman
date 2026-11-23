@@ -81,10 +81,13 @@ defmodule ForemanWeb.SecretAPITest do
         assert slug == ctx.env.slug
       end
 
-      # A stopped environment has nothing running to restart.
-      ctx.env |> Ecto.Changeset.change(desired_state: "stopped") |> Repo.update!()
-      reply = change(ctx.conn, token, path, %{secrets: set([{"A", "3"}])})
-      assert %{"affected" => [], "others_affected" => 0} = json_response(reply, 200)
+      # An environment that isn't up has nothing to restart, whether it was
+      # stopped or went down on its own.
+      for attrs <- [[observed_state: "stopped"], [desired_state: "stopped"]] do
+        ctx.env |> Ecto.Changeset.change(attrs) |> Repo.update!()
+        reply = change(ctx.conn, token, path, %{secrets: set([{"A", "3"}])})
+        assert %{"affected" => [], "others_affected" => 0} = json_response(reply, 200)
+      end
     end
 
     test "names no environment for a connection that can't list them", ctx do

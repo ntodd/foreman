@@ -424,14 +424,14 @@ func (o Options) change(ctx context.Context, v invocation, set []api.SecretValue
 		fmt.Fprintf(w, "Not set there, so left alone: %s.\n", strings.Join(skipped, ", "))
 	}
 	if len(result.Affected) > 0 {
-		fmt.Fprintln(w, "New shells in these running environments pick the change up shortly. Their running processes and services keep the previous values until a restart:")
+		fmt.Fprintln(w, "The change reaches these running environments of yours. New shells in them pick it up shortly; a service already running keeps the values it started with:")
 		for _, env := range result.Affected {
 			fmt.Fprintf(w, "  %s  %s\n", env.Slug, env.ID)
 		}
-		fmt.Fprintf(w, "Apply it with: foreman env restart %s\n", result.Affected[0].ID)
+		fmt.Fprintf(w, "To recreate the services that use what changed: foreman env restart %s\n", result.Affected[0].ID)
 	}
 	if n := result.OthersAffected; n > 0 {
-		_, err = fmt.Fprintf(w, "The change also reaches %d running environment(s) of other people, which need the same restart.\n", n)
+		_, err = fmt.Fprintf(w, "It also reaches %d running environment(s) of other people, which may need the same restart.\n", n)
 	}
 	return err
 }

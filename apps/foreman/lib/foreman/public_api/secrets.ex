@@ -157,12 +157,14 @@ defmodule Foreman.PublicAPI.Secrets do
   # revocation waits), an admin is still one, and the subject is still
   # the caller's to reach.
   defp still_allowed(principal, scope, retained) do
+    # The user row before the grant row, the order refresh and
+    # offboarding take them in.
     cond do
-      not Access.lock_connection(principal) ->
-        {:error, :missing}
-
       scope in ["repo", "owner"] and not admin?(principal) ->
         {:error, :role}
+
+      not Access.lock_connection(principal) ->
+        {:error, :missing}
 
       retained && not Repo.exists?(retained) ->
         {:error, :missing}
@@ -215,18 +217,17 @@ defmodule Foreman.PublicAPI.Secrets do
   # The caller's running environments are named when the connection may
   # list environments, and other people's are only counted. Running, not
   # changed: reporting only those whose values differ would tell the
-  # caller whether what they sent matched what was there.
+  # caller whether what they sent matched what was there. Running means
+  # asked for and observed, which is what a restart will accept.
   defp reached(principal, scope, subject, listable) do
     ids = Foreman.Secrets.affected_environment_ids(scope, subject)
-
-    running =
-      from e in Environment,
-        where: e.id in ^ids and e.desired_state == "running" and is_nil(e.destroyed_at)
+    running = dynamic([e], e.desired_state == "running" and e.observed_state == "running")
 
     own =
       if listable do
         from(e in listable,
-          where: e.id in ^ids and e.desired_state == "running",
+          where: e.id in ^ids,
+          where: ^running,
           order_by: e.slug,
           select: map(e, [:id, :slug])
         )
@@ -235,7 +236,11 @@ defmodule Foreman.PublicAPI.Secrets do
         []
       end
 
-    others = from e in running, where: e.user_id != ^principal.user.id
+    others =
+      from e in Environment,
+        where: e.id in ^ids and is_nil(e.destroyed_at) and e.user_id != ^principal.user.id,
+        where: ^running
+
     %{affected: own, others_affected: Repo.aggregate(others, :count)}
   end
 

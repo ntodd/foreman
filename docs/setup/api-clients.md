@@ -81,6 +81,8 @@ In a running environment new shells pick a change up once the box has written it
 
 `foreman env restart "$ENV_ID"` applies a change, as **Restart affected** does in the browser. It recreates the services whose compose configuration uses a secret that changed and restarts the workspace container. `foreman env restart "$ENV_ID" --all` stops and starts every container without recreating any, which is what a process that read `/run/foreman/secrets.env` at startup needs. A stop and a start does no more than `--all`: the services come back in the containers they already had, with the environment those were created with.
 
+Two limits to know. The default restart finds its services by the `$NAME` and `${NAME}` references in the compose files, so a service that receives a secret another way, such as a bare `NAME` in an `environment:` list, is not recreated. And once `--all` or a stop and start has run, Foreman counts the current values as applied and stops listing the environment as waiting, even though a container it did not recreate still has its old values. When in doubt, rebuild the environment from the browser.
+
 ## Update or disconnect
 
 Run `foreman update` to install the latest stable CLI release. An interactive command announces a newly available version once. Updating preserves your login, including personal connections saved by the checkout CLI. Run `foreman logout` to disconnect the selected account.

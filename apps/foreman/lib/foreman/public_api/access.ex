@@ -137,13 +137,19 @@ defmodule Foreman.PublicAPI.Access do
   def connected?(principal), do: Foreman.Repo.exists?(matching_grants(principal))
 
   @doc """
-  The same check under a row lock, inside a transaction: a revocation
-  that hasn't committed yet waits for the caller, and one that has is
-  seen.
+  The same check inside a transaction, holding the grant row: a
+  revocation that hasn't committed yet waits for the caller, and one
+  that has is seen. Shared, and on the grant alone, so two writers
+  through one client don't queue behind each other on its row.
   """
   def lock_connection(principal) do
     query = from g in matching_grants(principal), select: g.id
-    query = if Foreman.Repo.sqlite?(), do: query, else: lock(query, "FOR UPDATE")
+
+    query =
+      if Foreman.Repo.sqlite?(),
+        do: query,
+        else: lock(query, [g], fragment("FOR SHARE OF ?", g))
+
     not is_nil(Foreman.Repo.one(query))
   end
 

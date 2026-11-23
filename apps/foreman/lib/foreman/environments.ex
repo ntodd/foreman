@@ -629,7 +629,15 @@ defmodule Foreman.Environments do
     name = Atom.to_string(action)
     desired = desired_for(name) || env.desired_state
 
-    args = remember_prior(args, env, desired, replaces_authority?(name, opts))
+    # Remembered so cancelling the operation can put the wish back.
+    args =
+      if desired != env.desired_state,
+        do:
+          Map.merge(args, %{
+            "prior_desired" => env.desired_state,
+            "prior_authority" => env.desired_authority
+          }),
+        else: args
 
     # What the user saw when they clicked. The command adds anything that
     # changes before it's sent.
@@ -641,7 +649,7 @@ defmodule Foreman.Environments do
     # Reconciliation can happen long after operation history has been pruned.
     # Keep the authority for this desired state until another lifecycle request replaces it.
     env =
-      if desired_for(name) do
+      if sets_authority?(action, opts) do
         authority =
           if opts[:api_grant_id] || Scope.user_id(scope) != env.user_id do
             %{
@@ -661,7 +669,7 @@ defmodule Foreman.Environments do
 
     env = prepare_queue(env, name, opts[:trigger])
 
-    if action == :start and not env.initial_create_deferred,
+    if files_first?(action, env, opts),
       do: queue_operation(env, "secrets_write", %{}, scope.user, opts)
 
     op = queue_operation(env, name, args, scope.user, opts)
@@ -669,22 +677,22 @@ defmodule Foreman.Environments do
     {:ok, op}
   end
 
-  # Remembered so cancelling the operation, or its denial at dispatch, can
-  # put the wish back. A request through an API grant replaces the
-  # authority even when the wish itself is unchanged, as a restart's is.
-  defp remember_prior(args, env, desired, replaces_authority?) do
-    if desired != env.desired_state or replaces_authority? do
-      Map.merge(args, %{
-        "prior_desired" => env.desired_state,
-        "prior_authority" => env.desired_authority
-      })
-    else
-      args
-    end
-  end
+  # A restart through an API grant leaves the desired state as it is, and
+  # the authority behind it too: who wants the workspace running hasn't
+  # changed, so there is nothing to restore if the restart is cancelled
+  # or refused.
+  defp api_restart?(action, opts),
+    do: action in [:restart_affected, :restart_all] and not is_nil(opts[:api_grant_id])
 
-  defp replaces_authority?(name, opts),
-    do: not is_nil(opts[:api_grant_id]) and not is_nil(desired_for(name))
+  defp sets_authority?(action, opts),
+    do: not is_nil(desired_for(Atom.to_string(action))) and not api_restart?(action, opts)
+
+  # A start gets the current files first. So does a restart asked for
+  # through an API grant: the workspace may have been launched by a
+  # connection since revoked, whose automatic file writes were refused,
+  # and the restart would otherwise bring services up on stale files.
+  defp files_first?(action, env, opts),
+    do: (action == :start or api_restart?(action, opts)) and not env.initial_create_deferred
 
   defp prepare_queue(env, "stop", "expiry") do
     cancelled = cancel_queued(env, &(&1 in @up or &1 in ["suspend", "secrets_write"]))

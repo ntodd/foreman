@@ -310,7 +310,7 @@ func TestOutputSaysWhatNeedsARestart(t *testing.T) {
 	}}
 	r := invoke(t, f, Options{}, "set", "A=1", "B=2", "--repo", repoID)
 	out := r.out.String()
-	for _, want := range []string{"Set A, B", "storefront-alice-1", envID, "foreman env restart " + envID, "2 "} {
+	for _, want := range []string{"Set A, B", "storefront-alice-1", envID, "foreman env restart " + envID, "2 running"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("missing %q in:\n%s", want, out)
 		}

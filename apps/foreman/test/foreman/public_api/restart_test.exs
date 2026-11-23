@@ -162,16 +162,25 @@ defmodule Foreman.PublicAPI.RestartTest do
   end
 
   describe "at dispatch" do
-    test "an accepted restart is sent to the box, for both kinds", ctx do
+    alias ForemanProtocol.Command
+
+    # The current files go to the box first, then the restart.
+    defp files_then_restart(box, op) do
+      assert_receive {:dispatch, %Command{type: "env.secrets.write", op_id: files}}
+      refute_received {:dispatch, %Command{type: "env.restart"}}
+      complete(box, files)
+      assert_receive {:dispatch, %Command{type: "env.restart", op_id: ^op}}
+      assert Repo.get!(Operation, op).status == "dispatched"
+    end
+
+    test "an accepted restart is sent to the box after the current files, for both kinds", ctx do
       assert {:ok, _, all} = restart(ctx.actor, ctx.env, "restart_all")
-      assert_receive {:dispatch, %ForemanProtocol.Command{type: "env.restart", op_id: ^all}}
-      assert Repo.get!(Operation, all).status == "dispatched"
+      files_then_restart(ctx.box, all)
       complete(ctx.box, all)
 
       pending(Repo.reload!(ctx.env), ["A"])
       assert {:ok, _, affected} = restart(ctx.actor, ctx.env, "restart_affected")
-      assert_receive {:dispatch, %ForemanProtocol.Command{type: "env.restart", op_id: ^affected}}
-      assert Repo.get!(Operation, affected).status == "dispatched"
+      files_then_restart(ctx.box, affected)
     end
 
     test "the owner's new connection can restart a workspace an earlier one launched", ctx do
@@ -179,13 +188,26 @@ defmodule Foreman.PublicAPI.RestartTest do
       assert ctx.env.api_grant_id == ctx.actor.grant_id
       Foreman.OAuth.revoke_grant(ctx.actor.grant_id)
 
+      # With the launching connection gone, a changed secret can't be
+      # written to the box on its authority.
+      {:ok, _} =
+        Foreman.Secrets.apply_changes(
+          Foreman.Scope.for_user(ctx.user),
+          "environment",
+          ctx.env,
+          [{"A", "1"}],
+          []
+        )
+
+      refute_receive {:dispatch, %Command{type: "env.secrets.write"}}
+
+      # The restart delivers it on the new connection's, before anything restarts.
       assert {:ok, _, op} = restart(newer, ctx.env, "restart_all")
-      assert_receive {:dispatch, %ForemanProtocol.Command{type: "env.restart", op_id: ^op}}
-      assert Repo.get!(Operation, op).status == "dispatched"
+      files_then_restart(ctx.box, op)
       assert Repo.reload!(ctx.env).workload_grant_id == newer.grant_id
     end
 
-    test "a restart denied at dispatch leaves the earlier authority in place", ctx do
+    test "a restart leaves the authority behind the workspace alone, refused or not", ctx do
       earlier = %{
         "action" => "start",
         "user_id" => ctx.user.id,
@@ -208,11 +230,13 @@ defmodule Foreman.PublicAPI.RestartTest do
           dedupe: false
         )
 
-      assert %{"action" => "restart_all"} = Repo.reload!(ctx.env).desired_authority
+      assert Repo.reload!(ctx.env).desired_authority == earlier
+      refute Map.has_key?(Repo.get!(Operation, op.id).args, "prior_authority")
+
       Foreman.OAuth.revoke_grant(other.grant_id)
       Foreman.Environments.Server.kick(ctx.env.id)
 
-      refute_receive {:dispatch, %ForemanProtocol.Command{type: "env.restart"}}
+      refute_receive {:dispatch, %Command{type: "env.restart"}}
       assert Repo.get!(Operation, op.id).status == "failed"
       env = Repo.reload!(ctx.env)
       assert env.desired_state == "running"

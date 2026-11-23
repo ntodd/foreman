@@ -241,18 +241,18 @@ defmodule Foreman.Secrets do
         attrs -> Map.put(attrs, "repo_ids", if(existing, do: existing.repo_ids, else: []))
       end
 
-    # The timestamp moves on every set. Left to Ecto, setting the value a
-    # secret already holds would change nothing, and anyone who can list
-    # names would learn that the value they sent was the one stored.
     changeset =
       secret
       |> Secret.changeset(attrs)
       |> Ecto.Changeset.put_change(:updated_by_id, Scope.user_id(scope))
-      |> Ecto.Changeset.force_change(:updated_at, DateTime.utc_now())
 
     # Ecto logs a write's parameters as they were cast, before the column
     # type encrypts them, so this write stays out of the query log.
-    with {:ok, saved} <- Foreman.Repo.insert_or_update(changeset, log: false) do
+    #
+    # Forced, so the timestamp moves on every set. Left alone, setting the
+    # value a secret already holds would write nothing, and anyone who can
+    # list names would learn that the value they sent was the one stored.
+    with {:ok, saved} <- Foreman.Repo.insert_or_update(changeset, log: false, force: true) do
       Audit.log(
         scope,
         if(existing, do: "secret.update", else: "secret.create"),
