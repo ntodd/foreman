@@ -39,6 +39,7 @@ defmodule ForemanWeb.Router do
     get "/me", IdentityController, :show
     post "/environments", EnvironmentMutationController, :create
     post "/environments/:id/operations", EnvironmentMutationController, :operate
+    patch "/secrets/:scope/:subject", SecretMutationController, :update
   end
 
   scope "/", ForemanWeb do
@@ -86,6 +87,7 @@ defmodule ForemanWeb.Router do
     get "/environments/:id/operations", PublicReadController, :operations
     get "/operations/:id", PublicReadController, :operation
     get "/operations/:id/logs", PublicReadController, :logs
+    get "/secrets/:scope/:subject", PublicReadController, :secrets
   end
 
   # Agents: enrollment, the install script and release downloads. Release

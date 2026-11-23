@@ -129,6 +129,13 @@ defmodule Foreman.PublicAPI.Access do
       on: type(resource.id, :string) in field(g, ^field)
   end
 
+  @doc """
+  Whether the connection's grant is still live. The resource queries
+  above check it in the same statement that reads the resource; this is
+  for a subject they don't cover.
+  """
+  def connected?(principal), do: Foreman.Repo.exists?(matching_grants(principal))
+
   defp matching_grants(principal) do
     from g in OAuth.live_grants(),
       where:

@@ -400,6 +400,120 @@ defmodule Foreman.SecretsTest do
     end
   end
 
+  describe "apply_changes/6" do
+    test "sets and removes several secrets at one scope in one call", %{user: user, env: env} do
+      u = Scope.for_user(user)
+      {:ok, _} = Secrets.put_secret(u, "environment", env, %{"name" => "OLD", "value" => "1"})
+      {:ok, _} = Secrets.put_secret(u, "environment", env, %{"name" => "KEEP", "value" => "k"})
+
+      assert {:ok, %{set: ["A", "B"], unset: ["OLD"]}} =
+               Secrets.apply_changes(
+                 u,
+                 "environment",
+                 env,
+                 [{"A", "1"}, {"B", "two words"}],
+                 ["OLD", "NEVER_SET"]
+               )
+
+      assert Secrets.resolve(env) == %{"A" => "1", "B" => "two words", "KEEP" => "k"}
+    end
+
+    test "saves everything or nothing, and names the secret that was refused", %{
+      user: user,
+      env: env
+    } do
+      u = Scope.for_user(user)
+      {:ok, _} = Secrets.put_secret(u, "environment", env, %{"name" => "OLD", "value" => "1"})
+
+      assert {:error, {:invalid, "9LIVES", message}} =
+               Secrets.apply_changes(
+                 u,
+                 "environment",
+                 env,
+                 [{"A", "1"}, {"9LIVES", "x"}],
+                 ["OLD"]
+               )
+
+      assert message =~ "must start with a letter"
+      assert Secrets.resolve(env) == %{"OLD" => "1"}
+      assert Foreman.Audit.recent() |> Enum.map(& &1.action) == ["secret.create"]
+    end
+
+    test "replacing a value keeps the repos a user secret is limited to", %{user: user, env: env} do
+      u = Scope.for_user(user)
+
+      {:ok, _} =
+        Secrets.put_secret(u, "user", user, %{
+          "name" => "K",
+          "value" => "1",
+          "repo_ids" => [env.repo_id]
+        })
+
+      assert {:ok, %{set: ["K"]}} = Secrets.apply_changes(u, "user", user, [{"K", "2"}], [])
+      assert %{repo_ids: [repo_id], value: "2"} = Repo.get_by!(Secret, name: "K")
+      assert repo_id == env.repo_id
+    end
+
+    test "follows the scope's own authorization", %{user: user, repo: repo, env: env} do
+      assert {:error, :unauthorized} =
+               Secrets.apply_changes(Scope.for_user(user), "repo", repo, [{"A", "1"}], [])
+
+      stranger = Scope.for_user(user_fixture())
+
+      assert {:error, :unauthorized} =
+               Secrets.apply_changes(stranger, "environment", env, [{"A", "1"}], [])
+
+      assert Repo.aggregate(Secret, :count) == 0
+    end
+
+    test "a running environment is marked for restart once, with every changed name", %{
+      user: user,
+      env: env
+    } do
+      u = Scope.for_user(user)
+      {:ok, _} = Secrets.put_secret(u, "environment", env, %{"name" => "OLD", "value" => "1"})
+
+      env =
+        env
+        |> Ecto.Changeset.change(
+          created_once: true,
+          desired_state: "running",
+          applied_secret_hashes: Secrets.hashes(Secrets.resolve(env)),
+          pending_restart: false,
+          pending_changes: []
+        )
+        |> Repo.update!()
+
+      assert {:ok, _} =
+               Secrets.apply_changes(u, "environment", env, [{"A", "1"}, {"B", "2"}], ["OLD"])
+
+      env = Repo.reload!(env)
+      assert env.pending_restart
+      assert Enum.sort(env.pending_changes) == ["A", "B", "OLD"]
+    end
+
+    test "the audit trail carries who asked, when the caller says so", %{user: user, env: env} do
+      u = Scope.for_user(user)
+      {:ok, _} = Secrets.put_secret(u, "environment", env, %{"name" => "OLD", "value" => "1"})
+
+      assert {:ok, _} =
+               Secrets.apply_changes(u, "environment", env, [{"A", "1"}], ["OLD"],
+                 audit: %{"client_id" => "foreman-cli"}
+               )
+
+      events = Foreman.Audit.recent() |> Enum.filter(&(&1.metadata["client_id"] == "foreman-cli"))
+      assert Enum.sort(Enum.map(events, & &1.action)) == ["secret.create", "secret.delete"]
+      assert Enum.all?(events, &(&1.metadata["scope"] == "environment:" <> env.id))
+    end
+
+    test "a destroyed environment takes no changes", %{user: user, env: env} do
+      env = env |> Ecto.Changeset.change(destroyed_at: DateTime.utc_now()) |> Repo.update!()
+
+      assert {:error, :unauthorized} =
+               Secrets.apply_changes(Scope.for_user(user), "environment", env, [{"A", "1"}], [])
+    end
+  end
+
   describe "rendering" do
     test "secrets.env quotes values so the shell takes them literally" do
       rendered = Secrets.render_env_file(%{"A" => "it's $HOME `id` \\n", "B" => "line1\nline2"})
