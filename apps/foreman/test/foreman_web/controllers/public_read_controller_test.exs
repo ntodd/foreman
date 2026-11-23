@@ -1,7 +1,8 @@
 defmodule ForemanWeb.PublicReadControllerTest do
   use ForemanWeb.ConnCase
 
-  alias Foreman.{Operations, Repo}
+  alias Foreman.{Agents, Environments, Operations, Repo}
+  alias Foreman.Jobs.EnvironmentExpiry
   alias Foreman.Operations.LogStore
   alias ForemanWeb.PublicReadController
 
@@ -190,6 +191,146 @@ defmodule ForemanWeb.PublicReadControllerTest do
     assert %{"status" => "failed", "error" => %{"code" => "operation_timeout"}} = before
     assert {:ok, _} = Operations.finish(op.id, "ok", %{}, nil)
     assert read(ctx.principal, :operation, params) == before
+  end
+
+  for action <- ~w(stop destroy), order <- [:original_first, :retry_first] do
+    @action action
+    @order order
+    test "#{action} expiry keeps its public timeout and stable target after reconnect (#{order})",
+         ctx do
+      {first, retry} = reconnect_expiry(ctx, @action)
+      timeout = read(ctx.principal, :operation, %{"id" => first})
+      assert %{"status" => "failed", "error" => %{"code" => "operation_timeout"}} = timeout
+
+      [winner, sibling] = if @order == :original_first, do: [first, retry], else: [retry, first]
+      succeed(ctx.box, winner)
+      consumed = Repo.reload!(ctx.env).expiry_consumed_at
+      assert consumed
+      succeed(ctx.box, sibling)
+      assert Repo.reload!(ctx.env).expiry_consumed_at == consumed
+
+      assert [%{"id" => ^retry, "status" => "succeeded", "trigger" => "expiry"}, ^timeout] =
+               read(ctx.principal, :operations, %{"id" => ctx.env.id})["items"]
+
+      assert json_response(post_action(ctx, @action), 200) == %{"environment_id" => ctx.env.id}
+      type = "env." <> @action
+      refute_received {:dispatch, %{type: ^type}}
+    end
+  end
+
+  for action <- ~w(stop destroy) do
+    @action action
+    test "late #{@action} success cancels an unsent retry and preserves its public history",
+         ctx do
+      {first, job} = time_out_expiry(ctx, @action)
+      Registry.unregister(Foreman.Registry, {:agent, ctx.box.id})
+      :ok = EnvironmentExpiry.perform(job)
+      history = fn -> read(ctx.principal, :operations, %{"id" => ctx.env.id})["items"] end
+      assert [%{"id" => retry, "status" => "queued"}, timeout] = history.()
+
+      assert %{"id" => ^first, "status" => "failed", "error" => %{"code" => "operation_timeout"}} =
+               timeout
+
+      :ok = Agents.register(ctx.box.id)
+      succeed(ctx.box, first)
+      assert Repo.reload!(ctx.env).expiry_consumed_at
+
+      assert [%{"id" => ^retry, "status" => "cancelled", "trigger" => "expiry"}, ^timeout] =
+               history.()
+
+      refute Operations.get!(retry).dispatched_at
+    end
+  end
+
+  test "the older expiry result cannot reconfirm a stop after its successful retry was contradicted",
+       ctx do
+    {first, job} = time_out_expiry(ctx, "stop")
+    :ok = EnvironmentExpiry.perform(job)
+    assert_receive {:dispatch, %{type: "env.stop", op_id: retry}}
+    succeed(ctx.box, retry)
+    assert Agents.LifecycleState.confirmed?(ctx.env, "stopped")
+
+    {:ok, running} =
+      ForemanProtocol.Event.new("env.state", %{env_id: ctx.env.id, state: "running"})
+
+    :ok = Agents.handle_event(ctx.box.id, running)
+    refute Agents.LifecycleState.confirmed?(ctx.env, "stopped")
+
+    succeed(ctx.box, first)
+    assert %{"operation_id" => stop} = json_response(post_action(ctx, "stop"), 202)
+    assert_receive {:dispatch, %{type: "env.stop", op_id: ^stop}}
+
+    assert read(ctx.principal, :operation, %{"id" => first})["error"]["code"] ==
+             "operation_timeout"
+  end
+
+  test "a buffered expiry stop cannot override a later start or its socket confirmation", ctx do
+    {first, retry} = reconnect_expiry(ctx, "stop")
+    succeed(ctx.box, retry)
+    assert Repo.reload!(ctx.env).expiry_consumed_at
+
+    {:ok, start} =
+      Environments.start(Foreman.Scope.for_user(ctx.principal.user), Repo.reload!(ctx.env))
+
+    assert_receive {:dispatch, %{type: "env.secrets.write", op_id: write}}
+    succeed(ctx.box, write)
+    assert_receive {:dispatch, %{type: "env.start", op_id: start_id}}
+    assert start.id == start_id
+    succeed(ctx.box, start_id)
+    succeed(ctx.box, first)
+
+    assert Agents.LifecycleState.confirmed?(ctx.env, "running")
+    assert read(ctx.principal, :environment, %{"id" => ctx.env.id})["observed_state"] == "running"
+
+    assert %{"status" => "failed", "error" => %{"code" => "operation_timeout"}} =
+             read(ctx.principal, :operation, %{"id" => first})
+  end
+
+  defp reconnect_expiry(ctx, action) do
+    {first, job} = time_out_expiry(ctx, action)
+    Registry.unregister(Foreman.Registry, {:agent, ctx.box.id})
+    :ok = Agents.register(ctx.box.id)
+    :ok = EnvironmentExpiry.perform(job)
+    type = "env." <> action
+    assert_receive {:dispatch, %{type: ^type, op_id: retry}}
+    {first, retry}
+  end
+
+  defp time_out_expiry(ctx, action) do
+    Repo.update!(
+      Ecto.Changeset.change(ctx.env, expiry_at: DateTime.utc_now(), expiry_action: action)
+    )
+
+    :ok = Agents.register(ctx.box.id)
+    job = %{args: %{"environment_id" => ctx.env.id}}
+    :ok = EnvironmentExpiry.perform(job)
+    type = "env." <> action
+    assert_receive {:dispatch, %{type: ^type, op_id: first}}
+
+    {:ok, _, _} =
+      Operations.timed_out(
+        Operations.get!(first),
+        "original timeout",
+        &Environments.record_result/1
+      )
+
+    {first, job}
+  end
+
+  defp post_action(ctx, action) do
+    scopes = ["environments:" <> action]
+    {_, grant} = Foreman.PublicAPIMutationFixtures.principal(ctx.principal.user, scopes)
+    token = Foreman.OAuth.issue(grant, scopes, :user).access_token
+
+    build_conn()
+    |> put_req_header("authorization", "Bearer " <> token)
+    |> put_req_header("idempotency-key", "check-target")
+    |> post("/api/v1/environments/#{ctx.env.id}/operations", %{action: action})
+  end
+
+  defp succeed(box, id) do
+    {:ok, event} = ForemanProtocol.Event.new("op.result", %{op_id: id, status: "ok"})
+    :ok = Agents.handle_event(box.id, event)
   end
 
   test "upgrading settles reopened timeouts without changing the environment or its history",

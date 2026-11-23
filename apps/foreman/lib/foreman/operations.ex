@@ -92,7 +92,22 @@ defmodule Foreman.Operations do
     # to the queue lets a shutdown supersede it even during a provider outage.
     writes = where(missing, [o], o.action == "secrets_write" and is_nil(o.cancel_requested_at))
     Repo.update_all(writes, set: [status: "queued", dispatched_at: nil, started_at: nil])
-    Repo.update_all(missing, set: [dispatched_at: DateTime.utc_now()])
+
+    # A missing retry may already have a result in the agent's outbox. For
+    # fulfilled expiry, ask the agent to cancel: it returns the cached result
+    # or acknowledges cancellation without executing the old shutdown again.
+    fulfilled =
+      from o in missing,
+        join: e in assoc(o, :environment),
+        where: o.trigger == "expiry" and is_nil(o.user_id) and is_nil(o.api_grant_id),
+        where: o.action in ["stop", "destroy"] and o.action == e.expiry_action,
+        where: not is_nil(e.expiry_at) and not is_nil(e.expiry_consumed_at),
+        select: o.id
+
+    cancel = from o in missing, where: o.id in subquery(fulfilled), select: o.id
+    now = DateTime.utc_now()
+    {_, cancelled} = Repo.update_all(cancel, set: [cancel_requested_at: now])
+    Repo.update_all(where(missing, [o], o.id not in ^cancelled), set: [dispatched_at: now])
 
     :ok
   end
@@ -282,7 +297,13 @@ defmodule Foreman.Operations do
   def workload_denial_message, do: @workload_denied
 
   def deny_workload(op, phase) do
-    statuses = if phase == :queued, do: ["queued"], else: ["dispatched", "running"]
+    statuses =
+      case phase do
+        :queued -> ["queued"]
+        :claimed -> ["dispatched"]
+        :reconnect -> ["dispatched", "running"]
+      end
+
     query = from o in Operation, where: o.id == ^op.id and o.status in ^statuses
     args = op.args || %{}
     args = if phase == :reconnect, do: Map.put(args, "awaiting_result", true), else: args
@@ -433,9 +454,13 @@ defmodule Foreman.Operations do
     end
   end
 
-  def cancel_unsent_write(%Operation{action: "secrets_write"} = op) do
+  def cancel_unsent(%Operation{} = op) do
     transition(op, "dispatched", status: "cancelled", finished_at: DateTime.utc_now())
   end
+
+  @doc "Returns an undelivered claim to the queue if it is still dispatched."
+  def release_claim(%Operation{} = op),
+    do: transition(op, "dispatched", status: "queued", dispatched_at: nil)
 
   @doc "Fails a queued operation that couldn't be sent. `:error` if it isn't queued any more."
   def fail_queued(%Operation{} = op, error),

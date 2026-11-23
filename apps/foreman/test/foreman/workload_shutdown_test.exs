@@ -1,0 +1,239 @@
+defmodule Foreman.WorkloadShutdownTest do
+  use ForemanWeb.ConnCase
+  import Mox
+  import Foreman.PublicAPIMutationFixtures
+
+  alias Foreman.{Accounts, Agents, Environments, OAuth, Operations, Repo, Repos, Scope}
+  alias Foreman.Environments.Server
+  alias Foreman.GitHub.ClientMock
+  alias Foreman.Jobs.EnvironmentExpiry
+
+  setup do
+    old = Application.fetch_env(:foreman, :github_app)
+
+    Application.put_env(:foreman, :github_app, %{
+      client_id: "test",
+      client_secret: "test",
+      private_key: "test"
+    })
+
+    on_exit(fn ->
+      case old do
+        {:ok, value} -> Application.put_env(:foreman, :github_app, value)
+        :error -> Application.delete_env(:foreman, :github_app)
+      end
+    end)
+
+    admin = Scope.for_user(user_fixture(role: "admin"))
+    user = user_fixture()
+    owner = owner_fixture()
+    name = "#{owner.login}/workload"
+    id = unique()
+    verify_repo = fn _, ^name -> {:ok, %{"full_name" => name, "id" => id}} end
+    stub(ClientMock, :get_repo, verify_repo)
+    {:ok, repo} = Repos.add_repo(admin, name)
+    box = box_fixture(owner_user_id: user.id)
+    env = environment_fixture(user: user, repo: repo, box: box)
+    {actor, grant} = principal(user)
+    writer = OAuth.issue(grant, grant.scopes, :user).access_token
+    {_, reader} = principal(user, ["operations:read"])
+    token = OAuth.issue(reader, reader.scopes, :user).access_token
+
+    %{
+      env: env,
+      admin: admin,
+      box: box,
+      actor: actor,
+      writer: writer,
+      token: token,
+      verify_repo: verify_repo
+    }
+  end
+
+  defp request_shutdown(ctx, action) do
+    response =
+      build_conn()
+      |> put_req_header("authorization", "Bearer " <> ctx.writer)
+      |> put_req_header("idempotency-key", "first")
+      |> post("/api/v1/environments/#{ctx.env.id}/operations", %{action: action})
+
+    %{"operation_id" => id} = json_response(response, 202)
+    assert get_resp_header(response, "location") == ["/api/v1/operations/#{id}"]
+    id
+  end
+
+  defp read(token, id) do
+    build_conn()
+    |> put_req_header("authorization", "Bearer " <> token)
+    |> get("/api/v1/operations/#{id}")
+    |> json_response(200)
+  end
+
+  defp event(box, type, id, attrs) do
+    {:ok, event} = ForemanProtocol.Event.new(type, Map.put(attrs, :op_id, id))
+    :ok = Agents.handle_event(box.id, event)
+  end
+
+  for action <- [:stop, :destroy] do
+    @action action
+
+    test "an administrator's #{@action} supersedes a queued matching API shutdown during an outage",
+         ctx do
+      action = Atom.to_string(@action)
+      type = "env." <> action
+      first = request_shutdown(ctx, action)
+      assert Operations.get!(first).status == "queued"
+      stub(ClientMock, :get_repo, fn _, _ -> {:error, :timeout} end)
+      :ok = Agents.register(ctx.box.id)
+      :ok = Agents.agent_connected(ctx.box)
+      refute Operations.in_flight(ctx.env.id)
+      {:ok, admin} = apply(Environments, @action, [ctx.admin, Repo.reload!(ctx.env)])
+      assert_receive {:dispatch, %{type: ^type, op_id: id}}
+      assert id == admin.id
+      event(ctx.box, "op.result", id, %{status: "ok"})
+      refute_received {:dispatch, _}
+      stub(ClientMock, :get_repo, ctx.verify_repo)
+      assert %{"status" => "cancelled"} = read(ctx.token, first)
+      assert %{"status" => "succeeded"} = read(ctx.token, id)
+    end
+
+    test "a former administrator's queued #{@action} cannot displace the personal request", ctx do
+      action = Atom.to_string(@action)
+      type = "env." <> action
+      first = request_shutdown(ctx, action)
+      {:ok, admin} = apply(Environments, @action, [ctx.admin, Repo.reload!(ctx.env)])
+      other_admin = Scope.for_user(user_fixture(role: "admin"))
+      {:ok, _} = Accounts.set_role(other_admin, ctx.admin.user, "member")
+      stub(ClientMock, :get_repo, fn _, _ -> {:error, :timeout} end)
+
+      :ok = Agents.register(ctx.box.id)
+      :ok = Agents.agent_connected(ctx.box)
+      assert Operations.get!(first).status == "queued"
+      assert Repo.reload!(admin).status == "queued"
+      refute_received {:dispatch, _}
+      stub(ClientMock, :get_repo, ctx.verify_repo)
+      Server.kick(ctx.env.id)
+      assert_receive {:dispatch, %{type: ^type, op_id: ^first}}
+    end
+
+    test "revoking a #{@action} after claim preserves its denial and the previous physical state",
+         ctx do
+      action = Atom.to_string(@action)
+      id = request_shutdown(ctx, action)
+      handler = make_ref()
+      Process.put(handler, true)
+
+      :ok =
+        :telemetry.attach(
+          handler,
+          [:foreman, :repo, :query],
+          fn _, _, meta, _ ->
+            if meta.source == "operations" and String.starts_with?(meta.query, "UPDATE") and
+                 String.contains?(meta.query, "dispatched_at") and Process.delete(handler) do
+              OAuth.revoke_grant(ctx.actor.grant_id)
+            end
+          end,
+          nil
+        )
+
+      on_exit(fn -> :telemetry.detach(handler) end)
+      :ok = Agents.register(ctx.box.id)
+      Server.kick(ctx.env.id)
+      refute_received {:dispatch, _}
+
+      assert %{"status" => "failed", "error" => %{"code" => "workload_unauthorized"}} =
+               read(ctx.token, id)
+
+      assert %{observed_state: "running", desired_state: "running"} = Repo.reload!(ctx.env)
+      event(ctx.box, "op.result", id, %{status: "ok"})
+
+      assert %{"status" => "failed", "error" => %{"code" => "workload_unauthorized"}} =
+               read(ctx.token, id)
+    end
+
+    test "an administrator's #{@action} waits for the agent's matching running operation", ctx do
+      action = Atom.to_string(@action)
+      type = "env." <> action
+      :ok = Agents.register(ctx.box.id)
+      first = request_shutdown(ctx, action)
+      Server.kick(ctx.env.id)
+      assert_receive {:dispatch, %{type: ^type, op_id: ^first}}
+      event(ctx.box, "op.accepted", first, %{})
+      stub(ClientMock, :get_repo, fn _, _ -> {:error, :timeout} end)
+      {:ok, admin} = apply(Environments, @action, [ctx.admin, Repo.reload!(ctx.env)])
+      :ok = Agents.restart_clocks(ctx.box.id, [first])
+      :ok = Agents.agent_connected(ctx.box)
+      assert Operations.get!(first).status == "running"
+      assert Repo.reload!(admin).status == "queued"
+      refute_received {:dispatch, _}
+      event(ctx.box, "op.result", first, %{status: "error", error: "fixture shutdown failed"})
+      assert_receive {:dispatch, %{type: ^type, op_id: next}}
+      assert next == admin.id
+      event(ctx.box, "op.result", next, %{status: "ok"})
+      stub(ClientMock, :get_repo, ctx.verify_repo)
+
+      assert %{"status" => "failed", "error" => %{"code" => "operation_failed"}} =
+               read(ctx.token, first)
+
+      assert %{"status" => "succeeded"} = read(ctx.token, next)
+    end
+  end
+
+  for action <- [:stop, :destroy], inventory <- [:running, :missing] do
+    @action action
+    @inventory inventory
+    test "a #{@inventory} #{@action} expiry retry keeps its physical outcome after its sibling fulfills the policy",
+         ctx do
+      action = Atom.to_string(@action)
+      type = "env." <> action
+
+      Repo.update!(
+        Ecto.Changeset.change(ctx.env, expiry_at: DateTime.utc_now(), expiry_action: action)
+      )
+
+      :ok = Agents.register(ctx.box.id)
+      job = %{args: %{"environment_id" => ctx.env.id}}
+      :ok = EnvironmentExpiry.perform(job)
+      assert_receive {:dispatch, %{type: ^type, op_id: first}}
+
+      {:ok, _, _} =
+        Operations.timed_out(
+          Operations.get!(first),
+          "original timeout",
+          &Environments.record_result/1
+        )
+
+      :ok = EnvironmentExpiry.perform(job)
+      assert_receive {:dispatch, %{type: ^type, op_id: retry}}
+      event(ctx.box, "op.accepted", retry, %{})
+      event(ctx.box, "op.result", first, %{status: "ok"})
+      assert Repo.reload!(ctx.env).expiry_consumed_at
+      sent = Operations.get!(retry).dispatched_at
+      :ok = Agents.restart_clocks(ctx.box.id, if(@inventory == :running, do: [retry], else: []))
+      :ok = Agents.agent_connected(ctx.box)
+      refute_received {:dispatch, %{type: ^type}}
+
+      if @inventory == :missing do
+        assert_receive {:dispatch, %{type: "op.cancel", payload: %{target_op_id: ^retry}}}
+      else
+        refute_received {:dispatch, %{type: "op.cancel"}}
+      end
+
+      assert Operations.get!(retry).dispatched_at == sent
+      assert %{"status" => "running"} = read(ctx.token, retry)
+
+      if @inventory == :missing and @action == :destroy do
+        event(ctx.box, "op.result", retry, %{status: "error", error: "cancelled"})
+        assert %{"status" => "cancelled"} = read(ctx.token, retry)
+      else
+        event(ctx.box, "op.result", retry, %{status: "ok"})
+        assert %{"status" => "succeeded"} = read(ctx.token, retry)
+      end
+
+      assert Repo.reload!(ctx.env).observed_state ==
+               if(@action == :stop, do: "stopped", else: "destroyed")
+
+      assert %{"error" => %{"code" => "operation_timeout"}} = read(ctx.token, first)
+    end
+  end
+end

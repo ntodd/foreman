@@ -8,7 +8,10 @@ defmodule Foreman.PublicAPI.MutationConcurrencyTest do
   alias Ecto.Adapters.SQL.Sandbox
 
   alias Foreman.{
+    Agents,
+    Environments,
     Environments.Environment,
+    Jobs.EnvironmentExpiry,
     Operations,
     Operations.Operation,
     PublicAPI.Mutations,
@@ -280,6 +283,138 @@ defmodule Foreman.PublicAPI.MutationConcurrencyTest do
     Sandbox.unboxed_run(Repo, fn ->
       assert Repo.aggregate(from(o in Operation, where: o.environment_id == ^env.id), :count) == 1
     end)
+  end
+
+  for action <- ~w(stop destroy), delivery <- [:online, :offline] do
+    @action action
+    @delivery delivery
+    test "fulfilled #{action} survives #{delivery} delivery of a claimed retry", ctx do
+      # Stop just after the durable claim, before the channel receives the command.
+      handler = make_ref()
+
+      :ok =
+        :telemetry.attach(
+          handler,
+          [:foreman, :repo, :query],
+          fn _, _, meta, pid ->
+            if meta.source == "operations" and String.starts_with?(meta.query, "UPDATE") and
+                 String.contains?(meta.query, "dispatched_at") and
+                 Process.delete(:pause_retry_claim) do
+              send(pid, {:claimed, self()})
+
+              receive do
+                :deliver -> :ok
+              after
+                5000 -> raise "retry was not released"
+              end
+            end
+          end,
+          self()
+        )
+
+      on_exit(fn -> :telemetry.detach(handler) end)
+
+      Sandbox.unboxed_run(Repo, fn ->
+        env = environment_fixture(user: ctx.actor.user, box: ctx.box, repo: ctx.repo)
+
+        Repo.update!(
+          Ecto.Changeset.change(env,
+            expiry_at: DateTime.add(DateTime.utc_now(), -1),
+            expiry_action: @action
+          )
+        )
+
+        job = %{args: %{"environment_id" => env.id}}
+
+        on_exit(fn ->
+          Sandbox.unboxed_run(Repo, fn ->
+            Repo.delete_all(
+              from j in Oban.Job,
+                where: j.args["environment_id"] == ^env.id or j.args["slug"] == ^env.slug
+            )
+
+            Repo.delete_all(from a in Foreman.Audit.Event, where: a.subject_id == ^env.id)
+          end)
+        end)
+
+        :ok = EnvironmentExpiry.perform(job)
+        assert_receive {:dispatch, %{op_id: first}}
+
+        assert {:ok, timeout, _} =
+                 Operations.timed_out(
+                   Operations.get!(first),
+                   "timeout",
+                   &Environments.record_result/1
+                 )
+
+        task =
+          Task.async(fn ->
+            Sandbox.unboxed_run(Repo, fn ->
+              Process.put(:pause_retry_claim, true)
+              EnvironmentExpiry.perform(job)
+            end)
+          end)
+
+        assert_receive {:claimed, dispatcher}, 5000
+
+        finish = fn id ->
+          {:ok, success} = ForemanProtocol.Event.new("op.result", %{op_id: id, status: "ok"})
+          Agents.handle_event(env.box_id, success)
+        end
+
+        assert :ok = finish.(first)
+        settled = Repo.reload!(env)
+        assert settled.expiry_consumed_at
+        assert settled.observed_state == if(@action == "stop", do: "stopped", else: "destroyed")
+        if @delivery == :offline, do: Registry.unregister(Foreman.Registry, {:agent, env.box_id})
+        send(dispatcher, :deliver)
+        assert :ok = Task.await(task)
+
+        retry =
+          Repo.one!(from o in Operation, where: o.environment_id == ^env.id and o.id != ^first)
+
+        check_expiry_delivery(@delivery, retry, finish)
+        assert Repo.reload!(env) == settled
+        assert Operations.get!(first).finished_at == timeout.finished_at
+
+        {reader, _} = principal(ctx.actor.user, ~w(environments:read operations:list))
+        conn = Phoenix.ConnTest.build_conn() |> Plug.Conn.assign(:api_principal, reader)
+        params = %{"id" => env.id}
+        history = ForemanWeb.PublicReadController.operations(conn, params)
+        retry_status = if @delivery == :online, do: "succeeded", else: "cancelled"
+        retry_id = retry.id
+
+        assert [
+                 %{"id" => ^retry_id, "trigger" => "expiry", "status" => ^retry_status},
+                 %{
+                   "id" => ^first,
+                   "trigger" => "expiry",
+                   "status" => "failed",
+                   "error" => %{"code" => "operation_timeout", "message" => "timeout"}
+                 }
+               ] = Phoenix.ConnTest.json_response(history, 200)["items"]
+
+        response = ForemanWeb.PublicReadController.environment(conn, params)
+
+        if @action == "stop" do
+          assert Phoenix.ConnTest.json_response(response, 200)["observed_state"] == "stopped"
+        else
+          assert Phoenix.ConnTest.json_response(response, 404)["code"] == "resource_not_found"
+        end
+      end)
+    end
+  end
+
+  defp check_expiry_delivery(:online, retry, finish) do
+    assert_receive {:dispatch, %{op_id: id}}
+    assert id == retry.id
+    assert :ok = finish.(id)
+    assert Repo.reload!(retry).status == "succeeded"
+  end
+
+  defp check_expiry_delivery(:offline, retry, _finish) do
+    refute_received {:dispatch, _}
+    assert retry.status == "cancelled"
   end
 
   defp together(fun) do

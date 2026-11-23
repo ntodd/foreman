@@ -21,7 +21,19 @@ defmodule Foreman.Environments do
   alias Foreman.Jobs.EnvironmentExpiry
   alias ForemanProtocol.Connect
   alias Foreman.Repos.Repo, as: GitRepo
-  alias Foreman.{Activity, Agents, Audit, Capacity, GitHub, Operations, Repo, Scope, Secrets}
+
+  alias Foreman.{
+    Accounts,
+    Activity,
+    Agents,
+    Audit,
+    Capacity,
+    GitHub,
+    Operations,
+    Repo,
+    Scope,
+    Secrets
+  }
 
   require Logger
 
@@ -563,6 +575,50 @@ defmodule Foreman.Environments do
   end
 
   @doc false
+  def supersede_queued_shutdown(%{trigger: "request", action: action, api_grant_id: grant} = op)
+      when action in ["stop", "destroy"] and not is_nil(grant) do
+    # Check at queue selection as an undelivered claim can return to the
+    # queue after the administrator's request. Keep each request's identity.
+    candidates =
+      from s in Foreman.Operations.Operation,
+        join: u in assoc(s, :user),
+        where:
+          s.environment_id == ^op.environment_id and s.action == ^action and s.status == "queued",
+        where: s.trigger == "request" and is_nil(s.api_grant_id) and u.role == "admin",
+        where: is_nil(u.workload_access_revoked_at) and is_nil(u.disabled_at),
+        order_by: [s.inserted_at, s.id],
+        select: {s, u}
+
+    {:ok, retired?} =
+      Repo.transact(fn ->
+        candidates = if Repo.sqlite?(), do: candidates, else: lock(candidates, "FOR UPDATE")
+
+        # Lock the replacement against cancellation and check its effective
+        # local authority before changing either operation. The actual send
+        # still goes through its ordinary delivery checks.
+        admin =
+          Enum.find(Repo.all(candidates), fn {_, user} ->
+            match?({:ok, _}, Accounts.lock_admin(Scope.for_user(user)))
+          end)
+
+        with {replacement, _} <- admin, {:ok, _} <- Operations.cancel_queued(op) do
+          # Cancelling the replacement before it leaves must restore the
+          # intent that the original request superseded.
+          prior = Map.take(op.args || %{}, ["prior_desired", "prior_authority"])
+          args = Map.merge(prior, replacement.args || %{})
+          replacement |> Ecto.Changeset.change(args: args) |> Repo.update!()
+          {:ok, true}
+        else
+          _ -> {:ok, false}
+        end
+      end)
+
+    retired?
+  end
+
+  def supersede_queued_shutdown(_op), do: false
+
+  @doc false
   def locked_environment(id) do
     query = from e in Environment, where: e.id == ^id
     Repo.one(if Repo.sqlite?(), do: query, else: lock(query, "FOR UPDATE"))
@@ -851,7 +907,8 @@ defmodule Foreman.Environments do
 
   @doc """
   Writes a finished operation's outcome to its environment. Returns the
-  environment, or `:expiry_already_consumed` when a sibling fulfilled its policy.
+  environment if the result can confirm its state. A superseded expiry result
+  returns `:expiry_already_consumed` and leaves the environment alone.
   Box operations return the work left by `Foreman.Prebuilds.record_result/1`.
   """
   def record_result(%Foreman.Operations.Operation{environment_id: nil} = op) do
@@ -867,6 +924,27 @@ defmodule Foreman.Environments do
 
   # A dispatched retry can finish after its sibling consumed the expiry.
   # Keep its operation history without reapplying its old state or cleanup.
+  defp record_environment_result(
+         %{
+           id: id,
+           trigger: "expiry",
+           action: "stop",
+           status: "succeeded",
+           dispatched_at: %DateTime{} = sent
+         },
+         %{expiry_consumed_at: at, observed_state: "stopped", desired_state: "stopped"} = env
+       )
+       when not is_nil(at) do
+    # The current socket may have performed the redundant stop. Its result
+    # confirms only that stop, never a state established by a later action.
+    superseded =
+      from o in Foreman.Operations.Operation,
+        where: o.environment_id == ^env.id and o.id != ^id and o.action in @lifecycle,
+        where: o.dispatched_at >= ^sent
+
+    if Repo.exists?(superseded), do: :expiry_already_consumed, else: env
+  end
+
   defp record_environment_result(%{trigger: "expiry"}, %{expiry_consumed_at: at})
        when not is_nil(at),
        do: :expiry_already_consumed
@@ -1214,6 +1292,23 @@ defmodule Foreman.Environments do
     broadcast(env)
     env
   end
+
+  @doc false
+  def mark_dispatch_state(%{trigger: "expiry"}, env, state) do
+    # A sibling success can commit after the retry's claim. Serialize this
+    # write with consumption on the environment row, including on Postgres.
+    query = from e in Environment, where: e.id == ^env.id and is_nil(e.expiry_consumed_at)
+
+    {changed, _} =
+      Repo.update_all(query,
+        set: [observed_state: state, status_message: nil, updated_at: DateTime.utc_now()]
+      )
+
+    if changed == 1, do: broadcast(env)
+  end
+
+  def mark_dispatch_state(_op, env, state),
+    do: update_env!(env, %{observed_state: state, status_message: nil})
 
   @doc "The transitional state shown while an operation runs."
   def transitional_state("create"), do: "creating"

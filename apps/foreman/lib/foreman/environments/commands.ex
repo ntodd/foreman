@@ -16,7 +16,7 @@ defmodule Foreman.Environments.Commands do
   require Logger
 
   @spec build(Operation.t(), Environment.t()) ::
-          {:ok, Command.t(), map()} | {:error, String.t() | :unauthorized} | :retry
+          {:ok, Command.t(), map()} | {:error, String.t() | :unauthorized} | :retry | :superseded
   def build(%Operation{} = op, %Environment{} = env) do
     with {:ok, cmd, extra, _policy} <- prepare(op, env), do: {:ok, cmd, extra}
   end

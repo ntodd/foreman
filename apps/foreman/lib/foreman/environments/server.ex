@@ -147,7 +147,9 @@ defmodule Foreman.Environments.Server do
         if op = Foreman.Jobs.EnvironmentExpiry.next_due(env_id), do: dispatch(op, env)
 
       op = Operations.next_queued(env_id, env.created_once) ->
-        dispatch(op, env)
+        if Environments.supersede_queued_shutdown(op),
+          do: dispatch_next(env_id),
+          else: dispatch(op, env)
 
       true ->
         :ok
@@ -176,6 +178,10 @@ defmodule Foreman.Environments.Server do
 
       :retry ->
         retry(op)
+
+      :superseded ->
+        Operations.cancel_queued(op)
+        dispatch_next(env.id)
 
       {:error, :unauthorized} ->
         with {:ok, failed} <-
@@ -206,10 +212,7 @@ defmodule Foreman.Environments.Server do
   end
 
   defp send_claimed(op, cmd, env, state, policy) do
-    updated =
-      if state,
-        do: Environments.update_env!(env, %{observed_state: state, status_message: nil}),
-        else: env
+    if state, do: Environments.mark_dispatch_state(op, env, state)
 
     Foreman.Operations.Redactions.put(op.id, cmd, env)
 
@@ -218,30 +221,29 @@ defmodule Foreman.Environments.Server do
         :ok
 
       :superseded ->
-        Operations.cancel_unsent_write(op)
+        settle_claim(op, state, &Operations.cancel_unsent/1)
         dispatch_next(env.id)
         :ok
 
       {:error, :unauthorized} ->
-        if state, do: Environments.update_env!(updated, %{observed_state: env.observed_state})
-        deny_sent(op, env, :claimed)
+        with {:ok, failed} <- settle_claim(op, state, &Operations.deny_workload(&1, :claimed)),
+             do: Environments.dispatch_denied(failed, env)
+
         {:error, :unauthorized}
 
       :retry ->
-        Operations.mark(op, "queued", dispatched_at: nil)
-        if state, do: Environments.update_env!(updated, %{observed_state: env.observed_state})
+        settle_claim(op, state, &Operations.release_claim/1)
         retry(op)
 
       # Gone since the check: back to the queue, and to the state it was in.
       {:error, :offline} ->
-        Operations.mark(op, "queued", dispatched_at: nil)
-        if state, do: Environments.update_env!(updated, %{observed_state: env.observed_state})
+        settle_claim(op, state, &Operations.release_claim/1)
         :ok
     end
   end
 
-  defp deliver(op, env, cmd, policy) do
-    WorkloadAccess.deliver(op, env, policy, fn current ->
+  defp deliver(op, env, cmd, policy, phase \\ :dispatch) do
+    WorkloadAccess.deliver(op, env, policy, phase, fn current ->
       with :ok <- Agents.dispatch(current.box_id, cmd) do
         remember_enrollment(cmd.payload, current)
         bind_workload_grant(op, current)
@@ -257,8 +259,8 @@ defmodule Foreman.Environments.Server do
 
   defp remember_enrollment(_payload, _env), do: :ok
 
-  defp deny_sent(op, env, phase) do
-    with {:ok, failed} <- Operations.deny_workload(op, phase),
+  defp deny_reconnect(op, env) do
+    with {:ok, failed} <- Operations.deny_workload(op, :reconnect),
          do: Environments.dispatch_denied(failed, env)
   end
 
@@ -268,6 +270,33 @@ defmodule Foreman.Environments.Server do
   end
 
   defp bind_workload_grant(_op, _env), do: :ok
+
+  # Only the winner of the operation transition may restore its transient state.
+  # A sibling can have fulfilled an expiry while this claim was being prepared.
+  defp settle_claim(op, state, transition) do
+    Repo.transact(fn ->
+      case transition.(op) do
+        {:ok, settled} ->
+          if state,
+            do: restore_unsent(settled, Environments.locked_environment(op.environment_id), state)
+
+          {:ok, settled}
+
+        :error ->
+          {:error, :already_settled}
+      end
+    end)
+  end
+
+  defp restore_unsent(%{trigger: "expiry", status: status} = op, %{expiry_consumed_at: at}, _)
+       when not is_nil(at) do
+    if status == "queued", do: Operations.cancel_queued(op)
+  end
+
+  defp restore_unsent(op, %{observed_state: state} = env, state),
+    do: Environments.update_env!(env, %{observed_state: op.args["prior_state"]})
+
+  defp restore_unsent(_op, _env, _state), do: :ok
 
   # Rebuilds the command (current secrets and token) and sends it again.
   # If it can't be rebuilt, it fails rather than sitting there as if it
@@ -287,17 +316,22 @@ defmodule Foreman.Environments.Server do
         Foreman.Operations.refresh_args(op, Map.delete(extra, "prior_state"))
         Foreman.Operations.Redactions.put(op.id, cmd, env)
 
-        case deliver(op, env, cmd, policy) do
+        case deliver(op, env, cmd, policy, :reconnect) do
           :retry -> retry(op)
-          {:error, :unauthorized} -> deny_sent(op, env, :reconnect)
+          {:error, :unauthorized} -> deny_reconnect(op, env)
           other -> other
         end
 
       :retry ->
         retry(op)
 
+      # The agent already owns this command. Its result still settles this
+      # operation even when a sibling has fulfilled the same expiry.
+      :superseded ->
+        :ok
+
       {:error, :unauthorized} ->
-        deny_sent(op, env, :reconnect)
+        deny_reconnect(op, env)
 
       {:error, message} ->
         Logger.warning("couldn't resend #{op.action} for #{env.slug}: #{message}")
