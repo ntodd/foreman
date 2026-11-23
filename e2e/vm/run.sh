@@ -431,7 +431,9 @@ if [ "$scenario" != expiry ]; then
     fail "couldn't delete the prebuild"
   wait_for "the prebuild's disk is deleted" 30 sh -c "[ -z \"\$(sudo ls -A /srv/foreman/prebuilds)\" ]"
 fi
-remaining=$(sudo ls -A /srv/foreman/vms) || fail "could not inspect the VM disks"
+# Guest disk directories have UUID names. The agent keeps its .records and
+# .s parent directories after destroying the last workspace.
+remaining=$(sudo ls -1 /srv/foreman/vms) || fail "could not inspect the VM disks"
 [ -z "$remaining" ] || fail "VM disks left behind: $remaining"
 ip -br link | grep -q '^fm-vm' && fail "taps left behind"
 echo "ok: nothing left on the box"
