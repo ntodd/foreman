@@ -350,6 +350,38 @@ defmodule Foreman.PublicAPI.MutationsTest do
     assert {:error, :invalid_request, _} = Mutations.create(ctx.actor, "new-key", replay)
   end
 
+  test "a new socket must establish current state before saving a stable receipt", ctx do
+    env = environment_fixture(user: ctx.user, repo: ctx.repo, box: ctx.box)
+    online(ctx.box)
+    Foreman.Agents.handle_event(ctx.box.id, %ForemanProtocol.Event{type: "box.inventory", payload: %{environments: [%{env_id: env.id, slug: env.slug, state: "running"}]}})
+    assert {:ok, _, nil} = Mutations.operate(ctx.actor, env.id, "confirmed", %{"action" => "start"})
+
+    Registry.unregister(Foreman.Registry, {:agent, ctx.box.id})
+    parent = self()
+    channel = spawn_link(fn ->
+      Foreman.Agents.register(ctx.box.id)
+      send(parent, :joined)
+      receive do :close -> :ok end
+    end)
+    on_exit(fn -> send(channel, :close) end)
+    assert_receive :joined
+
+    assert {:ok, _, op_id} = Mutations.operate(ctx.actor, env.id, "reconnected", %{"action" => "start"})
+    assert is_binary(op_id)
+    assert Repo.get!(Operation, op_id).action == "start"
+  end
+
+  test "a queued start of an errored workspace reserves its boot allocation", ctx do
+    online(ctx.box)
+    Repo.update!(change(ctx.box, capacity_policy: "refuse", capacity: %{"cpus" => 2}, cpu_threshold: 1.0))
+    repo = Repo.update!(change(ctx.repo, cpu_limit: 2.0))
+    env = environment_fixture(user: ctx.user, repo: repo, box: ctx.box, observed_state: "error")
+    assert {:ok, _, start} = Mutations.operate(ctx.actor, env.id, "recover", %{"action" => "start"})
+    assert Repo.get!(Operation, start).status == "queued"
+    assert {:error, :capacity_exceeded, _} = Mutations.create(ctx.actor, "competitor", Map.put(ctx.input, "box_id", ctx.box.id))
+    assert Repo.aggregate(from(e in Environment, where: e.box_id == ^ctx.box.id), :count) == 1
+  end
+
   defp complete(box, op_id) do
     {:ok, result} =
       ForemanProtocol.Event.new("op.result", %{op_id: op_id, status: "ok", result: %{}})

@@ -59,6 +59,54 @@ defmodule Foreman.PublicAPI.ExpiryTest do
              Repo.all(from o in Operation, where: o.environment_id == ^env.id)
   end
 
+  test "due stop supersedes unsent boots, even if reconnect dispatch precedes Oban" do
+    for action <- ~w(create start rebuild pull_rebuild restart_all restart_affected) do
+      env = environment_fixture()
+      boot = Foreman.Environments.queue_operation(env, action, %{}, nil)
+      Repo.update!(change(env, expiry_at: DateTime.add(DateTime.utc_now(), -1), expiry_action: "stop"))
+      Registry.register(Foreman.Registry, {:agent, env.box_id}, nil)
+
+      Foreman.Agents.agent_connected(Foreman.Boxes.get_box!(env.box_id))
+      assert_receive {:dispatch, %{type: "env.stop", op_id: cleanup}}
+      assert Repo.get!(Operation, cleanup).trigger == "expiry"
+      assert Repo.reload!(boot).status == "cancelled"
+      assert {:error, _} = Foreman.Environments.retry(Foreman.Scope.for_user(Repo.preload(env, :user).user), env)
+    end
+  end
+
+  test "failed physical expiry retains the policy and durably retries with its system identity" do
+    for action <- ~w(stop destroy) do
+      env = environment_fixture()
+      Repo.update!(change(env, expiry_at: DateTime.add(DateTime.utc_now(), -1), expiry_action: action))
+      Registry.register(Foreman.Registry, {:agent, env.box_id}, nil)
+      job = %Oban.Job{args: %{"environment_id" => env.id}}
+      assert :ok = EnvironmentExpiry.perform(job)
+      assert_receive {:dispatch, %{op_id: first}}
+
+      {:ok, failure} = ForemanProtocol.Event.new("op.result", %{op_id: first, status: "error", error: "disk busy"})
+      assert :ok = Foreman.Agents.handle_event(env.box_id, failure)
+      assert is_nil(Repo.reload!(env).expiry_consumed_at)
+      assert is_nil(Repo.reload!(env).destroyed_at)
+      assert Repo.get!(Operation, first).status == "failed"
+
+      Registry.unregister(Foreman.Registry, {:agent, env.box_id})
+      retry_job = Repo.one!(from j in Oban.Job, where: j.worker == "Foreman.Jobs.EnvironmentExpiry" and j.args["environment_id"] == ^env.id)
+      assert :ok = EnvironmentExpiry.perform(retry_job)
+      assert :ok = EnvironmentExpiry.perform(retry_job)
+      retry = Repo.one!(from o in Operation, where: o.environment_id == ^env.id and o.status == "queued")
+      assert retry.action == action and retry.trigger == "expiry" and retry.user_id == nil
+      Registry.register(Foreman.Registry, {:agent, env.box_id}, nil)
+      Foreman.Agents.agent_connected(Foreman.Boxes.get_box!(env.box_id))
+      assert_receive {:dispatch, %{op_id: second}}
+      assert second == retry.id
+      {:ok, success} = ForemanProtocol.Event.new("op.result", %{op_id: second, status: "ok", result: %{}})
+      assert :ok = Foreman.Agents.handle_event(env.box_id, success)
+      assert Repo.reload!(env).expiry_consumed_at
+      assert :ok = EnvironmentExpiry.perform(retry_job)
+      assert Repo.aggregate(from(o in Operation, where: o.environment_id == ^env.id), :count) == 2
+    end
+  end
+
   test "a pending expiry is visible while the in-flight transition finishes" do
     env = environment_fixture()
 
