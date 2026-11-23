@@ -137,7 +137,7 @@ defmodule ForemanWeb.PublicReadControllerTest do
     assert json_response(get(authed.(), "/api/v1/operations/#{internal.id}"), 404)
   end
 
-  test "a late result cannot reopen logs or extend terminal history", ctx do
+  test "late agent messages cannot reopen logs or extend terminal history", ctx do
     for days <- [31, 91] do
       deadline = DateTime.add(DateTime.utc_now(), -days, :day)
 
@@ -153,7 +153,19 @@ defmodule ForemanWeb.PublicReadControllerTest do
       id = %{"id" => op.id}
       LogStore.append(op.id, "old output")
       assert read(ctx.principal, :logs, id, 404)
-      assert {:ok, _} = Operations.finish(op.id, "ok", %{}, nil)
+
+      for {type, fields} <- [
+            {"op.accepted", %{}},
+            {"op.log", %{stream: "stdout", data: "late output\n"}},
+            {"op.result", %{status: "error", error: "cancelled"}},
+            {"op.result", %{status: "ok"}},
+            {"op.result", %{status: "error", error: "duplicate"}}
+          ] do
+        {:ok, event} = ForemanProtocol.Event.new(type, Map.put(fields, :op_id, op.id))
+        assert :ok = Foreman.Agents.handle_event(ctx.box.id, event)
+        assert Operations.get!(op.id).finished_at == deadline
+      end
+
       assert read(ctx.principal, :logs, id, 404)
       assert read(ctx.principal, :operation, id, if(days == 31, do: 200, else: 404))
       assert :ok = Foreman.Jobs.Housekeeping.perform(%{})

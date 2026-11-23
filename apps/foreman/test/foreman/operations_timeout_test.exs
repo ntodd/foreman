@@ -118,6 +118,42 @@ defmodule Foreman.OperationsTimeoutTest do
     assert Repo.reload!(env).desired_state == "stopped"
   end
 
+  test "repeated housekeeping preserves the first deadline on a previously reopened timeout",
+       ctx do
+    op = start(ctx)
+    assert {:ok, failed} = Operations.timed_out(op, "original timeout")
+    # An older release could persist a delayed acceptance after a timeout.
+    reopened = Repo.update!(Ecto.Changeset.change(failed, status: "running"))
+    assert {:ok, settled} = Operations.timed_out(reopened, "late timeout")
+    assert settled.status == "failed"
+    assert settled.finished_at == failed.finished_at
+    assert settled.timeout_error == "original timeout"
+  end
+
+  test "a late result for a previously reopened timeout cannot override a newer stop", ctx do
+    op = start(ctx)
+    assert {:ok, failed} = Operations.timed_out(op, "original timeout")
+    Repo.update!(Ecto.Changeset.change(failed, status: "running"))
+
+    stop =
+      Operations.create!(%{
+        box_id: op.box_id,
+        environment_id: op.environment_id,
+        action: "stop",
+        command: "env.stop",
+        status: "dispatched",
+        dispatched_at: DateTime.utc_now()
+      })
+
+    :ok = report(ctx.box, stop.id, %{status: "ok"})
+    :ok = report(ctx.box, op.id, %{status: "error", error: "cancelled"})
+    :ok = report(ctx.box, op.id, %{status: "ok"})
+    settled = Operations.get!(op.id)
+    assert settled.status == "succeeded"
+    assert settled.finished_at == failed.finished_at
+    assert Repo.reload!(ctx.env).observed_state == "stopped"
+  end
+
   test "giving up waits if the clock was restarted since the operation was read", ctx do
     stale = start(ctx)
     long_ago = DateTime.add(DateTime.utc_now(), -4 * 3600)
