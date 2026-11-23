@@ -454,7 +454,11 @@ echo "ok: environments don't reach each other"
 say "the API stops and starts the same workspace disk"
 marker=$(sed -n 's/^PROBE workspace-marker //p' "$work/create2.log" | tail -1)
 [ -n "$marker" ] || fail "the API-created workspace never wrote its marker"
-public_api stop
+if [ -n "${FOREMAN_CLI:-}" ]; then
+  E2E_COOKIE="$cookie" public_api cli-stop
+else
+  public_api stop
+fi
 wait_for_env hello-2 stopped 180
 public_api not_ready
 wait_for "API stop powered off the VM" 30 vm_powered_off "$second"

@@ -21,9 +21,9 @@ env:
   ELIXIR_VERSION: "1.20.4"
   OTP_VERSION: "29.1.1"
 
-# Every job runs on Crew, in a VM of its own, at the default size on either
-# arch: nothing here needs x86, and the caches are keyed by arch. The jobs
-# still publish no fixed port and use no fixed container or image name,
+# Most jobs run in their own Crew VM on either architecture. The CLI archive
+# checks use native runners for each supported OS and CPU. Caches are keyed
+# by architecture. Jobs publish no fixed port and use no fixed container or image name,
 # so they also run on a shared Docker daemon. Postgres is reached at its
 # container's own address.
 #
@@ -125,6 +125,34 @@ jobs:
       - run: mix credo --strict
       - run: mix test
 
+  cli-artifact-smoke:
+    if: github.event_name != 'schedule'
+    name: CLI archive (${{ matrix.os }}/${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {os: linux, arch: amd64, runner: ubuntu-24.04}
+          - {os: linux, arch: arm64, runner: ubuntu-24.04-arm}
+          - {os: darwin, arch: amd64, runner: macos-15-intel}
+          - {os: darwin, arch: arm64, runner: macos-15}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version: "1.26.11"
+          cache-dependency-path: cli/go.sum
+      - name: Run help and version from the release archive on its native target
+        env:
+          TARGET_OS: ${{ matrix.os }}
+          TARGET_ARCH: ${{ matrix.arch }}
+        run: |
+          test "$(go env GOHOSTOS)/$(go env GOHOSTARCH)" = "$TARGET_OS/$TARGET_ARCH"
+          scripts/package-cli.sh v1.2.3 "$TARGET_OS" "$TARGET_ARCH" "$RUNNER_TEMP"
+          scripts/smoke-cli.sh v1.2.3 "$RUNNER_TEMP/foreman-cli-v1.2.3-$TARGET_OS-$TARGET_ARCH.tar.gz"
+
   # The agent against a real Docker daemon and the real devcontainer CLI.
   agent-docker:
     if: github.event_name != 'schedule'
@@ -211,6 +239,16 @@ jobs:
           python -m pip install openapi-python-client==0.30.0
           npm install --prefix "$RUNNER_TEMP/openapi-ts" --no-audit --no-fund --ignore-scripts @hey-api/openapi-ts@0.99.0 typescript@5.9.3
           ../../e2e/openapi/run.sh
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        if: matrix.db == 'sqlite'
+        with:
+          go-version: "1.26.11"
+          cache-dependency-path: cli/go.sum
+      - name: Run the Go CLI against the public API
+        if: matrix.db == 'sqlite'
+        run: |
+          (cd ../../cli && go build -o "$RUNNER_TEMP/foreman" ./cmd/foreman)
+          FOREMAN_CLI="$RUNNER_TEMP/foreman" mix test ../../e2e/cli/*_test.exs
       # What Flatcar's Ignition (the version Flatcar ships) makes of the
       # first-boot configs the control plane makes for Flatcar boxes.
       - name: Validate Flatcar first-boot configs
@@ -427,6 +465,13 @@ jobs:
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version-file: cli/go.mod
+          cache-dependency-path: cli/go.sum
+      - name: Build the CLI for the real workspace smoke
+        working-directory: cli
+        run: go build -o "$RUNNER_TEMP/foreman" ./cmd/foreman
       - name: Test the VM acceptance client
         run: python3 -B -m unittest discover -s e2e/vm
       # For mix foreman_agent.sign, which makes the release keys and signs
@@ -462,7 +507,7 @@ jobs:
       - name: Build the guest image
         if: steps.guest-image.outputs.cache-hit != 'true'
         run: guest/build.sh "$RUNNER_TEMP/guest"
-      - run: E2E_VM_THROWAWAY=1 E2E_GUEST_TAR="$RUNNER_TEMP/guest/foreman-guest-linux-amd64.tar" e2e/vm/run.sh
+      - run: FOREMAN_CLI="$RUNNER_TEMP/foreman" E2E_VM_THROWAWAY=1 E2E_GUEST_TAR="$RUNNER_TEMP/guest/foreman-guest-linux-amd64.tar" e2e/vm/run.sh
 
   # A control plane host that boots systemd, runs the control plane from
   # docker/compose.yml and installs the updater: refused requests, an
