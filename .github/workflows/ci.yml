@@ -157,6 +157,22 @@ jobs:
       - name: Test CLI credential replacement
         if: matrix.db == 'sqlite'
         run: python3 -B ../../e2e/oauth_cli_test.py
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        if: matrix.db == 'sqlite'
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        if: matrix.db == 'sqlite'
+        with:
+          node-version: "22"
+      - name: Exercise generated clients against the public API
+        if: matrix.db == 'sqlite'
+        run: |
+          python -m venv "$RUNNER_TEMP/openapi-venv"
+          export PATH="$RUNNER_TEMP/openapi-venv/bin:$RUNNER_TEMP/openapi-ts/node_modules/.bin:$PATH"
+          python -m pip install openapi-python-client==0.30.0
+          npm install --prefix "$RUNNER_TEMP/openapi-ts" --no-audit --no-fund --ignore-scripts @hey-api/openapi-ts@0.99.0 typescript@5.9.3
+          ../../e2e/openapi/run.sh
       # What Flatcar's Ignition (the version Flatcar ships) makes of the
       # first-boot configs the control plane makes for Flatcar boxes.
       - name: Validate Flatcar first-boot configs
@@ -373,6 +389,8 @@ jobs:
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Test the VM acceptance client
+        run: python3 -B -m unittest discover -s e2e/vm
       # For mix foreman_agent.sign, which makes the release keys and signs
       # the agent the run publishes.
       - uses: erlef/setup-beam@54075bcc5e249e4758d363f27d099f55d843f124 # v1.24.1
@@ -420,9 +438,23 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: ./.github/actions/crew-docker
-      - run: e2e/updater/run.sh
+      - name: Build updater fixture images
+        run: |
+          status=0
+          timeout --kill-after=15s 8m e2e/updater/run.sh --build-only || status=$?
+          case "$status" in
+            0) ;;
+            124|137)
+              echo "::warning::Updater fixture build timed out or was killed. Retrying once."
+              timeout --kill-after=15s 8m e2e/updater/run.sh --build-only
+              ;;
+            *) exit "$status" ;;
+          esac
+      - name: Test the updater and rollback
+        id: updater
+        run: SKIP_BUILD=1 e2e/updater/run.sh
       - name: Logs
-        if: failure()
+        if: failure() && steps.updater.outcome == 'failure'
         run: e2e/updater/run.sh --logs
       - name: Remove the host and its images
         if: always()

@@ -93,14 +93,15 @@ env_observed() { cp_eval 'E2E.status()' | grep "^ENV $1 " | sed 's/.*observed=\(
 # fails a create or start; it's tried again, as a user would, twice at most.
 rate_limited() { cp_eval "E2E.log(\"$1\")" | grep -qiE "toomanyrequests|too many requests|rate exceeded"; }
 wait_for_env() { # slug, state, seconds
-  i=0 retries=0
+  i=0 retries=0 retry_operation=
   until [ "$(env_observed "$1")" = "$2" ]; do
     if [ "$(env_observed "$1")" = error ]; then
       if [ "$retries" -lt 2 ] && rate_limited "$1"; then
         retries=$((retries + 1))
         echo "a registry limited pulls; trying $1 again ($retries)" >&2
         sleep 30
-        cp_eval "E2E.retry_failed(\"$1\")" >/dev/null
+        retry_operation=$(cp_eval "E2E.retry_failed(\"$1\")" | sed -n 's/^RETRY=//p')
+        [ -n "$retry_operation" ] || fail "no operation returned by the registry retry for $1"
         j=0
         while [ "$(env_observed "$1")" = error ] && [ $j -lt 300 ]; do sleep 5; j=$((j + 5)); done
         continue
@@ -185,12 +186,42 @@ say "a git server on the box's LAN"
 # printed into the operation's log: what it can reach. Exit status 0 is
 # connected, 1 refused (reachable), 124 timed out (dropped).
 box_ip=$(ip -4 route get 1.1.1.1 | sed -n 's/.* src \([0-9.]*\).*/\1/p')
+# Every cold VM needs the same privileged sidecar. Stage it once on the
+# fixture LAN so concurrent guests cannot exhaust a public registry quota.
+dind_source=
+for registry in public.ecr.aws/docker/library mirror.gcr.io/library docker.io/library; do
+  if docker pull "$registry/docker:29-dind"; then
+    dind_source=$registry/docker:29-dind
+    break
+  fi
+done
+[ -n "$dind_source" ] || fail "couldn't stage the Docker-in-Docker fixture"
+rm -rf "$work/git"
+mkdir -p "$work/git"
+docker save -o "$work/git/dind.tar" "$dind_source"
+gzip -1 "$work/git/dind.tar"
+# The host and guest can report different IDs for the same image. Key the
+# guest's local tag by the archive it actually verified and loaded.
+dind_sha=$(sha256sum "$work/git/dind.tar.gz")
+dind_sha=${dind_sha%% *}
+dind_ref=foreman-e2e-dind:$dind_sha
 mkdir -p "$work/overlay/.devcontainer"
+cat > "$work/overlay/.devcontainer/load-dind.sh" <<EOF
+set -e -o pipefail
+if docker image inspect "$dind_ref" >/dev/null 2>&1; then exit 0; fi
+archive=\$(mktemp)
+trap 'rm -f "\$archive"' EXIT
+curl -fsS "http://$lan:8080/dind.tar.gz" -o "\$archive"
+printf '%s  %s\n' "$dind_sha" "\$archive" | sha256sum -c -
+docker load -i "\$archive"
+docker tag "$dind_source" "$dind_ref"
+EOF
 cat > "$work/overlay/.devcontainer/devcontainer.json" <<EOF
 {
   "name": "hello",
   "dockerComposeFile": ["docker-compose.yml"],
   "service": "app",
+  "initializeCommand": ["bash", ".devcontainer/load-dind.sh"],
   "workspaceFolder": "/workspaces/\${localWorkspaceFolderBasename}",
   "remoteUser": "vscode",
   "postStartCommand": "bash .devcontainer/probe.sh"
@@ -217,7 +248,8 @@ cat >> "$work/overlay/.devcontainer/docker-compose.yml" <<EOF
     command: ["sh", "-c", "while :; do echo \"PROBE beat \$\$(cat /proc/sys/kernel/random/boot_id) \$\$(date +%s)\"; sleep 1; done"]
     stop_grace_period: 1s
   dind:
-    image: public.ecr.aws/docker/library/docker:29-dind
+    image: $dind_ref
+    pull_policy: never
     privileged: true
     environment:
       DOCKER_TLS_CERTDIR: ""
@@ -230,9 +262,17 @@ echo "PROBE user \$(id -un)"
 # the devcontainer CLI's \`up\`) and gives the container's user its uid, so
 # the 0600 secrets and the clone are the user's own.
 [ "\$(stat -c %u /run/foreman/secrets.env)" = "\$(id -u)" ] && echo "PROBE secrets-owner self" || echo "PROBE secrets-owner other"
+marker=".workspace-marker-\${FOREMAN_ENV:?}"
+[ -s "\$marker" ] || cat /proc/sys/kernel/random/uuid > "\$marker"
+echo "PROBE workspace-marker \$(cat "\$marker")"
 touch .probe-write 2>/dev/null; echo "PROBE workspace-writable \$?"
 secret=\$(. /run/foreman/secrets.env 2>/dev/null; printf %s "\${SIDECAR_TOKEN:-none}" | sha256sum | cut -c1-16)
 echo "PROBE secret \$secret"
+(
+  . /run/foreman/secrets.env
+  if [ -n "\${API_TEST_APPROVED:-}" ]; then echo 'PROBE approved-secret present'; else echo 'PROBE approved-secret absent'; fi
+  if [ -n "\${API_TEST_UNAPPROVED:-}" ]; then echo 'PROBE unapproved-secret present'; else echo 'PROBE unapproved-secret absent'; fi
+)
 try gateway 10.250.0.1 1
 try box $box_ip 1
 try first-guest 10.250.0.2 1
@@ -242,7 +282,6 @@ try lan $lan 8080
 for _ in \$(seq 30); do timeout 2 bash -c "exec 3<>/dev/tcp/dind/2375" 2>/dev/null && break; sleep 1; done
 try dind dind 2375
 EOF
-rm -rf "$work/git"
 e2e/make-git-fixture.sh "$work/git" hello "$work/overlay" >/dev/null
 
 sudo ip netns del e2e-lan 2>/dev/null || true
@@ -304,6 +343,17 @@ echo "ok: the VM helper is root's and listening"
 sudo nft list table inet foreman_guests >/dev/null || fail "the VM firewall table isn't loaded"
 echo "ok: the VM firewall table is loaded"
 
+# A unit is created per environment, and MainPID is the Cloud Hypervisor process.
+running_vm_pid() {
+  vm_pid=$(systemctl show -p MainPID --value "foreman-vm-$1.service") || return 1
+  [ "$vm_pid" -gt 0 ] && printf '%s\n' "$vm_pid"
+}
+
+# A powered-off transient unit can already have been collected by systemd.
+vm_powered_off() {
+  units=$(systemctl list-units --all --plain --no-legend "foreman-vm-$1.service") || return 1
+  [ -z "$units" ] || [ "$(printf '%s\n' "$units" | awk '{print $3}')" = inactive ]
+}
 vm_ready() { cp_eval 'E2E.vm_status()' | grep -q "^VM ready=true"; }
 # Whether a VM's Cloud Hypervisor is confined by Landlock, by what it can
 # do rather than how it was started (a resumed VM takes its settings from
@@ -337,6 +387,9 @@ cp_eval 'E2E.vm_status()' | grep "^VM"
 # user's clicks do, so the running control plane sends them at once. Work
 # queued from an eval (a VM of its own) waits for the dispatch sweep, up
 # to a minute each time.
+public_api() {
+  python3 "$root/e2e/vm/public_api.py" "$url" "$work/api-client.json" "$@"
+}
 cookie=$(cp_eval 'E2E.session_cookie()' | sed -n 's/^COOKIE=//p')
 [ -n "$cookie" ] || fail "no session cookie"
 box_id=$(cp_eval 'E2E.box_id()' | sed -n 's/^BOX_ID=//p')
@@ -386,12 +439,31 @@ probe dind 0 create
 echo "ok: the environment reaches the internet and the LAN, not the box, and runs docker-in-docker"
 
 say "a second environment can't reach the first"
-[ -n "$(create_env hello-2)" ] || fail "no second environment"
+E2E_COOKIE="$cookie" public_api login
+cold_started=$(date +%s)
+second=$(public_api create)
+[ -n "$second" ] || fail "the API did not reserve the second environment"
 wait_for_env hello-2 running 600
+public_api ready --retry-operation "$retry_operation"
+cold_elapsed=$(( $(date +%s) - cold_started ))
 cp_eval 'E2E.log("hello-2", "create")' > "$work/create2.log"
 probe first-guest 124 create2
 probe gateway 124 create2
 echo "ok: environments don't reach each other"
+
+say "the API stops and starts the same workspace disk"
+marker=$(sed -n 's/^PROBE workspace-marker //p' "$work/create2.log" | tail -1)
+[ -n "$marker" ] || fail "the API-created workspace never wrote its marker"
+public_api stop
+wait_for_env hello-2 stopped 180
+public_api not_ready
+wait_for "API stop powered off the VM" 30 vm_powered_off "$second"
+sudo test -s "/srv/foreman/vms/$second/data.raw" || fail "stop removed the workspace disk"
+public_api start
+wait_for_env hello-2 running 300
+public_api ready --retry-operation "$retry_operation"
+cp_eval 'E2E.log("hello-2", "start")' > "$work/start2.log"
+probe workspace-marker "$marker" start2
 
 say "secrets survive a stop and start"
 cp_eval 'E2E.secret("hello-1", "SIDECAR_TOKEN", "vm-secret-1")' >/dev/null
@@ -519,9 +591,11 @@ echo "create took ${cold}s from scratch, ${warm}s from the prebuild"
 echo "ok: hello-3 started from the prebuild, without cloning"
 
 say "release the other VMs before testing the memory reserve"
-cp_eval 'E2E.act("hello-2", "destroy")' >/dev/null
+public_api stop
 cp_eval 'E2E.act("hello-3", "destroy")' >/dev/null
-wait_for_env hello-2 destroyed 180
+wait_for_env hello-2 stopped 180
+public_api not_ready
+wait_for "the no-deadline VM is off before memory pressure" 30 vm_powered_off "$second"
 wait_for_env hello-3 destroyed 180
 
 say "the slice contains an OOM and the environment page records the cause"
@@ -555,9 +629,109 @@ wait_for "the environment page shows the box-reported OOM" 90 oom_visible
 
 say "destroy"
 cp_eval 'E2E.act("hello-1", "destroy")' >/dev/null
+wait_for_env hello-1 destroyed 180
+
+# Reuse the primary (no-deadline) workspace as the control. This keeps
+# the same three-guest peak as the earlier prebuild test.
+public_api start
+wait_for_env hello-2 running 300
+public_api ready --retry-operation "$retry_operation"
+[ "$(public_api marker)" = "$marker" ] || fail "the primary workspace lost its marker"
+
+say "expiry survives a control-plane restart and an offline box"
+# Both API grants build cold. Use this runner's measured API create-to-ready
+# time, including any registry retry, for two contending builds. Leave time
+# for a delayed pull and for the restart and both offline observations.
+service_api() { python3 "$root/e2e/vm/public_api.py" "$url" "$work/service-client.json" "$@"; }
+(umask 077; cp_eval 'E2E.service_client()' | sed -n 's/^E2E_SERVICE=//p' > "$work/service-client.json")
+[ -s "$work/service-client.json" ] || fail "the service account fixture was not created"
+build_seconds=$((2 * cold_elapsed + 90))
+build_by=$(( $(date +%s) + build_seconds ))
+expires=$(date -u -d "@$((build_by + 90))" '+%Y-%m-%dT%H:%M:%SZ')
+echo "Cold API build took ${cold_elapsed}s; expiry at $expires allows ${build_seconds}s for the two builds"
+keep=$(public_api create --workspace keep --expiry stop "$expires")
+drop=$(service_api create --expiry destroy "$expires" --hidden "$keep")
+
+# Each client owns a separate state file. Follow its original receipt, or
+# the exact replacement operation if the registry rejected the image pull.
+ready_for_expiry() (
+  client=$1
+  shift
+  retry_operation='' attempts=0
+  while [ "$(date +%s)" -lt "$build_by" ]; do
+    remaining=$((build_by - $(date +%s)))
+    result=0
+    failed_id=$("$client" ready --wait "$remaining" --retry-operation "$retry_operation" "$@") || result=$?
+    [ "$result" -ne 0 ] || exit 0
+    # EX_TEMPFAIL is reserved for a registry rejection in this exact operation's logs.
+    [ "$result" -eq 75 ] || exit "$result"
+    if [ "$attempts" -ge 2 ] || [ $((build_by - $(date +%s))) -le 30 ]; then
+      break
+    fi
+    attempts=$((attempts + 1))
+    echo "Registry limited create $failed_id; retrying ($attempts)" >&2
+    sleep 30
+    retry_operation=$(cp_eval "E2E.retry_create(\"$failed_id\")" | sed -n 's/^RETRY=//p')
+    [ -n "$retry_operation" ] || break
+  done
+  exit 1
+)
+ready_for_expiry public_api --workspace keep --hidden "$drop" &
+keep_ready=$!
+if ! ready_for_expiry service_api; then
+  wait "$keep_ready" || true
+  fail "service workspace did not finish its cold build before the outage"
+fi
+wait "$keep_ready" || fail "personal workspace did not finish its cold build before the outage"
+service_api marker >/dev/null
+keep_marker=$(public_api marker --workspace keep)
+primary_pid=$(running_vm_pid "$second") || fail "the no-deadline VM is not running"
+keep_pid=$(running_vm_pid "$keep") || fail "the expiry stop VM is not running"
+drop_pid=$(running_vm_pid "$drop") || fail "the expiry destroy VM is not running"
+sudo systemctl stop foreman-agent
+docker restart "$cp_name" >/dev/null
+wait_for "the restarted control plane" 120 curl -fsS "$url/healthz"
+# The clients have independent credentials and state files. Both must
+# observe the restarted control plane with time remaining on their policy.
+public_api pending-expiry --workspace keep &
+keep_poll=$!
+expiry_failed=0
+if ! service_api pending-expiry; then
+  expiry_failed=1
+fi
+wait "$keep_poll" || expiry_failed=1
+[ "$expiry_failed" -eq 0 ] || fail "expiry did not queue at the deadline while offline"
+cp_eval "E2E.check_expiry_times([\"$keep\", \"$drop\"])" || fail "expiry was queued prematurely"
+sudo test -s "/srv/foreman/vms/$keep/data.raw" || fail "offline stop lost its disk"
+sudo test -s "/srv/foreman/vms/$drop/data.raw" || fail "offline destroy reported premature cleanup"
+[ "$(running_vm_pid "$keep")" = "$keep_pid" ] || fail "the expiry stop VM stopped or restarted while offline"
+[ "$(running_vm_pid "$drop")" = "$drop_pid" ] || fail "the expiry destroy VM stopped or restarted while offline"
+sudo systemctl start foreman-agent
+public_api not_ready --workspace keep --wait 180
+wait_for "expiry stop powered off the VM" 30 vm_powered_off "$keep"
+public_api ready
+[ "$(running_vm_pid "$second")" = "$primary_pid" ] || fail "the no-deadline VM stopped or restarted"
+wait_for "the expired destroy removed the VM disk" 180 sudo test ! -e "/srv/foreman/vms/$drop"
+wait_for "expiry destroy powered off the VM" 30 vm_powered_off "$drop"
+wait_for "the API records the expiry destroy" 60 service_api destroyed
+sudo test -s "/srv/foreman/vms/$keep/data.raw" || fail "expiry stop removed the workspace disk"
+public_api start --workspace keep
+public_api ready --workspace keep --wait 300
+[ "$(public_api marker --workspace keep)" = "$keep_marker" ] || fail "the workspace changed after expiry stop"
+public_api destroy --workspace keep
+wait_for "the restarted workspace is destroyed" 180 sudo test ! -e "/srv/foreman/vms/$keep"
+wait_for "manual destroy powered off the restarted VM" 30 vm_powered_off "$keep"
+wait_for "the API records manual destroy" 60 public_api destroyed --workspace keep
+public_api destroy
+wait_for_env hello-2 destroyed 180
+public_api destroyed
+wait_for "manual destroy powered off the no-deadline VM" 30 vm_powered_off "$second"
+sudo test ! -e "/srv/foreman/vms/$second" || fail "API destroy left the workspace on disk"
+public_api logout
+service_api logout
+
 lv_click "/repos/$repo_id" delete_prebuild "{\"id\":\"$prebuild\"}" >/dev/null ||
   fail "couldn't delete the prebuild"
-wait_for_env hello-1 destroyed 180
 [ -z "$(ls -A /srv/foreman/vms 2>/dev/null)" ] || fail "VM disks left behind: $(ls /srv/foreman/vms)"
 wait_for "the prebuild's disk is deleted" 30 sh -c "[ -z \"\$(sudo ls -A /srv/foreman/prebuilds)\" ]"
 ip -br link | grep -q '^fm-vm' && fail "taps left behind"

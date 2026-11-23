@@ -85,13 +85,42 @@ defmodule E2E do
     env = live_env(slug)
     [op | _] = Operations.list_for_environment(env.id, 1)
 
-    {:ok, _} =
+    {:ok, retry} =
       case op.action do
         "create" -> Environments.retry(scope, env)
         _ -> Environments.start(scope, env)
       end
 
-    IO.puts("retried #{op.action} for #{slug}")
+    IO.puts("RETRY=#{retry.id}")
+  end
+
+  # Retry the same failed API create as the dashboard's Retry action. An
+  # environment can reuse a destroyed slug, so identify it by its operation.
+  def retry_create(op_id) do
+    scope = Scope.for_user(admin())
+    %{action: "create", status: "failed"} = op = Repo.get!(Operations.Operation, op_id)
+    env = Repo.get!(Environments.Environment, op.environment_id)
+    {:ok, retry} = Environments.retry(scope, env)
+    IO.puts("RETRY=#{retry.id}")
+  end
+
+  # Public history omits timestamps. Check the durable queue time as well
+  # as polling history, so an early enqueue between polls is caught.
+  def check_expiry_times(ids) do
+    start()
+
+    Enum.each(ids, fn id ->
+      env = Repo.get!(Environments.Environment, id)
+
+      op =
+        Repo.one!(from o in Operations.Operation,
+          where: o.environment_id == ^id and o.trigger == "expiry"
+        )
+
+      if DateTime.before?(op.inserted_at, env.expiry_at) do
+        raise "#{op.action} was queued before its deadline"
+      end
+    end)
   end
 
   # The latest logs operation's id, before asking for another (through
@@ -167,6 +196,25 @@ defmodule E2E do
     env = live_env(slug)
     {:ok, _} = Foreman.Secrets.put_secret(scope, "environment", env, %{"name" => name, "value" => value})
     IO.puts("set #{name} on #{slug}")
+  end
+
+  # Two synthetic repository secrets distinguish installation grants inside the guest.
+  def service_client do
+    scope = Scope.for_user(admin())
+    repo = Foreman.Repos.get_repo_by_full_name("acme/hello")
+    new_secret = fn name ->
+      {:ok, secret} = Foreman.Secrets.put_secret(scope, "repo", repo, %{
+        "name" => name, "value" => Base.url_encode64(:crypto.strong_rand_bytes(24), padding: false)
+      })
+      secret.id
+    end
+    allowed = new_secret.("API_TEST_APPROVED")
+    new_secret.("API_TEST_UNAPPROVED")
+    {:ok, installation} = Foreman.OAuth.ServiceAccounts.register(scope, "service", %{
+      "name" => "VM acceptance", "scopes" => Foreman.OAuth.Scopes.all(),
+      "repo_ids" => [repo.id], "box_ids" => [box().id], "secret_ids" => [allowed]
+    })
+    IO.puts("E2E_SERVICE=" <> JSON.encode!(%{client_id: installation.client.id, client_secret: installation.secret}))
   end
 
   # An environment made on its page (see e2e/vm/run.sh's create_env).

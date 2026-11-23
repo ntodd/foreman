@@ -1,5 +1,11 @@
 # Connect to the public API
 
+## Generated clients
+
+Generate your SDK from the [OpenAPI contract](../design/public-api.openapi.yaml). Set its base URL to the Foreman instance origin, for example `https://foreman.example.org`. The generated methods include the paths for OAuth and versioned API resources.
+
+Personal clients send a client ID and device code to exchange an approved grant, then a client ID and refresh token to renew it. Team apps use HTTP Basic for the client credentials exchange. Both use the returned bearer token for environment requests. Generate an idempotency key before creating an environment and reuse it when retrying the same request.
+
 ## Personal CLI connection
 
 From the Foreman checkout on a Unix system with Python 3, run:

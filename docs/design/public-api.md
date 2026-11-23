@@ -1,6 +1,6 @@
 # Foreman public API
 
-Draft for review, 2026-11-22. The CLI and development apps use the same versioned JSON API on each self-hosted Foreman instance. Foreman provisions environments, reports their condition, and manages their lifecycle. The caller chooses how to connect and run work. [Draft OpenAPI contract](./public-api.openapi.yaml)
+The CLI and development apps use the same versioned JSON API on each self-hosted Foreman instance. Foreman provisions environments, reports their condition, and manages their lifecycle. The caller chooses how to connect and run work. [OpenAPI contract](./public-api.openapi.yaml)
 
 ## Agreed behavior
 
@@ -13,7 +13,7 @@ Draft for review, 2026-11-22. The CLI and development apps use the same versione
 | Recovery | Repeating a create request with its original request key returns the original environment and operation. An intentional second create uses a fresh key. |
 | Lifetime | Environments persist by default. The caller may supply an expiry and explicitly choose stop, which preserves the disk, or destroy, which removes it. |
 
-The following sections propose the wire format and acceptance criteria. The final section identifies policy decisions to settle before implementation.
+See the [connection guide](../setup/api-clients.md) for CLI login, third-party client registration, service credential rotation and TLS configuration.
 
 ## Connect once
 
@@ -61,7 +61,7 @@ Example create body (the expiry is an absolute UTC instant):
 }
 ```
 
-**Retry semantics.** Scope the key to the instance, acting identity, client and endpoint. Atomically commit the key, normalized request, environment reservation and operation before dispatch. Concurrent identical submissions converge on the same IDs, including across server restarts. Compare caller inputs before applying mutable defaults. Reusing an accepted key with changed input returns `409 idempotency_conflict`. Validation and capacity failures before acceptance reserve nothing. A replay rechecks visibility. Keep a compact record of each accepted create key for the life of the instance. After destruction, an authorized replay of the original create returns `410 original_environment_gone`, including after operation history has expired.
+**Retry semantics.** Scope the key to the instance, acting identity, client and endpoint. Atomically commit the key, normalized request, environment reservation and operation before dispatch. Concurrent identical submissions converge on the same IDs, including across server restarts. Compare caller inputs before applying mutable defaults. Reusing an accepted key with changed input returns `409 idempotency_conflict`. Validation and capacity failures before acceptance reserve nothing. A replay rechecks visibility. Keep a compact record of each accepted create key for the life of the instance. If the original environment still exists after the operation history expires, a replay returns the original IDs and `operation_history_expired: true`. Read the environment directly at that point. After destruction, an authorized replay of the original create returns `410 original_environment_gone`, including after operation history has expired.
 
 **Lifecycle responses.** After checking for a replay, return `200` with the environment ID if the target state is already reached and stable. If an active operation is already moving toward it, return `202` with that operation’s ID and location. An opposing action during an active transition returns `409 lifecycle_conflict`. For example, stop during create conflicts, while start during create follows the existing operation.
 
@@ -69,13 +69,13 @@ Example create body (the expiry is an absolute UTC instant):
 
 **Client behavior.** Collection responses use opaque cursors; logs expose a cursor and indicate truncation. Clients can reconnect using the last cursor. API errors carry a stable code and a human-readable message. Use 401 for an expired or invalid credential, 403 for an unauthorized action on a visible resource, and 404 for an absent or invisible resource. A failed asynchronous build is a terminal operation result available by GET. Clients should tolerate additional response fields within v1.
 
-**Read responses.** Collections return up to 50 items. Repository and box lists use ascending names, environments use ascending IDs, and operation history uses newest creation time first with the operation ID as the tie-breaker. Cursors belong to the same grant and collection. Log pages contain up to 64 KiB of durable, redacted output. An empty page can be polled again after the agent flushes more output. If the 1 MiB rolling tail overtakes the reader, the next page starts at the retained text and sets `truncated` to true.
+**Read responses.** Collections return up to 50 items. Repository and box lists use ascending names, environments use ascending IDs, and operation history uses newest creation time first with the operation ID as the tie-breaker. Cursors belong to the same grant and collection and have no independent deadline. Authorization and retention are checked on every page. Log pages contain up to 64 KiB of durable, redacted output. An empty page can be polled again after the agent flushes more output. If the 1 MiB rolling tail overtakes the reader, the next page starts at the retained text and sets `truncated` to true.
 
 A ready workspace has a successful devcontainer setup result for the same container ID that its box currently sees running. A failed sidecar can leave the environment partially running while its workspace is ready. A disconnected box, an unreachable guest, or a box without a fresh workspace report yields unknown readiness. Environment connection fields require `environments:read`, including on a collection response.
 
 The v1 operation history includes create, start, stop and destroy. When Foreman times out an operation it reports a terminal `failed` with error code `operation_timeout`. A late agent result can correct the environment's observed state when that operation still controls it. The public operation keeps its timeout outcome. If workload authorization is withdrawn before dispatch or reconnect, the operation reports a terminal `failed` with `workload_unauthorized`. A late result for an earlier delivery may still reconcile the environment while that public outcome stays final.
 
-Proposed create errors:
+### Create errors
 
 | HTTP | Code | Caller action |
 |---|---|---|
@@ -99,8 +99,6 @@ Proposed create errors:
 - Attempt to enumerate, read logs for, or obtain connection details for another owner’s workspace. Check secondary repos, injected secrets and actual SSH access for a service workspace as well as the HTTP responses.
 - Exercise both expiry actions across control-plane restart and box outage. Verify the workspace disk survives stop and is removed after successful destroy. Verify an environment with no deadline persists.
 
-## Open implementation choices
+## V1 boundaries
 
-- Define the admin workflow for service credentials, runtime secrets and SSH grants. Verify which supported Tailscale configurations allow selective SSH enforcement and how Foreman surfaces pending manual removals.
-- Define cursor expiry and expiry editing.
-- Confirm whether launch, observe, start, stop and destroy cover the first release. Rebuild, suspend, event streaming and broader dashboard operations can be specified individually.
+The lifecycle API supports create, start, stop and destroy. Set any expiry when creating the environment. The administrator registers service credentials, selects workload grants and manages rotation from **Admin → API clients**. Each installation has its own tailnet tag. Tailnet administrators control SSH authorization in deployments that delegate SSH to Tailscale.
