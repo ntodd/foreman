@@ -194,7 +194,9 @@ defmodule Foreman.Agents do
             if offer && op.status == "succeeded",
               do: Environments.deliver_offer(op.id, offer)
 
-            LifecycleState.inventory_result(box_id, payload)
+            if LifecycleState.inventory_result(box_id, payload) == :rescan,
+              do: refresh_inventory(box_id)
+
             LifecycleState.result(box_id, op, env)
             Environments.after_result(op, env)
 
@@ -217,7 +219,7 @@ defmodule Foreman.Agents do
   end
 
   def handle_event(box_id, %Event{type: "box.inventory", payload: %{environments: envs}}) do
-    if LifecycleState.receiving?(box_id),
+    if LifecycleState.accept_observation?(box_id),
       do: Environments.reconcile_inventory(box_id, envs),
       else: refresh_inventory(box_id)
   end
@@ -265,9 +267,9 @@ defmodule Foreman.Agents do
   end
 
   def handle_event(box_id, %Event{type: "env.state", payload: %{env_id: env_id, state: state}}) do
-    if LifecycleState.receiving?(box_id),
+    if LifecycleState.accept_observation?(box_id, env_id),
       do: Environments.observe(box_id, env_id, state),
-      else: :ok
+      else: refresh_inventory(box_id)
   end
 
   defp refresh_inventory(box_id) do

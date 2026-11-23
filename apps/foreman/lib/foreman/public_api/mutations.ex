@@ -59,7 +59,7 @@ defmodule Foreman.PublicAPI.Mutations do
   defp place(actor, hash, input) do
     repo_query = Access.repos(actor, input["repo_id"])
 
-    with true <- Repo.exists?(repo_query),
+    with :ok <- visible(repo_query),
          :ok <- explicit_box_visible(actor, input["box_id"]),
          :ok <- create_scopes(actor, input) do
       explicit = input["box_id"]
@@ -81,8 +81,10 @@ defmodule Foreman.PublicAPI.Mutations do
         end
       end)
     else
-      false -> @not_found
-      error -> error
+      error ->
+        # Another request may have accepted this key before admission changed.
+        # Resolve its receipt under the same unique key as a placement attempt.
+        Receipt.reserve(hash, input, fn -> error end) |> finish(actor, input, :create)
     end
   end
 
@@ -137,8 +139,10 @@ defmodule Foreman.PublicAPI.Mutations do
   defp explicit_box_visible(_actor, nil), do: :ok
 
   defp explicit_box_visible(actor, id) do
-    if Repo.get(Access.boxes(actor), id), do: :ok, else: @not_found
+    visible(from b in Access.boxes(actor), where: b.id == ^id)
   end
+
+  defp visible(query), do: if(Repo.exists?(query), do: :ok, else: @not_found)
 
   defp usable_repo(nil), do: @not_found
 

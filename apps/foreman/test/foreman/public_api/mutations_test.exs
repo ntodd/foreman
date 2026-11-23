@@ -474,6 +474,36 @@ defmodule Foreman.PublicAPI.MutationsTest do
     end
   end
 
+  test "a fresh lifecycle result stays confirmed until another observation arrives", ctx do
+    :ok = Foreman.Agents.register(ctx.box.id)
+    {:ok, inventory} = ForemanProtocol.Event.new("box.inventory", %{environments: []})
+    :ok = Foreman.Agents.handle_event(ctx.box.id, inventory)
+    assert_receive {:dispatch, %{type: "box.inventory", op_id: probe}}
+
+    assert {:ok, env, create} = Mutations.create(ctx.actor, "create", ctx.input)
+    complete(ctx.box, create)
+
+    assert {:ok, ^env, nil} =
+             Mutations.operate(ctx.actor, env, "confirmed-create", %{"action" => "start"})
+
+    # The pre-create scan cannot supersede the successful command on this socket.
+    {:ok, old} =
+      ForemanProtocol.Event.new("op.result", %{
+        op_id: probe,
+        status: "ok",
+        result: %{"environments" => []}
+      })
+
+    :ok = Foreman.Agents.handle_event(ctx.box.id, old)
+    assert_receive {:dispatch, %{type: "box.inventory"}}
+    current = Repo.get!(Environment, env)
+    assert Foreman.Agents.LifecycleState.confirmed?(current, "running")
+
+    {:ok, stopped} = ForemanProtocol.Event.new("env.state", %{env_id: env, state: "stopped"})
+    :ok = Foreman.Agents.handle_event(ctx.box.id, stopped)
+    refute Foreman.Agents.LifecycleState.confirmed?(current, "running")
+  end
+
   test "a queued start of an errored workspace reserves its boot allocation", ctx do
     online(ctx.box)
 
