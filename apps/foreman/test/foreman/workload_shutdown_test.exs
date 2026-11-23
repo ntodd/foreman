@@ -102,8 +102,12 @@ defmodule Foreman.WorkloadShutdownTest do
 
       assert %{"status" => "succeeded"} = read(ctx.token, next)
     end
+  end
 
-    test "a running #{@action} expiry retry keeps its physical outcome after its sibling fulfills the policy",
+  for action <- [:stop, :destroy], inventory <- [:running, :missing] do
+    @action action
+    @inventory inventory
+    test "a #{@inventory} #{@action} expiry retry keeps its physical outcome after its sibling fulfills the policy",
          ctx do
       action = Atom.to_string(@action)
       type = "env." <> action
@@ -129,9 +133,18 @@ defmodule Foreman.WorkloadShutdownTest do
       event(ctx.box, "op.accepted", retry, %{})
       event(ctx.box, "op.result", first, %{status: "ok"})
       assert Repo.reload!(ctx.env).expiry_consumed_at
-      :ok = Agents.restart_clocks(ctx.box.id, [retry])
+      sent = Operations.get!(retry).dispatched_at
+      :ok = Agents.restart_clocks(ctx.box.id, if(@inventory == :running, do: [retry], else: []))
       :ok = Agents.agent_connected(ctx.box)
       refute_received {:dispatch, %{type: ^type}}
+
+      if @inventory == :missing do
+        assert_receive {:dispatch, %{type: "op.cancel", payload: %{target_op_id: ^retry}}}
+      else
+        refute_received {:dispatch, %{type: "op.cancel"}}
+      end
+
+      assert Operations.get!(retry).dispatched_at == sent
       assert %{"status" => "running"} = read(ctx.token, retry)
       event(ctx.box, "op.result", retry, %{status: "ok"})
       assert %{"status" => "succeeded"} = read(ctx.token, retry)

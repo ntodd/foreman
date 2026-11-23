@@ -147,7 +147,9 @@ defmodule Foreman.Environments.Server do
         if op = Foreman.Jobs.EnvironmentExpiry.next_due(env_id), do: dispatch(op, env)
 
       op = Operations.next_queued(env_id, env.created_once) ->
-        dispatch(op, env)
+        if Environments.supersede_queued_shutdown(op),
+          do: dispatch_next(env_id),
+          else: dispatch(op, env)
 
       true ->
         :ok
@@ -176,6 +178,10 @@ defmodule Foreman.Environments.Server do
 
       :retry ->
         retry(op)
+
+      :superseded ->
+        Operations.cancel_queued(op)
+        dispatch_next(env.id)
 
       {:error, :unauthorized} ->
         with {:ok, failed} <-
@@ -218,7 +224,7 @@ defmodule Foreman.Environments.Server do
         :ok
 
       :superseded ->
-        Operations.cancel_unsent_write(op)
+        Operations.cancel_unsent(op)
         dispatch_next(env.id)
         :ok
 
@@ -240,8 +246,8 @@ defmodule Foreman.Environments.Server do
     end
   end
 
-  defp deliver(op, env, cmd, policy) do
-    WorkloadAccess.deliver(op, env, policy, fn current ->
+  defp deliver(op, env, cmd, policy, phase \\ :dispatch) do
+    WorkloadAccess.deliver(op, env, policy, phase, fn current ->
       with :ok <- Agents.dispatch(current.box_id, cmd) do
         remember_enrollment(cmd.payload, current)
         bind_workload_grant(op, current)
@@ -287,7 +293,7 @@ defmodule Foreman.Environments.Server do
         Foreman.Operations.refresh_args(op, Map.delete(extra, "prior_state"))
         Foreman.Operations.Redactions.put(op.id, cmd, env)
 
-        case deliver(op, env, cmd, policy) do
+        case deliver(op, env, cmd, policy, :reconnect) do
           :retry -> retry(op)
           {:error, :unauthorized} -> deny_sent(op, env, :reconnect)
           other -> other
@@ -295,6 +301,11 @@ defmodule Foreman.Environments.Server do
 
       :retry ->
         retry(op)
+
+      # The agent already owns this command. Its result still settles this
+      # operation even when a sibling has fulfilled the same expiry.
+      :superseded ->
+        :ok
 
       {:error, :unauthorized} ->
         deny_sent(op, env, :reconnect)

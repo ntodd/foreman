@@ -16,10 +16,12 @@ defmodule Foreman.Environments.WorkloadAccess do
 
   def authorize(%{trigger: "expiry", action: action, api_grant_id: nil, user_id: nil}, env, _mode)
       when action in ["stop", "destroy"] and action == env.expiry_action and
-             is_nil(env.expiry_consumed_at) and not is_nil(env.expiry_at) do
-    if DateTime.compare(env.expiry_at, DateTime.utc_now()) != :gt,
-      do: {:ok, @empty},
-      else: @denied
+             not is_nil(env.expiry_at) do
+    cond do
+      not is_nil(env.expiry_consumed_at) -> :superseded
+      DateTime.after?(env.expiry_at, DateTime.utc_now()) -> @denied
+      true -> {:ok, @empty}
+    end
   end
 
   def authorize(%{trigger: "expiry"}, _env, _mode), do: @denied
@@ -286,7 +288,7 @@ defmodule Foreman.Environments.WorkloadAccess do
   # The remote membership checks and the credential mint are complete. Serialize the
   # final local mailbox send with disables, grant revocations and box sharing changes.
   # No GitHub or tailnet call is permitted inside this transaction.
-  def deliver(op, env, prepared, send_command) do
+  def deliver(op, env, prepared, phase \\ :dispatch, send_command) do
     Repo.transact(fn ->
       lock_row(Foreman.Boxes.Box, env.box_id)
       env = Foreman.Environments.locked_environment(env.id) |> Repo.preload(repo: :owner)
@@ -296,13 +298,13 @@ defmodule Foreman.Environments.WorkloadAccess do
               Foreman.Jobs.EnvironmentExpiry.due?(env)) do
         {:ok, :superseded}
       else
-        deliver_current(op, env, prepared, send_command)
+        deliver_current(op, env, prepared, phase, send_command)
       end
     end)
     |> elem(1)
   end
 
-  defp deliver_current(op, env, prepared, send_command) do
+  defp deliver_current(op, env, prepared, phase, send_command) do
     policy = prepared.policy
 
     repositories = [env.repo_id | Map.keys(prepared.secondaries)]
@@ -348,6 +350,12 @@ defmodule Foreman.Environments.WorkloadAccess do
 
       {:ok, _changed} ->
         {:ok, :retry}
+
+      # A first send already claimed while the policy was due may complete
+      # alongside the matching cleanup that just fulfilled it. A reconnect
+      # must never replay that cleanup after the policy was consumed.
+      :superseded when phase == :dispatch and op.trigger == "expiry" and op.status == "dispatched" ->
+        {:ok, send_command.(env)}
 
       other ->
         {:ok, other}

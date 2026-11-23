@@ -92,7 +92,21 @@ defmodule Foreman.Operations do
     # to the queue lets a shutdown supersede it even during a provider outage.
     writes = where(missing, [o], o.action == "secrets_write" and is_nil(o.cancel_requested_at))
     Repo.update_all(writes, set: [status: "queued", dispatched_at: nil, started_at: nil])
-    Repo.update_all(missing, set: [dispatched_at: DateTime.utc_now()])
+
+    # A missing retry may already have a result in the agent's outbox. For
+    # fulfilled expiry, ask the agent to cancel: it returns the cached result
+    # or acknowledges cancellation without executing the old shutdown again.
+    fulfilled =
+      from o in missing,
+        join: e in assoc(o, :environment),
+        where: o.trigger == "expiry" and is_nil(o.user_id) and is_nil(o.api_grant_id),
+        where: o.action == e.expiry_action and not is_nil(e.expiry_consumed_at),
+        select: o.id
+
+    cancel = from o in missing, where: o.id in subquery(fulfilled), select: o.id
+    now = DateTime.utc_now()
+    {_, cancelled} = Repo.update_all(cancel, set: [cancel_requested_at: now])
+    Repo.update_all(where(missing, [o], o.id not in ^cancelled), set: [dispatched_at: now])
 
     :ok
   end
@@ -433,7 +447,7 @@ defmodule Foreman.Operations do
     end
   end
 
-  def cancel_unsent_write(%Operation{action: "secrets_write"} = op) do
+  def cancel_unsent(%Operation{} = op) do
     transition(op, "dispatched", status: "cancelled", finished_at: DateTime.utc_now())
   end
 

@@ -21,7 +21,19 @@ defmodule Foreman.Environments do
   alias Foreman.Jobs.EnvironmentExpiry
   alias ForemanProtocol.Connect
   alias Foreman.Repos.Repo, as: GitRepo
-  alias Foreman.{Activity, Agents, Audit, Capacity, GitHub, Operations, Repo, Scope, Secrets}
+
+  alias Foreman.{
+    Accounts,
+    Activity,
+    Agents,
+    Audit,
+    Capacity,
+    GitHub,
+    Operations,
+    Repo,
+    Scope,
+    Secrets
+  }
 
   require Logger
 
@@ -561,6 +573,50 @@ defmodule Foreman.Environments do
       end
     end
   end
+
+  @doc false
+  def supersede_queued_shutdown(%{trigger: "request", action: action, api_grant_id: grant} = op)
+      when action in ["stop", "destroy"] and not is_nil(grant) do
+    # Check at queue selection as an undelivered claim can return to the
+    # queue after the administrator's request. Keep each request's identity.
+    candidates =
+      from s in Foreman.Operations.Operation,
+        join: u in assoc(s, :user),
+        where:
+          s.environment_id == ^op.environment_id and s.action == ^action and s.status == "queued",
+        where: s.trigger == "request" and is_nil(s.api_grant_id) and u.role == "admin",
+        where: is_nil(u.workload_access_revoked_at) and is_nil(u.disabled_at),
+        order_by: [s.inserted_at, s.id],
+        select: {s, u}
+
+    {:ok, retired?} =
+      Repo.transact(fn ->
+        candidates = if Repo.sqlite?(), do: candidates, else: lock(candidates, "FOR UPDATE")
+
+        # Lock the replacement against cancellation and check its effective
+        # local authority before changing either operation. The actual send
+        # still goes through its ordinary delivery checks.
+        admin =
+          Enum.find(Repo.all(candidates), fn {_, user} ->
+            match?({:ok, _}, Accounts.lock_admin(Scope.for_user(user)))
+          end)
+
+        with {replacement, _} <- admin, {:ok, _} <- Operations.cancel_queued(op) do
+          # Cancelling the replacement before it leaves must restore the
+          # intent that the original request superseded.
+          prior = Map.take(op.args || %{}, ["prior_desired", "prior_authority"])
+          args = Map.merge(prior, replacement.args || %{})
+          replacement |> Ecto.Changeset.change(args: args) |> Repo.update!()
+          {:ok, true}
+        else
+          _ -> {:ok, false}
+        end
+      end)
+
+    retired?
+  end
+
+  def supersede_queued_shutdown(_op), do: false
 
   @doc false
   def locked_environment(id) do
