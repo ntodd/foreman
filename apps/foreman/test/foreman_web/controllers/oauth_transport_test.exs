@@ -1,6 +1,8 @@
 defmodule ForemanWeb.OAuthTransportTest do
   use ForemanWeb.ConnCase
 
+  alias ForemanWeb.Plugs.OAuthTransport
+
   setup do
     before = Application.fetch_env(:foreman, :base_url)
 
@@ -12,6 +14,35 @@ defmodule ForemanWeb.OAuthTransportTest do
     end)
 
     :ok
+  end
+
+  test "transport policy classifies router segments after one URI decoding pass" do
+    paths = [
+      {~w(oauth device), :oauth},
+      {~w(.well-known oauth-authorization-server), :oauth},
+      {~w(admin apps), :oauth},
+      {~w(settings connections), :oauth},
+      {~w(api v1 me), :resource},
+      {~w(api agents enroll), :other},
+      {~w(admin users), :other}
+    ]
+
+    for {segments, policy} <- paths do
+      encoded = Enum.map(segments, &URI.encode(&1, fn _ -> false end))
+      assert OAuthTransport.policy(segments) == policy
+      assert OAuthTransport.policy(encoded) == policy
+    end
+  end
+
+  test "resource transport errors carry the public API code and message", %{conn: conn} do
+    Application.put_env(:foreman, :base_url, "https://foreman.example.org")
+    denied = get(conn, "/api/v1/me")
+    assert get_resp_header(denied, "cache-control") == ["no-store"]
+
+    assert json_response(denied, 400) == %{
+             "code" => "insecure_transport",
+             "message" => "The API requires a secure instance origin and transport."
+           }
   end
 
   test "use the configured HTTPS issuer over direct TLS or a trusted terminating proxy", %{

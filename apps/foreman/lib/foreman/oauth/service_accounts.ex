@@ -47,46 +47,55 @@ defmodule Foreman.OAuth.ServiceAccounts do
 
   defp grant_field(_, _), do: nil
 
-  def clients(%Scope{} = scope) do
-    if Scope.admin?(scope), do: Repo.all(from c in Client, order_by: c.name), else: []
+  def inventory(scope) do
+    admin_transaction(scope, fn _actor ->
+      {:ok, %{clients: clients(), installations: installations(), choices: choices()}}
+    end)
   end
 
-  def installations(%Scope{} = scope) do
-    if Scope.admin?(scope) do
-      Repo.all(
-        from g in Grant,
-          join: c in assoc(g, :client),
-          where: c.kind == "service",
-          preload: [client: c, user: []],
-          order_by: c.name
-      )
-    else
-      []
+  def clients(%Scope{} = scope), do: admin_read(scope, &clients/0, [])
+  def installations(%Scope{} = scope), do: admin_read(scope, &installations/0, [])
+  def choices(%Scope{} = scope), do: admin_read(scope, &choices/0, nil)
+
+  defp admin_read(scope, query, fallback) do
+    case admin_transaction(scope, fn _actor -> {:ok, query.()} end) do
+      {:ok, result} -> result
+      {:error, :unauthorized} -> fallback
     end
   end
 
-  def choices(%Scope{} = scope) do
-    if Scope.admin?(scope) do
-      %{
-        repos:
-          Repo.all(
-            from r in grantable_repos(),
-              order_by: r.full_name,
-              select: {r.id, r.full_name}
-          ),
-        boxes:
-          Repo.all(
-            from b in Box, where: is_nil(b.revoked_at), order_by: b.name, select: {b.id, b.name}
-          ),
-        secrets:
-          Repo.all(
-            from s in Secret,
-              where: s.scope in ["owner", "repo"],
-              order_by: s.name,
-              select: {s.id, s.name, s.scope_key}
-          )
-      }
-    end
+  defp clients, do: Repo.all(from c in Client, order_by: c.name)
+
+  defp installations do
+    Repo.all(
+      from g in Grant,
+        join: c in assoc(g, :client),
+        where: c.kind == "service",
+        preload: [client: c, user: []],
+        order_by: c.name
+    )
+  end
+
+  defp choices do
+    %{
+      repos:
+        Repo.all(
+          from r in grantable_repos(),
+            order_by: r.full_name,
+            select: {r.id, r.full_name}
+        ),
+      boxes:
+        Repo.all(
+          from b in Box, where: is_nil(b.revoked_at), order_by: b.name, select: {b.id, b.name}
+        ),
+      secrets:
+        Repo.all(
+          from s in Secret,
+            where: s.scope in ["owner", "repo"],
+            order_by: s.name,
+            select: {s.id, s.name, s.scope_key}
+        )
+    }
   end
 
   def register(scope, kind, attrs) when kind in ["service", "public"] do
