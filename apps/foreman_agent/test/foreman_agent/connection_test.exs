@@ -46,6 +46,16 @@ defmodule ForemanAgent.ConnectionTest do
     end
   end
 
+  test "an older control plane receives no unsupported workspace reports" do
+    socket = Slipstream.Socket.assign(closed_socket(), :workspace_samples, false)
+    {:ok, sample} = Event.new("box.workspaces", %{environments: %{}})
+    # Even attempting to push on this socket would log a transport error.
+    assert ExUnit.CaptureLog.capture_log(fn ->
+             assert {:noreply, ^socket} =
+                      Connection.handle_info({:outbox_deliver, sample, nil}, socket)
+           end) == ""
+  end
+
   test "a refused upgrade logs the HTTP status without the response headers" do
     reason =
       {:error,

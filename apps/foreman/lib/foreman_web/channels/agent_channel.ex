@@ -35,7 +35,7 @@ defmodule ForemanWeb.AgentChannel do
       )
 
       send(self(), :after_join)
-      {:ok, assign(socket, :box, box)}
+      {:ok, %{"workspace_samples" => true}, assign(socket, :box, box)}
     else
       {:error, :protocol} -> {:error, %{reason: "unsupported protocol version"}}
       {:error, _errors} -> {:error, %{reason: "invalid join payload"}}

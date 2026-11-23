@@ -138,13 +138,18 @@ defmodule ForemanAgent.Connection do
   end
 
   @impl Slipstream
-  def handle_join(topic, _reply, socket) do
+  def handle_join(topic, reply, socket) do
     Logger.info("joined #{topic}")
     # Joining is what makes a newly installed release good.
     Updater.confirm(socket.assigns.config)
     Outbox.attach(self())
     Reporter.report_now()
-    {:ok, assign(socket, joined: true)}
+
+    {:ok,
+     assign(socket,
+       joined: true,
+       workspace_samples: match?(%{"workspace_samples" => true}, reply)
+     )}
   end
 
   @impl Slipstream
@@ -183,6 +188,14 @@ defmodule ForemanAgent.Connection do
   defp reject(_, _), do: :ok
 
   @impl Slipstream
+  # Older control planes predate workspace samples. They keep receiving
+  # inventory unchanged and never see an event their protocol rejects.
+  def handle_info(
+        {:outbox_deliver, %Event{type: "box.workspaces"}, nil},
+        %{assigns: %{workspace_samples: false}} = socket
+      ),
+      do: {:noreply, socket}
+
   def handle_info({:outbox_deliver, event, ack_id}, socket) do
     case safe_push(socket, event) do
       {:ok, ref} when is_integer(ack_id) ->
