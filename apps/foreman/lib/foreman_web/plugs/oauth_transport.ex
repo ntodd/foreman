@@ -8,19 +8,22 @@ defmodule ForemanWeb.Plugs.OAuthTransport do
   def call(conn, _) do
     case policy(conn.path_info) do
       :other -> conn
-      _ -> secure(conn)
+      policy -> secure(conn, policy)
     end
   end
 
   @doc false
-  def policy(["oauth" | _]), do: :oauth
-  def policy(["api", "v1" | _]), do: :resource
-  def policy([".well-known", "oauth-authorization-server"]), do: :oauth
-  def policy(["admin", "apps" | _]), do: :oauth
-  def policy(["settings", "connections" | _]), do: :oauth
-  def policy(_), do: :other
+  # Phoenix.Router dispatches on URI.decode/1 applied once to each segment.
+  def policy(path_info), do: path_info |> Enum.map(&URI.decode/1) |> route_policy()
 
-  defp secure(conn) do
+  defp route_policy(["oauth" | _]), do: :oauth
+  defp route_policy(["api", "v1" | _]), do: :resource
+  defp route_policy([".well-known", "oauth-authorization-server"]), do: :oauth
+  defp route_policy(["admin", "apps" | _]), do: :oauth
+  defp route_policy(["settings", "connections" | _]), do: :oauth
+  defp route_policy(_), do: :other
+
+  defp secure(conn, policy) do
     uri = URI.parse(Foreman.Config.base_url())
 
     allowed =
@@ -49,14 +52,20 @@ defmodule ForemanWeb.Plugs.OAuthTransport do
       conn
       |> put_resp_content_type("application/json")
       |> put_resp_header("cache-control", "no-store")
-      |> send_resp(
-        400,
-        JSON.encode!(%{
-          error: "invalid_request",
-          error_description: "OAuth requires a secure instance origin and transport."
-        })
-      )
+      |> send_resp(400, JSON.encode!(transport_error(policy)))
       |> halt()
     end
   end
+
+  defp transport_error(:resource),
+    do: %{
+      code: "insecure_transport",
+      message: "The API requires a secure instance origin and transport."
+    }
+
+  defp transport_error(:oauth),
+    do: %{
+      error: "invalid_request",
+      error_description: "OAuth requires a secure instance origin and transport."
+    }
 end

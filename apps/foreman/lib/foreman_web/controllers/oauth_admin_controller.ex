@@ -20,21 +20,34 @@ defmodule ForemanWeb.OAuthAdminController do
 
   defp respond(conn, {:ok, _}), do: redirect(conn, to: ~p"/admin/apps")
 
+  defp respond(conn, {:error, :unauthorized}), do: forbidden(conn)
+
   defp respond(conn, {:error, reason}),
     do: page(conn |> put_status(422) |> put_flash(:error, "Could not save: #{reason}."))
 
   defp page(conn, credential \\ nil) do
-    scope = conn.assigns.current_scope
+    case ServiceAccounts.inventory(conn.assigns.current_scope) do
+      {:ok, inventory} ->
+        conn
+        |> put_resp_header("cache-control", "no-store")
+        |> render(:index,
+          page_title: "API clients",
+          clients: inventory.clients,
+          installations: Map.new(inventory.installations, &{&1.client_id, &1}),
+          choices: inventory.choices,
+          scopes: Scopes.all(),
+          credential: credential
+        )
 
+      {:error, :unauthorized} ->
+        forbidden(conn)
+    end
+  end
+
+  defp forbidden(conn) do
     conn
     |> put_resp_header("cache-control", "no-store")
-    |> render(:index,
-      page_title: "API clients",
-      clients: ServiceAccounts.clients(scope),
-      installations: Map.new(ServiceAccounts.installations(scope), &{&1.client_id, &1}),
-      choices: ServiceAccounts.choices(scope),
-      scopes: Scopes.all(),
-      credential: credential
-    )
+    |> put_status(:forbidden)
+    |> text("Forbidden")
   end
 end
