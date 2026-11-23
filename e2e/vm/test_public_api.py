@@ -24,6 +24,7 @@ class PublicAPIClientTest(unittest.TestCase):
         self.now = 100
         self.history = []
         self.operations = {}
+        self.log_pages = {}
         stack = ExitStack()
         self.addCleanup(stack.close)
         stack.enter_context(patch.object(public_api, "args", self.args, create=True))
@@ -44,7 +45,7 @@ class PublicAPIClientTest(unittest.TestCase):
         if path == "/api/v1/environments/env/operations":
             return {"items": self.history}, {}
         if "/logs" in path:
-            return {"text": "", "next_cursor": "cursor", "truncated": False}, {}
+            return self.log_pages.get(path, {"text": "", "next_cursor": "cursor", "truncated": False}), {}
         return self.operations[path.removeprefix("/api/v1/operations/")], {}
 
     def run_client(self):
@@ -100,6 +101,22 @@ class PublicAPIClientTest(unittest.TestCase):
     def test_unrelated_success_cannot_substitute_for_the_failed_operation(self):
         self.retry("create", "start")
         with self.assertRaisesRegex(AssertionError, "retry action"):
+            self.run_client()
+
+    def test_only_registry_rejection_of_the_exact_failed_create_can_be_retried(self):
+        self.args.action = "ready"
+        self.operations["original"] = {"id": "original", "action": "create",
+                                       "environment_id": "env", "status": "failed"}
+        path = "/api/v1/operations/original/logs"
+        self.log_pages[path] = {"text": "building...", "next_cursor": "page2", "truncated": True}
+        self.log_pages[path + "?cursor=page2"] = {
+            "text": "registry: Too Many Requests", "next_cursor": "end", "truncated": False}
+        with self.assertRaises(public_api.RegistryPullLimited) as failure:
+            self.run_client()
+        self.assertEqual(str(failure.exception), "original")
+
+        self.log_pages.clear()
+        with self.assertRaisesRegex(AssertionError, "create failed"):
             self.run_client()
 
     def test_workspace_without_deadline_cannot_accumulate_expiry_work(self):

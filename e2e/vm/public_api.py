@@ -21,6 +21,10 @@ CLIENT = "foreman-cli"
 GRANT = "urn:ietf:params:oauth:grant-type:device_code"
 
 
+class RegistryPullLimited(Exception):
+    """The VM harness may retry this failed create after backing off."""
+
+
 class NoRedirect(HTTPRedirectHandler):
     def redirect_request(self, *args):
         return None
@@ -60,6 +64,19 @@ def request(path, *, form=None, body=None, token=None, key=None, basic=None, sta
             raise AssertionError(f"{path} returned {response.status}, expected {status}: "
                                  f"{result.get('error') or result.get('code')}")
         return result, response.headers
+
+
+def operation_log(path, token, *, require_complete=False):
+    pages = []
+    next_page = path
+    while True:
+        page, _ = request(next_page, token=token)
+        if require_complete:
+            assert not page["truncated"]
+        if not page["text"]:
+            return "".join(pages)
+        pages.append(page["text"])
+        next_page = path + "?" + urlencode({"cursor": page["next_cursor"]})
 
 
 class ConsentForm(HTMLParser):
@@ -220,15 +237,7 @@ def run():
 
     if args.action == "marker":
         log_path = "/api/v1/operations/" + state["operation_id"] + "/logs"
-        next_page = log_path
-        output = ""
-        while True:
-            page, _ = request(next_page, token=token)
-            assert not page["truncated"]
-            output += page["text"]
-            if not page["text"]:
-                break
-            next_page = log_path + "?" + urlencode({"cursor": page["next_cursor"]})
+        output = operation_log(log_path, token, require_complete=True)
         if service:
             assert "PROBE approved-secret present" in output
             assert "PROBE unapproved-secret absent" in output
@@ -268,6 +277,10 @@ def run():
         assert op["environment_id"] == state["environment_id"]
         if retry_action:
             assert op["action"] == retry_action, "Registry retry action differs from the failed operation"
+        if args.action == "ready" and op["action"] == "create" and op["status"] == "failed":
+            log = operation_log(op_path + "/logs", token)
+            if re.search(r"toomanyrequests|too many requests|rate exceeded", log, re.IGNORECASE):
+                raise RegistryPullLimited(operation_id)
         assert op["status"] not in ("cancelled", "failed"), f"{op['action']} {op['status']}"
         if env["readiness"] == args.action and op["status"] == "succeeded":
             break
@@ -303,4 +316,8 @@ if __name__ == "__main__":
     parser.add_argument("--retry-operation", help="exact operation returned by the registry retry")
     parser.add_argument("--wait", type=int, default=100)
     args = parser.parse_args()
-    run()
+    try:
+        run()
+    except RegistryPullLimited as limited:
+        print(limited)
+        raise SystemExit(os.EX_TEMPFAIL)

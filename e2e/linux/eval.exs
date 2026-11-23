@@ -94,6 +94,16 @@ defmodule E2E do
     IO.puts("RETRY=#{retry.id}")
   end
 
+  # Retry the same failed API create as the dashboard's Retry action. An
+  # environment can reuse a destroyed slug, so identify it by its operation.
+  def retry_create(op_id) do
+    scope = Scope.for_user(admin())
+    %{action: "create", status: "failed"} = op = Repo.get!(Operations.Operation, op_id)
+    env = Repo.get!(Environments.Environment, op.environment_id)
+    {:ok, retry} = Environments.retry(scope, env)
+    IO.puts("RETRY=#{retry.id}")
+  end
+
   # Public history omits timestamps. Check the durable queue time as well
   # as polling history, so an early enqueue between polls is caught.
   def check_expiry_times(ids) do
