@@ -47,6 +47,10 @@ defmodule Foreman.Environments.Environment do
     field :ts_authkey, Foreman.Encrypted.Binary, redact: true
     field :created_once, :boolean, default: false
     field :token_pushed_at, :utc_datetime_usec
+    field :api_grant_id, :binary_id
+    field :expiry_at, :utc_datetime_usec
+    field :expiry_action, :string
+    field :expiry_consumed_at, :utc_datetime_usec
     field :destroyed_at, :utc_datetime_usec
     # Set by `Environments.record_result/1` when an up applied secrets the
     # files on the box still say have changed.
