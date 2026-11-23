@@ -48,6 +48,12 @@ export async function launch({ binary, profile, port = 9333, width = 1440, heigh
     ws.send(JSON.stringify({ id: msgId, method, params }))
   })
 
+  // Browser.close can close the socket before acknowledging the command.
+  ws.onclose = () => {
+    for (const { reject } of pending.values()) reject(new Error("Browser disconnected"))
+    pending.clear()
+  }
+
   await send("Page.enable")
   await send("Runtime.enable")
   await send("Emulation.setDeviceMetricsOverride", { width, height, deviceScaleFactor: 1, mobile: false })

@@ -30,8 +30,10 @@ defmodule ForemanWeb.AuthControllerTest do
     assert query["state"] == get_session(conn, :oauth_state)
   end
 
-  test "signs in on a matching callback", %{conn: conn} do
-    conn = get(conn, ~p"/auth/github")
+  test "a matching GitHub callback returns the signed-in user to device consent", %{conn: conn} do
+    conn = get(%{conn | remote_ip: {127, 0, 0, 1}}, "/oauth/device?user_code=ABCD-EFGH")
+    assert redirected_to(conn) == "/sign-in"
+    conn = conn |> recycle() |> get(~p"/auth/github")
     state = get_session(conn, :oauth_state)
     verifier = get_session(conn, :oauth_verifier)
 
@@ -54,7 +56,7 @@ defmodule ForemanWeb.AuthControllerTest do
       |> recycle()
       |> get(~p"/auth/github/callback", %{"code" => "the-code", "state" => state})
 
-    assert redirected_to(conn) == "/"
+    assert redirected_to(conn) == "/oauth/device?user_code=ABCD-EFGH"
     assert get_session(conn, :session_token)
   end
 

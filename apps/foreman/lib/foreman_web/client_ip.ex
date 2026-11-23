@@ -28,13 +28,16 @@ defmodule ForemanWeb.ClientIP do
 
   @spec resolve(:inet.ip_address(), [{String.t(), String.t()}], [range()]) :: String.t()
   def resolve(peer, headers, trusted \\ trusted()) do
-    with true <- loopback?(peer) or Enum.any?(trusted, &in_range?(peer, &1)),
+    with true <- trusted_proxy?(peer, trusted),
          {:ok, forwarded} <- last_forwarded(headers) do
       forwarded |> :inet.ntoa() |> to_string()
     else
       _ -> peer |> :inet.ntoa() |> to_string()
     end
   end
+
+  def trusted_proxy?(peer, ranges \\ trusted()),
+    do: loopback?(peer) or Enum.any?(ranges, &in_range?(peer, &1))
 
   # Parsed once: `gateway` is read from the routing table at first use.
   defp trusted do
@@ -135,10 +138,10 @@ defmodule ForemanWeb.ClientIP do
 
   defp unmap(ip), do: ip
 
-  defp loopback?({127, _, _, _}), do: true
-  defp loopback?({0, 0, 0, 0, 0, 0, 0, 1}), do: true
-  defp loopback?({0, 0, 0, 0, 0, 0xFFFF, a, _}), do: Bitwise.bsr(a, 8) == 127
-  defp loopback?(_), do: false
+  def loopback?({127, _, _, _}), do: true
+  def loopback?({0, 0, 0, 0, 0, 0, 0, 1}), do: true
+  def loopback?({0, 0, 0, 0, 0, 0xFFFF, a, _}), do: Bitwise.bsr(a, 8) == 127
+  def loopback?(_), do: false
 
   defp last_forwarded(headers) do
     value =

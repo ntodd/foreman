@@ -1,0 +1,261 @@
+#!/usr/bin/env python3
+"""Connect the Foreman CLI to a self-hosted instance (Python 3, Unix)."""
+import argparse
+import contextlib
+import fcntl
+import hashlib
+import json
+import os
+import sys
+import tempfile
+import time
+from pathlib import Path
+from urllib.error import HTTPError, URLError
+from urllib.parse import urlencode, urlsplit
+from urllib.request import HTTPRedirectHandler, Request, build_opener
+
+CLIENT = "foreman-cli"
+DEVICE = "urn:ietf:params:oauth:grant-type:device_code"
+
+
+class Failure(Exception):
+    pass
+
+
+class OAuthError(Failure):
+    pass
+
+
+class DurabilityError(Failure):
+    """Atomic replacement succeeded, but the directory sync did not complete."""
+
+
+class NoRedirect(HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+http = build_opener(NoRedirect)
+
+
+def origin(value):
+    parts = urlsplit(value)
+    local = parts.hostname in {"localhost", "127.0.0.1", "::1"}
+    if (not parts.hostname or parts.username is not None or parts.password is not None
+            or parts.scheme != "https" and not (local and parts.scheme == "http")):
+        raise Failure("Select an HTTPS instance URL (local development may use loopback HTTP).")
+    return parts.scheme + "://" + parts.netloc
+
+
+def request(url, fields=None, token=None):
+    headers = {"Accept": "application/json"}
+    if token:
+        headers["Authorization"] = "Bearer " + token
+    data = urlencode(fields).encode() if fields is not None else None
+    try:
+        with http.open(Request(url, data=data, headers=headers), timeout=20) as response:
+            body = response.read()
+            return json.loads(body) if body else {}
+    except HTTPError as exc:
+        try:
+            reason = json.loads(exc.read()).get("error")
+        except (ValueError, AttributeError):
+            reason = None
+        raise OAuthError(reason or "HTTP " + str(exc.code)) from None
+
+
+def discover(instance):
+    meta = request(instance + "/.well-known/oauth-authorization-server")
+    if meta["issuer"] != instance:
+        raise Failure("The advertised issuer does not match the selected instance.")
+    for key in ("token_endpoint", "device_authorization_endpoint", "revocation_endpoint"):
+        if origin(meta[key]) != instance:
+            raise Failure("The advertised " + key + " is outside this instance.")
+    return meta
+
+
+def state_dir(instance):
+    root = Path(os.environ.get("XDG_STATE_HOME") or Path.home() / ".local/state")
+    path = root / "foreman" / hashlib.sha256(instance.encode()).hexdigest()
+    path.mkdir(mode=0o700, parents=True, exist_ok=True)
+    return path
+
+
+def account_path(directory, account):
+    return directory / (hashlib.sha256(account.encode()).hexdigest() + ".json")
+
+
+@contextlib.contextmanager
+def locked(path):
+    with open(path.with_suffix(".lock"), "a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        yield
+
+
+def sync_directory(directory):
+    fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def save(path, state):
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile(dir=path.parent, mode="w", delete=False) as temp:
+            temporary = temp.name
+            json.dump(state, temp)
+            temp.flush()
+            os.fsync(temp.fileno())
+        os.replace(temporary, path)
+    except BaseException:
+        if temporary is not None:
+            os.unlink(temporary)
+        raise
+
+    try:
+        sync_directory(path.parent)
+    except OSError as exc:
+        raise DurabilityError("Credentials replaced; could not sync the account directory. "
+                              "Run me again to retry before retiring the previous connection.") from exc
+
+
+def credentials(reply, account):
+    return {"access_token": reply["access_token"], "refresh_token": reply["refresh_token"],
+            "expires": time.time() + reply["expires_in"], "scope": reply["scope"], "account": account}
+
+
+def login(instance, meta, directory, requested, account):
+    device = request(meta["device_authorization_endpoint"], {"client_id": CLIENT, "scope": requested})
+    uri = device["verification_uri"]
+    if origin(uri) != instance:
+        raise Failure("The verification URI is outside this instance.")
+    print("Open " + uri + " and enter " + device["user_code"], flush=True)
+    deadline = time.monotonic() + device["expires_in"]
+    interval = device.get("interval", 5)
+    while time.monotonic() + interval <= deadline:
+        time.sleep(interval)
+        try:
+            reply = request(meta["token_endpoint"], {"client_id": CLIENT, "grant_type": DEVICE,
+                                                      "device_code": device["device_code"]})
+            break
+        except OAuthError as exc:
+            if str(exc) == "slow_down":
+                interval += 5
+            elif str(exc) != "authorization_pending":
+                raise
+    else:
+        raise Failure("Device code expired. Run login again.")
+
+    install_connection(instance, meta, directory, account, reply)
+
+
+def revoke(meta, token):
+    request(meta["revocation_endpoint"], {"client_id": CLIENT, "token": token})
+
+
+def retire_previous(path, state, meta):
+    pending = state.get("pending_revocations", [])
+    if not pending:
+        return
+    # A prior process might have replaced the file and failed to sync its directory.
+    sync_directory(path.parent)
+    try:
+        for credential in pending:
+            revoke(meta, credential)
+    except (Failure, OSError, ValueError) as exc:
+        raise Failure("Replacement credentials saved. Revocation of a previous connection is pending. "
+                      "Run me or logout again to retry.") from exc
+    del state["pending_revocations"]
+    save(path, state)
+
+
+def install_connection(instance, meta, directory, account, reply):
+    saved = False
+    try:
+        identity = request(instance + "/api/v1/me", token=reply["access_token"])
+        if identity["kind"] != "user" or identity["client_id"] != CLIENT or (account and account != identity["id"]):
+            raise Failure("The approved account does not match the selected connection.")
+        path = account_path(directory, identity["id"])
+        with locked(path):
+            state = credentials(reply, identity["id"])
+            if path.exists():
+                old = json.loads(path.read_text())
+                state["pending_revocations"] = old.get("pending_revocations", []) + [old["refresh_token"]]
+            save(path, state)
+            saved = True
+            retire_previous(path, state, meta)
+    except DurabilityError:
+        # The new file is visible. Keep both grants usable until a retry confirms durability.
+        raise
+    except (Failure, OSError, KeyError, ValueError) as exc:
+        if not saved:
+            try:
+                revoke(meta, reply["refresh_token"])
+            except (Failure, OSError, KeyError, ValueError):
+                raise Failure("Could not save or revoke the new connection. "
+                              "Revoke the new Foreman CLI connection under Connected apps.") from exc
+        raise
+    print("Connected " + identity["id"] + " with permissions " + reply["scope"])
+
+
+def use_connection(command, instance, meta, directory, account):
+    if account:
+        path = account_path(directory, account)
+    else:
+        accounts = list(directory.glob("*.json"))
+        if len(accounts) > 1:
+            raise Failure("Select --account from " + ", ".join(sorted(json.loads(p.read_text())["account"] for p in accounts)))
+        path = accounts[0] if accounts else None
+    if path is None:
+        raise Failure("No connection. Run login first.")
+    with locked(path):
+        if not path.exists():
+            raise Failure("No connection for this account. Run login first.")
+        state = json.loads(path.read_text())
+        retire_previous(path, state, meta)
+        if command == "logout":
+            revoke(meta, state["refresh_token"])
+            path.unlink()
+            print("Disconnected " + state["account"])
+            return
+        if state["expires"] <= time.time() + 30:
+            try:
+                reply = request(meta["token_endpoint"], {"client_id": CLIENT, "grant_type": "refresh_token",
+                                                        "refresh_token": state["refresh_token"]})
+            except OAuthError as exc:
+                if str(exc) == "invalid_grant":
+                    raise Failure("Connection expired or revoked. Run login to approve a new connection.") from None
+                raise
+            state = credentials(reply, state["account"])
+            save(path, state)
+        print(json.dumps(request(instance + "/api/v1/me", token=state["access_token"])))
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--instance", required=True, help="Foreman HTTPS origin")
+    parser.add_argument("--account", help="account UUID if multiple accounts are connected")
+    sub = parser.add_subparsers(dest="command", required=True)
+    sub.add_parser("login").add_argument("--scope", default="repos:list", help="space-separated permissions")
+    sub.add_parser("me")
+    sub.add_parser("logout")
+    args = parser.parse_args()
+    instance = args.instance.rstrip("/")
+    if origin(instance) != instance:
+        raise Failure("Select an instance origin without a path, query, or fragment.")
+    meta = discover(instance)
+    directory = state_dir(instance)
+    if args.command == "login":
+        login(instance, meta, directory, args.scope, args.account)
+    else:
+        use_connection(args.command, instance, meta, directory, args.account)
+
+
+if __name__ == "__main__":
+    os.umask(0o077)
+    try:
+        main()
+    except (Failure, OSError, ValueError, KeyError, URLError) as error:
+        sys.exit(str(error))

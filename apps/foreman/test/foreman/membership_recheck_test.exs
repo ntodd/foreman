@@ -156,6 +156,62 @@ defmodule Foreman.MembershipRecheckTest do
              GitHub.environment_token(user, repo_fixture(token_mode: "broad"))
   end
 
+  test "a confirmed denial at browser login immediately revokes existing authority", %{user: user} do
+    configure(["root"], [], "acme")
+    profile = %{"id" => user.github_id, "login" => user.login}
+
+    assert {:error, :not_allowed} =
+             Accounts.sign_in_from_github(profile, %{}, org_member?: :unknown)
+
+    refute revoked?(user)
+    assert sessions(user) == 1
+    assert {:error, :not_allowed} = Accounts.sign_in_from_github(profile, %{}, org_member?: false)
+    assert revoked?(user)
+    assert sessions(user) == 0
+  end
+
+  test "a refresh in flight cannot restore credentials cleared by offboarding", %{user: user} do
+    admin = user_fixture(role: "admin") |> Foreman.Scope.for_user()
+
+    expect(ClientMock, :refresh_user_token, fn _, "ghr_old" ->
+      {:ok, _} = Accounts.set_disabled(admin, user, true)
+      {:ok, %{access_token: "new", refresh_token: "new-refresh", expires_in: 28_800}}
+    end)
+
+    assert {:error, :login_expired} = GitHub.user_token(user)
+
+    assert {:error, :login_expired} =
+             GitHub.environment_token(user, repo_fixture(token_mode: "broad"))
+
+    assert Repo.reload!(user).access_token == nil
+  end
+
+  test "an API check that confirms removal from the local allowlist revokes every connection", %{
+    user: user
+  } do
+    configure(["root"], ["pat"], nil)
+    client = Repo.get!(Foreman.OAuth.Client, "foreman-cli")
+    session = Accounts.create_session(user, "device")
+
+    tokens =
+      for _ <- 1..2 do
+        {:ok, device} = Foreman.OAuth.DeviceFlow.start(client, "repos:list")
+
+        {:ok, "approve"} =
+          Foreman.OAuth.DeviceFlow.decide(device.user_code, "approve", user, session)
+
+        {:ok, pair} = Foreman.OAuth.DeviceFlow.poll(client, device.device_code)
+        pair
+      end
+
+    [first, second] = tokens
+    configure(["root"], [], nil)
+    assert {:error, :invalid_grant} = Foreman.OAuth.refresh(client, first.refresh_token, nil)
+    configure(["root"], ["pat"], nil)
+    assert :error = Foreman.OAuth.authenticate(second.access_token)
+    assert sessions(user) == 0
+  end
+
   describe "the periodic check of signed-in users" do
     # Someone with no environments never needs a token refreshed, so the
     # check above alone would leave their session alive for 30 days.
@@ -174,6 +230,30 @@ defmodule Foreman.MembershipRecheckTest do
 
       assert :ok = Foreman.Jobs.CheckAccess.perform(%Oban.Job{args: %{}})
       assert sessions(user) == 0
+      assert revoked?(user)
+    end
+
+    test "hourly recheck revokes an API-only user's grant after a confirmed departure", %{
+      user: user
+    } do
+      configure(["root"], [], "acme")
+      client = Repo.get!(Foreman.OAuth.Client, "foreman-cli")
+      {:ok, device} = Foreman.OAuth.DeviceFlow.start(client, "repos:list")
+      session = Accounts.create_session(user, "device")
+
+      {:ok, "approve"} =
+        Foreman.OAuth.DeviceFlow.decide(device.user_code, "approve", user, session)
+
+      {:ok, tokens} = Foreman.OAuth.DeviceFlow.poll(client, device.device_code)
+      {:ok, principal} = Foreman.OAuth.authenticate(tokens.access_token)
+      Accounts.delete_user_sessions(user)
+      refreshes()
+      expect(ClientMock, :org_membership, fn "ghu_new", "acme" -> {:ok, false} end)
+
+      assert :ok = Foreman.Jobs.CheckAccess.perform(%Oban.Job{args: %{}})
+      assert :error = Foreman.OAuth.authenticate(tokens.access_token)
+      assert :error = Foreman.OAuth.authorize_grant(principal.grant_id)
+      assert {:error, :invalid_grant} = Foreman.OAuth.refresh(client, tokens.refresh_token, nil)
       assert revoked?(user)
     end
 

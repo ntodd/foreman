@@ -1,6 +1,6 @@
 defmodule Foreman.Jobs.CheckAccess do
   @moduledoc """
-  Checks that everyone with a live session may still use Foreman (they
+  Checks that everyone with a live session or personal API grant may still use Foreman (they
   might have left the org or an allowlist). Token refreshes check too, but
   someone with no environments may not refresh for weeks.
 
@@ -8,7 +8,7 @@ defmodule Foreman.Jobs.CheckAccess do
   org, so they're signed out when it comes down to the org; signing in
   again checks it.
   """
-  use Oban.Worker, queue: :github, max_attempts: 3, unique: [period: 3600]
+  use Oban.Worker, queue: :github, max_attempts: 3, unique: [period: 3500]
 
   import Ecto.Query
 
@@ -52,15 +52,24 @@ defmodule Foreman.Jobs.CheckAccess do
   end
 
   defp signed_in?(%User{id: id}),
-    do: Foreman.Repo.exists?(from s in Session, where: s.user_id == ^id)
+    do: Foreman.Repo.exists?(from u in active_users(), where: u.id == ^id)
 
-  defp signed_in_users do
+  defp signed_in_users, do: Foreman.Repo.all(active_users())
+
+  defp active_users do
+    cutoff = DateTime.add(DateTime.utc_now(), -30, :day)
+
     from(u in User,
       as: :user,
       where:
-        is_nil(u.disabled_at) and
-          exists(from s in Session, where: s.user_id == parent_as(:user).id)
+        is_nil(u.disabled_at) and not u.service_account and
+          (exists(
+             from s in Session,
+               where: s.user_id == parent_as(:user).id and s.inserted_at > ^cutoff
+           ) or
+             exists(
+               from g in Foreman.OAuth.live_grants(), where: g.user_id == parent_as(:user).id
+             ))
     )
-    |> Foreman.Repo.all()
   end
 end

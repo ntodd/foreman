@@ -67,6 +67,13 @@ defmodule ForemanWeb.Layouts do
           >
             Settings
           </.sidebar_link>
+          <.sidebar_link
+            href={~p"/settings/connections"}
+            icon="hero-link"
+            current_path={@current_path}
+          >
+            Connected apps
+          </.sidebar_link>
         </.sidebar_group>
 
         <.sidebar_group :if={Foreman.Scope.admin?(@current_scope)} label="Admin">
@@ -86,6 +93,9 @@ defmodule ForemanWeb.Layouts do
             current_path={@current_path}
           >
             Audit log
+          </.sidebar_link>
+          <.sidebar_link href={~p"/admin/apps"} icon="hero-key" current_path={@current_path}>
+            API clients
           </.sidebar_link>
           <.sidebar_link href={~p"/admin/oban"} icon="hero-queue-list" current_path={@current_path}>
             Jobs

@@ -52,7 +52,7 @@ defmodule ForemanWeb.Plugs.SecurityHeaders do
   end
 
   defp maybe_hsts(conn) do
-    if conn.scheme == :https or get_req_header(conn, "x-forwarded-proto") == ["https"],
+    if conn.scheme == :https,
       do: put_resp_header(conn, "strict-transport-security", "max-age=31536000"),
       else: conn
   end
