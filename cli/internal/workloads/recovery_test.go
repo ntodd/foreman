@@ -81,7 +81,10 @@ func TestKilledCreateRecoversGeneratedKeyAndBody(t *testing.T) {
 	h.API = fake{create: func(context.Context, string, api.Create) (*api.Response[api.Accepted], error) {
 		return nil, &api.HTTPError{StatusCode: 409, Code: "capacity_confirmation_required", Message: "Capacity warning."}
 	}}
-	h.failure(t, "capacity_confirmation_required", "env", "create", "--resume", progress.RequestKey)
+	report := h.failure(t, "outcome_unknown", "env", "create", "--resume", progress.RequestKey)
+	if report["request_key"] != progress.RequestKey || report["remote_code"] != "capacity_confirmation_required" || report["http_status"] != float64(409) {
+		t.Fatal(report)
+	}
 	h.API = fake{create: func(context.Context, string, api.Create) (*api.Response[api.Accepted], error) {
 		t.Fatal("changed a killed submission")
 		return nil, nil

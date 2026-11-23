@@ -238,7 +238,14 @@ func (o Options) submitSaved(ctx context.Context, j *journal, r *record, result 
 			return nil
 		}
 		var remote *api.HTTPError
-		if allRejected && errors.As(err, &remote) && remote.StatusCode >= 400 && remote.StatusCode == correctableStatus(remote.Code) {
+		if errors.As(err, &remote) && remote.StatusCode >= 400 && remote.StatusCode == correctableStatus(remote.Code) {
+			if !allRejected {
+				f := failure(err)
+				f.Code = "outcome_unknown"
+				f.RemoteCode = remote.Code
+				f.Message += " An earlier submission may have been accepted. Replay the saved inputs with foreman env create --resume KEY."
+				return f
+			}
 			r.Rejection = remote.Code
 			if e := j.save(r); e != nil {
 				return e
@@ -253,11 +260,6 @@ func (o Options) submitSaved(ctx context.Context, j *journal, r *record, result 
 				r.Body.ConfirmCapacityWarning = new(true)
 				continue
 			}
-		}
-		if !allRejected && isCapacityWarning(err) {
-			f := failure(err)
-			f.Message += " An earlier submission may have been accepted. This key must replay its original inputs."
-			return f
 		}
 		return mutationFailure(err, "create", r.Key, "")
 	}
