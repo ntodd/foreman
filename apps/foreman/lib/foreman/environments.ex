@@ -199,7 +199,7 @@ defmodule Foreman.Environments do
 
     changeset =
       Environment.create_changeset(
-        %Environment{},
+        %Environment{repo_github_id: repo.github_id},
         Map.merge(limits, %{
           slug: slug,
           index: index,
