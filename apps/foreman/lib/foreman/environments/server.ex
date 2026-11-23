@@ -277,13 +277,10 @@ defmodule Foreman.Environments.Server do
   # launched it, and after that one is revoked no changed secret could be
   # written to the box.
   #
-  # Only while running is still what is wanted. A restart sent again
-  # after a reconnect may find a stop has been asked for since, and the
-  # authority recorded then belongs to the stop.
-  defp bind_workload_grant(
-         %{action: action, api_grant_id: id} = op,
-         %{desired_state: "running"} = env
-       )
+  # Only while this restart is still the latest word on the workspace. A
+  # restart sent again after a reconnect may find a stop or a rebuild has
+  # been asked for since, and the authority recorded then is theirs.
+  defp bind_workload_grant(%{action: action, api_grant_id: id} = op, env)
        when action in ["restart_affected", "restart_all"] and not is_nil(id) do
     authority = %{
       "action" => action,
@@ -292,7 +289,9 @@ defmodule Foreman.Environments.Server do
       "trigger" => op.trigger
     }
 
-    if env.workload_grant_id != id or env.desired_authority != authority,
+    current? = env.workload_grant_id == id and env.desired_authority == authority
+
+    if env.desired_state == "running" and not current? and not Environments.superseded?(op),
       do: Environments.update_env!(env, %{workload_grant_id: id, desired_authority: authority})
   end
 

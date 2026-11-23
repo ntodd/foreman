@@ -1574,6 +1574,18 @@ defmodule Foreman.Environments do
       where: not is_nil(o.environment_id) and o.action in @lifecycle
   end
 
+  @doc """
+  Whether a lifecycle request has been made for the operation's
+  environment since the operation itself. Such a request, and not the
+  older operation, is what the environment currently answers to.
+  """
+  def superseded?(%{id: id, environment_id: env_id, inserted_at: at}) do
+    Repo.exists?(
+      from o in lifecycle_operations(),
+        where: o.environment_id == ^env_id and o.id != ^id and o.inserted_at >= ^at
+    )
+  end
+
   def active_lifecycle(env_id) do
     from o in lifecycle_operations(),
       where: o.environment_id == ^env_id and o.status in ["queued", "dispatched", "running"],

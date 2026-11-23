@@ -267,6 +267,25 @@ defmodule Foreman.PublicAPI.RestartTest do
       assert after_resend.desired_authority == stopping.desired_authority
     end
 
+    test "a restart sent again after a newer request for running leaves that one in charge",
+         ctx do
+      assert {:ok, _, op} = restart(ctx.actor, ctx.env, "restart_all")
+      files_then_restart(ctx.box, op)
+
+      # An admin rebuilds it in the browser while the restart is still out.
+      admin = user_fixture(role: "admin")
+
+      {:ok, _} =
+        Foreman.Environments.rebuild(Foreman.Scope.for_user(admin), Repo.reload!(ctx.env))
+
+      rebuilding = Repo.reload!(ctx.env)
+      assert %{"action" => "rebuild", "user_id" => admin_id} = rebuilding.desired_authority
+      assert admin_id == admin.id
+
+      Foreman.Environments.Server.resend(ctx.env.id, op)
+      assert Repo.reload!(ctx.env).desired_authority == rebuilding.desired_authority
+    end
+
     test "a restart refused at dispatch leaves the authority behind the workspace alone", ctx do
       earlier = %{
         "action" => "start",
