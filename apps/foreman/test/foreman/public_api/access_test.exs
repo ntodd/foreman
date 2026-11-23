@@ -71,6 +71,41 @@ defmodule Foreman.PublicAPI.AccessTest do
     assert ids(Access.environments(principal)) == Enum.sort([mine.id, tombstone.id])
   end
 
+  test "polling a single environment checks only its repository and conceals other owners" do
+    github_config()
+    mine = user_fixture()
+    principal = %{kind: :user, user: mine}
+    repo = repo_fixture() |> github_id(123)
+    env = environment_fixture(user: mine, repo: repo)
+    other = environment_fixture()
+
+    assert ids(Access.environments(principal, other.id)) == []
+
+    expect(ClientMock, :get_repo, fn token, name ->
+      assert token == mine.access_token
+      assert name == repo.full_name
+      {:ok, %{"id" => 123, "full_name" => name}}
+    end)
+
+    assert ids(Access.environments(principal, env.id)) == [env.id]
+    expect(ClientMock, :get_repo, fn _, _ -> {:error, :not_found} end)
+    assert ids(Access.environments(principal, env.id)) == []
+  end
+
+  test "a temporary failure to verify visibility has a retryable API error" do
+    github_config()
+    repo = repo_fixture()
+    principal = %{kind: :user, user: user_fixture()}
+    expect(ClientMock, :get_repo, fn _, _ -> {:error, :timeout} end)
+    error = assert_raise Access.Unavailable, fn -> Access.repos(principal, repo.id) end
+    assert Plug.Exception.status(error) == 503
+
+    assert %{code: "repository_access_unavailable", message: message} =
+             ForemanWeb.ErrorJSON.render("503.json", %{reason: error})
+
+    assert message == Exception.message(error)
+  end
+
   defp github_config do
     old = Application.get_env(:foreman, :github_app)
 

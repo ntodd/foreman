@@ -33,33 +33,56 @@ defmodule Foreman.PublicAPI.Access do
     end
   end
 
-  def repos(%{kind: :service_account} = principal) do
+  def repos(principal, id \\ :all)
+
+  def repos(%{kind: :service_account} = principal, id) do
     ids = ServiceAccounts.repo_ids(principal)
-    where(active_repos(), [r], r.id in ^ids)
+    where(by_id(active_repos(), id), [r], r.id in ^ids)
   end
 
-  def repos(%{kind: :user, user: user}) do
+  def repos(%{kind: :user, user: user}, id) do
+    query = by_id(active_repos(), id)
+
     cond do
       GitHub.configured?() ->
-        ids = github_repo_ids(user)
-        where(active_repos(), [r], r.id in ^ids)
+        ids = github_repo_ids(user, id, query)
+        where(query, [r], r.id in ^ids)
 
       local_git?() ->
-        where(active_repos(), [r], not r.private)
+        where(query, [r], not r.private)
 
       true ->
-        where(active_repos(), false)
+        where(query, false)
     end
   end
 
   def environments(principal) do
-    repo_ids = select(repos(principal), [r], r.id)
+    visible_in_repos(owned_environments(principal), repos(principal))
+  end
+
+  def environments(principal, id) do
+    query = by_id(owned_environments(principal), id)
+
+    case Repo.one(select(query, [e], e.repo_id)) do
+      nil -> where(query, false)
+      repo_id -> visible_in_repos(query, repos(principal, repo_id))
+    end
+  end
+
+  defp owned_environments(principal) do
     box_ids = select(boxes(principal), [b], b.id)
 
     from e in Environment,
-      where: e.user_id == ^principal.user.id,
-      where: e.repo_id in subquery(repo_ids) and e.box_id in subquery(box_ids)
+      where: e.user_id == ^principal.user.id and e.box_id in subquery(box_ids)
   end
+
+  defp visible_in_repos(query, repos) do
+    repo_ids = select(repos, [r], r.id)
+    where(query, [e], e.repo_id in subquery(repo_ids))
+  end
+
+  defp by_id(query, :all), do: query
+  defp by_id(query, id), do: where(query, [r], r.id == ^id)
 
   defp active_repos, do: from(r in GitRepo, where: not r.archived and is_nil(r.removed_at))
 
@@ -73,18 +96,10 @@ defmodule Foreman.PublicAPI.Access do
     end
   end
 
-  defp github_repo_ids(user) do
+  defp github_repo_ids(user, id, query) do
     case GitHub.user_token(user) do
       {:ok, token} ->
-        from(r in active_repos(),
-          join: o in assoc(r, :owner),
-          select: {o.installation_id, r.id, r.github_id, r.full_name}
-        )
-        |> Repo.all()
-        |> Enum.group_by(&elem(&1, 0))
-        |> Enum.flat_map(fn {installation, records} ->
-          installation_repo_ids(token, installation, records)
-        end)
+        github_repo_ids_with_token(token, id, query)
 
       {:error, :login_expired} ->
         []
@@ -92,6 +107,24 @@ defmodule Foreman.PublicAPI.Access do
       {:error, _} ->
         raise Unavailable
     end
+  end
+
+  defp github_repo_ids_with_token(token, :all, query) do
+    from(r in query,
+      join: o in assoc(r, :owner),
+      select: {o.installation_id, r.id, r.github_id, r.full_name}
+    )
+    |> Repo.all()
+    |> Enum.group_by(&elem(&1, 0))
+    |> Enum.flat_map(fn {installation, records} ->
+      installation_repo_ids(token, installation, records)
+    end)
+  end
+
+  defp github_repo_ids_with_token(token, _id, query) do
+    for {id, github_id, name} <- Repo.all(select(query, [r], {r.id, r.github_id, r.full_name})),
+        readable_repo?(token, github_id, name),
+        do: id
   end
 
   defp installation_repo_ids(token, nil, records) do
