@@ -174,6 +174,49 @@ defmodule Foreman.PublicAPI.ExpiryTest do
            )
   end
 
+  test "a dispatched expiry retry cannot reverse its sibling's confirmed success" do
+    for action <- ~w(stop destroy) do
+      env = environment_fixture()
+
+      Repo.update!(
+        change(env, expiry_at: DateTime.add(DateTime.utc_now(), -1), expiry_action: action)
+      )
+
+      Registry.register(Foreman.Registry, {:agent, env.box_id}, nil)
+      job = %Oban.Job{args: %{"environment_id" => env.id}}
+
+      :ok = EnvironmentExpiry.perform(job)
+      assert_receive {:dispatch, %{op_id: first}}
+
+      timeout = fn id ->
+        Foreman.Operations.timed_out(
+          Repo.get!(Operation, id),
+          "no result",
+          &Foreman.Environments.record_result/1
+        )
+      end
+
+      assert {:ok, _, _} = timeout.(first)
+      :ok = EnvironmentExpiry.perform(job)
+      assert_receive {:dispatch, %{op_id: retry}}
+      refute retry == first
+
+      {:ok, success} = ForemanProtocol.Event.new("op.result", %{op_id: first, status: "ok"})
+      :ok = Foreman.Agents.handle_event(env.box_id, success)
+      confirmed = Repo.reload!(env)
+      assert confirmed.expiry_consumed_at
+      assert confirmed.observed_state == if(action == "stop", do: "stopped", else: "destroyed")
+      assert {:ok, %{status: "failed"}, _} = timeout.(retry)
+      assert Repo.reload!(env) == confirmed
+
+      # The retry may also report a physical result after its own timeout.
+      {:ok, late} = ForemanProtocol.Event.new("op.result", %{op_id: retry, status: "ok"})
+      :ok = Foreman.Agents.handle_event(env.box_id, late)
+      assert Repo.get!(Operation, retry).status == "succeeded"
+      assert Repo.reload!(env) == confirmed
+    end
+  end
+
   test "start can provision an initial create that expiry stopped before first dispatch" do
     env = environment_fixture(created_once: false, observed_state: "pending")
     Foreman.Environments.queue_operation(env, "create", %{}, nil)
