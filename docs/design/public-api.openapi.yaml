@@ -4,11 +4,13 @@ info:
   version: 1.0.0
   description: Version 1 of the Foreman environment API. Connect to the authorization server at the instance origin, then use the bearer token under /api/v1.
 servers:
-  - url: /api/v1
+  - url: /
+# Token exchange and revocation accept public clients or installation Basic auth.
+security: [{}, {serviceCredential: []}]
 paths:
   /.well-known/oauth-authorization-server:
-    servers: [{url: /}]
     get:
+      security: []
       operationId: getOAuthMetadata
       summary: Discover the instance issuer, endpoints, grants and scopes
       responses:
@@ -30,8 +32,8 @@ paths:
                   token_endpoint_auth_methods_supported: {type: array, items: {type: string}, example: [none, client_secret_basic]}
                   revocation_endpoint_auth_methods_supported: {type: array, items: {type: string}, example: [none, client_secret_basic]}
   /oauth/device/code:
-    servers: [{url: /}]
     post:
+      security: []
       operationId: requestDeviceCode
       summary: Begin personal approval on another device
       requestBody:
@@ -61,36 +63,19 @@ paths:
                   interval: {type: integer, minimum: 1, description: Minimum seconds between polls}
         default: {$ref: '#/components/responses/OAuthError'}
   /oauth/token:
-    servers: [{url: /}]
     post:
       operationId: obtainToken
       summary: Exchange a device code, rotate a refresh token, or obtain a service token
       description: Public clients supply client_id. Service installations use HTTP Basic client authentication. Successful responses use Cache-Control no-store and Pragma no-cache.
-      security: [{}, {serviceCredential: []}]
       requestBody:
         required: true
         content:
           application/x-www-form-urlencoded:
             schema:
-              type: object
-              required: [grant_type]
-              properties:
-                grant_type: {enum: ['urn:ietf:params:oauth:grant-type:device_code', refresh_token, client_credentials]}
-                client_id: {type: string}
-                device_code: {type: string}
-                refresh_token: {type: string}
-                scope: {$ref: '#/components/schemas/ScopeString'}
               oneOf:
-                - properties: {grant_type: {const: 'urn:ietf:params:oauth:grant-type:device_code'}}
-                  required: [device_code, client_id]
-                - properties: {grant_type: {const: refresh_token}}
-                  required: [refresh_token, client_id]
-                - properties: {grant_type: {const: client_credentials}}
-                  description: Send the installation ID and secret together in the HTTP Basic Authorization header.
-                  not:
-                    anyOf:
-                      - required: [client_id]
-                      - required: [client_secret]
+                - $ref: '#/components/schemas/DeviceCodeGrant'
+                - $ref: '#/components/schemas/RefreshTokenGrant'
+                - $ref: '#/components/schemas/ClientCredentialsGrant'
       responses:
         '200':
           description: Personal grants include a new refresh token on each successful exchange. Service grants issue access tokens only.
@@ -107,12 +92,10 @@ paths:
                   refresh_token: {type: string}
         default: {$ref: '#/components/responses/OAuthError'}
   /oauth/revoke:
-    servers: [{url: /}]
     post:
       operationId: revokeToken
       summary: Revoke the personal connection on logout or invalidate a service access token
       description: For a personal connection, revoke the refresh token and its associated access tokens. Public clients supply client_id. Service installations authenticate with HTTP Basic.
-      security: [{}, {serviceCredential: []}]
       requestBody:
         required: true
         content:
@@ -127,7 +110,7 @@ paths:
       responses:
         '200': {description: 'Revocation processed, including an already invalid token'}
         default: {$ref: '#/components/responses/OAuthError'}
-  /me:
+  /api/v1/me:
     get:
       operationId: getIdentity
       summary: Show the acting identity and connected client
@@ -139,7 +122,7 @@ paths:
             application/json:
               schema: {$ref: '#/components/schemas/Identity'}
         default: {$ref: '#/components/responses/Error'}
-  /repos:
+  /api/v1/repos:
     get:
       operationId: listRepos
       x-required-permission: 'repos:list'
@@ -154,7 +137,7 @@ paths:
             application/json:
               schema: {$ref: '#/components/schemas/RepositoryPage'}
         default: {$ref: '#/components/responses/Error'}
-  /boxes:
+  /api/v1/boxes:
     get:
       operationId: listBoxes
       x-required-permission: 'boxes:list'
@@ -169,7 +152,7 @@ paths:
             application/json:
               schema: {$ref: '#/components/schemas/BoxPage'}
         default: {$ref: '#/components/responses/Error'}
-  /environments:
+  /api/v1/environments:
     get:
       operationId: listEnvironments
       x-required-permission: 'environments:list'
@@ -222,7 +205,7 @@ paths:
               schema: {$ref: '#/components/schemas/Error'}
               example: {code: original_environment_gone, message: Original environment gone.}
         default: {$ref: '#/components/responses/Error'}
-  /environments/{id}:
+  /api/v1/environments/{id}:
     get:
       operationId: getEnvironment
       x-required-permission: 'environments:read'
@@ -237,7 +220,7 @@ paths:
             application/json:
               schema: {$ref: '#/components/schemas/Environment'}
         default: {$ref: '#/components/responses/Error'}
-  /environments/{id}/operations:
+  /api/v1/environments/{id}/operations:
     get:
       operationId: listEnvironmentOperations
       x-required-permission: 'operations:list'
@@ -292,7 +275,7 @@ paths:
             application/json:
               schema: {$ref: '#/components/schemas/Error'}
               example: {code: lifecycle_conflict, message: An opposing lifecycle action is in progress.}
-  /operations/{id}:
+  /api/v1/operations/{id}:
     get:
       operationId: getOperation
       x-required-permission: 'operations:read'
@@ -307,7 +290,7 @@ paths:
             application/json:
               schema: {$ref: '#/components/schemas/Operation'}
         default: {$ref: '#/components/responses/Error'}
-  /operations/{id}/logs:
+  /api/v1/operations/{id}/logs:
     get:
       operationId: getOperationLogs
       x-required-permission: 'logs:read'
@@ -349,7 +332,8 @@ components:
       name: Idempotency-Key
       in: header
       required: true
-      schema: {type: string, minLength: 1}
+      description: Supply the same nonblank value when retrying the same request.
+      schema: {type: string, minLength: 1, pattern: '\S'}
   responses:
     Error:
       description: Request failed. See the stable code for recovery.
@@ -367,6 +351,34 @@ components:
               error: {type: string}
               error_description: {type: string}
   schemas:
+    DeviceCodeGrant:
+      type: object
+      required: [grant_type, client_id, device_code]
+      properties:
+        grant_type: {type: string, const: 'urn:ietf:params:oauth:grant-type:device_code'}
+        client_id: {type: string}
+        device_code: {type: string}
+      not: {required: [client_secret]}
+    RefreshTokenGrant:
+      type: object
+      required: [grant_type, client_id, refresh_token]
+      properties:
+        grant_type: {type: string, const: refresh_token}
+        client_id: {type: string}
+        refresh_token: {type: string}
+        scope: {$ref: '#/components/schemas/ScopeString'}
+      not: {required: [client_secret]}
+    ClientCredentialsGrant:
+      type: object
+      description: Send the installation ID and secret in the HTTP Basic Authorization header.
+      required: [grant_type]
+      properties:
+        grant_type: {type: string, const: client_credentials}
+        scope: {$ref: '#/components/schemas/ScopeString'}
+      not:
+        anyOf:
+          - required: [client_id]
+          - required: [client_secret]
     ScopeString:
       type: string
       description: Space-separated resource-first scope names from scopes_supported
@@ -409,7 +421,14 @@ components:
         box_id:
           $ref: '#/components/schemas/Id'
           description: Pins provisioning to this box. Omit to enable automatic placement.
-        branch: {type: string, minLength: 1}
+        branch:
+          type: string
+          description: Named Git branch of at most 255 UTF-8 bytes. Omit to use the repository default branch.
+          minLength: 1
+          maxLength: 255
+          # Reject invalid components, ref sequences and characters as in ForemanProtocol.Schema.
+          not:
+            pattern: '(^[-/.]|^@$|[/.]$|\.lock(/|$)|/\.|\.\.|//|@\{|[\u0000-\u0020\u007f~^:?*\[\\])'
         expiry: {$ref: '#/components/schemas/Expiry'}
         confirm_capacity_warning: {type: boolean, default: false}
     Action:

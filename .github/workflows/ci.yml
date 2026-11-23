@@ -157,6 +157,22 @@ jobs:
       - name: Test CLI credential replacement
         if: matrix.db == 'sqlite'
         run: python3 -B ../../e2e/oauth_cli_test.py
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        if: matrix.db == 'sqlite'
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        if: matrix.db == 'sqlite'
+        with:
+          node-version: "22"
+      - name: Exercise generated clients against the public API
+        if: matrix.db == 'sqlite'
+        run: |
+          python -m venv "$RUNNER_TEMP/openapi-venv"
+          export PATH="$RUNNER_TEMP/openapi-venv/bin:$RUNNER_TEMP/openapi-ts/node_modules/.bin:$PATH"
+          python -m pip install openapi-python-client==0.30.0
+          npm install --prefix "$RUNNER_TEMP/openapi-ts" --no-audit --no-fund --ignore-scripts @hey-api/openapi-ts@0.99.0 typescript@5.9.3
+          ../../e2e/openapi/run.sh
       # What Flatcar's Ignition (the version Flatcar ships) makes of the
       # first-boot configs the control plane makes for Flatcar boxes.
       - name: Validate Flatcar first-boot configs
