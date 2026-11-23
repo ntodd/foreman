@@ -5,12 +5,59 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"reflect"
+	"syscall"
 	"testing"
 )
+
+type failedRefreshTransport struct {
+	op       string
+	readBody bool
+	body     io.ReadCloser
+}
+
+func (tr *failedRefreshTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	tr.body = req.Body
+	defer tr.body.Close()
+	if tr.readBody {
+		if _, err := io.ReadFull(tr.body, make([]byte, 1)); err != nil {
+			return nil, err
+		}
+	}
+	return nil, &net.OpError{Op: tr.op, Net: "tcp", Err: syscall.ECONNREFUSED}
+}
+
+func TestOnlyUnreadRefreshOnFailedDialCanBeRetried(t *testing.T) {
+	for _, tc := range []struct {
+		name, op         string
+		readBody, unsent bool
+	}{
+		{"dial before body read", "dial", false, true},
+		{"dial after partial body read", "dial", true, false},
+		{"read error", "read", false, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tr := &failedRefreshTransport{op: tc.op, readBody: tc.readBody}
+			client, err := NewClient("https://foreman.example", &http.Client{Transport: tr})
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, err = client.ObtainToken(context.Background(), RefreshTokenGrant{GrantType: "refresh_token", ClientID: "cli", RefreshToken: "old"})
+			if !errors.Is(err, syscall.ECONNREFUSED) || errors.Is(err, ErrRefreshTokenNotSent) != tc.unsent {
+				t.Fatalf("unexpected delivery classification: %v", err)
+			}
+			if tc.unsent {
+				if n, err := tr.body.Read(make([]byte, 1)); n != 0 || !errors.Is(err, io.ErrClosedPipe) {
+					t.Fatalf("transport could still read an abandoned refresh body: %d, %v", n, err)
+				}
+			}
+		})
+	}
+}
 
 func TestContractRequests(t *testing.T) {
 	ctx := context.Background()

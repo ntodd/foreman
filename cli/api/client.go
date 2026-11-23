@@ -10,10 +10,12 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"time"
 )
 
@@ -132,6 +134,36 @@ type request struct {
 	success                                   []int
 }
 
+// ErrRefreshTokenNotSent means a dial failed before the transport could read
+// the refresh token from the request body. This attempt did not spend it.
+var ErrRefreshTokenNotSent = errors.New("refresh token was not sent")
+
+type refreshBody struct {
+	io.ReadCloser
+	state atomic.Uint32
+}
+
+const (
+	refreshUnread uint32 = iota
+	refreshStarted
+	refreshAborted
+)
+
+func (b *refreshBody) Read(p []byte) (int, error) {
+	b.state.CompareAndSwap(refreshUnread, refreshStarted)
+	if b.state.Load() == refreshAborted {
+		return 0, io.ErrClosedPipe
+	}
+	return b.ReadCloser.Read(p)
+}
+
+func (b *refreshBody) abortFailedDial(err error) bool {
+	var op *net.OpError
+	// Seal the unread body before reporting non-delivery, since a transport
+	// may still hold it after Do returns. The token exists only in this body.
+	return errors.As(err, &op) && op.Op == "dial" && b.state.CompareAndSwap(refreshUnread, refreshAborted)
+}
+
 func call[T any](ctx context.Context, c *Client, s request) (*Response[T], error) {
 	target := c.origin + s.path
 	if endpoint, ok := c.discovered[s.oauthOperation]; ok {
@@ -168,6 +200,11 @@ func call[T any](ctx context.Context, c *Client, s request) (*Response[T], error
 	}
 	// Mutations and single-use refresh grants must never be replayed by the transport.
 	req.GetBody = nil
+	var refresh *refreshBody
+	if s.form.Get("grant_type") == "refresh_token" {
+		refresh = &refreshBody{ReadCloser: req.Body}
+		req.Body = refresh
+	}
 	req.Header.Set("Accept", "application/json")
 	if contentType != "" {
 		req.Header.Set("Content-Type", contentType)
@@ -187,6 +224,9 @@ func call[T any](ctx context.Context, c *Client, s request) (*Response[T], error
 	}
 	res, err := c.http.Do(req)
 	if err != nil {
+		if refresh != nil && refresh.abortFailedDial(err) {
+			return nil, fmt.Errorf("%w: %w", ErrRefreshTokenNotSent, err)
+		}
 		return nil, err
 	}
 	defer res.Body.Close()

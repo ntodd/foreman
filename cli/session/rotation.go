@@ -58,6 +58,9 @@ func (s *Store) rotate(ctx context.Context, public *api.Client, instance, path s
 
 	reply, err := public.ObtainToken(ctx, api.RefreshTokenGrant{GrantType: "refresh_token", ClientID: ClientID, RefreshToken: old.RefreshToken})
 	if err != nil {
+		if errors.Is(err, api.ErrRefreshTokenNotSent) {
+			return credential{}, errors.Join(err, s.save(path, old))
+		}
 		return credential{}, rotationUncertain(instance, old.Account, err)
 	}
 	next, err := s.credentials(reply.Value, old.Account)
