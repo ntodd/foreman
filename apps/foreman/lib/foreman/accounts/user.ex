@@ -5,6 +5,7 @@ defmodule Foreman.Accounts.User do
   @roles ~w(admin member)
 
   schema "users" do
+    field :access_generation, :integer, default: 0
     field :service_account, :boolean, default: false
     field :github_id, :integer
     field :login, :string
