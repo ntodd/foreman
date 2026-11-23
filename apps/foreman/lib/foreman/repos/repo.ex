@@ -13,6 +13,7 @@ defmodule Foreman.Repos.Repo do
     field :full_name, :string
     field :name, :string
     field :github_id, :integer
+    field :github_identity_bound_at, :utc_datetime_usec
     field :default_branch, :string, default: "main"
     field :private, :boolean, default: true
     field :archived, :boolean, default: false

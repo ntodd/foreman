@@ -114,9 +114,19 @@ defmodule Foreman.Repos do
 
     repo
     |> GitRepo.sync_changeset(attrs)
+    |> record_first_binding(repo, github_id)
     |> Ecto.Changeset.put_change(:owner_id, owner.id)
     |> Repo.insert_or_update()
   end
+
+  # Historical workspaces on a manually entered name predate our first
+  # evidence of which GitHub repository occupied it.
+  defp record_first_binding(changeset, %GitRepo{id: id, github_id: nil}, github_id)
+       when not is_nil(id) and is_integer(github_id) do
+    Ecto.Changeset.put_change(changeset, :github_identity_bound_at, DateTime.utc_now())
+  end
+
+  defp record_first_binding(changeset, _, _), do: changeset
 
   # A row with the same name but another GitHub id is another repo: the
   # first one was renamed or deleted and this one took its name. It
@@ -176,6 +186,7 @@ defmodule Foreman.Repos do
          {:ok, owner} <- get_or_create_owner(owner_login),
          {:ok, repo} <-
            upsert_repo(owner, Map.merge(%{full_name: full_name, name: name, manual: true}, attrs)) do
+      repo = bind_manual_repo(scope.user, repo)
       Audit.log(scope, "repo.add", repo)
       {:ok, Repo.preload(repo, :owner)}
     else
@@ -183,6 +194,27 @@ defmodule Foreman.Repos do
       error -> error
     end
   end
+
+  # Adding a public repo outside the app installation is an existing admin
+  # workflow. A verified immutable ID makes it eligible for the public API.
+  defp bind_manual_repo(user, %GitRepo{github_id: nil} = repo) do
+    with true <- Foreman.GitHub.configured?(),
+         {:ok, token} <- Foreman.GitHub.user_token(user),
+         {:ok, %{"id" => id, "full_name" => name}} when is_integer(id) and is_binary(name) <-
+           Foreman.GitHub.Client.impl().get_repo(token, repo.full_name),
+         true <- String.downcase(name) == String.downcase(repo.full_name) do
+      from(r in GitRepo,
+        where: r.id == ^repo.id and is_nil(r.github_id) and r.full_name == ^repo.full_name
+      )
+      |> Repo.update_all(set: [github_id: id, github_identity_bound_at: DateTime.utc_now()])
+
+      Repo.reload!(repo)
+    else
+      _ -> repo
+    end
+  end
+
+  defp bind_manual_repo(_user, repo), do: repo
 
   defp get_or_create_owner(login) do
     case get_owner_by_login(login) do

@@ -6,10 +6,9 @@ defmodule Foreman.PublicAPI.Access do
   """
   import Ecto.Query
 
-  alias Foreman.{Config, GitHub, OAuth, Repo}
+  alias Foreman.{Config, GitHub, OAuth}
   alias Foreman.Boxes.Box
   alias Foreman.Environments.Environment
-  alias Foreman.GitHub.Client
   alias Foreman.Repos.Repo, as: GitRepo
 
   defmodule Unavailable do
@@ -22,28 +21,55 @@ defmodule Foreman.PublicAPI.Access do
     |> service_resources(principal, :box_ids)
   end
 
-  def boxes(%{kind: :user, user: user}) do
-    query = from b in Box, where: is_nil(b.revoked_at)
+  def boxes(%{kind: :user, user: user} = principal) do
+    grant =
+      from g in matching_grants(principal),
+        join: account in assoc(g, :user),
+        select: %{role: account.role, service: account.service_account}
 
-    if user.role == "admin" do
-      query
-    else
-      from b in query, where: b.owner_user_id == ^user.id or ^user.id in b.shared_user_ids
-    end
+    from b in Box,
+      join: actor in subquery(grant),
+      on: not actor.service,
+      where: is_nil(b.revoked_at),
+      where:
+        (^user.role == "admin" and actor.role == "admin") or
+          b.owner_user_id == ^user.id or ^user.id in b.shared_user_ids
   end
 
-  def repos(principal, id \\ :all)
-
-  def repos(%{kind: :service_account} = principal, id) do
-    active_repos() |> by_id(id) |> service_resources(principal, :repo_ids)
+  def repos(principal, id \\ :all) do
+    query = from r in GitRepo, where: not r.archived and is_nil(r.removed_at)
+    query = by_id(query, id)
+    authorized_repos(query, principal)
+  rescue
+    # A selector alone does not establish that a private repo exists.
+    error in Unavailable ->
+      if id == :all, do: reraise(error, __STACKTRACE__), else: where(GitRepo, false)
   end
 
-  def repos(%{kind: :user, user: user}, id) do
-    query = by_id(active_repos(), id)
+  def environments(principal, id \\ :all) do
+    owned = by_id(owned_environments(principal), id)
+    candidates = select(owned, [e], e.repo_id)
+    query = from r in GitRepo, where: is_nil(r.removed_at) and r.id in subquery(candidates)
+    allowed = authorized_repos(query, principal)
+
+    from e in owned,
+      join: r in subquery(allowed),
+      on: r.id == e.repo_id,
+      where: is_nil(r.github_identity_bound_at) or r.github_identity_bound_at <= e.inserted_at
+  end
+
+  defp authorized_repos(query, %{kind: :service_account} = principal) do
+    query = if GitHub.configured?(), do: where(query, [r], not is_nil(r.github_id)), else: query
+    service_resources(query, principal, :repo_ids)
+  end
+
+  defp authorized_repos(query, %{kind: :user, user: user} = principal) do
+    grants = matching_grants(principal)
+    query = where(query, exists(subquery(grants)))
 
     cond do
       GitHub.configured?() ->
-        ids = github_repo_ids(user, id, query)
+        ids = Foreman.PublicAPI.RepositoryAccess.visible_ids(query, user)
         where(query, [r], r.id in ^ids)
 
       local_git?() ->
@@ -54,19 +80,6 @@ defmodule Foreman.PublicAPI.Access do
     end
   end
 
-  def environments(principal) do
-    visible_in_repos(owned_environments(principal), repos(principal))
-  end
-
-  def environments(principal, id) do
-    query = by_id(owned_environments(principal), id)
-
-    case Repo.one(select(query, [e], e.repo_id)) do
-      nil -> where(query, false)
-      repo_id -> visible_in_repos(query, repos(principal, repo_id))
-    end
-  end
-
   defp owned_environments(principal) do
     box_ids = select(boxes(principal), [b], b.id)
 
@@ -74,29 +87,25 @@ defmodule Foreman.PublicAPI.Access do
       where: e.user_id == ^principal.user.id and e.box_id in subquery(box_ids)
   end
 
-  defp visible_in_repos(query, repos) do
-    repo_ids = select(repos, [r], r.id)
-    where(query, [e], e.repo_id in subquery(repo_ids))
-  end
-
   # Keep the installation check in the final SQL statement: callers can
   # prepare a query before entering the placement transaction.
   defp service_resources(query, principal, field) do
-    grant =
-      from g in OAuth.live_grants(),
-        where:
-          g.id == ^principal.grant_id and g.client_id == ^principal.client_id and
-            g.user_id == ^principal.user.id
+    grant = matching_grants(principal)
 
     from resource in query,
       join: g in subquery(grant),
       on: type(resource.id, :string) in field(g, ^field)
   end
 
+  defp matching_grants(principal) do
+    from g in OAuth.live_grants(),
+      where:
+        g.id == ^principal.grant_id and g.client_id == ^principal.client_id and
+          g.user_id == ^principal.user.id
+  end
+
   defp by_id(query, :all), do: query
   defp by_id(query, id), do: where(query, [r], r.id == ^id)
-
-  defp active_repos, do: from(r in GitRepo, where: not r.archived and is_nil(r.removed_at))
 
   defp local_git? do
     case URI.parse(Config.git_base_url()) do
@@ -105,76 +114,6 @@ defmodule Foreman.PublicAPI.Access do
 
       _ ->
         false
-    end
-  end
-
-  defp github_repo_ids(user, id, query) do
-    case GitHub.user_token(user) do
-      {:ok, token} ->
-        github_repo_ids_with_token(token, id, query)
-
-      {:error, :login_expired} ->
-        []
-
-      {:error, _} ->
-        raise Unavailable
-    end
-  end
-
-  defp github_repo_ids_with_token(token, :all, query) do
-    from(r in query,
-      join: o in assoc(r, :owner),
-      select: {o.installation_id, r.id, r.github_id, r.full_name}
-    )
-    |> Repo.all()
-    |> Enum.group_by(&elem(&1, 0))
-    |> Enum.flat_map(fn {installation, records} ->
-      installation_repo_ids(token, installation, records)
-    end)
-  end
-
-  defp github_repo_ids_with_token(token, _id, query) do
-    for {id, github_id, name} <- Repo.all(select(query, [r], {r.id, r.github_id, r.full_name})),
-        readable_repo?(token, github_id, name),
-        do: id
-  end
-
-  defp installation_repo_ids(token, nil, records) do
-    # Repositories can also be added manually, without an installation.
-    for {_, id, github_id, name} <- records,
-        readable_repo?(token, github_id, name),
-        do: id
-  end
-
-  defp installation_repo_ids(token, installation, records) do
-    case Client.impl().list_user_installation_repos(token, installation) do
-      {:ok, repositories} ->
-        by_name = Map.new(repositories, &{String.downcase(&1["full_name"]), &1["id"]})
-
-        for {_, id, github_id, name} <- records,
-            remote_id = by_name[String.downcase(name)],
-            is_nil(github_id) or github_id == remote_id,
-            do: id
-
-      {:error, {:http, 404, _}} ->
-        []
-
-      {:error, _} ->
-        raise Unavailable
-    end
-  end
-
-  defp readable_repo?(token, github_id, name) do
-    case Client.impl().get_repo(token, name) do
-      {:ok, %{"full_name" => full_name, "id" => id}} ->
-        String.downcase(full_name) == String.downcase(name) and
-          (is_nil(github_id) or github_id == id)
-
-      {:error, :not_found} ->
-        false
-
-      _ ->
-        raise Unavailable
     end
   end
 end
