@@ -307,35 +307,7 @@ defmodule Foreman.Environments.WorkloadAccess do
   defp deliver_current(op, env, prepared, phase, send_command) do
     policy = prepared.policy
 
-    repositories = [env.repo_id | Map.keys(prepared.secondaries)]
-    lock_rows(Repos.Repo, repositories)
-    owner_ids = Repo.all(from r in Repos.Repo, where: r.id in ^repositories, select: r.owner_id)
-    lock_rows(Repos.Owner, owner_ids)
-
-    grants =
-      [
-        op.api_grant_id,
-        env.api_grant_id,
-        env.workload_grant_id,
-        (env.desired_authority || %{})["grant_id"],
-        policy && policy.principal.grant_id
-      ]
-      |> Enum.reject(&is_nil/1)
-      |> Enum.uniq()
-
-    grant_query = from g in OAuth.Grant, where: g.id in ^grants
-    clients = Repo.all(select(grant_query, [g], g.client_id))
-
-    users =
-      [env.user_id, op.user_id, (env.desired_authority || %{})["user_id"]]
-      |> Enum.reject(&is_nil/1)
-
-    # Admin mutations lock their human actor before a client, then its service
-    # identity and grant. Follow the same order for personal and service work.
-    lock_query(from u in Accounts.User, where: u.id in ^users and not u.service_account)
-    lock_rows(OAuth.Client, clients)
-    lock_query(from u in Accounts.User, where: u.id in ^users and u.service_account)
-    lock_rows(OAuth.Grant, grants)
+    lock_workload_authority(op, env, prepared)
     env = Repo.preload(env, [:user, :box, repo: :owner], force: true)
 
     # Waiting for a credential writer can cross a grant deadline. Check the
@@ -360,6 +332,38 @@ defmodule Foreman.Environments.WorkloadAccess do
       other ->
         {:ok, other}
     end
+  end
+
+  defp lock_workload_authority(op, env, prepared) do
+    repositories = [env.repo_id | Map.keys(prepared.secondaries)]
+    lock_rows(Repos.Repo, repositories)
+    owner_ids = Repo.all(from r in Repos.Repo, where: r.id in ^repositories, select: r.owner_id)
+    lock_rows(Repos.Owner, owner_ids)
+
+    grants =
+      [
+        op.api_grant_id,
+        env.api_grant_id,
+        env.workload_grant_id,
+        (env.desired_authority || %{})["grant_id"],
+        prepared.policy && prepared.policy.principal.grant_id
+      ]
+      |> Enum.reject(&is_nil/1)
+      |> Enum.uniq()
+
+    grant_query = from g in OAuth.Grant, where: g.id in ^grants
+    clients = Repo.all(select(grant_query, [g], g.client_id))
+
+    users =
+      [env.user_id, op.user_id, (env.desired_authority || %{})["user_id"]]
+      |> Enum.reject(&is_nil/1)
+
+    # Admin mutations lock their human actor before a client, then its service
+    # identity and grant. Follow the same order for personal and service work.
+    lock_query(from u in Accounts.User, where: u.id in ^users and not u.service_account)
+    lock_rows(OAuth.Client, clients)
+    lock_query(from u in Accounts.User, where: u.id in ^users and u.service_account)
+    lock_rows(OAuth.Grant, grants)
   end
 
   defp lock_row(schema, id), do: lock_rows(schema, [id])

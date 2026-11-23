@@ -100,7 +100,8 @@ defmodule Foreman.Operations do
       from o in missing,
         join: e in assoc(o, :environment),
         where: o.trigger == "expiry" and is_nil(o.user_id) and is_nil(o.api_grant_id),
-        where: o.action == e.expiry_action and not is_nil(e.expiry_consumed_at),
+        where: o.action in ["stop", "destroy"] and o.action == e.expiry_action,
+        where: not is_nil(e.expiry_at) and not is_nil(e.expiry_consumed_at),
         select: o.id
 
     cancel = from o in missing, where: o.id in subquery(fulfilled), select: o.id
