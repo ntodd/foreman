@@ -17,6 +17,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"testing"
 )
 
@@ -68,6 +69,7 @@ type fixture struct {
 	validators atomic.Int64
 	binary     string
 	artifacts  string
+	onArchive  func()
 }
 
 func newFixture(t *testing.T) *fixture {
@@ -128,6 +130,9 @@ func (f *fixture) serve(w http.ResponseWriter, r *http.Request) {
 	case "/download/" + f.tag + "/foreman-cli-" + f.tag + "-SHA256SUMS":
 		fmt.Fprintf(w, "%x  %s\n", sha256.Sum256(data), filename)
 	case "/download/" + f.tag + "/" + filename:
+		if f.onArchive != nil {
+			f.onArchive()
+		}
 		if f.corrupt {
 			data = append(data, '!')
 		}
@@ -158,9 +163,9 @@ func (f *fixture) install() (string, error) {
 	body := strings.ReplaceAll(string(script), "__FOREMAN_CLI_RELEASE_URL__", f.server.URL+"/stable")
 	body = strings.ReplaceAll(body, "https://github.com/ntodd/foreman/releases/download", f.server.URL+"/download")
 	// A fresh target has these ordinary tools, but no Python, jq, Go or
-	// developer toolchain. Keep the test runner's own PATH outside the child.
+	// developer toolchain. GNU tar invokes gzip through the child's PATH.
 	path := f.t.TempDir()
-	for _, name := range strings.Fields("sh uname mkdir curl cat grep awk tar chmod mktemp mv ln rm shasum sha256sum") {
+	for _, name := range strings.Fields("sh uname id stat mkdir curl cat grep awk tar gzip chmod mktemp mv ln rm shasum sha256sum") {
 		src, err := exec.LookPath(name)
 		if err != nil && (name == "sha256sum" || name == "shasum") {
 			continue
@@ -300,6 +305,60 @@ func TestUnmanagedAndSymlinkInstall(t *testing.T) {
 	}
 }
 
+func TestReplacementDuringDownload(t *testing.T) {
+	f := newFixture(t)
+	if out, err := f.install(); err != nil {
+		t.Fatalf("install: %s %v", out, err)
+	}
+	f.tag = "v1.10.0"
+	f.onArchive = func() {
+		if err := os.WriteFile(f.binary, []byte("installed by another tool"), 0755); err != nil {
+			t.Error(err)
+		}
+	}
+	if _, err := f.options().update(context.Background(), "v1.9.0"); err == nil || !strings.Contains(err.Error(), "package manager") {
+		t.Fatalf("expected ownership error, got %v", err)
+	}
+	if data, err := os.ReadFile(f.binary); err != nil || string(data) != "installed by another tool" {
+		t.Fatalf("unmanaged binary changed: %q %v", data, err)
+	}
+}
+
+// Run this case with CAP_CHOWN in an isolated Linux container. The receipt
+// still matches and the parent is writable after a package owner takes over.
+func TestTransferredInstallation(t *testing.T) {
+	for _, part := range []string{"executable", "directory"} {
+		t.Run(part, func(t *testing.T) {
+			f := newFixture(t)
+			if out, err := f.install(); err != nil {
+				t.Fatalf("install: %s %v", out, err)
+			}
+			path := f.binary
+			if part == "directory" {
+				path = filepath.Dir(f.binary)
+			}
+			if err := os.Chmod(path, 0777); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Chown(path, os.Geteuid()+1, -1); err != nil {
+				if os.IsPermission(err) {
+					t.Skip("needs permission to transfer file ownership")
+				}
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = os.Chown(path, os.Geteuid(), -1) })
+			f.tag = "v1.10.0"
+			if out, err := f.install(); err == nil || !strings.Contains(out, "package manager") {
+				t.Fatalf("installer accepted transferred %s: %q %v", part, out, err)
+			}
+			if _, err := f.options().update(context.Background(), "v1.9.0"); err == nil || !strings.Contains(err.Error(), "package manager") {
+				t.Fatalf("updater accepted transferred %s: %v", part, err)
+			}
+			f.installed("v1.9.0")
+		})
+	}
+}
+
 func TestNewPageOnNotModified(t *testing.T) {
 	f := newFixture(t)
 	u := f.options()
@@ -382,5 +441,50 @@ func TestInteractive(t *testing.T) {
 	cmd.Env = append(os.Environ(), "FOREMAN_TTY_PROBE=1", "FOREMAN_TEST_BINARY="+exe)
 	if out, err := cmd.CombinedOutput(); err != nil || !strings.Contains(string(out), "foreman-tty-verified") {
 		t.Fatalf("terminal probe: %s: %v", out, err)
+	}
+}
+
+// This optional Linux fixture is a read-only bind mount of a caller-owned
+// directory containing an executable foreman, both with mode 0755.
+func TestReadOnlyMount(t *testing.T) {
+	parent := os.Getenv("FOREMAN_TEST_READONLY_BIN_DIR")
+	if parent == "" {
+		t.Skip("needs a caller-owned read-only bind mount")
+	}
+	f := newFixture(t)
+	u := f.options()
+	if err := os.MkdirAll(filepath.Dir(filepath.Dir(f.binary)), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(parent, filepath.Dir(f.binary)); err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{parent, f.binary} {
+		st, err := os.Stat(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if int(st.Sys().(*syscall.Stat_t).Uid) != os.Geteuid() || st.Mode().Perm()&0200 == 0 {
+			t.Fatalf("fixture must have owner-write mode and belong to caller: %s", path)
+		}
+	}
+	body, err := os.ReadFile(f.binary)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = os.MkdirAll(u.state, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err = os.WriteFile(filepath.Join(u.state, fmt.Sprintf("%x.version", sha256.Sum256(body))), []byte("v1.0.0\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := f.install(); err == nil || !strings.Contains(out, "package manager") {
+		t.Fatalf("installer accepted a read-only mount: %s %v", out, err)
+	}
+	if _, err := u.update(context.Background(), "v1.0.0"); err == nil || !strings.Contains(err.Error(), "package manager") {
+		t.Fatalf("updater accepted a read-only mount: %v", err)
+	}
+	if f.requests.Load() != 0 {
+		t.Fatal("downloaded releases for an unwritable installation")
 	}
 }

@@ -364,6 +364,8 @@ jobs:
           merge-multiple: true
       - name: Verify the complete CLI release and write its manifest
         run: scripts/checksum-cli.sh "$GITHUB_REF_NAME" out
+      - name: Test release publication and replay against local fixtures
+        run: python3 -B scripts/test_publish_release.py
       - name: Publish the GitHub release
         env:
           VERSION: ${{ needs.check.outputs.version }}
@@ -401,5 +403,4 @@ jobs:
             echo
             echo "To register these agents on a control plane by hand: \`scripts/publish-agent-release.sh $VERSION\`"
           } > notes.md
-          gh release create "$GITHUB_REF_NAME" --verify-tag --title "Foreman $VERSION" \
-            --notes-file notes.md "out/foreman-cli-$GITHUB_REF_NAME-SHA256SUMS" out/*.tar.gz out/*.sig out/foreman-guest-*.tar
+          python3 scripts/publish_release.py "$GITHUB_REF_NAME" "$(git rev-parse HEAD)" notes.md out

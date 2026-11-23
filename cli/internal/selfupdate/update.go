@@ -74,9 +74,26 @@ func ownerError() error {
 	return errors.New("use the package manager or installation owner to update this executable")
 }
 
+// Refuse inherited privilege and require both installer ownership and OS
+// permission (including ACLs and mount flags). Access uses real identities,
+// which equal the effective identities for a supported invocation.
+func ownedWritable(path string, info os.FileInfo) bool {
+	st, ok := info.Sys().(*syscall.Stat_t)
+	if !ok || int(st.Uid) != os.Geteuid() || os.Getuid() != os.Geteuid() || os.Getgid() != os.Getegid() {
+		return false
+	}
+	const writeAndExecute = 3
+	return info.Mode().Perm()&0200 != 0 && syscall.Access(path, writeAndExecute) == nil
+}
+
 func (u updater) managedVersion() (string, error) {
 	info, err := os.Lstat(u.bin)
-	if err != nil || !info.Mode().IsRegular() || info.Mode().Perm()&0200 == 0 {
+	if err != nil || !info.Mode().IsRegular() || !ownedWritable(u.bin, info) {
+		return "", ownerError()
+	}
+	parent := filepath.Dir(u.bin)
+	dir, err := os.Stat(parent)
+	if err != nil || !dir.IsDir() || !ownedWritable(parent, dir) {
 		return "", ownerError()
 	}
 	managedPath, err := filepath.EvalSymlinks(u.bin)
@@ -85,10 +102,6 @@ func (u updater) managedVersion() (string, error) {
 	}
 	runningPath, err := filepath.EvalSymlinks(u.executable)
 	if err != nil || runningPath != managedPath {
-		return "", ownerError()
-	}
-	dir, err := os.Stat(filepath.Dir(u.bin))
-	if err != nil || dir.Mode().Perm()&0200 == 0 {
 		return "", ownerError()
 	}
 	f, err := os.Open(u.bin)
@@ -152,7 +165,10 @@ func (u updater) update(ctx context.Context, installedVersion string) (string, e
 	if err := verify(sums, name, archive); err != nil {
 		return "", err
 	}
-	if err := u.replace(latest, archive); err != nil {
+	if err := u.replace(current, latest, archive); err != nil {
+		if errors.Is(err, os.ErrPermission) || errors.Is(err, syscall.EROFS) {
+			return "", fmt.Errorf("%w: %v", ownerError(), err)
+		}
 		return "", err
 	}
 	return latest, nil
@@ -201,7 +217,7 @@ func unpack(archive []byte, w io.Writer) error {
 	return err
 }
 
-func (u updater) replace(tag string, archive []byte) error {
+func (u updater) replace(from, tag string, archive []byte) error {
 	stage, err := os.CreateTemp(filepath.Dir(u.bin), ".foreman-*")
 	if err != nil {
 		return fmt.Errorf("stage CLI as its installation owner: %w", err)
@@ -221,6 +237,13 @@ func (u updater) replace(tag string, archive []byte) error {
 	if err = stage.Close(); err != nil {
 		return err
 	}
+	// A user or package manager could take over the destination while the
+	// network request was in flight. Recheck the old receipt and permissions
+	// before publishing either the new receipt or the executable.
+	if current, err := u.managedVersion(); err != nil || current != from {
+		return ownerError()
+	}
+
 	// The receipt is keyed by binary contents. Both old and new receipts
 	// remain valid if the process exits on either side of the rename.
 	receipt := filepath.Join(u.state, hex.EncodeToString(h.Sum(nil))+".version")

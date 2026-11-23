@@ -25,6 +25,14 @@ digest() {
   printf '%s\n' "${sum%% *}"
 }
 
+caller_owns() {
+  case "$os" in
+    linux) uid=$(stat -Lc '%u' "$1") || return 1 ;;
+    darwin) uid=$(stat -Lf '%u' "$1") || return 1 ;;
+  esac
+  [ "$uid" = "$caller" ]
+}
+
 main() {
   umask 077
   case $(uname -s) in Linux) os=linux ;; Darwin) os=darwin ;; *) fail "supported operating systems are Linux and macOS" ;; esac
@@ -35,10 +43,12 @@ main() {
   binary="$bin/foreman"
   owner="use the package manager or installation owner to update this executable"
   mkdir -p "$bin" "$state" || fail "$owner"
+  caller=$(id -u)
+  caller_owns "$bin" && [ -w "$bin" ] && [ -x "$bin" ] || fail "$owner"
   [ ! -L "$binary" ] || fail "$owner"
 
   if [ -e "$binary" ]; then
-    [ -f "$binary" ] && [ -x "$binary" ] && [ -w "$binary" ] && [ -w "$bin" ] || fail "$owner"
+    [ -f "$binary" ] && caller_owns "$binary" && [ -x "$binary" ] && [ -w "$binary" ] || fail "$owner"
     installed_hash=$(digest "$binary")
     [ -f "$state/$installed_hash.version" ] || fail "$owner"
     # An installed CLI already has the verified upgrade path and install lock.
