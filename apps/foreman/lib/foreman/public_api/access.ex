@@ -136,6 +136,17 @@ defmodule Foreman.PublicAPI.Access do
   """
   def connected?(principal), do: Foreman.Repo.exists?(matching_grants(principal))
 
+  @doc """
+  The same check under a row lock, inside a transaction: a revocation
+  that hasn't committed yet waits for the caller, and one that has is
+  seen.
+  """
+  def lock_connection(principal) do
+    query = from g in matching_grants(principal), select: g.id
+    query = if Foreman.Repo.sqlite?(), do: query, else: lock(query, "FOR UPDATE")
+    not is_nil(Foreman.Repo.one(query))
+  end
+
   @doc "Narrows a query to nothing unless the connection's grant is still live."
   def while_connected(query, principal),
     do: where(query, exists(subquery(matching_grants(principal))))

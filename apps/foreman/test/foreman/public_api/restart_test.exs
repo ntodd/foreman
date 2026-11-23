@@ -5,16 +5,38 @@ defmodule Foreman.PublicAPI.RestartTest do
   import Foreman.PublicAPIMutationFixtures
   setup :local_git
 
+  alias Foreman.Environments.Environment
   alias Foreman.Operations.Operation
   alias Foreman.PublicAPI.Mutations
 
+  # A workspace the box has confirmed is running, as a restart requires.
   setup do
     user = user_fixture()
     repo = repo_fixture() |> change(private: false) |> Repo.update!()
     box = box_fixture(owner_user_id: user.id, vm: %{"ready" => true})
+    {:ok, _} = Registry.register(Foreman.Registry, {:agent, box.id}, nil)
     {actor, _} = principal(user)
-    env = environment_fixture(user: user, repo: repo, box: box)
-    %{actor: actor, user: user, repo: repo, box: box, env: env}
+
+    assert {:ok, id, create} = Mutations.create(actor, "create", %{"repo_id" => repo.id})
+    complete(box, create)
+    flush()
+
+    %{actor: actor, user: user, repo: repo, box: box, env: Repo.get!(Environment, id)}
+  end
+
+  defp complete(box, op_id) do
+    {:ok, result} =
+      ForemanProtocol.Event.new("op.result", %{op_id: op_id, status: "ok", result: %{}})
+
+    assert :ok = Foreman.Agents.handle_event(box.id, result)
+  end
+
+  defp flush do
+    receive do
+      {:dispatch, _} -> flush()
+    after
+      0 -> :ok
+    end
   end
 
   defp pending(env, names),
@@ -29,8 +51,7 @@ defmodule Foreman.PublicAPI.RestartTest do
 
     assert {:ok, ^env_id, op_id} = restart(ctx.actor, ctx.env, "restart_all")
 
-    assert %Operation{action: "restart_all", api_grant_id: ^grant, status: "queued"} =
-             Repo.get!(Operation, op_id)
+    assert %Operation{action: "restart_all", api_grant_id: ^grant} = Repo.get!(Operation, op_id)
 
     assert Repo.reload!(ctx.env).desired_state == "running"
 
@@ -85,12 +106,20 @@ defmodule Foreman.PublicAPI.RestartTest do
   end
 
   test "a restart during a start conflicts, where a second start would follow it", ctx do
-    env = ctx.env |> change(desired_state: "stopped", observed_state: "stopped") |> Repo.update!()
-    Registry.register(Foreman.Registry, {:agent, ctx.box.id}, nil)
-    assert {:ok, _, start} = Mutations.operate(ctx.actor, env.id, "start", %{"action" => "start"})
-    assert is_binary(start)
+    assert {:ok, _, stop} =
+             Mutations.operate(ctx.actor, ctx.env.id, "stop", %{"action" => "stop"})
 
-    assert {:error, :lifecycle_conflict, _} = restart(ctx.actor, env, "restart_all")
+    complete(ctx.box, stop)
+    env_id = ctx.env.id
+
+    assert {:ok, ^env_id, start} =
+             Mutations.operate(ctx.actor, env_id, "start", %{"action" => "start"})
+
+    assert is_binary(start)
+    assert {:error, :lifecycle_conflict, _} = restart(ctx.actor, ctx.env, "restart_all")
+
+    assert {:ok, ^env_id, ^start} =
+             Mutations.operate(ctx.actor, env_id, "again", %{"action" => "start"})
   end
 
   test "a restart takes permission to both stop and start", ctx do
@@ -110,6 +139,84 @@ defmodule Foreman.PublicAPI.RestartTest do
 
     for action <- ~w(restart suspend rebuild) do
       assert {:error, :invalid_request, _} = restart(ctx.actor, ctx.env, action)
+    end
+  end
+
+  test "an environment whose VM is not confirmed running conflicts, pending or not", ctx do
+    for observed <- ~w(stopped error) do
+      env = ctx.env |> change(observed_state: observed) |> Repo.update!() |> pending([])
+
+      assert {:error, :lifecycle_conflict, _} =
+               restart(ctx.actor, env, "restart_affected", observed)
+
+      pending(env, ["A"])
+
+      assert {:error, :lifecycle_conflict, _} =
+               restart(ctx.actor, env, "restart_affected", observed <> " pending")
+
+      assert {:error, :lifecycle_conflict, _} =
+               restart(ctx.actor, env, "restart_all", observed <> " all")
+    end
+
+    refute Repo.exists?(from o in Operation, where: o.action in ~w(restart_all restart_affected))
+  end
+
+  describe "at dispatch" do
+    test "an accepted restart is sent to the box, for both kinds", ctx do
+      assert {:ok, _, all} = restart(ctx.actor, ctx.env, "restart_all")
+      assert_receive {:dispatch, %ForemanProtocol.Command{type: "env.restart", op_id: ^all}}
+      assert Repo.get!(Operation, all).status == "dispatched"
+      complete(ctx.box, all)
+
+      pending(Repo.reload!(ctx.env), ["A"])
+      assert {:ok, _, affected} = restart(ctx.actor, ctx.env, "restart_affected")
+      assert_receive {:dispatch, %ForemanProtocol.Command{type: "env.restart", op_id: ^affected}}
+      assert Repo.get!(Operation, affected).status == "dispatched"
+    end
+
+    test "the owner's new connection can restart a workspace an earlier one launched", ctx do
+      {newer, _} = principal(ctx.user)
+      assert ctx.env.api_grant_id == ctx.actor.grant_id
+      Foreman.OAuth.revoke_grant(ctx.actor.grant_id)
+
+      assert {:ok, _, op} = restart(newer, ctx.env, "restart_all")
+      assert_receive {:dispatch, %ForemanProtocol.Command{type: "env.restart", op_id: ^op}}
+      assert Repo.get!(Operation, op).status == "dispatched"
+      assert Repo.reload!(ctx.env).workload_grant_id == newer.grant_id
+    end
+
+    test "a restart denied at dispatch leaves the earlier authority in place", ctx do
+      earlier = %{
+        "action" => "start",
+        "user_id" => ctx.user.id,
+        "grant_id" => ctx.actor.grant_id,
+        "trigger" => "request"
+      }
+
+      ctx.env |> change(desired_authority: earlier) |> Repo.update!()
+      {other, _} = principal(ctx.user)
+
+      # Queued without the kick the API gives it, so the grant can go first.
+      {:ok, op} =
+        Foreman.Environments.queue_action(
+          Foreman.Scope.for_user(ctx.user),
+          Repo.reload!(ctx.env),
+          :restart_all,
+          %{},
+          api_grant_id: other.grant_id,
+          audit: %{},
+          dedupe: false
+        )
+
+      assert %{"action" => "restart_all"} = Repo.reload!(ctx.env).desired_authority
+      Foreman.OAuth.revoke_grant(other.grant_id)
+      Foreman.Environments.Server.kick(ctx.env.id)
+
+      refute_receive {:dispatch, %ForemanProtocol.Command{type: "env.restart"}}
+      assert Repo.get!(Operation, op.id).status == "failed"
+      env = Repo.reload!(ctx.env)
+      assert env.desired_state == "running"
+      assert env.desired_authority == earlier
     end
   end
 end

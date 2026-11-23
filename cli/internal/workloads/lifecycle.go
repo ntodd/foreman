@@ -107,7 +107,7 @@ func (o Options) result(r submission) error {
 	if r.AlreadyReached {
 		message := "The environment is already in the requested state."
 		if r.nothingToRestart {
-			message = "No services are waiting on a restart. Use --all to restart every service."
+			message = "No services are waiting on a restart. Use --all to stop and start every container."
 		}
 		if _, err := fmt.Fprintln(o.Out, message); err != nil {
 			return err

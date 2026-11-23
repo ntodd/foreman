@@ -226,6 +226,7 @@ func TestImportReadsADotenvFile(t *testing.T) {
 		`SINGLE='raw $HOME \n # kept'`,
 		"INLINE=value # trailing comment",
 		"HASH=abc#def",
+		"TABBED=value\t# a comment after a tab",
 		"EQUALS=a=b=c",
 	}, "\n")
 	read := func(string) ([]byte, error) { return []byte(body), nil }
@@ -237,7 +238,7 @@ func TestImportReadsADotenvFile(t *testing.T) {
 	want := map[string]string{
 		"PLAIN": "value", "EXPORTED": "yes", "SPACED": "padded value",
 		"DOUBLE": "two words # kept\nnext \"quoted\" \\ done", "SINGLE": `raw $HOME \n # kept`,
-		"INLINE": "value", "HASH": "abc#def", "EQUALS": "a=b=c", "ODD": `a\qb \$HOME`,
+		"INLINE": "value", "HASH": "abc#def", "TABBED": "value", "EQUALS": "a=b=c", "ODD": `a\qb \$HOME`,
 	}
 	if !reflect.DeepEqual(f.changes[0].set, want) || f.changes[0].scope != "repo" {
 		t.Fatalf("%+v", f.changes[0].set)
@@ -304,8 +305,8 @@ func TestListFollowsPagesAndPrintsNamesOnly(t *testing.T) {
 
 func TestOutputSaysWhatNeedsARestart(t *testing.T) {
 	f := &fake{result: api.SecretChangeResult{
-		PendingRestart:       []api.EnvironmentRef{{ID: envID, Slug: "storefront-alice-1"}},
-		OthersPendingRestart: 2,
+		Affected:       []api.EnvironmentRef{{ID: envID, Slug: "storefront-alice-1"}},
+		OthersAffected: 2,
 	}}
 	r := invoke(t, f, Options{}, "set", "A=1", "B=2", "--repo", repoID)
 	out := r.out.String()
@@ -317,7 +318,7 @@ func TestOutputSaysWhatNeedsARestart(t *testing.T) {
 
 	r = invoke(t, f, Options{JSON: true}, "set", "A=1", "--repo", repoID)
 	var doc api.SecretChangeResult
-	if err := json.Unmarshal(r.out.Bytes(), &doc); err != nil || doc.OthersPendingRestart != 2 || doc.PendingRestart[0].ID != envID || r.err.Len() != 0 {
+	if err := json.Unmarshal(r.out.Bytes(), &doc); err != nil || doc.OthersAffected != 2 || doc.Affected[0].ID != envID || r.err.Len() != 0 {
 		t.Fatalf("%v %s %s", err, r.out.String(), r.err.String())
 	}
 }
@@ -348,6 +349,7 @@ func TestNothingTheCallerTypedIsRepeatedBack(t *testing.T) {
 		{"set", "TOKEN=@sk-live-4242"},
 		{"set", "sk-live-4242"},
 		{"list", "sk-live-4242"},
+		{"import", "TOKEN=sk-live-4242"},
 	} {
 		f := &fake{}
 		r := invoke(t, f, Options{ReadFile: read}, args...)
@@ -378,6 +380,14 @@ func TestOneValueCanComeFromStandardInput(t *testing.T) {
 	f := &fake{}
 	r := invoke(t, f, Options{In: strings.NewReader("@starts with at\nsecond line\n")}, "set", "PIPED=-", "OTHER=x")
 	if r.failure != nil || f.changes[0].set["PIPED"] != "@starts with at\nsecond line" || f.changes[0].set["OTHER"] != "x" {
+		t.Fatalf("%v %+v", r.failure, f.changes)
+	}
+
+	// On a terminal, - asks without echo instead of reading what is typed in the clear.
+	f = &fake{}
+	asked := func(name string) (string, error) { return "typed " + name, nil }
+	r = invoke(t, f, Options{In: strings.NewReader("echoed"), Prompt: asked}, "set", "A=-")
+	if r.failure != nil || f.changes[0].set["A"] != "typed A" {
 		t.Fatalf("%v %+v", r.failure, f.changes)
 	}
 

@@ -98,21 +98,29 @@ defmodule Foreman.PublicAPI.Secrets do
 
   @doc """
   Applies one request's changes to a scope the caller may manage. Returns
-  the names set and removed, the caller's own environments now waiting on
-  a restart, and how many of other people's are.
+  the names set and removed, the caller's running environments the scope
+  reaches, and how many of other people's it reaches.
+
+  Which environments are reported never depends on the values sent: one
+  that already held the same value is listed like any other.
   """
   def change(%Principal{} = principal, scope, subject, params) do
     with {:ok, set, unset} <- input(params) do
       actor = Scope.for_user(principal.user)
+      # Everything that asks GitHub is asked here, before the transaction
+      # opens. A failure to reach it then fails the request with nothing
+      # written, and what runs afterwards is local SQL.
+      retained = retained(principal, scope, subject)
+      listable = listable(principal, scope, retained)
 
       opts = [
         audit: audit(principal),
-        recheck: fn -> still_allowed(principal, scope, subject) end
+        recheck: fn -> still_allowed(principal, scope, retained) end
       ]
 
       case Foreman.Secrets.apply_changes(actor, scope, subject, set, unset, opts) do
         {:ok, changed} ->
-          {:ok, Map.merge(changed, pending(principal, scope, subject))}
+          {:ok, Map.merge(changed, reached(principal, scope, subject, listable))}
 
         {:error, {:invalid, name, message}} ->
           {:error, :invalid_request, "#{name}: #{message}"}
@@ -121,37 +129,51 @@ defmodule Foreman.PublicAPI.Secrets do
           {:error, :role}
 
         # The subject was the caller's a moment ago: it has just been
-        # destroyed, or the connection has just been revoked.
+        # destroyed or archived, or the connection has just been revoked.
         {:error, _} ->
           {:error, :resource_not_found, "Resource not found."}
       end
     end
   end
 
-  # Authentication and `subject/3` ran before the transaction opened, and
-  # a repository lookup can wait on GitHub in between. Inside it, with
-  # the rows locked: the grant is still live, an admin is still one, and
-  # an environment is still the caller's to reach.
-  defp still_allowed(principal, scope, subject) do
+  # The query that established the caller's access to the subject, kept to
+  # run again under the write's locks.
+  defp retained(principal, "environment", env), do: Access.live_environments(principal, env.id)
+  defp retained(principal, "repo", repo), do: Access.repos(principal, repo.id)
+  defp retained(_principal, _scope, _subject), do: nil
+
+  # The environments this connection could list, or nil when it may not.
+  defp listable(principal, scope, retained) do
     cond do
-      not Access.connected?(principal) ->
+      "environments:list" not in principal.scopes -> nil
+      scope == "environment" -> retained
+      true -> Access.live_environments(principal)
+    end
+  end
+
+  # Authentication and `subject/3` ran before the transaction opened, and
+  # a repository lookup can wait on GitHub in between. Inside it, after
+  # the scope's turn has come: the grant is still live (and locked, so a
+  # revocation waits), an admin is still one, and the subject is still
+  # the caller's to reach.
+  defp still_allowed(principal, scope, retained) do
+    cond do
+      not Access.lock_connection(principal) ->
         {:error, :missing}
 
-      scope in ["repo", "owner"] ->
-        case Accounts.lock_admin(Scope.for_user(principal.user)) do
-          {:ok, _} -> :ok
-          _ -> {:error, :role}
-        end
+      scope in ["repo", "owner"] and not admin?(principal) ->
+        {:error, :role}
 
-      scope == "environment" ->
-        if Repo.exists?(Access.live_environments(principal, subject.id)),
-          do: :ok,
-          else: {:error, :missing}
+      retained && not Repo.exists?(retained) ->
+        {:error, :missing}
 
       true ->
         :ok
     end
   end
+
+  defp admin?(principal),
+    do: match?({:ok, _}, Accounts.lock_admin(Scope.for_user(principal.user)))
 
   defp input(%{} = params) do
     with [] <- Map.keys(params) -- ["secrets", "unset"],
@@ -190,26 +212,31 @@ defmodule Foreman.PublicAPI.Secrets do
 
   defp names(_), do: :error
 
-  # Environments of the caller's are named, since the caller can see
-  # those; everyone else's are only counted.
-  defp pending(principal, scope, subject) do
+  # The caller's running environments are named when the connection may
+  # list environments, and other people's are only counted. Running, not
+  # changed: reporting only those whose values differ would tell the
+  # caller whether what they sent matched what was there.
+  defp reached(principal, scope, subject, listable) do
     ids = Foreman.Secrets.affected_environment_ids(scope, subject)
 
-    waiting =
-      from e in Environment, where: e.id in ^ids and e.pending_restart and is_nil(e.destroyed_at)
+    running =
+      from e in Environment,
+        where: e.id in ^ids and e.desired_state == "running" and is_nil(e.destroyed_at)
 
-    # Named only if the connection could list it: one on a box no longer
-    # shared with the caller is theirs, and still not theirs to see here.
     own =
-      from e in Access.live_environments(principal),
-        where: e.id in ^ids and e.pending_restart,
-        order_by: e.slug
+      if listable do
+        from(e in listable,
+          where: e.id in ^ids and e.desired_state == "running",
+          order_by: e.slug,
+          select: map(e, [:id, :slug])
+        )
+        |> Repo.all()
+      else
+        []
+      end
 
-    %{
-      pending_restart: Repo.all(from e in own, select: map(e, [:id, :slug])),
-      others_pending_restart:
-        Repo.aggregate(from(e in waiting, where: e.user_id != ^principal.user.id), :count)
-    }
+    others = from e in running, where: e.user_id != ^principal.user.id
+    %{affected: own, others_affected: Repo.aggregate(others, :count)}
   end
 
   defp audit(principal) do

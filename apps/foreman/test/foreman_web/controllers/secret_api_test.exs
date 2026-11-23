@@ -66,26 +66,48 @@ defmodule ForemanWeb.SecretAPITest do
       assert Map.keys(item) |> Enum.sort() == ["name", "updated_at"]
     end
 
-    test "says which of the caller's environments now wait on a restart", ctx do
-      env =
-        ctx.env
-        |> Ecto.Changeset.change(
-          applied_secret_hashes: %{},
-          pending_restart: false,
-          pending_changes: []
-        )
-        |> Repo.update!()
+    test "names the caller's running environments the change reaches, whatever the value", ctx do
+      token = token(ctx.user, @scopes ++ ["environments:list"])
+      path = "environment/#{ctx.env.id}"
+      env_id = ctx.env.id
 
+      # Setting the value it already holds reads exactly like setting a new one.
+      for value <- ["1", "1", "2"] do
+        reply = change(ctx.conn, token, path, %{secrets: set([{"A", value}])})
+
+        assert %{"affected" => [%{"id" => ^env_id, "slug" => slug}], "others_affected" => 0} =
+                 json_response(reply, 200)
+
+        assert slug == ctx.env.slug
+      end
+
+      # A stopped environment has nothing running to restart.
+      ctx.env |> Ecto.Changeset.change(desired_state: "stopped") |> Repo.update!()
+      reply = change(ctx.conn, token, path, %{secrets: set([{"A", "3"}])})
+      assert %{"affected" => [], "others_affected" => 0} = json_response(reply, 200)
+    end
+
+    test "names no environment for a connection that can't list them", ctx do
       reply =
-        change(ctx.conn, token(ctx.user), "environment/#{env.id}", %{secrets: set([{"A", "1"}])})
+        change(ctx.conn, token(ctx.user), "environment/#{ctx.env.id}", %{
+          secrets: set([{"A", "1"}])
+        })
 
-      assert %{
-               "pending_restart" => [%{"id" => id, "slug" => slug}],
-               "others_pending_restart" => 0
-             } =
-               json_response(reply, 200)
+      assert %{"affected" => [], "others_affected" => 0} = json_response(reply, 200)
+    end
 
-      assert {id, slug} == {env.id, env.slug}
+    test "a secret's timestamp moves on every set, the same value included", ctx do
+      token = token(ctx.user)
+
+      stamp = fn ->
+        [%{"updated_at" => at}] = json_response(list(ctx.conn, token, "user/me"), 200)["items"]
+        at
+      end
+
+      change(ctx.conn, token, "user/me", %{secrets: set([{"A", "1"}])})
+      first = stamp.()
+      change(ctx.conn, token, "user/me", %{secrets: set([{"A", "1"}])})
+      assert stamp.() != first
     end
 
     test "is all or nothing, and names the secret that was refused", ctx do
@@ -152,13 +174,12 @@ defmodule ForemanWeb.SecretAPITest do
       token = token(ctx.admin)
       path = "repo/#{ctx.repo.id}"
 
-      assert %{"set" => ["SHARED"], "others_pending_restart" => others} =
-               json_response(
-                 change(ctx.conn, token, path, %{secrets: set([{"SHARED", "1"}])}),
-                 200
-               )
+      # Someone else's running environment is counted, never named.
+      reply = change(ctx.conn, token, path, %{secrets: set([{"SHARED", "1"}])})
 
-      assert is_integer(others)
+      assert %{"set" => ["SHARED"], "affected" => [], "others_affected" => 1} =
+               json_response(reply, 200)
+
       assert Secrets.resolve(ctx.env) == %{"SHARED" => "1"}
 
       assert %{"items" => [%{"name" => "SHARED"}]} =
@@ -324,10 +345,29 @@ defmodule ForemanWeb.SecretAPITest do
              )
 
       # The caller's own secrets still reach it, but the response doesn't name it.
+      token = token(ctx.user, @scopes ++ ["environments:list"])
       reply = change(ctx.conn, token, "user/me", %{secrets: set([{"MINE", "1"}])})
-      assert %{"pending_restart" => pending} = json_response(reply, 200)
-      refute env.id in Enum.map(pending, & &1["id"])
+      assert %{"affected" => affected} = json_response(reply, 200)
+      refute env.id in Enum.map(affected, & &1["id"])
       assert Repo.reload!(env).pending_restart
+    end
+
+    test "a subject that stopped being the caller's after it was looked up takes no change",
+         ctx do
+      {actor, _} = principal(ctx.user, @scopes)
+      {admin, _} = principal(ctx.admin, @scopes)
+      body = %{"secrets" => [%{"name" => "A", "value" => "1"}]}
+      api = Foreman.PublicAPI.Secrets
+
+      {:ok, "environment", env} = api.subject(actor, "environment", ctx.env.id)
+      ctx.box |> Ecto.Changeset.change(owner_user_id: ctx.admin.id) |> Repo.update!()
+      assert {:error, :resource_not_found, _} = api.change(actor, "environment", env, body)
+
+      {:ok, "repo", repo} = api.subject(admin, "repo", ctx.repo.id)
+      ctx.repo |> Ecto.Changeset.change(archived: true) |> Repo.update!()
+      assert {:error, :resource_not_found, _} = api.change(admin, "repo", repo, body)
+
+      assert Repo.aggregate(Secret, :count) == 0
     end
   end
 
@@ -374,6 +414,31 @@ defmodule ForemanWeb.SecretAPITest do
 
       assert %{"code" => "invalid_request"} = json_response(reply, 422)
       refute reply.resp_body =~ "4242"
+    end
+
+    test "nothing sent to the change route is logged, however it is shaped", ctx do
+      level = Logger.level()
+      Logger.configure(level: :debug)
+      on_exit(fn -> Logger.configure(level: level) end)
+      token = token(ctx.user)
+
+      log =
+        ExUnit.CaptureLog.capture_log([level: :debug], fn ->
+          for body <- [
+                %{"HUNTER2_AS_A_KEY" => "hunter2"},
+                %{unset: ["hunter2"]},
+                %{secrets: set([{"A", "hunter2"}])},
+                ["hunter2"]
+              ] do
+            change(ctx.conn, token, "user/me", body)
+          end
+
+          # Another route still logs its parameters, so the capture is live.
+          list(ctx.conn, token, "user/me", %{cursor: "visible-in-the-log"})
+        end)
+
+      assert log =~ "visible-in-the-log"
+      refute String.downcase(log) =~ "hunter2"
     end
 
     test "values stay out of the request log, in a well-formed body or not" do

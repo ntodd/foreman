@@ -321,6 +321,13 @@ func (o Options) pairs(args []string) ([]api.SecretValue, error) {
 				return nil, invalid("Could not read a value for %s.", name)
 			}
 			value = typed
+		case value == "-" && o.Prompt != nil:
+			// Reading a terminal here would show the value as it is typed.
+			typed, err := o.Prompt(name)
+			if err != nil {
+				return nil, invalid("Could not read a value for %s.", name)
+			}
+			value = typed
 		case value == "-":
 			if piped {
 				return nil, invalid("Only one secret can take its value from standard input.")
@@ -416,15 +423,15 @@ func (o Options) change(ctx context.Context, v invocation, set []api.SecretValue
 	if len(skipped) > 0 {
 		fmt.Fprintf(w, "Not set there, so left alone: %s.\n", strings.Join(skipped, ", "))
 	}
-	if len(result.PendingRestart) > 0 {
+	if len(result.Affected) > 0 {
 		fmt.Fprintln(w, "New shells in these running environments pick the change up shortly. Their running processes and services keep the previous values until a restart:")
-		for _, env := range result.PendingRestart {
+		for _, env := range result.Affected {
 			fmt.Fprintf(w, "  %s  %s\n", env.Slug, env.ID)
 		}
-		fmt.Fprintf(w, "Apply it with: foreman env restart %s\n", result.PendingRestart[0].ID)
+		fmt.Fprintf(w, "Apply it with: foreman env restart %s\n", result.Affected[0].ID)
 	}
-	if n := result.OthersPendingRestart; n > 0 {
-		_, err = fmt.Fprintf(w, "%d running environment(s) of other people are waiting on a restart too.\n", n)
+	if n := result.OthersAffected; n > 0 {
+		_, err = fmt.Fprintf(w, "The change also reaches %d running environment(s) of other people, which need the same restart.\n", n)
 	}
 	return err
 }
@@ -443,7 +450,7 @@ func (o Options) dotenv(path string) ([]api.SecretValue, error) {
 		body, err = o.ReadFile(path)
 	}
 	if err != nil {
-		return nil, invalid("Could not read %s: %v", path, err)
+		return nil, invalid("Could not read the file to import. secrets import takes a dotenv file, or - for standard input.")
 	}
 	var set []api.SecretValue
 	var names []string
@@ -456,23 +463,23 @@ func (o Options) dotenv(path string) ([]api.SecretValue, error) {
 		name, raw, assigned := strings.Cut(line, "=")
 		name = strings.TrimSpace(name)
 		if !assigned || !namePattern.MatchString(name) {
-			return nil, invalid("Line %d of %s is not NAME=value.", i+1, path)
+			return nil, invalid("Line %d of the import is not NAME=value.", i+1)
 		}
 		value, ok := dotenvValue(raw)
 		if !ok {
-			return nil, invalid("Line %d of %s (%s) has a quote that is not closed, or text after the closing quote.", i+1, path, name)
+			return nil, invalid("Line %d of the import (%s) has a quote that is not closed, or text after the closing quote.", i+1, name)
 		}
 		if err := sendable(name, value); err != nil {
-			return nil, invalid("Line %d of %s: %s", i+1, path, failure(err).Message)
+			return nil, invalid("Line %d of the import: %s", i+1, failure(err).Message)
 		}
 		set = append(set, api.SecretValue{Name: name, Value: value})
 		names = append(names, name)
 	}
 	if len(set) == 0 {
-		return nil, invalid("%s sets nothing.", path)
+		return nil, invalid("The import sets nothing.")
 	}
 	if len(set) > maxChanges {
-		return nil, invalid("%s sets %d secrets, and one request takes at most %d. Split it up.", path, len(set), maxChanges)
+		return nil, invalid("The import sets %d secrets, and one request takes at most %d. Split it up.", len(set), maxChanges)
 	}
 	return set, unique(names)
 }
@@ -520,8 +527,14 @@ func dotenvValue(raw string) (string, bool) {
 		if strings.HasPrefix(raw, "#") {
 			return "", true
 		}
-		if at := strings.Index(raw, " #"); at >= 0 {
-			raw = raw[:at]
+		if at := strings.IndexAny(raw, " \t"); at >= 0 {
+			// The first "#" that follows a space or a tab starts a comment.
+			for i := at; i+1 < len(raw); i++ {
+				if (raw[i] == ' ' || raw[i] == '\t') && raw[i+1] == '#' {
+					raw = raw[:i]
+					break
+				}
+			}
 		}
 		return strings.TrimSpace(raw), true
 	}

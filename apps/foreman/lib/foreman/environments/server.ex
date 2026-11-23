@@ -264,8 +264,9 @@ defmodule Foreman.Environments.Server do
          do: Environments.dispatch_denied(failed, env)
   end
 
-  defp bind_workload_grant(%{action: "start", api_grant_id: id}, env)
-       when not is_nil(id) and env.workload_grant_id != id do
+  defp bind_workload_grant(%{action: action, api_grant_id: id}, env)
+       when action in ["start", "restart_affected", "restart_all"] and not is_nil(id) and
+              env.workload_grant_id != id do
     Environments.update_env!(env, %{workload_grant_id: id})
   end
 

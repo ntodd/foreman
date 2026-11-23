@@ -302,7 +302,9 @@ defmodule Foreman.PublicAPI.Mutations do
       active != [] ->
         accepted_existing(actor, env, action, hd(active).id)
 
-      env.desired_state != "running" or not env.created_once ->
+      # Desired alone isn't enough: a VM that stopped or failed on its own
+      # still says running there, and has nothing up to restart.
+      not env.created_once or not stable?(env, "start") ->
         @not_running
 
       # Nothing has changed since the services last came up.

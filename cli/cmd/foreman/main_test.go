@@ -102,7 +102,7 @@ func TestHeadlessCommands(t *testing.T) {
 			return
 		}
 		patched = append(patched, body.Secrets[0].Name+"="+body.Secrets[0].Value)
-		fmt.Fprintf(w, `{"set":[%q],"unset":[],"pending_restart":[],"others_pending_restart":0}`, body.Secrets[0].Name)
+		fmt.Fprintf(w, `{"set":[%q],"unset":[],"affected":[],"others_affected":0}`, body.Secrets[0].Name)
 	})
 	// Both spellings of the command reach the same handler.
 	for _, name := range []string{"secrets", "secret"} {

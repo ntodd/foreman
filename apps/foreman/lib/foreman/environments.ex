@@ -629,15 +629,7 @@ defmodule Foreman.Environments do
     name = Atom.to_string(action)
     desired = desired_for(name) || env.desired_state
 
-    # Remembered so cancelling the operation can put the wish back.
-    args =
-      if desired != env.desired_state,
-        do:
-          Map.merge(args, %{
-            "prior_desired" => env.desired_state,
-            "prior_authority" => env.desired_authority
-          }),
-        else: args
+    args = remember_prior(args, env, desired, replaces_authority?(name, opts))
 
     # What the user saw when they clicked. The command adds anything that
     # changes before it's sent.
@@ -676,6 +668,23 @@ defmodule Foreman.Environments do
     Audit.log(scope, "environment.#{action}", env, Keyword.get(opts, :audit, %{}))
     {:ok, op}
   end
+
+  # Remembered so cancelling the operation, or its denial at dispatch, can
+  # put the wish back. A request through an API grant replaces the
+  # authority even when the wish itself is unchanged, as a restart's is.
+  defp remember_prior(args, env, desired, replaces_authority?) do
+    if desired != env.desired_state or replaces_authority? do
+      Map.merge(args, %{
+        "prior_desired" => env.desired_state,
+        "prior_authority" => env.desired_authority
+      })
+    else
+      args
+    end
+  end
+
+  defp replaces_authority?(name, opts),
+    do: not is_nil(opts[:api_grant_id]) and not is_nil(desired_for(name))
 
   defp prepare_queue(env, "stop", "expiry") do
     cancelled = cancel_queued(env, &(&1 in @up or &1 in ["suspend", "secrets_write"]))

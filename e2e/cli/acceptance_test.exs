@@ -119,8 +119,6 @@ defmodule Foreman.CLIAcceptanceTest do
   end
 
   test "secrets are set, imported, listed and removed without a value ever being printed", ctx do
-    env = environment_fixture(user: ctx.user, repo: ctx.repo, box: ctx.box)
-
     # A default login leaves the secret permissions out, and says how to ask for them.
     login(ctx, ctx.user)
     assert {%{"code" => "insufficient_scope"}, "", _} = failure(ctx, ["secrets", "set", "A=1"])
@@ -129,7 +127,18 @@ defmodule Foreman.CLIAcceptanceTest do
     assert hint =~ ~s(foreman login --scope ")
     assert hint =~ "secrets:write"
 
-    login(ctx, ctx.user, "repos:list secrets:list secrets:write environments:start environments:stop")
+    # A workspace the box has confirmed is running.
+    created = json(ctx, ["env", "create", ctx.repo.full_name, "--no-wait"])
+    env_id = created["environment_id"]
+    complete(ctx.box, created["operation_id"])
+    env = Repo.get!(Environment, env_id)
+
+    login(
+      ctx,
+      ctx.user,
+      "repos:list environments:list operations:read environments:start environments:stop secrets:list secrets:write"
+    )
+
     File.write!(Path.join(ctx.tmp_dir, "key.txt"), "from a file\n")
 
     File.write!(
@@ -137,41 +146,54 @@ defmodule Foreman.CLIAcceptanceTest do
       "# shared\nDOTENV_ONE=1\nexport DOTENV_TWO=\"two words\"\n"
     )
 
-    args = ["secrets", "set", "PLAIN=hunter2", "FROM_FILE=@key.txt", "--env", env.id]
-    env_id = env.id
+    args = ["secrets", "set", "PLAIN=hunter2", "FROM_FILE=@key.txt", "--env", env_id]
 
     assert %{
              "set" => ["PLAIN", "FROM_FILE"],
              "unset" => [],
-             "pending_restart" => [%{"id" => ^env_id}]
+             "affected" => [%{"id" => ^env_id}],
+             "others_affected" => 0
            } = json(ctx, args)
 
     assert Foreman.Secrets.resolve(env) == %{"PLAIN" => "hunter2", "FROM_FILE" => "from a file"}
 
-    # The running services still hold what they started with; a restart recreates them.
+    # The running services still hold what they started with. A restart recreates the
+    # ones that use what changed, and it reaches the box.
     assert %{"environment_id" => ^env_id, "operation_id" => restart} =
-             json(ctx, ["env", "restart", env.id, "--no-wait"])
+             json(ctx, ["env", "restart", env_id, "--no-wait"])
 
-    assert %{action: "restart_affected", args: %{"changed" => ["FROM_FILE", "PLAIN"]}} =
-             Repo.get!(Operation, restart)
+    assert %{
+             action: "restart_affected",
+             status: "dispatched",
+             args: %{"changed" => ["FROM_FILE", "PLAIN"]}
+           } = Repo.get!(Operation, restart)
 
-    {0, human, ""} = ctx |> launch(["secrets", "list", "--env", env.id]) |> finish()
-    assert ["NAME\tUPDATED", "FROM_FILE\t" <> _, "PLAIN\t" <> _] = String.split(human, "\n", trim: true)
-    listed = json(ctx, ["secrets", "list", "--env", env.id])
+    complete(ctx.box, restart)
+    assert %{"status" => "succeeded"} = json(ctx, ["op", "wait", restart])
+
+    {0, human, ""} = ctx |> launch(["secrets", "list", "--env", env_id]) |> finish()
+
+    assert ["NAME\tUPDATED", "FROM_FILE\t" <> _, "PLAIN\t" <> _] =
+             String.split(human, "\n", trim: true)
+
+    listed = json(ctx, ["secrets", "list", "--env", env_id])
     assert Enum.map(items(listed), & &1["name"]) == ["FROM_FILE", "PLAIN"]
     refute human <> inspect(listed) =~ "hunter2"
 
     # With no level named, the secrets are the caller's own.
     assert %{"set" => ["DOTENV_ONE", "DOTENV_TWO"]} = json(ctx, ["secret", "import", "team.env"])
-    assert Enum.map(items(json(ctx, ["secrets", "list"])), & &1["name"]) == ["DOTENV_ONE", "DOTENV_TWO"]
+
+    assert Enum.map(items(json(ctx, ["secrets", "list"])), & &1["name"]) ==
+             ["DOTENV_ONE", "DOTENV_TWO"]
+
     assert Foreman.Secrets.resolve(env)["DOTENV_TWO"] == "two words"
 
     assert %{"set" => [], "unset" => ["PLAIN"]} =
-             json(ctx, ["secrets", "unset", "PLAIN", "NEVER_SET", "--env", env.id])
+             json(ctx, ["secrets", "unset", "PLAIN", "NEVER_SET", "--env", env_id])
 
     # One refused name leaves the whole request unapplied.
     assert {%{"code" => "invalid_request", "message" => message}, "", _} =
-             failure(ctx, ["secrets", "set", "GOOD=1", "FOREMAN_TOKEN=2", "--env", env.id])
+             failure(ctx, ["secrets", "set", "GOOD=1", "FOREMAN_TOKEN=2", "--env", env_id])
 
     assert message =~ "FOREMAN_TOKEN"
     refute Map.has_key?(Foreman.Secrets.resolve(env), "GOOD")

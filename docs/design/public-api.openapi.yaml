@@ -341,7 +341,7 @@ paths:
             schema: {$ref: '#/components/schemas/SecretChanges'}
       responses:
         '200':
-          description: The names changed and the environments now waiting on a restart
+          description: The names changed and the running environments the scope reaches
           content:
             application/json:
               schema: {$ref: '#/components/schemas/SecretChangeResult'}
@@ -487,7 +487,7 @@ components:
       additionalProperties: false
       required: [action]
       properties:
-        action: {type: string, enum: [start, stop, destroy, restart_affected, restart_all], description: 'restart_affected recreates the services whose secrets changed since they last came up. restart_all recreates every service. Both need a running environment.'}
+        action: {type: string, enum: [start, stop, destroy, restart_affected, restart_all], description: 'restart_affected recreates the services whose compose configuration uses a secret that changed since they last came up, and restarts the workspace container. restart_all stops and starts every container without recreating any, so processes start again and read the current secrets file. Both need a running environment.'}
         confirm_capacity_warning: {type: boolean, default: false}
     Accepted:
       type: object
@@ -586,7 +586,7 @@ components:
         slug: {type: string}
     SecretChangeResult:
       type: object
-      required: [set, unset, pending_restart, others_pending_restart]
+      required: [set, unset, affected, others_affected]
       properties:
         set:
           type: array
@@ -595,13 +595,13 @@ components:
           type: array
           description: The names that were set and are now removed.
           items: {type: string}
-        pending_restart:
+        affected:
           type: array
-          description: The caller's running environments that keep their previous values until restarted.
+          description: The caller's running environments the scope reaches, for a connection that may list environments, and empty otherwise. Their running services keep the values they started with until restarted. The list does not depend on the values sent.
           items: {$ref: '#/components/schemas/EnvironmentRef'}
-        others_pending_restart:
+        others_affected:
           type: integer
-          description: How many of other people's running environments are waiting the same way.
+          description: How many of other people's running environments the scope reaches.
     EnvironmentPage:
       type: object
       required: [items, next_cursor]

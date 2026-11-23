@@ -137,10 +137,10 @@ type EnvironmentRef struct {
 }
 
 type SecretChangeResult struct {
-	Set                  []string         `json:"set"`
-	Unset                []string         `json:"unset"`
-	PendingRestart       []EnvironmentRef `json:"pending_restart"`
-	OthersPendingRestart int64            `json:"others_pending_restart"`
+	Set            []string         `json:"set"`
+	Unset          []string         `json:"unset"`
+	Affected       []EnvironmentRef `json:"affected"`
+	OthersAffected int64            `json:"others_affected"`
 }
 
 type EnvironmentPage struct {

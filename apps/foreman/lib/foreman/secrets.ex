@@ -136,11 +136,11 @@ defmodule Foreman.Secrets do
     audit = Keyword.get(opts, :audit, %{})
     recheck = Keyword.get(opts, :recheck, fn -> :ok end)
 
+    # The scope's turn is taken first: a check made while still waiting
+    # for it could be out of date by the time the write runs.
     change = fn ->
-      with :ok <- recheck.() do
-        serialize(scope_key(scope_name, subject))
-        change_all(scope, scope_name, subject, set, unset, audit)
-      end
+      serialize(scope_key(scope_name, subject))
+      with :ok <- recheck.(), do: change_all(scope, scope_name, subject, set, unset, audit)
     end
 
     with :ok <- authorize(scope, scope_name, subject),
@@ -180,7 +180,9 @@ defmodule Foreman.Secrets do
   defp remove_secret(scope, scope_name, subject, name, audit) do
     key = scope_key(scope_name, subject)
 
-    with %Secret{} = secret <- Foreman.Repo.get_by(Secret, scope_key: key, name: name),
+    # Unlogged, like the write: a value pasted where a name belongs would
+    # otherwise be the query's parameter.
+    with %Secret{} = secret <- lookup(key, name),
          {1, _} <- Foreman.Repo.delete_all(from s in Secret, where: s.id == ^secret.id) do
       Audit.log(
         scope,
@@ -224,7 +226,7 @@ defmodule Foreman.Secrets do
   defp save_secret(scope, scope_name, subject, attrs, audit \\ %{}) do
     key = scope_key(scope_name, subject)
     name = attrs["name"] || attrs[:name]
-    existing = name && Foreman.Repo.get_by(Secret, scope_key: key, name: name)
+    existing = name && lookup(key, name)
 
     secret =
       existing ||
@@ -239,10 +241,14 @@ defmodule Foreman.Secrets do
         attrs -> Map.put(attrs, "repo_ids", if(existing, do: existing.repo_ids, else: []))
       end
 
+    # The timestamp moves on every set. Left to Ecto, setting the value a
+    # secret already holds would change nothing, and anyone who can list
+    # names would learn that the value they sent was the one stored.
     changeset =
       secret
       |> Secret.changeset(attrs)
       |> Ecto.Changeset.put_change(:updated_by_id, Scope.user_id(scope))
+      |> Ecto.Changeset.force_change(:updated_at, DateTime.utc_now())
 
     # Ecto logs a write's parameters as they were cast, before the column
     # type encrypts them, so this write stays out of the query log.
@@ -346,6 +352,9 @@ defmodule Foreman.Secrets do
     |> Ecto.Changeset.put_change(:updated_by_id, Scope.user_id(scope))
     |> Foreman.Repo.insert(log: false)
   end
+
+  defp lookup(key, name),
+    do: Foreman.Repo.get_by(Secret, [scope_key: key, name: name], log: false)
 
   defp subject_fields("owner", %Owner{id: id}), do: %{owner_id: id}
   defp subject_fields("repo", %Repo{id: id}), do: %{repo_id: id}
