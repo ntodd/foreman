@@ -269,7 +269,12 @@ defmodule Foreman.GitHub do
   user's own token when the repo is set to `broad`. The token lasts until
   the environment's next scheduled one.
   """
-  def environment_token(%User{} = user, %Repos.Repo{} = repo) do
+  def environment_token(user, repo) do
+    with {:ok, value, _source} <- environment_credential(user, repo), do: {:ok, value}
+  end
+
+  @doc false
+  def environment_credential(%User{} = user, %Repos.Repo{} = repo) do
     repo = Foreman.Repo.preload(repo, :owner)
 
     with {:ok, token} <- user_token(user, @environment_token_life),
@@ -279,12 +284,16 @@ defmodule Foreman.GitHub do
          true <-
            current.access_generation == user.access_generation and current.access_token == token,
          true <- Accounts.access(current) != :denied do
-      {:ok, credential}
+      {:ok, credential, credential_version(token)}
     else
       {:error, _} = error -> error
       _ -> {:error, :login_expired}
     end
   end
+
+  @doc false
+  def credential_version(token) when is_binary(token), do: :crypto.hash(:sha256, token)
+  def credential_version(nil), do: nil
 
   defp browser_credential(token, %{token_mode: "broad"}), do: {:ok, token}
   defp browser_credential(token, repo), do: scope_token(token, repo, Repos.token_repos(repo))

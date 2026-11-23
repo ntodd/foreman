@@ -290,57 +290,68 @@ defmodule Foreman.Environments.WorkloadAccess do
     Repo.transact(fn ->
       lock_row(Foreman.Boxes.Box, env.box_id)
       env = Foreman.Environments.locked_environment(env.id) |> Repo.preload(repo: :owner)
-      policy = prepared.policy
 
-      repositories = [env.repo_id | Map.keys(prepared.secondaries)]
-      lock_rows(Repos.Repo, repositories)
-      owner_ids = Repo.all(from r in Repos.Repo, where: r.id in ^repositories, select: r.owner_id)
-      lock_rows(Repos.Owner, owner_ids)
-
-      grants =
-        [
-          op.api_grant_id,
-          env.api_grant_id,
-          env.workload_grant_id,
-          (env.desired_authority || %{})["grant_id"],
-          policy && policy.principal.grant_id
-        ]
-        |> Enum.reject(&is_nil/1)
-        |> Enum.uniq()
-
-      grant_query = from g in OAuth.Grant, where: g.id in ^grants
-      clients = Repo.all(select(grant_query, [g], g.client_id))
-
-      users =
-        [env.user_id, op.user_id, (env.desired_authority || %{})["user_id"]]
-        |> Enum.reject(&is_nil/1)
-
-      # Admin mutations lock their human actor before a client, then its service
-      # identity and grant. Follow the same order for personal and service work.
-      lock_query(from u in Accounts.User, where: u.id in ^users and not u.service_account)
-      lock_rows(OAuth.Client, clients)
-      lock_query(from u in Accounts.User, where: u.id in ^users and u.service_account)
-      lock_rows(OAuth.Grant, grants)
-      env = Repo.preload(env, [:user, :box, repo: :owner], force: true)
-
-      # Waiting for a credential writer can cross a grant deadline. Check the
-      # retained access queries after all material locks have been acquired.
-      current? = current_material?(env, prepared, true)
-
-      case authorize(op, env, prepared) do
-        {:ok, %{policy: ^policy}} ->
-          if current?,
-            do: {:ok, send_command.(env)},
-            else: {:ok, :retry}
-
-        {:ok, _changed} ->
-          {:ok, :retry}
-
-        other ->
-          {:ok, other}
+      if op.action == "secrets_write" and
+           (env.desired_state in ["stopped", "destroyed"] or
+              Foreman.Jobs.EnvironmentExpiry.due?(env)) do
+        {:ok, :superseded}
+      else
+        deliver_current(op, env, prepared, send_command)
       end
     end)
     |> elem(1)
+  end
+
+  defp deliver_current(op, env, prepared, send_command) do
+    policy = prepared.policy
+
+    repositories = [env.repo_id | Map.keys(prepared.secondaries)]
+    lock_rows(Repos.Repo, repositories)
+    owner_ids = Repo.all(from r in Repos.Repo, where: r.id in ^repositories, select: r.owner_id)
+    lock_rows(Repos.Owner, owner_ids)
+
+    grants =
+      [
+        op.api_grant_id,
+        env.api_grant_id,
+        env.workload_grant_id,
+        (env.desired_authority || %{})["grant_id"],
+        policy && policy.principal.grant_id
+      ]
+      |> Enum.reject(&is_nil/1)
+      |> Enum.uniq()
+
+    grant_query = from g in OAuth.Grant, where: g.id in ^grants
+    clients = Repo.all(select(grant_query, [g], g.client_id))
+
+    users =
+      [env.user_id, op.user_id, (env.desired_authority || %{})["user_id"]]
+      |> Enum.reject(&is_nil/1)
+
+    # Admin mutations lock their human actor before a client, then its service
+    # identity and grant. Follow the same order for personal and service work.
+    lock_query(from u in Accounts.User, where: u.id in ^users and not u.service_account)
+    lock_rows(OAuth.Client, clients)
+    lock_query(from u in Accounts.User, where: u.id in ^users and u.service_account)
+    lock_rows(OAuth.Grant, grants)
+    env = Repo.preload(env, [:user, :box, repo: :owner], force: true)
+
+    # Waiting for a credential writer can cross a grant deadline. Check the
+    # retained access queries after all material locks have been acquired.
+    current? = current_material?(env, prepared, true)
+
+    case authorize(op, env, prepared) do
+      {:ok, %{policy: ^policy}} ->
+        if current?,
+          do: {:ok, send_command.(env)},
+          else: {:ok, :retry}
+
+      {:ok, _changed} ->
+        {:ok, :retry}
+
+      other ->
+        {:ok, other}
+    end
   end
 
   defp lock_row(schema, id), do: lock_rows(schema, [id])
@@ -376,7 +387,7 @@ defmodule Foreman.Environments.WorkloadAccess do
      GitHub.configured?(), Tailscale.configured?(), tags,
      is_nil(policy) &&
        {repo.token_mode, Repos.token_repos(repo), owner.registry_host, owner.registry_username,
-        owner.registry_token, env.user.access_token}, env.user.access_generation}
+        owner.registry_token}, env.user.access_generation}
     |> :erlang.term_to_binary()
     |> then(&:crypto.hash(:sha256, &1))
   end
@@ -387,6 +398,8 @@ defmodule Foreman.Environments.WorkloadAccess do
     options = Keyword.put(material.options, :lock, lock?)
 
     settings(env, policy) == material.settings and
+      (is_nil(material.source) or
+         GitHub.credential_version(env.user.access_token) == material.source) and
       current_enrollment?(env, policy, material.enrollment) and
       Secrets.hashes(Secrets.resolve(env, options)) == material.hashes
   end

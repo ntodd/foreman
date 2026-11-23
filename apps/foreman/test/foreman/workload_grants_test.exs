@@ -575,12 +575,12 @@ defmodule Foreman.WorkloadGrantsTest do
   end
 
   test "an administrator or due expiry can stop ahead of a retrying personal file write", ctx do
-    {grant, env} = personal(ctx, ctx.admin)
     github()
     stub(ClientMock, :get_repo, fn _, _ -> {:error, :timeout} end)
     {:ok, _} = Registry.register(Foreman.Registry, {:agent, ctx.box.id}, nil)
 
     for trigger <- [:admin, :expiry] do
+      {grant, env} = personal(ctx, ctx.admin)
       write = operation(env, grant, "secrets_write") |> Repo.insert!()
       Server.kick(env.id)
       assert Repo.reload!(write).status == "queued"
@@ -635,6 +635,31 @@ defmodule Foreman.WorkloadGrantsTest do
     assert cmd.payload.files["github-token"] == "derived"
     save(ctx.admin, access_token: "replacement")
     assert :retry = Environments.WorkloadAccess.deliver(op, env, proof, fn _ -> :sent end)
+  end
+
+  test "a reconnect preserves a guest's running file write but a lost write cannot block shutdown",
+       ctx do
+    {grant, env} = personal(ctx, ctx.admin)
+
+    write =
+      operation(env, grant, "secrets_write") |> Map.put(:status, "running") |> Repo.insert!()
+
+    github()
+    stub(ClientMock, :get_repo, fn _, _ -> {:error, :timeout} end)
+    {:ok, _} = Registry.register(Foreman.Registry, {:agent, ctx.box.id}, nil)
+    assert {:ok, stop} = Environments.stop(Scope.for_user(ctx.admin), env)
+
+    :ok = Foreman.Agents.restart_clocks(ctx.box.id, [write.id])
+    :ok = Foreman.Agents.agent_connected(ctx.box)
+    assert Repo.reload!(write).status == "running"
+    assert Repo.reload!(stop).status == "queued"
+    refute_received {:dispatch, %Command{type: "env.stop"}}
+
+    :ok = Foreman.Agents.restart_clocks(ctx.box.id, [])
+    :ok = Foreman.Agents.agent_connected(ctx.box)
+    assert_receive {:dispatch, %Command{type: "env.stop", op_id: id}}
+    assert id == stop.id
+    assert Repo.reload!(write).status == "cancelled"
   end
 
   defp personal(ctx, user) do

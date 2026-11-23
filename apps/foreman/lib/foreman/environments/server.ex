@@ -159,6 +159,12 @@ defmodule Foreman.Environments.Server do
     dispatch_next(env.id)
   end
 
+  defp dispatch(%{action: "secrets_write"} = op, %{desired_state: state} = env)
+       when state in ["stopped", "destroyed"] do
+    Operations.cancel_queued(op)
+    dispatch_next(env.id)
+  end
+
   # Builds the command fresh (current secrets and token), takes the
   # operation off the queue and records the transitional state, then
   # sends. The state goes first so a fast result can't be overwritten by
@@ -209,6 +215,11 @@ defmodule Foreman.Environments.Server do
 
     case deliver(op, env, cmd, policy) do
       :ok ->
+        :ok
+
+      :superseded ->
+        Operations.cancel_unsent_write(op)
+        dispatch_next(env.id)
         :ok
 
       {:error, :unauthorized} ->

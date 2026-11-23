@@ -35,7 +35,7 @@ defmodule Foreman.Environments.Commands do
 
   defp material(_env, _policy, _cmd, nil), do: nil
 
-  defp material(env, policy, cmd, {options, hashes}) do
+  defp material(env, policy, cmd, {options, hashes, source}) do
     enrollment =
       if tailscale = cmd.payload[:tailscale],
         do: {tailscale, {env.ts_authkey, env.ts_authkey_tags, env.tailscale_device_id}}
@@ -44,7 +44,8 @@ defmodule Foreman.Environments.Commands do
       options: options,
       hashes: hashes,
       settings: WorkloadAccess.settings(env, policy),
-      enrollment: enrollment
+      enrollment: enrollment,
+      source: source
     }
   end
 
@@ -143,12 +144,12 @@ defmodule Foreman.Environments.Commands do
   end
 
   defp with_secrets(env, policy, fun) do
-    secrets = secrets(env, policy, fn -> elem(github_token(env, policy), 0) end)
+    secrets = secrets(env, policy, fn -> github_token(env, policy) end)
 
     with {:ok, cmd, extra} <- fun.(secrets) do
       {:ok, cmd,
        Map.put(extra, "secret_hashes", secrets.hashes)
-       |> Map.put(:selected_secrets, {secrets.options, secrets.hashes})}
+       |> Map.put(:selected_secrets, {secrets.options, secrets.hashes, secrets.source})}
     end
   end
 
@@ -187,9 +188,9 @@ defmodule Foreman.Environments.Commands do
   defp up(op, env, %{policy: policy} = access, action) do
     # A build shouldn't wait on GitHub: without a token it goes ahead, and
     # the token follows with the next refresh.
-    {token, token_notice, token_status} = github_token(env, policy)
+    {token, token_notice, token_status, source} = credential = github_token(env, policy)
     {type, extra} = up_command(action, env, token, policy)
-    secrets = secrets(env, policy, fn -> token end)
+    secrets = secrets(env, policy, fn -> credential end)
     identity = identity(env, policy)
     features = features(env, policy)
 
@@ -224,7 +225,7 @@ defmodule Foreman.Environments.Commands do
       with {:ok, cmd, _} <- command(op, type, payload) do
         {:ok, cmd,
          %{
-           :selected_secrets => {secrets.options, secrets.hashes},
+           :selected_secrets => {secrets.options, secrets.hashes, source},
            "secret_hashes" => secrets.hashes,
            "token" => token != nil,
            "token_retry" => token_status == :unavailable
@@ -240,8 +241,8 @@ defmodule Foreman.Environments.Commands do
   # refresh, which this puts first in line. (An expired login is
   # different: that token is dead, and the notice says to sign in again.)
   defp secrets_write(op, env, policy) do
-    {token, notice, status} = github_token(env, policy)
-    secrets = secrets(env, policy, fn -> token end)
+    {token, notice, status, source} = credential = github_token(env, policy)
+    secrets = secrets(env, policy, fn -> credential end)
     identity = identity(env, policy)
 
     payload =
@@ -251,7 +252,7 @@ defmodule Foreman.Environments.Commands do
     with {:ok, cmd, _} <- command(op, "env.secrets.write", payload) do
       {:ok, cmd,
        %{
-         :selected_secrets => {secrets.options, secrets.hashes},
+         :selected_secrets => {secrets.options, secrets.hashes, source},
          "token" => token != nil,
          "token_retry" => status == :unavailable
        }}
@@ -292,12 +293,13 @@ defmodule Foreman.Environments.Commands do
       values: values,
       hashes: Secrets.hashes(values),
       registry_auth: nil,
+      source: nil,
       options: [approved_ids: ids]
     }
   end
 
   defp secrets(env, policy, get_token) do
-    shared? = share_credentials?(env, get_token)
+    {shared?, source} = share_credentials(env, get_token)
     values = Secrets.resolve(env, include_shared: shared?)
     auth = if shared? and is_nil(policy), do: registry_auth(env.repo.owner)
 
@@ -305,21 +307,25 @@ defmodule Foreman.Environments.Commands do
       values: values,
       hashes: Secrets.hashes(values),
       registry_auth: auth,
+      source: source,
       options: [include_shared: shared?]
     }
   end
 
-  defp share_credentials?(env, get_token) do
+  defp share_credentials(env, get_token) do
     cond do
       not GitHub.configured?() ->
-        true
+        {true, nil}
 
       is_nil(env.repo.owner.registry_token) and not Secrets.shared?(env) ->
-        false
+        {false, nil}
 
       true ->
-        token = get_token.()
-        is_binary(token) and GitHub.can_read?(token, env.repo, [])
+        {token, _, _, source} = get_token.()
+
+        if is_binary(token) and GitHub.can_read?(token, env.repo, []),
+          do: {true, source},
+          else: {false, nil}
     end
   end
 
@@ -358,39 +364,41 @@ defmodule Foreman.Environments.Commands do
     [pending, token_notice] |> Enum.reject(&is_nil/1) |> Enum.join()
   end
 
-  # {token, notice, status}: status is :ok, :expired (sign in again) or
+  # {token, notice, status, source credential version}: status is :ok, :expired (sign in again) or
   # :unavailable (GitHub failed this time; try again later).
   defp github_token(env, policy) do
     if GitHub.configured?() do
       case workload_token(env, policy) do
-        {:ok, token} ->
-          {token, nil, :ok}
+        {:ok, token, source} ->
+          {token, nil, :ok, source}
 
         {:error, :contents_disabled} ->
           {nil, "Foreman: repository policy disables GitHub contents access for this workload.\n",
-           :disabled}
+           :disabled, nil}
 
         {:error, :login_expired} ->
           {nil,
            "Foreman: your GitHub login expired, so git push and gh won't work here. Sign in to Foreman again to fix it.\n",
-           :expired}
+           :expired, nil}
 
         {:error, reason} ->
           Logger.warning("couldn't get a GitHub token for #{env.slug}: #{inspect(reason)}")
 
           {nil,
            "Foreman: couldn't get a GitHub token for this environment just now, so git push and gh won't work yet. Foreman will try again shortly.\n",
-           :unavailable}
+           :unavailable, nil}
       end
     else
-      {nil, nil, :ok}
+      {nil, nil, :ok, nil}
     end
   end
 
-  defp workload_token(env, nil), do: GitHub.environment_token(env.user, env.repo)
+  defp workload_token(env, nil), do: GitHub.environment_credential(env.user, env.repo)
 
-  defp workload_token(env, policy),
-    do: GitHub.workload_token(policy.principal, env.repo, policy.repository_ids)
+  defp workload_token(env, policy) do
+    with {:ok, token} <- GitHub.workload_token(policy.principal, env.repo, policy.repository_ids),
+         do: {:ok, token, nil}
+  end
 
   defp before_enrollment(env, op, access) do
     if Tailscale.configured?(), do: recheck(op, env, Map.put(access, :material, nil)), else: :ok

@@ -59,7 +59,7 @@ defmodule Foreman.WorkloadDeliveryConcurrencyTest do
       args: %{}
     }
 
-    %{op: op, env: env, secret: secret}
+    %{op: op, env: env, secret: secret, admin: admin, box: box, repo: repo}
   end
 
   test "selected secret rotation and mailbox delivery serialize in either order", %{
@@ -122,6 +122,58 @@ defmodule Foreman.WorkloadDeliveryConcurrencyTest do
     assert :sent = Task.await(delivery)
     assert :rotation_committed = Task.await(rotation)
     assert :retry = WorkloadAccess.deliver(op, env, fresh, fn _ -> flunk("stale delivery") end)
+  end
+
+  test "a new personal override cannot overtake delivery of the inherited value", ctx do
+    env = environment_fixture(user: ctx.admin, repo: ctx.repo, box: ctx.box)
+
+    on_exit(fn ->
+      Sandbox.unboxed_run(Repo, fn ->
+        Repo.delete_all(from s in Foreman.Secrets.Secret, where: s.user_id == ^ctx.admin.id)
+        Repo.delete!(env)
+      end)
+    end)
+
+    op = %{ctx.op | environment_id: env.id, api_grant_id: nil, user_id: ctx.admin.id}
+    {:ok, cmd, _, proof} = Commands.prepare(op, env)
+    assert cmd.payload.files["secrets.env"] =~ "initial"
+    parent = self()
+
+    delivery =
+      concurrent(fn ->
+        WorkloadAccess.deliver(op, env, proof, fn _ ->
+          send(parent, :in_delivery)
+          await_release()
+          :sent
+        end)
+      end)
+
+    assert_receive :in_delivery, 3000
+
+    writer =
+      concurrent(fn ->
+        send(parent, :inserting)
+
+        Repo.insert!(%Foreman.Secrets.Secret{
+          name: "CHOSEN",
+          value: "override",
+          scope: "user",
+          scope_key: "user:" <> ctx.admin.id,
+          user_id: ctx.admin.id,
+          updated_by_id: ctx.admin.id
+        })
+
+        send(parent, :inserted)
+      end)
+
+    assert_receive :inserting, 3000
+    refute_receive :inserted
+    send(delivery.pid, :release)
+    assert :sent = Task.await(delivery)
+    assert :inserted = Task.await(writer)
+    assert :retry = WorkloadAccess.deliver(op, env, proof, fn _ -> flunk("stale override") end)
+    assert {:ok, updated, _, _} = Commands.prepare(op, env)
+    assert updated.payload.files["secrets.env"] =~ "override"
   end
 
   defp concurrent(fun),

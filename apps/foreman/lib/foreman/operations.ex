@@ -87,10 +87,12 @@ defmodule Foreman.Operations do
   def restart_clock([]), do: :ok
 
   def restart_clock(ids) do
-    Repo.update_all(
-      from(o in Operation, where: o.id in ^ids and o.status in ["dispatched", "running"]),
-      set: [dispatched_at: DateTime.utc_now()]
-    )
+    missing = from o in Operation, where: o.id in ^ids and o.status in ["dispatched", "running"]
+    # An agent that lost this replace-all write no longer owns it. Returning it
+    # to the queue lets a shutdown supersede it even during a provider outage.
+    writes = where(missing, [o], o.action == "secrets_write" and is_nil(o.cancel_requested_at))
+    Repo.update_all(writes, set: [status: "queued", dispatched_at: nil, started_at: nil])
+    Repo.update_all(missing, set: [dispatched_at: DateTime.utc_now()])
 
     :ok
   end
@@ -416,6 +418,10 @@ defmodule Foreman.Operations do
       {:ok, op} -> {:ok, op}
       :error -> {:error, :not_queued}
     end
+  end
+
+  def cancel_unsent_write(%Operation{action: "secrets_write"} = op) do
+    transition(op, "dispatched", status: "cancelled", finished_at: DateTime.utc_now())
   end
 
   @doc "Fails a queued operation that couldn't be sent. `:error` if it isn't queued any more."
