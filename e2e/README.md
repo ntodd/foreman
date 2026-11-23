@@ -30,6 +30,23 @@ Set `FOREMAN_CLI` to the path of a built Go CLI to run the same browser approval
 
 The headless browser submits an approval and a denial. The approved code has one successful exchange under simultaneous requests. The test also starts the real CLI, approves its code, and starts fresh CLI processes to verify credential persistence, a serialized refresh, and logout. The browser and CLI use temporary profiles. The GitHub callback has a separate integration test with a mocked provider.
 
+### Go CLI acceptance
+
+From the checkout root, build the executable with Go 1.26.11 and run it against a disposable loopback Foreman API. The suite uses the control plane's test dependencies, Python 3, and curl. Keep Go on the path for the install and update test.
+
+```sh
+(
+  set -eu
+  stage=$(mktemp -d)
+  trap 'rm -rf "$stage"' EXIT
+  (cd cli && go build -o "$stage/foreman" ./cmd/foreman)
+  cd apps/foreman
+  FOREMAN_CLI="$stage/foreman" MIX_ENV=test mix test ../../e2e/cli/*_test.exs
+)
+```
+
+The tests submit browser consent, run each CLI command in a fresh process and use the real OAuth, API, database and expiry worker. Fixture agent events supply operation results and workspace inventory. The install test serves release assets on loopback and exercises update notices through a pseudoterminal. PR CI also packages an archive and runs its help and version commands on each of the four native targets.
+
 ## Through the UI (macOS or Linux)
 
 A dev control plane and a local agent, driven by a headless Chromium
