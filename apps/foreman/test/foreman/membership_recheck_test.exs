@@ -177,6 +177,30 @@ defmodule Foreman.MembershipRecheckTest do
       assert revoked?(user)
     end
 
+    test "hourly recheck revokes an API-only user's grant after a confirmed departure", %{
+      user: user
+    } do
+      configure(["root"], [], "acme")
+      client = Repo.get!(Foreman.OAuth.Client, "foreman-cli")
+      {:ok, device} = Foreman.OAuth.DeviceFlow.start(client, "repos:list")
+      session = Accounts.create_session(user, "device")
+
+      {:ok, "approve"} =
+        Foreman.OAuth.DeviceFlow.decide(device.user_code, "approve", user, session)
+
+      {:ok, tokens} = Foreman.OAuth.DeviceFlow.poll(client, device.device_code)
+      {:ok, principal} = Foreman.OAuth.authenticate(tokens.access_token)
+      Accounts.delete_user_sessions(user)
+      refreshes()
+      expect(ClientMock, :org_membership, fn "ghu_new", "acme" -> {:ok, false} end)
+
+      assert :ok = Foreman.Jobs.CheckAccess.perform(%Oban.Job{args: %{}})
+      assert :error = Foreman.OAuth.authenticate(tokens.access_token)
+      assert :error = Foreman.OAuth.authorize_grant(principal.grant_id)
+      assert {:error, :invalid_grant} = Foreman.OAuth.refresh(client, tokens.refresh_token, nil)
+      assert revoked?(user)
+    end
+
     test "checks a user whose token needs refreshing once, with the new token", %{user: user} do
       configure(["root"], [], "acme")
       refreshes()

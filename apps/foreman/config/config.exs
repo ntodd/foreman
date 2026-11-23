@@ -43,7 +43,7 @@ config :foreman, Oban,
     {Oban.Plugins.Cron,
      crontab: [
        {"*/30 * * * *", Foreman.Jobs.RefreshTokens},
-       {"41 */6 * * *", Foreman.Jobs.CheckAccess},
+       {"41 * * * *", Foreman.Jobs.CheckAccess},
        {"*/15 * * * *", Foreman.Jobs.SyncRepos},
        {"7 * * * *", Foreman.Jobs.CleanupTailnet},
        {"*/5 * * * *", Foreman.Jobs.Housekeeping},
@@ -97,6 +97,6 @@ config :phoenix, :json_library, Jason
 
 # Kept out of request logs: join tokens (and the Tailscale keys and
 # first-boot configs that come with them), secrets, passwords.
-config :phoenix, :filter_parameters, ["password", "token", "secret", "auth_key"]
+config :phoenix, :filter_parameters, ["password", "token", "secret", "auth_key", "code"]
 
 import_config "#{config_env()}.exs"

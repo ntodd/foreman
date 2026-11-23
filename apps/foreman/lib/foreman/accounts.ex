@@ -20,7 +20,13 @@ defmodule Foreman.Accounts do
   def get_user(id), do: Repo.get(User, id) |> effective_user()
   def get_user_by_login(login), do: Repo.get_by(User, login: login) |> effective_user()
 
-  def list_users, do: User |> order_by(:login) |> Repo.all() |> Enum.map(&effective_user/1)
+  def list_users,
+    do:
+      User
+      |> where([u], not u.service_account)
+      |> order_by(:login)
+      |> Repo.all()
+      |> Enum.map(&effective_user/1)
 
   def login_config do
     %{
@@ -44,6 +50,9 @@ defmodule Foreman.Accounts do
     existing = find_github_user(profile["id"], login)
 
     cond do
+      String.starts_with?(login, "service:") or (existing && existing.service_account) ->
+        {:error, :not_allowed}
+
       existing && existing.disabled_at ->
         {:error, :disabled}
 
@@ -90,7 +99,9 @@ defmodule Foreman.Accounts do
   # login only identifies a record that has no GitHub id yet.
   defp find_github_user(github_id, login) do
     Repo.get_by(User, github_id: github_id) ||
-      Repo.one(from u in User, where: u.login == ^login and is_nil(u.github_id))
+      Repo.one(
+        from u in User, where: not u.service_account and u.login == ^login and is_nil(u.github_id)
+      )
   end
 
   # Another account held this login before a rename on GitHub. Its record
@@ -149,7 +160,7 @@ defmodule Foreman.Accounts do
   @spec access(User.t(), map()) :: :allowed | :denied | :ask_org
   def access(%User{} = user, config \\ login_config()) do
     cond do
-      user.disabled_at -> :denied
+      user.service_account or not is_nil(user.disabled_at) -> :denied
       allowed?(user.login, user, config, false) -> :allowed
       config.allowed_org -> :ask_org
       true -> :denied
@@ -163,19 +174,25 @@ defmodule Foreman.Accounts do
   if they're let back in, they sign in again as before.
   """
   def revoke_access(%User{id: id} = user, reason) do
-    from(u in User, where: u.id == ^id)
-    |> Repo.update_all(
-      set: [
-        github_login_expired: true,
-        access_token: nil,
-        refresh_token: nil,
-        updated_at: DateTime.utc_now()
-      ]
-    )
+    {:ok, :revoked} =
+      Repo.transact(fn ->
+        from(u in User, where: u.id == ^id)
+        |> Repo.update_all(
+          set: [
+            github_login_expired: true,
+            access_token: nil,
+            refresh_token: nil,
+            updated_at: DateTime.utc_now()
+          ]
+        )
 
-    delete_user_sessions(user)
+        delete_user_sessions(user)
+        Foreman.OAuth.revoke_user(id)
+        Audit.log(nil, "user.access_revoked", user, %{"reason" => reason})
+        {:ok, :revoked}
+      end)
+
     disconnect_live_views(user)
-    Audit.log(nil, "user.access_revoked", user, %{"reason" => reason})
     :ok
   end
 
@@ -299,6 +316,7 @@ defmodule Foreman.Accounts do
   def set_role(%Scope{} = scope, %User{} = user, role) do
     cond do
       not Scope.admin?(scope) -> {:error, :unauthorized}
+      user.service_account -> {:error, :unauthorized}
       scope.user.id == user.id -> {:error, :self}
       configured_admin?(user.login) -> {:error, :configured_admin}
       true -> update_role(scope, Repo.reload!(user), %{role: role, admin_via_config: false})
@@ -308,18 +326,34 @@ defmodule Foreman.Accounts do
   def set_disabled(%Scope{} = scope, %User{} = user, disabled?) do
     cond do
       not Scope.admin?(scope) -> {:error, :unauthorized}
+      user.service_account -> {:error, :unauthorized}
       scope.user.id == user.id -> {:error, :self}
       true -> update_role(scope, user, %{disabled_at: if(disabled?, do: DateTime.utc_now())})
     end
   end
 
   defp update_role(scope, user, attrs) do
-    with {:ok, updated} <- user |> User.role_changeset(attrs) |> Repo.update() do
-      if updated.disabled_at, do: delete_user_sessions(updated)
-      disconnect_live_views(updated)
-      Audit.log(scope, "user.role", updated, Map.new(attrs, fn {k, v} -> {k, to_string(v)} end))
-      {:ok, updated}
-    end
+    result =
+      Repo.transact(fn ->
+        with {:ok, updated} <- user |> User.role_changeset(attrs) |> Repo.update() do
+          if updated.disabled_at do
+            delete_user_sessions(updated)
+            Foreman.OAuth.revoke_user(updated.id)
+          end
+
+          Audit.log(
+            scope,
+            "user.role",
+            updated,
+            Map.new(attrs, fn {k, v} -> {k, to_string(v)} end)
+          )
+
+          {:ok, updated}
+        end
+      end)
+
+    if match?({:ok, _}, result), do: disconnect_live_views(user)
+    result
   end
 
   # Open LiveViews hold the scope they mounted with. `:access_changed`
@@ -334,7 +368,9 @@ defmodule Foreman.Accounts do
   # -- sessions --------------------------------------------------------------
 
   @doc "Creates a session and returns its token. Only the token's hash is stored."
-  def create_session(%User{} = user, user_agent) do
+  def create_session(%User{service_account: true}, _user_agent), do: nil
+
+  def create_session(%User{service_account: false, disabled_at: nil} = user, user_agent) do
     raw = :crypto.strong_rand_bytes(32)
 
     Repo.insert!(%Session{
@@ -356,7 +392,7 @@ defmodule Foreman.Accounts do
           join: u in assoc(s, :user),
           where:
             s.token_hash == ^:crypto.hash(:sha256, raw) and s.inserted_at > ^cutoff and
-              is_nil(u.disabled_at),
+              is_nil(u.disabled_at) and not u.service_account,
           select: u
         )
         |> Repo.one()

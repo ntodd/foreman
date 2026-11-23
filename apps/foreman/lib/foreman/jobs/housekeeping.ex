@@ -49,6 +49,7 @@ defmodule Foreman.Jobs.Housekeeping do
     )
 
     Operations.prune_output(DateTime.add(DateTime.utc_now(), -@log_days * 86_400))
+    Foreman.OAuth.prune()
     Redactions.prune()
     :ok
   end

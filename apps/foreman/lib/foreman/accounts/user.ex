@@ -1,10 +1,11 @@
 defmodule Foreman.Accounts.User do
-  @moduledoc "A person who signs in with GitHub."
+  @moduledoc "A human GitHub account or a non-interactive service installation."
   use Foreman.Schema
 
   @roles ~w(admin member)
 
   schema "users" do
+    field :service_account, :boolean, default: false
     field :github_id, :integer
     field :login, :string
     field :name, :string

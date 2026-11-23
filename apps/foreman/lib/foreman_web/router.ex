@@ -30,8 +30,20 @@ defmodule ForemanWeb.Router do
     plug :accepts, ["json"]
   end
 
+  pipeline :oauth_bearer do
+    plug ForemanWeb.Plugs.ApiAuth
+  end
+
+  scope "/api/v1", ForemanWeb do
+    pipe_through [:api, :oauth_bearer]
+    get "/me", IdentityController, :show
+  end
+
   scope "/", ForemanWeb do
     pipe_through :api
+    post "/oauth/device/code", OAuthController, :device
+    post "/oauth/token", OAuthController, :token
+    post "/oauth/revoke", OAuthController, :revoke
     get "/.well-known/oauth-authorization-server", OAuthMetadataController, :show
   end
 
@@ -72,6 +84,11 @@ defmodule ForemanWeb.Router do
   scope "/", ForemanWeb do
     pipe_through [:browser, :signed_in]
 
+    get "/oauth/device", ConsentController, :show
+    post "/oauth/device", ConsentController, :decide
+    get "/settings/connections", ConsentController, :connections
+    post "/settings/connections/:id/revoke", ConsentController, :disconnect
+
     live_session :signed_in,
       on_mount: [{ForemanWeb.StaleAssets, :reload}, {ForemanWeb.UserAuth, :require_user}] do
       live "/", EnvironmentLive.Index, :index
@@ -88,6 +105,11 @@ defmodule ForemanWeb.Router do
 
   scope "/admin", ForemanWeb do
     pipe_through [:browser, :admin]
+
+    get "/apps", OAuthAdminController, :index
+    post "/apps", OAuthAdminController, :register
+    post "/apps/:id/rotate", OAuthAdminController, :rotate
+    post "/apps/:id/disable", OAuthAdminController, :disable
 
     live_session :admin,
       on_mount: [
