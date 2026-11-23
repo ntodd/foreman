@@ -474,7 +474,7 @@ defmodule Foreman.PublicAPI.MutationsTest do
     end
   end
 
-  test "a fresh lifecycle result stays confirmed until another observation arrives", ctx do
+  test "a fresh lifecycle result stays confirmed until a conflicting observation arrives", ctx do
     :ok = Foreman.Agents.register(ctx.box.id)
     {:ok, inventory} = ForemanProtocol.Event.new("box.inventory", %{environments: []})
     :ok = Foreman.Agents.handle_event(ctx.box.id, inventory)
@@ -497,6 +497,18 @@ defmodule Foreman.PublicAPI.MutationsTest do
     :ok = Foreman.Agents.handle_event(ctx.box.id, old)
     assert_receive {:dispatch, %{type: "box.inventory"}}
     current = Repo.get!(Environment, env)
+    assert Foreman.Agents.LifecycleState.confirmed?(current, "running")
+
+    {:ok, running} = ForemanProtocol.Event.new("env.state", %{env_id: env, state: "running"})
+    :ok = Foreman.Agents.handle_event(ctx.box.id, running)
+    assert Foreman.Agents.LifecycleState.confirmed?(current, "running")
+
+    {:ok, same_inventory} =
+      ForemanProtocol.Event.new("box.inventory", %{
+        environments: [%{env_id: env, slug: current.slug, state: "running"}]
+      })
+
+    :ok = Foreman.Agents.handle_event(ctx.box.id, same_inventory)
     assert Foreman.Agents.LifecycleState.confirmed?(current, "running")
 
     {:ok, stopped} = ForemanProtocol.Event.new("env.state", %{env_id: env, state: "stopped"})

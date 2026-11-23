@@ -34,24 +34,38 @@ defmodule Foreman.Agents.LifecycleState do
 
   # The reporter and the inventory command sample independently. A report
   # received during a scan may describe a change after its sample was taken.
-  def accept_observation?(box_id, env_id \\ :all) do
+  def accept_observation?(box_id, payload) do
     if invalidate_pending_scan(box_id) == :pending do
       # A buffered report cannot confirm state. It can still contradict a
       # command that already completed on this connection.
-      forget_confirmation(box_id, env_id)
+      forget_conflicting(box_id, payload)
       false
     else
       true
     end
   end
 
-  defp forget_confirmation(box_id, :all) do
-    for {__MODULE__, ^box_id, _} = key <- Registry.keys(AgentRegistry, self()),
-        do: Registry.unregister(AgentRegistry, key)
+  defp forget_conflicting(box_id, %{environments: entries}) do
+    states = Map.new(entries, &{&1.env_id, &1.state})
+
+    for {__MODULE__, ^box_id, env_id} <- Registry.keys(AgentRegistry, self()),
+        do: forget_conflicting(box_id, env_id, Map.get(states, env_id, "missing"))
   end
 
-  defp forget_confirmation(box_id, env_id),
-    do: Registry.unregister(AgentRegistry, {__MODULE__, box_id, env_id})
+  defp forget_conflicting(box_id, %{env_id: id, state: state}),
+    do: forget_conflicting(box_id, id, state)
+
+  defp forget_conflicting(box_id, id, state) do
+    key = {__MODULE__, box_id, id}
+
+    case Registry.lookup(AgentRegistry, key) do
+      [{pid, confirmed}] when pid == self() and confirmed != state ->
+        Registry.unregister(AgentRegistry, key)
+
+      _ ->
+        :ok
+    end
+  end
 
   defp invalidate_pending_scan(box_id) do
     key = {__MODULE__, :inventory, box_id}

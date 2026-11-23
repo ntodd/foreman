@@ -218,9 +218,9 @@ defmodule Foreman.Agents do
     end
   end
 
-  def handle_event(box_id, %Event{type: "box.inventory", payload: %{environments: envs}}) do
-    if LifecycleState.accept_observation?(box_id),
-      do: Environments.reconcile_inventory(box_id, envs),
+  def handle_event(box_id, %Event{type: "box.inventory", payload: payload}) do
+    if LifecycleState.accept_observation?(box_id, payload),
+      do: Environments.reconcile_inventory(box_id, payload.environments),
       else: refresh_inventory(box_id)
   end
 
@@ -266,9 +266,9 @@ defmodule Foreman.Agents do
     Metrics.record_box(box_id, sample)
   end
 
-  def handle_event(box_id, %Event{type: "env.state", payload: %{env_id: env_id, state: state}}) do
-    if LifecycleState.accept_observation?(box_id, env_id),
-      do: Environments.observe(box_id, env_id, state),
+  def handle_event(box_id, %Event{type: "env.state", payload: payload}) do
+    if LifecycleState.accept_observation?(box_id, payload),
+      do: Environments.observe(box_id, payload.env_id, payload.state),
       else: refresh_inventory(box_id)
   end
 
