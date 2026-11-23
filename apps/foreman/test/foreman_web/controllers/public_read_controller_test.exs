@@ -23,14 +23,7 @@ defmodule ForemanWeb.PublicReadControllerTest do
     env = environment_fixture(user: user, repo: repo, box: box, tailscale_device_id: "node123")
     env = Repo.update!(Ecto.Changeset.change(env, remote_user: "dev", workspace_folder: "/work"))
 
-    principal =
-      struct!(Foreman.OAuth.Principal,
-        user: user,
-        kind: :user,
-        client_id: "cli",
-        grant_id: Ecto.UUID.generate(),
-        scopes: @scopes
-      )
+    {principal, _grant} = Foreman.PublicAPIMutationFixtures.principal(user, @scopes)
 
     %{principal: principal, env: env, repo: repo, box: box}
   end
@@ -202,9 +195,11 @@ defmodule ForemanWeb.PublicReadControllerTest do
     assert Enum.map(first ++ last, & &1["id"]) == Enum.sort(Enum.map(rows, & &1.id), :desc)
     other = environment_fixture(user: ctx.principal.user, repo: ctx.repo, box: ctx.box)
 
+    {another_grant, _} = Foreman.PublicAPIMutationFixtures.principal(ctx.principal.user, @scopes)
+
     for {principal, action, params} <- [
           {ctx.principal, :operations, %{"id" => other.id}},
-          {%{ctx.principal | grant_id: Ecto.UUID.generate()}, :operations, %{"id" => ctx.env.id}},
+          {another_grant, :operations, %{"id" => ctx.env.id}},
           {ctx.principal, :logs, %{"id" => hd(rows).id}}
         ] do
       assert read(principal, action, Map.put(params, "cursor", cursor), 422)["code"] ==
