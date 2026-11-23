@@ -480,6 +480,63 @@ defmodule Foreman.PublicAPI.MutationsTest do
     end
   end
 
+  for type <- ["box.inventory", "env.state"] do
+    @type_of_report type
+    test "a late passive #{type} cannot supersede a clean probe", ctx do
+      env = environment_fixture(user: ctx.user, repo: ctx.repo, box: ctx.box)
+      other = environment_fixture(user: ctx.user, repo: ctx.repo, box: ctx.box)
+      :ok = Foreman.Agents.register(ctx.box.id)
+
+      inventory = fn state ->
+        entries = [
+          %{env_id: env.id, slug: env.slug, state: state},
+          %{env_id: other.id, slug: other.slug, state: "running"}
+        ]
+
+        {:ok, event} = ForemanProtocol.Event.new("box.inventory", %{environments: entries})
+        event
+      end
+
+      running = inventory.("running")
+      partial = inventory.("partial")
+      :ok = Foreman.Agents.handle_event(ctx.box.id, running)
+      assert_receive {:dispatch, %{type: "box.inventory", op_id: probe}}
+
+      {:ok, reply} =
+        ForemanProtocol.Event.new("op.result", %{
+          op_id: probe,
+          status: "ok",
+          result: ForemanProtocol.Event.to_wire(partial)["payload"]
+        })
+
+      :ok = Foreman.Agents.handle_event(ctx.box.id, reply)
+      assert Foreman.Agents.LifecycleState.confirmed?(env, "partial")
+      assert Foreman.Agents.LifecycleState.confirmed?(other, "running")
+
+      # The reporter sampled this VM before the probe, but waited for another VM.
+      event =
+        case @type_of_report do
+          "box.inventory" ->
+            running
+
+          "env.state" ->
+            {:ok, event} =
+              ForemanProtocol.Event.new("env.state", %{env_id: env.id, state: "running"})
+
+            event
+        end
+
+      :ok = Foreman.Agents.handle_event(ctx.box.id, event)
+
+      assert {:ok, _, op} =
+               Mutations.operate(ctx.actor, env.id, "after-late-report", %{"action" => "start"})
+
+      assert is_binary(op)
+      assert Foreman.Agents.LifecycleState.confirmed?(other, "running")
+      assert_receive {:dispatch, %{type: "box.inventory"}}
+    end
+  end
+
   test "a fresh lifecycle result stays confirmed until a conflicting observation arrives", ctx do
     :ok = Foreman.Agents.register(ctx.box.id)
     {:ok, inventory} = ForemanProtocol.Event.new("box.inventory", %{environments: []})

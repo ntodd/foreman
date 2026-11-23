@@ -296,7 +296,13 @@ defmodule Foreman.Operations do
   def workload_denial_message, do: @workload_denied
 
   def deny_workload(op, phase) do
-    statuses = if phase == :queued, do: ["queued"], else: ["dispatched", "running"]
+    statuses =
+      case phase do
+        :queued -> ["queued"]
+        :claimed -> ["dispatched"]
+        :reconnect -> ["dispatched", "running"]
+      end
+
     query = from o in Operation, where: o.id == ^op.id and o.status in ^statuses
     args = op.args || %{}
     args = if phase == :reconnect, do: Map.put(args, "awaiting_result", true), else: args
@@ -450,6 +456,10 @@ defmodule Foreman.Operations do
   def cancel_unsent(%Operation{} = op) do
     transition(op, "dispatched", status: "cancelled", finished_at: DateTime.utc_now())
   end
+
+  @doc "Returns an undelivered claim to the queue if it is still dispatched."
+  def release_claim(%Operation{} = op),
+    do: transition(op, "dispatched", status: "queued", dispatched_at: nil)
 
   @doc "Fails a queued operation that couldn't be sent. `:error` if it isn't queued any more."
   def fail_queued(%Operation{} = op, error),
