@@ -9,6 +9,25 @@ The agent brings devcontainers up itself, with its own implementation of
 the devcontainer CLI's `up` (`ForemanAgent.Devcontainer`), so none of the
 runs needs the CLI.
 
+## OAuth consent and CLI
+
+Start a disposable development control plane with the existing dev sign-in link enabled. The dummy GitHub App settings make the regular sign-in page available. Run from `apps/foreman`:
+
+```sh
+export FOREMAN_DEV_DATABASE="$(mktemp -d)/foreman.db" PORT=4198
+export FOREMAN_GITHUB_APP_ID=1 FOREMAN_GITHUB_CLIENT_ID=dev
+export FOREMAN_GITHUB_CLIENT_SECRET=fixture FOREMAN_GITHUB_PRIVATE_KEY=fixture FOREMAN_ADMINS=dev
+mix do ecto.create + ecto.migrate + phx.server
+```
+
+In another terminal at the checkout root, run:
+
+```sh
+FOREMAN_E2E_URL=http://localhost:4198 BROWSER=/path/to/chromium node e2e/oauth.mjs
+```
+
+The headless browser submits an approval and a denial. The approved code has one successful exchange under simultaneous requests. The test also starts the real CLI, approves its code, and starts fresh CLI processes to verify credential persistence, a serialized refresh, and logout. The browser and CLI use temporary profiles. The GitHub callback has a separate integration test with a mocked provider.
+
 ## Through the UI (macOS or Linux)
 
 A dev control plane and a local agent, driven by a headless Chromium

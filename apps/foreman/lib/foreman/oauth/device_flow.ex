@@ -64,7 +64,7 @@ defmodule Foreman.OAuth.DeviceFlow do
     Repo.transact(fn ->
       # Serialize approval with offboarding, then recheck the browser session inside that lock.
       with %User{disabled_at: nil, service_account: false} <-
-             Store.locked(from u in User, where: u.id == ^user.id),
+             Repo.one_for_update(from u in User, where: u.id == ^user.id),
            %User{id: id} when id == user.id <- Accounts.get_user_by_session(session),
            %Device{} = device <- lookup(code),
            {1, _} <-
@@ -102,7 +102,7 @@ defmodule Foreman.OAuth.DeviceFlow do
     {:ok, result} =
       Repo.transact(fn ->
         device =
-          Store.locked(
+          Repo.one_for_update(
             from d in Device,
               where: d.device_hash == ^Store.digest(raw) and d.client_id == ^client_id
           )
@@ -148,7 +148,7 @@ defmodule Foreman.OAuth.DeviceFlow do
   end
 
   defp exchange(device) do
-    grant = Store.locked(from g in Grant, where: g.id == ^device.grant_id)
+    grant = OAuth.lock_personal_grant(device.grant_id, device.client_id)
 
     case OAuth.authorize_grant(grant.id) do
       {:ok, _} ->

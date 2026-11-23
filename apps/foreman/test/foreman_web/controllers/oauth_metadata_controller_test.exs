@@ -7,8 +7,8 @@ defmodule ForemanWeb.OAuthMetadataControllerTest do
     issuer = Foreman.Config.base_url()
 
     metadata =
-      conn
-      |> get("https://proxy.internal/.well-known/oauth-authorization-server")
+      %{conn | remote_ip: {127, 0, 0, 1}}
+      |> get("http://proxy.internal/.well-known/oauth-authorization-server")
       |> json_response(200)
 
     assert metadata["issuer"] == issuer
