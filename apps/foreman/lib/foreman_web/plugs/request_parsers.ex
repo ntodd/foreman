@@ -9,7 +9,13 @@ defmodule ForemanWeb.Plugs.RequestParsers do
      Plug.Parsers.init(Keyword.merge(options, parsers: [:json], pass: []))}
   end
 
-  def call(%{path_info: ["api", "v1" | _]} = conn, {_, json_options}) do
+  def call(conn, {options, json_options}) do
+    if ForemanWeb.Plugs.OAuthTransport.policy(conn.path_info) == :resource,
+      do: parse_resource(conn, json_options),
+      else: Plug.Parsers.call(conn, options)
+  end
+
+  defp parse_resource(conn, json_options) do
     conn = Phoenix.Controller.put_format(conn, "json")
     Plug.Parsers.call(conn, json_options)
   rescue
@@ -22,8 +28,6 @@ defmodule ForemanWeb.Plugs.RequestParsers do
     _error in [Plug.Parsers.ParseError, Plug.Conn.InvalidQueryError] ->
       error(conn, 400, "invalid_request", "The request could not be parsed.")
   end
-
-  def call(conn, {options, _}), do: Plug.Parsers.call(conn, options)
 
   defp error(conn, status, code, message) do
     conn
