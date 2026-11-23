@@ -26,6 +26,20 @@ const help = `Usage: foreman [--instance ORIGIN] [--account ID] [--json] COMMAND
   me                             Show the acting identity as JSON
   logout                         Revoke the selected personal connection
 
+  repo list | box list | env list
+  env show ID                    Show environment state and SSH details
+  env create REPO                Create from an owner/name or repository UUID
+    [--branch NAME] [--box BOX] [--expires-at TIME --on-expiry stop|destroy]
+    [--request-key KEY] [--confirm-capacity-warning]
+  env create --resume KEY        Replay a saved submission
+  env start|stop|destroy ID      Change the environment state (--yes confirms destroy)
+  op list ENV_ID | op show OP_ID
+  op wait OP_ID                  Wait for completion
+  op logs OP_ID [--follow] [--cursor CURSOR]
+
+Lifecycle commands wait by default. Use --no-wait for submission only
+or --timeout 30s to bound a wait.
+
   --instance ORIGIN              Foreman HTTPS origin (loopback HTTP for development)
   --account ID                   Select an account on this instance
   --json                         Emit machine-readable output
@@ -159,6 +173,10 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		return fail(stderr, o.json, errors.New("a command is required; use foreman --help"), "invalid_invocation", 2)
 	}
 	command := args[0]
+	switch command {
+	case "repo", "box", "env", "op":
+		return runWorkload(ctx, args, o, stdout, stderr)
+	}
 	flags := flag.NewFlagSet(command, flag.ContinueOnError)
 	flags.SetOutput(io.Discard)
 	var scope string

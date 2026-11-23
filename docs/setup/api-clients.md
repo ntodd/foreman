@@ -24,6 +24,33 @@ Access tokens last 15 minutes. Each successful refresh returns a replacement ref
 
 When you replace a connection with another login, the CLI saves and syncs the new credentials before revoking the old grant. If the old grant cannot be revoked immediately, the CLI records it in the private account file and retries on the next `me`, `login` or `logout`. If saving and revoking the new grant both fail, the CLI directs you to **Connected apps** for manual recovery.
 
+## Environments with the installed CLI
+
+After device login, run these commands from any directory.
+
+```sh
+foreman repo list
+foreman box list
+foreman env create acme/payments --branch topic --timeout 15m
+foreman env show "$ENV_ID"
+foreman op list "$ENV_ID"
+foreman op logs "$OP_ID" --follow
+```
+
+`env create` accepts a repository UUID or an exact owner/name. Omit `--branch` to use the repository default. Omit `--box` for automatic placement, or supply a box UUID or exact name. With a create-only grant, use UUIDs and add `--no-wait`. To request expiry, supply both `--expires-at` with an absolute RFC 3339 timestamp and `--on-expiry stop` or `--on-expiry destroy`.
+
+Create, start, stop and destroy print the accepted IDs and then wait up to 30 minutes by default. `--timeout` sets the wait budget after acceptance. Use `--no-wait` for submission alone. Waiting requires `operations:read`. After an interruption or a permission change, use `foreman op wait "$OP_ID"` to check the outcome. `op show` prints the operation and exits nonzero if it failed or was cancelled. `foreman env show "$ENV_ID"` reads current readiness. In a script, use `--confirm-capacity-warning` on create or start to acknowledge a capacity warning, and `--yes` on destroy to confirm disk removal.
+
+Before sending a create request, the CLI saves its key and resolved inputs in the private `create-requests` directory under the Foreman state root and prints the key to stderr. Each instance, account and client has its own keys. If the process dies or its response is lost, select the original connection and run `foreman env create --resume "$KEY"` to replay the saved body. If stderr is unavailable, the saved JSON record contains `request_key`, the instance, account, client and request body.
+
+Scripts can supply `--request-key "$KEY"` for each intentional create. If every attempt received a definitive validation or capacity rejection, supply corrected inputs with the same key. After a capacity warning, `foreman env create --resume "$KEY" --confirm-capacity-warning` acknowledges it. An uncertain attempt permanently binds that key to its saved body. Older journal records without a rejection history also replay their original inputs. For an uncertain start, stop or destroy, inspect the environment and its operation history before resubmitting.
+
+Use `--json` for automation. Lists return an object with an `items` array. Diagnostics go to stderr. On failure the final JSON diagnostic includes `code`, `message` and any known recovery IDs. An ambiguous submission uses `outcome_unknown`. If replaying an uncertain create returns a validation or capacity rejection, the diagnostic keeps `outcome_unknown` and the original `request_key`. When available, `http_status` and `remote_code` preserve the HTTP status and the server's error code.
+
+A single `op logs` read returns up to 16 whole pages and 1 MiB of text. In JSON mode it emits one object containing `text`, `next_cursor` and `truncated`. Continue with `foreman op logs "$OP_ID" --cursor "$CURSOR"` until an empty read returns the same cursor you supplied. The server sets `truncated` when earlier output has been discarded. The CLI preserves this flag on partial reads, including an empty page that advanced the cursor before a later request failed.
+
+Use `--follow` for a continuous log stream. JSON follow mode writes one page per line, including empty pages. To reconnect, run `foreman op logs "$OP_ID" --follow --cursor "$CURSOR"` using the last delivered cursor.
+
 ## TLS termination
 
 Tailscale Serve on the same host can forward HTTPS to Foreman's loopback listener. The Docker image also trusts the bridge gateway for installations using the documented loopback-only published port. For an external TLS terminator, set `FOREMAN_TLS_PROXIES` to its peer address and configure it to replace incoming `X-Forwarded-Proto` with the actual connection scheme. If migrating an existing reverse proxy, set this variable before upgrading. `FOREMAN_TRUSTED_PROXIES` controls client-address forwarding for rate limits and logs separately.
