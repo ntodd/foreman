@@ -127,9 +127,16 @@ defmodule Foreman.Operations do
   end
 
   def mark_running(op_id) do
-    case get(op_id) do
-      %Operation{status: "dispatched"} = op -> mark(op, "running", started_at: DateTime.utc_now())
-      other -> other
+    now = DateTime.utc_now()
+
+    query =
+      from o in Operation,
+        where: o.id == ^op_id and o.status == "dispatched" and is_nil(o.finished_at),
+        select: o
+
+    case Repo.update_all(query, set: [status: "running", started_at: now, updated_at: now]) do
+      {1, [op]} -> tap(op, &broadcast/1)
+      {0, _} -> get(op_id)
     end
   end
 
@@ -205,7 +212,7 @@ defmodule Foreman.Operations do
   end
 
   defp already_finished?(op, error) do
-    Operation.finished?(op) and (not timed_out?(op) or error == "cancelled")
+    if timed_out?(op), do: error == "cancelled", else: Operation.finished?(op)
   end
 
   # The late result corrects its own history. Once a later lifecycle command
@@ -259,7 +266,7 @@ defmodule Foreman.Operations do
   defp result_size(result), do: result |> JSON.encode_to_iodata!() |> IO.iodata_length()
 
   @doc "Whether Housekeeping failed the operation for taking too long (see `timed_out/2`)."
-  def timed_out?(%Operation{status: "failed", args: %{"timed_out" => true}}), do: true
+  def timed_out?(%Operation{finished_at: %DateTime{}, args: %{"timed_out" => true}}), do: true
   def timed_out?(%Operation{}), do: false
 
   @doc """
@@ -298,18 +305,22 @@ defmodule Foreman.Operations do
 
     {:ok, outcome} =
       Repo.transact(fn ->
-        {count, _} =
-          query
-          |> Repo.update_all(
-            set: [
-              status: "failed",
-              error: error,
-              timeout_error: error,
-              args: Map.put(op.args || %{}, "timed_out", true),
-              finished_at: now,
-              updated_at: now
+        # An older agent acceptance handler could leave a timed-out operation active.
+        # Settle it using the first public timeout and its original retention clock.
+        timeout =
+          from o in query,
+            update: [
+              set: [
+                status: "failed",
+                error: ^error,
+                timeout_error: coalesce(o.timeout_error, ^error),
+                args: ^Map.put(op.args || %{}, "timed_out", true),
+                finished_at: coalesce(o.finished_at, ^now),
+                updated_at: ^now
+              ]
             ]
-          )
+
+        {count, _} = Repo.update_all(timeout, [])
 
         if count == 1 do
           op = get!(id)

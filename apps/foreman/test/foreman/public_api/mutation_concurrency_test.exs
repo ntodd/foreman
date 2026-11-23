@@ -42,7 +42,8 @@ defmodule Foreman.PublicAPI.MutationConcurrencyTest do
     end)
   end
 
-  test "concurrent agent acceptance cannot reopen a timeout or reset its retention deadline", ctx do
+  test "concurrent agent acceptance cannot reopen a timeout or reset its retention deadline",
+       ctx do
     parent = self()
     handler = make_ref()
 
