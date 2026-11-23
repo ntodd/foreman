@@ -26,6 +26,8 @@ In another terminal at the checkout root, run:
 FOREMAN_E2E_URL=http://localhost:4198 BROWSER=/path/to/chromium node e2e/oauth.mjs
 ```
 
+Set `FOREMAN_CLI` to the path of a built Go CLI to run the same browser approval, credential rotation, and logout scenarios against that executable. By default this smoke uses the Python checkout client.
+
 The headless browser submits an approval and a denial. The approved code has one successful exchange under simultaneous requests. The test also starts the real CLI, approves its code, and starts fresh CLI processes to verify credential persistence, a serialized refresh, and logout. The browser and CLI use temporary profiles. The GitHub callback has a separate integration test with a mocked provider.
 
 ## Through the UI (macOS or Linux)

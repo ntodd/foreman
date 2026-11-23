@@ -24,6 +24,20 @@ for real on a machine you can throw away; see
 Each app has `mix precommit`, which formats and runs credo and the tests.
 The control plane's runs sobelow as well.
 
+## CLI
+
+The Go module in `cli/` builds the standalone `foreman` executable. Use the Go version in `cli/go.mod`. From that directory:
+
+```sh
+go run ./cmd/foreman --help
+go test -race ./...
+go build -o /tmp/foreman-dev ./cmd/foreman
+```
+
+CLI unit tests use isolated credentials and HTTP fixtures. To test the upgrade path, run `python3 -B ../e2e/cli-upgrade.py /tmp/foreman-dev` from the same directory. It runs the Python checkout CLI and the built executable against one temporary account while its refresh token rotates.
+
+After changing the OpenAPI document, run `go generate ./api` in `cli/` and commit the updated Go client. Regeneration uses Ruby's standard library and `gofmt`. Ordinary builds use the checked-in client.
+
 ## Tests
 
 | Command | What it covers |

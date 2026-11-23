@@ -57,15 +57,19 @@ try {
   }
   const state = mkdtempSync(join(tmpdir(), "foreman-cli-"))
   try {
-    const cli = fileURLToPath(new URL("../bin/foreman", import.meta.url))
+    const cli = process.env.FOREMAN_CLI || fileURLToPath(new URL("../bin/foreman", import.meta.url))
     const args = ["--instance", base]
     const env = { ...process.env, XDG_STATE_HOME: state }
-    const login = spawn(cli, [...args, "login", "--scope", "repos:list"], { env, stdio: ["ignore", "pipe", "inherit"] })
+    const login = spawn(cli, [...args, "login", "--scope", "repos:list"], { env, stdio: ["ignore", "pipe", "pipe"] })
     const finished = once(login, "exit")
-    const lines = createInterface({ input: login.stdout })
+    // The Go CLI reserves stdout for the command result. The checkout client
+    // predates this convention and prints its verification prompt to stdout.
+    const lines = createInterface({ input: process.env.FOREMAN_CLI ? login.stderr : login.stdout })
     try {
-      const [prompt] = await once(lines, "line")
-      const [, url, code] = /^Open (.+) and enter ([A-Z2-9-]+)$/.exec(prompt)
+      const { value: prompt } = await lines[Symbol.asyncIterator]().next()
+      const match = /^Open (.+) and enter ([A-Z2-9-]+)$/.exec(prompt || "")
+      assert.ok(match, "the CLI must print a device login URL and code")
+      const [, url, code] = match
       await browser.goto(url)
       await browser.fill("input[name=user_code]", code)
       await browser.submit("#lookup-code")
