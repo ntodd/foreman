@@ -522,7 +522,7 @@ defmodule Foreman.Environments do
     "start" => ~w(stop suspend),
     "restart_affected" => ~w(stop suspend),
     "restart_all" => ~w(stop suspend),
-    "stop" => ~w(start restart_affected restart_all suspend),
+    "stop" => ~w(start restart_affected restart_all suspend secrets_write),
     "suspend" => ~w(start restart_affected restart_all stop)
   }
 
@@ -622,7 +622,7 @@ defmodule Foreman.Environments do
   end
 
   defp prepare_queue(env, "stop", "expiry") do
-    cancelled = cancel_queued(env, &(&1 in @up or &1 == "suspend"))
+    cancelled = cancel_queued(env, &(&1 in @up or &1 in ["suspend", "secrets_write"]))
 
     if not env.created_once and Enum.any?(cancelled, &(&1.action == "create")),
       do: update_env!(env, %{initial_create_deferred: true}),

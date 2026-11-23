@@ -11,7 +11,7 @@ defmodule ForemanWeb.PublicReadController do
   @page_size 50
   @environment_fields ~w(id slug repo_id branch box_id desired_state observed_state)a
   @observations ~w(expiry_at expiry_action workspace_container_id created_once tailscale_device_id remote_user workspace_folder)a
-  @operation_fields ~w(id environment_id action trigger status error timeout_error inserted_at finished_at log_truncated)a
+  @operation_fields ~w(id environment_id action trigger status error timeout_error workload_denied inserted_at finished_at log_truncated)a
 
   def repos(conn, params) do
     collection(conn, params, "repos:list", fn p ->
@@ -222,6 +222,15 @@ defmodule ForemanWeb.PublicReadController do
     row = Map.take(op, [:id, :environment_id, :action, :trigger, :status])
 
     cond do
+      op.workload_denied ->
+        Map.merge(row, %{
+          status: "failed",
+          error: %{
+            code: "workload_unauthorized",
+            message: Foreman.Operations.workload_denial_message()
+          }
+        })
+
       op.timeout_error ->
         Map.merge(row, %{
           status: "failed",

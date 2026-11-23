@@ -514,20 +514,27 @@ defmodule Foreman.WorkloadGrantsTest do
     {grant, env} = personal(ctx, ctx.admin)
     github()
     local_only = :atomics.new(1, [])
+
     stub(ClientMock, :get_repo, fn _, name ->
       assert :atomics.get(local_only, 1) == 0
       repo = Enum.find([ctx.repo, ctx.extra, ctx.hidden], &(&1.full_name == name))
       {:ok, %{"id" => repo.github_id, "full_name" => name}}
     end)
+
     stub(ClientMock, :scope_user_token, fn _, _, _, _, _ -> {:ok, %{token: "scoped"}} end)
+
     for {target, action} <- [{ctx.extra, "secrets_write"}, {ctx.repo, "stop"}] do
       op = operation(env, grant, action)
       assert {:ok, _, _, proof} = Commands.prepare(op, env)
       :atomics.put(local_only, 1, 1)
       assert :sent = Environments.WorkloadAccess.deliver(op, env, proof, fn _ -> :sent end)
       save(target, full_name: target.full_name <> "-renamed")
-      assert Environments.WorkloadAccess.deliver(op, env, proof, fn _ -> :sent end) in
-               [:retry, {:error, :unauthorized}]
+
+      assert Environments.WorkloadAccess.deliver(op, env, proof, fn _ -> :sent end) in [
+               :retry,
+               {:error, :unauthorized}
+             ]
+
       save(Repo.reload!(target), full_name: target.full_name)
       :atomics.put(local_only, 1, 0)
     end
@@ -537,13 +544,16 @@ defmodule Foreman.WorkloadGrantsTest do
     {grant, env} = personal(ctx, ctx.admin)
     github()
     config(:tailscale, %{client_id: "fixture", client_secret: "fixture"})
+
     stub(ClientMock, :get_repo, fn _, name ->
       repo = Enum.find([ctx.repo, ctx.extra, ctx.hidden], &(&1.full_name == name))
       {:ok, %{"id" => repo.github_id, "full_name" => name}}
     end)
+
     stub(ClientMock, :scope_user_token, fn _, _, _, _, _ -> {:ok, %{token: "scoped"}} end)
     stub(Foreman.Tailscale.ClientMock, :create_auth_key, fn _, _ -> {:ok, %{key: "fixture"}} end)
     op = operation(env, grant, "create")
+
     for change <- [[token_permissions: %{"contents" => "read"}], [tailscale_tags: []]] do
       assert {:ok, _, _, proof} = Commands.prepare(op, env)
       save(Repo.reload!(ctx.repo), change)
@@ -569,16 +579,19 @@ defmodule Foreman.WorkloadGrantsTest do
     github()
     stub(ClientMock, :get_repo, fn _, _ -> {:error, :timeout} end)
     {:ok, _} = Registry.register(Foreman.Registry, {:agent, ctx.box.id}, nil)
+
     for trigger <- [:admin, :expiry] do
       write = operation(env, grant, "secrets_write") |> Repo.insert!()
       Server.kick(env.id)
       assert Repo.reload!(write).status == "queued"
+
       if trigger == :expiry do
         save(Repo.reload!(env), expiry_at: DateTime.utc_now(), expiry_action: "stop")
         Server.kick(env.id)
       else
         assert {:ok, _} = Environments.stop(Scope.for_user(ctx.admin), env)
       end
+
       assert_receive {:dispatch, %Command{type: "env.stop", op_id: id}}
       assert Repo.reload!(write).status == "cancelled"
       Operations.mark(Operations.get!(id), "succeeded")
@@ -590,10 +603,39 @@ defmodule Foreman.WorkloadGrantsTest do
     save(ctx.repo, token_permissions: %{"contents" => "none"})
     github()
     stub(ClientMock, :repo_read_token, fn _, _, _ -> {:ok, "inappropriate-token"} end)
-    assert {:ok, cmd, _} = Commands.build(operation(env, grant, "secrets_write"), Repo.reload!(env))
+
+    assert {:ok, cmd, extra} =
+             Commands.build(operation(env, grant, "secrets_write"), Repo.reload!(env))
+
     refute Map.has_key?(cmd.payload.files, "github-token")
+    refute extra["token_retry"]
   end
 
+  test "a browser-scoped credential is discarded when the source sign-in changes", ctx do
+    env =
+      environment_fixture(
+        user: ctx.admin,
+        repo: save(ctx.repo, token_mode: "scoped"),
+        box: ctx.box
+      )
+
+    op = %Operation{
+      id: Ecto.UUID.generate(),
+      action: "secrets_write",
+      command: "env.secrets.write",
+      user_id: ctx.admin.id,
+      environment_id: env.id,
+      box_id: env.box_id,
+      args: %{}
+    }
+
+    github()
+    expect(ClientMock, :scope_user_token, fn _, _, _, _, _ -> {:ok, %{token: "derived"}} end)
+    assert {:ok, cmd, _, proof} = Commands.prepare(op, env)
+    assert cmd.payload.files["github-token"] == "derived"
+    save(ctx.admin, access_token: "replacement")
+    assert :retry = Environments.WorkloadAccess.deliver(op, env, proof, fn _ -> :sent end)
+  end
 
   defp personal(ctx, user) do
     grant =

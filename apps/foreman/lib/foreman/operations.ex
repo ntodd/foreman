@@ -187,7 +187,7 @@ defmodule Foreman.Operations do
         else
           changes = outcome(op, status, result, error)
           updated = op |> Ecto.Changeset.change(changes) |> Repo.update!()
-          applied = unless superseded_timeout?(op), do: apply.(updated)
+          applied = unless superseded_result?(op), do: apply.(updated)
           {:ok, {updated, applied}}
         end
       end)
@@ -205,15 +205,15 @@ defmodule Foreman.Operations do
   end
 
   defp already_finished?(op, error) do
-    Operation.finished?(op) and (not timed_out?(op) or error == "cancelled")
+    Operation.finished?(op) and (not awaiting_result?(op) or error == "cancelled")
   end
 
   # The late result corrects its own history. Once a later lifecycle command
   # was dispatched, it owns the environment state. Also serialize competing
   # results on the environment row so neither can race the visibility check.
-  defp superseded_timeout?(%Operation{environment_id: nil}), do: false
+  defp superseded_result?(%Operation{environment_id: nil}), do: false
 
-  defp superseded_timeout?(op) do
+  defp superseded_result?(op) do
     query =
       from e in Foreman.Environments.Environment,
         where: e.id == ^op.environment_id,
@@ -221,7 +221,7 @@ defmodule Foreman.Operations do
 
     destroyed_at = Repo.one!(if Repo.sqlite?(), do: query, else: lock(query, "FOR UPDATE"))
 
-    timed_out?(op) and
+    awaiting_result?(op) and
       (not is_nil(destroyed_at) or
          Repo.exists?(
            from newer in Operation,
@@ -257,6 +257,37 @@ defmodule Foreman.Operations do
   end
 
   defp result_size(result), do: result |> JSON.encode_to_iodata!() |> IO.iodata_length()
+
+  defp awaiting_result?(%Operation{status: "failed", args: %{"awaiting_result" => true}}),
+    do: true
+
+  defp awaiting_result?(op), do: timed_out?(op)
+
+  @workload_denied "Workload authorization is no longer valid."
+  def workload_denial_message, do: @workload_denied
+
+  def deny_workload(op, phase) do
+    statuses = if phase == :queued, do: ["queued"], else: ["dispatched", "running"]
+    query = from o in Operation, where: o.id == ^op.id and o.status in ^statuses
+    args = op.args || %{}
+    args = if phase == :reconnect, do: Map.put(args, "awaiting_result", true), else: args
+
+    case transition(op, query,
+           status: "failed",
+           workload_denied: true,
+           error: @workload_denied,
+           args: args,
+           finished_at: DateTime.utc_now()
+         ) do
+      {:ok, failed} ->
+        Redactions.delete(op.id)
+        Foreman.Activity.operation_finished(failed)
+        {:ok, failed}
+
+      :error ->
+        :error
+    end
+  end
 
   @doc "Whether Housekeeping failed the operation for taking too long (see `timed_out/2`)."
   def timed_out?(%Operation{status: "failed", args: %{"timed_out" => true}}), do: true
@@ -352,7 +383,7 @@ defmodule Foreman.Operations do
       status: finished_status(status, error),
       result: result,
       error: error,
-      args: Map.delete(op.args || %{}, "timed_out"),
+      args: Map.drop(op.args || %{}, ["timed_out", "awaiting_result"]),
       # A late result reconciles the workspace. The public timeout already started retention.
       finished_at: op.finished_at || DateTime.utc_now()
     ]

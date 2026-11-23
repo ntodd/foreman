@@ -56,6 +56,12 @@ sync and never asks for more, so a missing permission leaves it out of
 the token instead of breaking it. The repo page flags permissions the
 installation lacks.
 
+Service-account API workspaces receive an installation token limited to
+contents read on the approved repositories. If the primary repo settings
+or installation permissions disable contents access, Foreman omits the
+token. Personal API workspaces receive a user token scoped to their
+approved repositories and the effective permissions of the primary repo.
+
 ### Apps created before Actions, Checks and the rest
 
 The manifest only applies when the app is created. An older app has

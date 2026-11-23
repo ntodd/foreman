@@ -276,6 +276,8 @@ defmodule Foreman.GitHub do
          {:ok, credential} <- browser_credential(token, repo),
          %User{disabled_at: nil, workload_access_revoked_at: nil} = current <-
            Accounts.get_user(user.id),
+         true <-
+           current.access_generation == user.access_generation and current.access_token == token,
          true <- Accounts.access(current) != :denied do
       {:ok, credential}
     else
@@ -325,9 +327,11 @@ defmodule Foreman.GitHub do
           select: r.github_id
       )
 
-    if Enum.all?(requested_ids, &(&1 in approved)),
-      do: client().repo_read_token(app(), repo.owner.installation_id, {:ids, requested_ids}),
-      else: {:error, :unauthorized}
+    cond do
+      not Enum.all?(requested_ids, &(&1 in approved)) -> {:error, :unauthorized}
+      token_permissions(repo)["contents"] not in ["read", "write"] -> {:error, :contents_disabled}
+      true -> client().repo_read_token(app(), repo.owner.installation_id, {:ids, requested_ids})
+    end
   end
 
   defp issue_workload_token(%{kind: :user} = principal, repo, ids) do
@@ -340,12 +344,15 @@ defmodule Foreman.GitHub do
          )
   end
 
+  def token_permissions(repo) do
+    Repos.TokenPermissions.request(
+      Repos.Repo.permissions(repo),
+      repo.owner.installation_permissions
+    )
+  end
+
   defp scope_token(token, repo, names) do
-    permissions =
-      Repos.TokenPermissions.request(
-        Repos.Repo.permissions(repo),
-        repo.owner.installation_permissions
-      )
+    permissions = token_permissions(repo)
 
     with {:ok, %{token: scoped}} <-
            client().scope_user_token(app(), token, repo.owner.login, names, permissions),
