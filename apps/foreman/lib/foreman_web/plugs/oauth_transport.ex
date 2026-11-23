@@ -27,9 +27,8 @@ defmodule ForemanWeb.Plugs.OAuthTransport do
               conn.scheme == :https or via_tls_proxy?(conn)
 
             "http" when host in ["127.0.0.1", "localhost", "::1"] ->
-              conn.scheme == :https or
-                (ClientIP.loopback?(conn.remote_ip) and
-                   get_req_header(conn, "x-forwarded-for") == [])
+              ClientIP.loopback?(conn.remote_ip) and get_req_header(conn, "x-forwarded-for") == [] and
+                get_req_header(conn, "x-forwarded-proto") == []
 
             _ ->
               false

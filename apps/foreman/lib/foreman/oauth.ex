@@ -30,19 +30,32 @@ defmodule Foreman.OAuth do
   defp principal(grant) do
     user = Accounts.get_user(grant.user_id)
 
-    if user && is_nil(user.disabled_at) &&
-         (user.service_account || Accounts.access(user) != :denied) do
-      {:ok,
-       %Principal{
-         user: user,
-         kind: if(user.service_account, do: :service_account, else: :user),
-         grant_id: grant.id,
-         client_id: grant.client_id,
-         scopes: grant.scopes
-       }}
-    else
-      :error
+    cond do
+      is_nil(user) or not is_nil(user.disabled_at) ->
+        :error
+
+      not user.service_account and Accounts.access(user) == :denied ->
+        Accounts.revoke_access(user, "no longer allowed to use the API")
+        :error
+
+      true ->
+        {:ok,
+         %Principal{
+           user: user,
+           kind: if(user.service_account, do: :service_account, else: :user),
+           grant_id: grant.id,
+           client_id: grant.client_id,
+           scopes: grant.scopes
+         }}
     end
+  end
+
+  # Take the same lock order as user offboarding before issuing or rotating personal credentials.
+  def lock_personal_grant(id, client_id) do
+    grant = from g in Grant, where: g.id == ^id and g.client_id == ^client_id
+    owner = from g in grant, select: g.user_id
+    Repo.one_for_update(from u in Accounts.User, where: u.id in subquery(owner))
+    Repo.one_for_update(grant)
   end
 
   def authenticate(raw) when is_binary(raw) and byte_size(raw) <= 128 do
@@ -109,8 +122,7 @@ defmodule Foreman.OAuth do
   def refresh(_, _, _), do: {:error, :invalid_grant}
 
   defp rotate(%Token{} = token, client_id, requested) do
-    grant =
-      Store.locked(from g in Grant, where: g.id == ^token.grant_id and g.client_id == ^client_id)
+    grant = lock_personal_grant(token.grant_id, client_id)
 
     with %Grant{} <- grant,
          {:ok, _} <- authorize_grant(grant.id),
@@ -138,7 +150,7 @@ defmodule Foreman.OAuth do
     Repo.transact(fn ->
       with %Token{} = token <- Repo.get_by(Token, digest: Store.digest(raw)),
            %Grant{} = grant <-
-             Store.locked(
+             Repo.one_for_update(
                from g in Grant, where: g.id == ^token.grant_id and g.client_id == ^client.id
              ) do
         if client.kind == "public",

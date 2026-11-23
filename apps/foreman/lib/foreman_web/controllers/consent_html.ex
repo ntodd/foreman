@@ -11,6 +11,7 @@ defmodule ForemanWeb.ConsentHTML do
             Connect <strong>{@device.client.name}</strong>
             as <strong>{@current_scope.user.login}</strong>?
           </p>
+          <p>Client ID <code>{@device.client.id}</code></p>
           <p>Confirm your device shows <strong class="font-mono">{@user_code}</strong>.</p>
           <input type="hidden" name="user_code" value={@user_code} />
           <p>This app is requesting these permissions:</p>
