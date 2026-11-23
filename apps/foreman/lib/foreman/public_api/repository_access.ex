@@ -5,7 +5,7 @@ defmodule Foreman.PublicAPI.RepositoryAccess do
   individual repositories outside an installation.
   """
   import Ecto.Query
-  alias Foreman.{Config, GitHub, Repo}
+  alias Foreman.{Config, GitHub, Repo, Repos}
   alias Foreman.GitHub.Client
   alias Foreman.PublicAPI.Access.Unavailable
 
@@ -52,7 +52,8 @@ defmodule Foreman.PublicAPI.RepositoryAccess do
     records =
       Repo.all(
         from [r, repository_owner: o] in candidates,
-          select: {identity(r, o), r.github_id, r.full_name, r.manual, o.installation_id}
+          select:
+            {identity(r, o), struct(r, [:id, :github_id, :full_name, :manual]), o.installation_id}
       )
 
     keys = if records == [], do: [], else: verify(records, user)
@@ -71,8 +72,8 @@ defmodule Foreman.PublicAPI.RepositoryAccess do
     case GitHub.user_token(user) do
       {:ok, token} ->
         candidates
-        |> Enum.group_by(fn {_, _, _, manual, installation} ->
-          if manual, do: :manual, else: installation
+        |> Enum.group_by(fn {_, repo, installation} ->
+          if repo.manual, do: :manual, else: installation
         end)
         |> Enum.flat_map(fn {installation, records} -> verified(token, installation, records) end)
 
@@ -85,20 +86,20 @@ defmodule Foreman.PublicAPI.RepositoryAccess do
   end
 
   defp verified(token, :manual, records) do
-    for {id, github_id, name, _, _} <- records, matches?(token, name, github_id), do: id
+    for {key, repo, _} <- records, verify_manual?(token, repo), do: key
   end
 
   defp verified(_token, nil, _records), do: []
 
   defp verified(token, installation, records) do
     requested =
-      MapSet.new(records, fn {_, github_id, name, _, _} -> {github_id, String.downcase(name)} end)
+      MapSet.new(records, fn {_, repo, _} -> {repo.github_id, String.downcase(repo.full_name)} end)
 
     case Client.impl().user_installation_membership(token, installation, requested) do
       {:ok, remote} ->
-        for {id, github_id, name, _, _} <- records,
-            MapSet.member?(remote, {github_id, String.downcase(name)}),
-            do: id
+        for {key, repo, _} <- records,
+            MapSet.member?(remote, {repo.github_id, String.downcase(repo.full_name)}),
+            do: key
 
       {:error, {:http, 404, _}} ->
         []
@@ -108,13 +109,10 @@ defmodule Foreman.PublicAPI.RepositoryAccess do
     end
   end
 
-  defp matches?(token, name, github_id) do
-    case Client.impl().get_repo(token, name) do
-      {:ok, %{"id" => ^github_id, "full_name" => full_name}} when is_binary(full_name) ->
-        String.downcase(full_name) == String.downcase(name)
-
-      {:ok, _} ->
-        false
+  defp verify_manual?(token, repo) do
+    case Client.impl().get_repo(token, repo.full_name) do
+      {:ok, remote} ->
+        Repos.observe_manual_repo(repo, remote)
 
       {:error, :not_found} ->
         false

@@ -532,6 +532,46 @@ defmodule Foreman.PublicAPI.AccessTest do
     assert ServiceAccounts.repo_ids(actor) == []
   end
 
+  test "a verified archive updates the current row when its cached status changed during the check" do
+    github_config()
+    person = principal(user_fixture())
+
+    repo =
+      repo_fixture() |> change(manual: true, github_id: 895, archived: true) |> Repo.update!()
+
+    expect(ClientMock, :get_repo, fn _, name ->
+      Repo.update!(change(repo, archived: false))
+      {:ok, %{"id" => 895, "full_name" => name, "archived" => true}}
+    end)
+
+    assert ids(Access.repos(person, repo.id)) == []
+    assert Repo.reload!(repo).archived
+  end
+
+  test "a concurrent first binding accepts an archive observation only for the same identity" do
+    github_config()
+    scope = Foreman.Scope.for_user(user_fixture(role: "admin"))
+
+    for {observed_id, synced_id} <- [{896, 896}, {897, 898}] do
+      repo = repo_fixture() |> change(manual: true) |> Repo.update!()
+
+      expect(ClientMock, :get_repo, fn _, name ->
+        {:ok, _} =
+          Foreman.Repos.upsert_repo(repo.owner, %{
+            name: repo.name,
+            full_name: name,
+            github_id: synced_id
+          })
+
+        {:ok, %{"id" => observed_id, "full_name" => name, "archived" => true}}
+      end)
+
+      {:ok, checked} = Foreman.Repos.add_repo(scope, repo.full_name)
+      assert checked.github_id == synced_id
+      assert checked.archived == (synced_id == observed_id)
+    end
+  end
+
   defp principal(user) do
     grant =
       Repo.insert!(%Foreman.OAuth.Grant{
