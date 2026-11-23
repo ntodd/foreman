@@ -373,6 +373,8 @@ jobs:
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Test the VM acceptance client
+        run: python3 -B -m unittest discover -s e2e/vm
       # For mix foreman_agent.sign, which makes the release keys and signs
       # the agent the run publishes.
       - uses: erlef/setup-beam@54075bcc5e249e4758d363f27d099f55d843f124 # v1.24.1

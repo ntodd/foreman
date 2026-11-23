@@ -1,4 +1,4 @@
-"""Exercise a personal app connection against the throwaway VM suite's local instance."""
+"""Exercise personal and service-account connections against the throwaway VM suite's local instance."""
 
 import argparse
 import base64
@@ -204,10 +204,12 @@ def run():
         env, _ = request(path, token=token)
         assert env["readiness"] == "unknown" and env["expiry"]["action"] == policy["action"]
         assert datetime.fromisoformat(env["expiry"]["at"].replace("Z", "+00:00")).timestamp() == due
+        assert time.time() < due, "The restarted server must observe the offline box before the deadline"
         while time.time() < due + 90:
             history, _ = request(path + "/operations", token=token)
             matches = [op for op in history["items"] if op["trigger"] == "expiry"]
             if matches:
+                assert time.time() >= due, "Expiry was queued before the deadline"
                 op, = matches
                 assert op["action"] == policy["action"] and op["status"] == "queued"
                 state["operation_id"] = op["id"]
@@ -249,13 +251,23 @@ def run():
         return
 
     # Inventory can arrive shortly after the agent confirms the operation.
-    op_path = "/api/v1/operations/" + state["operation_id"]
+    operation_id = state["operation_id"]
+    retry_action = None
+    if args.retry_operation:
+        original, _ = request("/api/v1/operations/" + operation_id, token=token)
+        assert original["environment_id"] == state["environment_id"] and original["status"] == "failed"
+        retry_action = original["action"]
+        assert args.action == "ready" and retry_action in ("create", "start")
+        operation_id = args.retry_operation
+    op_path = "/api/v1/operations/" + operation_id
     deadline = time.monotonic() + args.wait
     while time.monotonic() < deadline:
         env, _ = request(path, token=token)
         assert env["branch"] == state["branch"]
         op, _ = request(op_path, token=token)
         assert op["environment_id"] == state["environment_id"]
+        if retry_action:
+            assert op["action"] == retry_action, "Registry retry action differs from the failed operation"
         assert op["status"] not in ("cancelled", "failed"), f"{op['action']} {op['status']}"
         if env["readiness"] == args.action and op["status"] == "succeeded":
             break
@@ -263,9 +275,19 @@ def run():
     else:
         raise AssertionError(f"Workspace readiness was {env['readiness']}, expected {args.action}")
 
+    if "expiry" not in state["body"]:
+        assert "expiry" not in env, "The workspace acquired an expiry policy without a deadline"
+        history, _ = request(path + "/operations", token=token)
+        assert all(op["trigger"] != "expiry" for op in history["items"]), (
+            "The workspace received expiry work without a deadline"
+        )
+
     log, _ = request(op_path + "/logs", token=token)
     assert isinstance(log["text"], str) and isinstance(log["truncated"], bool)
     request(op_path + "/logs?" + urlencode({"cursor": log["next_cursor"]}), token=token)
+    if args.retry_operation:
+        state["operation_id"] = operation_id
+        save(connection)
 
 
 if __name__ == "__main__":
@@ -278,6 +300,7 @@ if __name__ == "__main__":
     parser.add_argument("--workspace", default="primary")
     parser.add_argument("--expiry", nargs=2, metavar=("ACTION", "AT"))
     parser.add_argument("--hidden", help="environment owned by the other test identity")
+    parser.add_argument("--retry-operation", help="exact operation returned by the registry retry")
     parser.add_argument("--wait", type=int, default=100)
     args = parser.parse_args()
     run()

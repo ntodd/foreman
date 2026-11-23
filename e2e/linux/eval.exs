@@ -85,13 +85,32 @@ defmodule E2E do
     env = live_env(slug)
     [op | _] = Operations.list_for_environment(env.id, 1)
 
-    {:ok, _} =
+    {:ok, retry} =
       case op.action do
         "create" -> Environments.retry(scope, env)
         _ -> Environments.start(scope, env)
       end
 
-    IO.puts("retried #{op.action} for #{slug}")
+    IO.puts("RETRY=#{retry.id}")
+  end
+
+  # Public history omits timestamps. Check the durable queue time as well
+  # as polling history, so an early enqueue between polls is caught.
+  def check_expiry_times(ids) do
+    start()
+
+    Enum.each(ids, fn id ->
+      env = Repo.get!(Environments.Environment, id)
+
+      op =
+        Repo.one!(from o in Operations.Operation,
+          where: o.environment_id == ^id and o.trigger == "expiry"
+        )
+
+      if DateTime.before?(op.inserted_at, env.expiry_at) do
+        raise "#{op.action} was queued before its deadline"
+      end
+    end)
   end
 
   # The latest logs operation's id, before asking for another (through

@@ -93,14 +93,15 @@ env_observed() { cp_eval 'E2E.status()' | grep "^ENV $1 " | sed 's/.*observed=\(
 # fails a create or start; it's tried again, as a user would, twice at most.
 rate_limited() { cp_eval "E2E.log(\"$1\")" | grep -qiE "toomanyrequests|too many requests|rate exceeded"; }
 wait_for_env() { # slug, state, seconds
-  i=0 retries=0
+  i=0 retries=0 retry_operation=
   until [ "$(env_observed "$1")" = "$2" ]; do
     if [ "$(env_observed "$1")" = error ]; then
       if [ "$retries" -lt 2 ] && rate_limited "$1"; then
         retries=$((retries + 1))
         echo "a registry limited pulls; trying $1 again ($retries)" >&2
         sleep 30
-        cp_eval "E2E.retry_failed(\"$1\")" >/dev/null
+        retry_operation=$(cp_eval "E2E.retry_failed(\"$1\")" | sed -n 's/^RETRY=//p')
+        [ -n "$retry_operation" ] || fail "no operation returned by the registry retry for $1"
         j=0
         while [ "$(env_observed "$1")" = error ] && [ $j -lt 300 ]; do sleep 5; j=$((j + 5)); done
         continue
@@ -312,6 +313,11 @@ echo "ok: the VM helper is root's and listening"
 sudo nft list table inet foreman_guests >/dev/null || fail "the VM firewall table isn't loaded"
 echo "ok: the VM firewall table is loaded"
 
+# A powered-off transient unit can already have been collected by systemd.
+vm_powered_off() {
+  units=$(systemctl list-units --all --plain --no-legend "foreman-vm-$1.service") || return 1
+  [ -z "$units" ] || [ "$(printf '%s\n' "$units" | awk '{print $3}')" = inactive ]
+}
 vm_ready() { cp_eval 'E2E.vm_status()' | grep -q "^VM ready=true"; }
 # Whether a VM's Cloud Hypervisor is confined by Landlock, by what it can
 # do rather than how it was started (a resumed VM takes its settings from
@@ -401,7 +407,7 @@ E2E_COOKIE="$cookie" public_api login
 second=$(public_api create)
 [ -n "$second" ] || fail "the API did not reserve the second environment"
 wait_for_env hello-2 running 600
-public_api ready
+public_api ready --retry-operation "$retry_operation"
 cp_eval 'E2E.log("hello-2", "create")' > "$work/create2.log"
 probe first-guest 124 create2
 probe gateway 124 create2
@@ -413,10 +419,11 @@ marker=$(sed -n 's/^PROBE workspace-marker //p' "$work/create2.log" | tail -1)
 public_api stop
 wait_for_env hello-2 stopped 180
 public_api not_ready
+wait_for "API stop powered off the VM" 30 vm_powered_off "$second"
 sudo test -s "/srv/foreman/vms/$second/data.raw" || fail "stop removed the workspace disk"
 public_api start
 wait_for_env hello-2 running 300
-public_api ready
+public_api ready --retry-operation "$retry_operation"
 cp_eval 'E2E.log("hello-2", "start")' > "$work/start2.log"
 probe workspace-marker "$marker" start2
 
@@ -546,11 +553,11 @@ echo "create took ${cold}s from scratch, ${warm}s from the prebuild"
 echo "ok: hello-3 started from the prebuild, without cloning"
 
 say "release the other VMs before testing the memory reserve"
-public_api destroy
+public_api stop
 cp_eval 'E2E.act("hello-3", "destroy")' >/dev/null
-wait_for_env hello-2 destroyed 180
-public_api destroyed
-sudo test ! -e "/srv/foreman/vms/$second" || fail "API destroy left the workspace on disk"
+wait_for_env hello-2 stopped 180
+public_api not_ready
+wait_for "the no-deadline VM is off before memory pressure" 30 vm_powered_off "$second"
 wait_for_env hello-3 destroyed 180
 
 say "the slice contains an OOM and the environment page records the cause"
@@ -586,6 +593,13 @@ say "destroy"
 cp_eval 'E2E.act("hello-1", "destroy")' >/dev/null
 wait_for_env hello-1 destroyed 180
 
+# Reuse the primary (no-deadline) workspace as the control. This keeps
+# the same three-guest peak as the earlier prebuild test.
+public_api start
+wait_for_env hello-2 running 300
+public_api ready --retry-operation "$retry_operation"
+[ "$(public_api marker)" = "$marker" ] || fail "the primary workspace lost its marker"
+
 say "expiry survives a control-plane restart and an offline box"
 # Both policies are submitted through the API and come due on the wall
 # clock. Leave time for both prebuilt guests to boot before stopping the
@@ -599,25 +613,42 @@ drop=$(service_api create --expiry destroy "$expires" --hidden "$keep")
 public_api ready --workspace keep --wait 240 --hidden "$drop"
 service_api ready --wait 240
 service_api marker >/dev/null
-marker=$(public_api marker --workspace keep)
+keep_marker=$(public_api marker --workspace keep)
+primary_unit="foreman-vm-$second.service"
+primary_pid=$(systemctl show -p MainPID --value "$primary_unit")
+[ "$primary_pid" -gt 0 ] || fail "the no-deadline VM is not running"
 sudo systemctl stop foreman-agent
 docker restart "$cp_name" >/dev/null
 wait_for "the restarted control plane" 120 curl -fsS "$url/healthz"
-public_api pending-expiry --workspace keep
-service_api pending-expiry
+# The clients have independent credentials and state files. Both must
+# observe the restarted control plane with time remaining on their policy.
+public_api pending-expiry --workspace keep &
+keep_poll=$!
+expiry_failed=0
+service_api pending-expiry || expiry_failed=1
+wait "$keep_poll" || expiry_failed=1
+[ "$expiry_failed" -eq 0 ] || fail "expiry did not queue at the deadline while offline"
+cp_eval "E2E.check_expiry_times([\"$keep\", \"$drop\"])" || fail "expiry was queued prematurely"
 sudo test -s "/srv/foreman/vms/$keep/data.raw" || fail "offline stop lost its disk"
 sudo test -s "/srv/foreman/vms/$drop/data.raw" || fail "offline destroy reported premature cleanup"
 sudo systemctl start foreman-agent
 public_api not_ready --workspace keep --wait 180
+wait_for "expiry stop powered off the VM" 30 vm_powered_off "$keep"
+public_api ready
+[ "$(systemctl show -p MainPID --value "$primary_unit")" = "$primary_pid" ] || fail "the no-deadline VM stopped or restarted"
 wait_for "the expired destroy removed the VM disk" 180 sudo test ! -e "/srv/foreman/vms/$drop"
 wait_for "the API records the expiry destroy" 60 service_api destroyed
 sudo test -s "/srv/foreman/vms/$keep/data.raw" || fail "expiry stop removed the workspace disk"
 public_api start --workspace keep
 public_api ready --workspace keep --wait 300
-[ "$(public_api marker --workspace keep)" = "$marker" ] || fail "the workspace changed after expiry stop"
+[ "$(public_api marker --workspace keep)" = "$keep_marker" ] || fail "the workspace changed after expiry stop"
 public_api destroy --workspace keep
 wait_for "the restarted workspace is destroyed" 180 sudo test ! -e "/srv/foreman/vms/$keep"
 wait_for "the API records manual destroy" 60 public_api destroyed --workspace keep
+public_api destroy
+wait_for_env hello-2 destroyed 180
+public_api destroyed
+sudo test ! -e "/srv/foreman/vms/$second" || fail "API destroy left the workspace on disk"
 public_api logout
 service_api logout
 
