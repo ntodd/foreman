@@ -10,6 +10,10 @@ defmodule Foreman.OAuth.ServiceAccounts do
   alias Foreman.Repos.Repo, as: Repository
   alias Foreman.Secrets.Secret
 
+  @identity_namespace "tag:foreman-svc-"
+  def identity_tag(user_id), do: @identity_namespace <> user_id
+  def identity_tag?(tag), do: String.starts_with?(String.downcase(tag), @identity_namespace)
+
   def principal_for_user(user_id) do
     with {:ok, id} <- Ecto.UUID.cast(user_id),
          grant_id when is_binary(grant_id) <-
@@ -128,7 +132,7 @@ defmodule Foreman.OAuth.ServiceAccounts do
           secret_hash: Store.digest(secret)
         })
 
-      policy = %{"tailscale_tags" => Enum.uniq(["tag:foreman-svc-" <> id | tags])}
+      policy = %{"tailscale_tags" => Enum.uniq([identity_tag(id) | tags])}
 
       grant =
         Repo.insert!(
@@ -185,13 +189,17 @@ defmodule Foreman.OAuth.ServiceAccounts do
   defp tags(tags) when is_binary(tags), do: tags(String.split(tags, [",", " ", "\n"], trim: true))
 
   defp tags(tags) when is_list(tags) do
-    if Enum.all?(
-         tags,
-         &(is_binary(&1) and Regex.match?(~r/\Atag:[a-zA-Z0-9][a-zA-Z0-9-]{0,62}\z/, &1))
-       ), do: {:ok, tags}, else: {:error, :invalid_network_policy}
+    if Enum.all?(tags, &additional_tag?/1),
+      do: {:ok, tags},
+      else: {:error, :invalid_network_policy}
   end
 
   defp tags(_), do: {:error, :invalid_network_policy}
+
+  defp additional_tag?(tag) do
+    is_binary(tag) and Regex.match?(~r/\Atag:[a-zA-Z0-9][a-zA-Z0-9-]{0,62}\z/, tag) and
+      not identity_tag?(tag)
+  end
 
   defp admin_transaction(scope, mutate) do
     Repo.transact(fn ->
@@ -226,7 +234,13 @@ defmodule Foreman.OAuth.ServiceAccounts do
 
     if client.kind == "service" do
       grant = Repo.get_by!(Grant, client_id: id)
-      Repo.update_all(from(u in User, where: u.id == ^grant.user_id), set: [disabled_at: now])
+
+      {changed, _} =
+        Repo.update_all(from(u in User, where: u.id == ^grant.user_id and is_nil(u.disabled_at)),
+          set: [disabled_at: now]
+        )
+
+      if changed == 1, do: Foreman.Accounts.SSHRemovals.record!(%User{id: grant.user_id})
     end
 
     Repo.update_all(from(g in Grant, where: g.client_id == ^id and is_nil(g.revoked_at)),

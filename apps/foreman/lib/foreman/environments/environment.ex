@@ -18,6 +18,7 @@ defmodule Foreman.Environments.Environment do
     belongs_to :user, Foreman.Accounts.User
     belongs_to :box, Foreman.Boxes.Box
     field :branch, :string
+    field :desired_authority, :map
     field :desired_state, :string, default: "running"
     field :observed_state, :string, default: "pending"
     # The box stopped the whole VM.
@@ -44,9 +45,11 @@ defmodule Foreman.Environments.Environment do
     # agent reported when it last came up.
     field :connect_hooks, {:array, :map}, default: []
     field :tailscale_device_id, :string
+    field :ts_authkey_tags, {:array, :string}
     field :ts_authkey, Foreman.Encrypted.Binary, redact: true
     field :created_once, :boolean, default: false
     field :token_pushed_at, :utc_datetime_usec
+    field :workload_grant_id, :binary_id
     field :api_grant_id, :binary_id
     field :expiry_at, :utc_datetime_usec
     field :expiry_action, :string
@@ -143,6 +146,8 @@ defmodule Foreman.Environments.Environment do
     env
     |> cast(attrs, [
       :desired_state,
+      :desired_authority,
+      :workload_grant_id,
       :observed_state,
       :vm_size,
       :status_message,
@@ -159,6 +164,7 @@ defmodule Foreman.Environments.Environment do
       :connect_hooks,
       :tailscale_device_id,
       :ts_authkey,
+      :ts_authkey_tags,
       :created_once,
       :token_pushed_at,
       :expiry_consumed_at,

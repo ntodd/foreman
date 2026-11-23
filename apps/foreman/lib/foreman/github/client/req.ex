@@ -108,7 +108,12 @@ defmodule Foreman.GitHub.Client.Req do
   def scope_user_token(app, token, target, repos, permissions) do
     req = api(auth: {:basic, "#{app.client_id}:#{app.client_secret}"})
 
-    body = %{access_token: token, target: target, repositories: repos, permissions: permissions}
+    body =
+      Map.merge(repository_selection(repos), %{
+        access_token: token,
+        target: target,
+        permissions: permissions
+      })
 
     case Req.post(req, url: "/applications/#{app.client_id}/token/scoped", json: body) do
       {:ok, %{status: 200, body: %{"token" => scoped} = body}} ->
@@ -138,12 +143,15 @@ defmodule Foreman.GitHub.Client.Req do
   def repo_read_token(app, installation_id, repos) do
     case Req.post(api(bearer(app_jwt(app))),
            url: "/app/installations/#{installation_id}/access_tokens",
-           json: %{repositories: repos, permissions: %{contents: "read"}}
+           json: Map.put(repository_selection(repos), :permissions, %{contents: "read"})
          ) do
       {:ok, %{status: 201, body: %{"token" => token}}} -> {:ok, token}
       other -> unexpected(other)
     end
   end
+
+  defp repository_selection({:ids, [_ | _] = ids}), do: %{repository_ids: ids}
+  defp repository_selection([_ | _] = names), do: %{repositories: names}
 
   @impl true
   def list_installation_repos(token) do

@@ -24,6 +24,8 @@ defmodule Foreman.Accounts.User do
     field :dotfiles_install_command, :string
     field :dotfiles_target_path, :string
     field :devcontainer_features, :map, default: %{}
+    field :workload_access_revoked_at, :utc_datetime_usec
+    field :ssh_removal_id, :binary_id
     field :disabled_at, :utc_datetime_usec
     timestamps()
   end
