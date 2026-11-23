@@ -43,7 +43,7 @@ defmodule Foreman.PublicAPI.ObservationTest do
     assert Readiness.get(env) == "unknown"
   end
 
-  test "a replaced workspace requires the successful restart's new ID and resume preserves it" do
+  test "restarts and resumed starts require the container that completed setup" do
     env = environment_fixture() |> change(workspace_container_id: "original") |> Repo.update!()
     :ok = Agents.register(env.box_id)
 
@@ -64,9 +64,12 @@ defmodule Foreman.PublicAPI.ObservationTest do
       assert :ok = sample(env, ["new", "sidecar"])
       assert Readiness.get(after_restart) == "ready"
 
-      assert Readiness.get(
-               Environments.record_result(%{op | action: "start", result: %{"resumed" => true}})
-             ) == "ready"
+      resumed = %{op | action: "start", result: %{"resumed" => true, "container_id" => "new"}}
+      assert Readiness.get(Environments.record_result(resumed)) == "ready"
+      # The box resumes the VM and then asks its guest to start the devcontainer.
+      # A legacy result without that setup ID cannot confirm which container came up.
+      assert Readiness.get(Environments.record_result(%{resumed | result: %{"resumed" => true}})) ==
+               "unknown"
 
       old_agent = Environments.record_result(%{op | result: %{}})
       assert Readiness.get(old_agent) == "unknown"

@@ -941,7 +941,7 @@ defmodule Foreman.Environments do
     |> put_if(:applied_secret_hashes, args["secret_hashes"])
     |> put_token_pushed(args)
     # Results carry repo content (devcontainer.json): take only what fits.
-    |> Map.put(:workspace_container_id, workspace_id(result, env))
+    |> Map.put(:workspace_container_id, workspace_id(result))
     |> put_if(:remote_user, string(result["remote_user"]))
     |> put_if(:workspace_folder, string(result["remote_workspace_folder"]))
     |> put_if(:services, strings(result["services"]))
@@ -1058,12 +1058,10 @@ defmodule Foreman.Environments do
 
   defp result_attrs(_op, _env), do: %{}
 
-  defp workspace_id(%{"container_id" => id}, _env)
-       when is_binary(id) and byte_size(id) in 1..128, do: id
+  defp workspace_id(%{"container_id" => id}) when is_binary(id) and byte_size(id) in 1..128,
+    do: id
 
-  # A restored VM continues running the same containers without devcontainer up.
-  defp workspace_id(%{"resumed" => true}, env), do: env.workspace_container_id
-  defp workspace_id(_, _env), do: nil
+  defp workspace_id(_result), do: nil
 
   defp connect_hooks(hooks) when is_list(hooks), do: Connect.cast_hooks(hooks)
   defp connect_hooks(_), do: []
