@@ -106,6 +106,45 @@ defmodule Foreman.PublicAPI.AccessTest do
     assert message == Exception.message(error)
   end
 
+  test "service resources follow the installation, including when a grant changes before a query runs" do
+    installer = user_fixture(role: "admin")
+    scope = Foreman.Scope.for_user(installer)
+    granted_repo = repo_fixture()
+    other_repo = repo_fixture()
+    granted_box = box_fixture()
+    other_box = box_fixture(owner_user_id: installer.id)
+
+    assert {:ok, %{grant: grant, client: client, secret: _}} =
+             Foreman.OAuth.ServiceAccounts.register(scope, "service", %{
+               "name" => "Team build",
+               "scopes" => ["environments:list"],
+               "repo_ids" => [granted_repo.id],
+               "box_ids" => [granted_box.id]
+             })
+
+    assert {:ok, principal} = Foreman.OAuth.authorize_grant(grant.id)
+    env = environment_fixture(user: principal.user, repo: granted_repo, box: granted_box)
+    _installer_env = environment_fixture(user: installer, repo: granted_repo, box: granted_box)
+    _other_repo = environment_fixture(user: principal.user, repo: other_repo, box: granted_box)
+    _other_box = environment_fixture(user: principal.user, repo: granted_repo, box: other_box)
+    authorized = Access.environments(principal)
+    assert ids(authorized) == [env.id]
+    assert ids(Access.repos(principal)) == [granted_repo.id]
+    assert ids(Access.boxes(principal)) == [granted_box.id]
+
+    # The installer and installation have distinct lifetimes.
+    Repo.update!(change(installer, disabled_at: DateTime.utc_now()))
+    assert ids(authorized) == [env.id]
+
+    assert {:ok, :disabled} =
+             Foreman.OAuth.ServiceAccounts.disable(
+               Foreman.Scope.for_user(user_fixture(role: "admin")),
+               client.id
+             )
+
+    assert ids(authorized) == []
+  end
+
   defp github_config do
     old = Application.get_env(:foreman, :github_app)
 

@@ -6,11 +6,10 @@ defmodule Foreman.PublicAPI.Access do
   """
   import Ecto.Query
 
-  alias Foreman.{Config, GitHub, Repo}
+  alias Foreman.{Config, GitHub, OAuth, Repo}
   alias Foreman.Boxes.Box
   alias Foreman.Environments.Environment
   alias Foreman.GitHub.Client
-  alias Foreman.OAuth.ServiceAccounts
   alias Foreman.Repos.Repo, as: GitRepo
 
   defmodule Unavailable do
@@ -19,8 +18,8 @@ defmodule Foreman.PublicAPI.Access do
   end
 
   def boxes(%{kind: :service_account} = principal) do
-    ids = ServiceAccounts.box_ids(principal)
-    from b in Box, where: is_nil(b.revoked_at) and b.id in ^ids
+    from(b in Box, where: is_nil(b.revoked_at))
+    |> service_resources(principal, :box_ids)
   end
 
   def boxes(%{kind: :user, user: user}) do
@@ -36,8 +35,7 @@ defmodule Foreman.PublicAPI.Access do
   def repos(principal, id \\ :all)
 
   def repos(%{kind: :service_account} = principal, id) do
-    ids = ServiceAccounts.repo_ids(principal)
-    where(by_id(active_repos(), id), [r], r.id in ^ids)
+    active_repos() |> by_id(id) |> service_resources(principal, :repo_ids)
   end
 
   def repos(%{kind: :user, user: user}, id) do
@@ -79,6 +77,20 @@ defmodule Foreman.PublicAPI.Access do
   defp visible_in_repos(query, repos) do
     repo_ids = select(repos, [r], r.id)
     where(query, [e], e.repo_id in subquery(repo_ids))
+  end
+
+  # Keep the installation check in the final SQL statement: callers can
+  # prepare a query before entering the placement transaction.
+  defp service_resources(query, principal, field) do
+    grant =
+      from g in OAuth.live_grants(),
+        where:
+          g.id == ^principal.grant_id and g.client_id == ^principal.client_id and
+            g.user_id == ^principal.user.id
+
+    from resource in query,
+      join: g in subquery(grant),
+      on: type(resource.id, :string) in field(g, ^field)
   end
 
   defp by_id(query, :all), do: query
