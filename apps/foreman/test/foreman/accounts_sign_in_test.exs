@@ -43,6 +43,20 @@ defmodule Foreman.AccountsSignInTest do
       assert user.github_id == 101
     end
 
+    test "a membership denial revokes a user created while the first check was pending" do
+      config = %{admins: [], allowed_users: [], allowed_org: "acme"}
+
+      check = fn "acme" ->
+        assert {:ok, user} = sign_in(101, "first-login", config, org_member?: true)
+        assert is_binary(Accounts.create_session(user, "first sign-in"))
+        false
+      end
+
+      assert {:error, :not_allowed} = sign_in(101, "first-login", config, check_membership: check)
+      refute Repo.exists?(Accounts.Session)
+      assert Accounts.get_user_by_login("first-login").github_login_expired
+    end
+
     test "a new GitHub account that takes a renamed user's old login gets a new account" do
       alice = user_fixture(login: "alice", github_id: 100, role: "admin")
       config = %{admins: ["root"], allowed_users: ["alice"], allowed_org: nil}
