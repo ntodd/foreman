@@ -482,6 +482,66 @@ defmodule Foreman.PublicAPI.AccessTest do
     assert ServiceAccounts.repo_ids(actor, primary.id) == []
   end
 
+  test "personal verification updates shared catalog and workload eligibility for manual repos" do
+    github_config()
+    alias Foreman.OAuth.ServiceAccounts
+    admin = user_fixture(role: "admin")
+    scope = Foreman.Scope.for_user(admin)
+    person = principal(admin)
+    repo = repo_fixture() |> change(manual: true, github_id: 892) |> Repo.update!()
+    box = box_fixture()
+
+    {:ok, %{grant: grant}} =
+      ServiceAccounts.register(scope, "service", %{
+        "name" => "CI",
+        "scopes" => ["repos:list"],
+        "repo_ids" => [repo.id],
+        "box_ids" => [box.id]
+      })
+
+    {:ok, service} = Foreman.OAuth.authorize_grant(grant.id)
+    existing = environment_fixture(user: service.user, repo: repo, box: box)
+    personal_history = environment_fixture(user: admin, repo: repo)
+    catalog = Access.repos(service)
+    assert ids(catalog) == [repo.id]
+
+    expect(ClientMock, :get_repo, fn _, name ->
+      {:ok, %{"id" => 892, "full_name" => name, "archived" => true}}
+    end)
+
+    assert ids(Access.repos(person, repo.id)) == []
+    assert Repo.reload!(repo).archived
+    assert ids(catalog) == []
+    assert ServiceAccounts.repo_ids(service, Ecto.UUID.generate()) == []
+    assert ServiceAccounts.repo_ids(service, repo.id) == [repo.id]
+    assert ids(Access.environments(service)) == [existing.id]
+
+    expect(ClientMock, :get_repo, fn _, name ->
+      {:ok, %{"id" => 892, "full_name" => name, "archived" => true}}
+    end)
+
+    assert ids(Access.environments(person, personal_history.id)) == [personal_history.id]
+
+    expect(ClientMock, :get_repo, fn _, _ -> {:error, :timeout} end)
+    assert_raise Access.Unavailable, fn -> Access.environments(person, personal_history.id) end
+    assert Repo.reload!(repo).archived
+
+    expect(ClientMock, :get_repo, fn _, name ->
+      {:ok, %{"id" => 893, "full_name" => name, "archived" => false}}
+    end)
+
+    assert ids(Access.repos(person, repo.id)) == []
+    assert Repo.reload!(repo).archived
+
+    expect(ClientMock, :get_repo, fn _, name ->
+      {:ok, %{"id" => 892, "full_name" => name, "archived" => false}}
+    end)
+
+    assert ids(Access.repos(person)) == [repo.id]
+    refute Repo.reload!(repo).archived
+    assert ids(catalog) == [repo.id]
+  end
+
   test "a grant approves the selected numeric repository even if a binding write commits later" do
     github_config()
     alias Foreman.OAuth.ServiceAccounts
@@ -501,6 +561,46 @@ defmodule Foreman.PublicAPI.AccessTest do
     Repo.update!(change(repo, github_id: 921, github_identity_bound_at: earlier))
     assert ids(query) == []
     assert ServiceAccounts.repo_ids(actor) == []
+  end
+
+  test "a verified archive updates the current row when its cached status changed during the check" do
+    github_config()
+    person = principal(user_fixture())
+
+    repo =
+      repo_fixture() |> change(manual: true, github_id: 895, archived: true) |> Repo.update!()
+
+    expect(ClientMock, :get_repo, fn _, name ->
+      Repo.update!(change(repo, archived: false))
+      {:ok, %{"id" => 895, "full_name" => name, "archived" => true}}
+    end)
+
+    assert ids(Access.repos(person, repo.id)) == []
+    assert Repo.reload!(repo).archived
+  end
+
+  test "a concurrent first binding accepts an archive observation only for the same identity" do
+    github_config()
+    scope = Foreman.Scope.for_user(user_fixture(role: "admin"))
+
+    for {observed_id, synced_id} <- [{896, 896}, {897, 898}] do
+      repo = repo_fixture() |> change(manual: true) |> Repo.update!()
+
+      expect(ClientMock, :get_repo, fn _, name ->
+        {:ok, _} =
+          Foreman.Repos.upsert_repo(repo.owner, %{
+            name: repo.name,
+            full_name: name,
+            github_id: synced_id
+          })
+
+        {:ok, %{"id" => observed_id, "full_name" => name, "archived" => true}}
+      end)
+
+      {:ok, checked} = Foreman.Repos.add_repo(scope, repo.full_name)
+      assert checked.github_id == synced_id
+      assert checked.archived == (synced_id == observed_id)
+    end
   end
 
   defp principal(user) do

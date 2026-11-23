@@ -425,6 +425,103 @@ defmodule Foreman.PublicAPI.MutationsTest do
              Mutations.operate(ctx.actor, env.id, "verified", %{"action" => "start"})
   end
 
+  for event_type <- ["env.state", "box.inventory"] do
+    @event_type event_type
+    test "#{@event_type} during a reconnect scan requires a fresh sample", ctx do
+      env = environment_fixture(user: ctx.user, repo: ctx.repo, box: ctx.box)
+      :ok = Foreman.Agents.register(ctx.box.id)
+
+      inventory = fn state ->
+        entries = [%{env_id: env.id, slug: env.slug, state: state}]
+        {:ok, event} = ForemanProtocol.Event.new("box.inventory", %{environments: entries})
+        event
+      end
+
+      report = fn op_id, sample ->
+        {:ok, event} =
+          ForemanProtocol.Event.new("op.result", %{
+            op_id: op_id,
+            status: "ok",
+            result: ForemanProtocol.Event.to_wire(sample)["payload"]
+          })
+
+        Foreman.Agents.handle_event(ctx.box.id, event)
+      end
+
+      running = inventory.("running")
+      stopped = inventory.("stopped")
+      :ok = Foreman.Agents.handle_event(ctx.box.id, running)
+      assert_receive {:dispatch, %{type: "box.inventory", op_id: probe}}
+
+      # The probe sampled running before the independent reporter saw the stop.
+      event =
+        case @event_type do
+          "box.inventory" ->
+            stopped
+
+          "env.state" ->
+            {:ok, event} =
+              ForemanProtocol.Event.new("env.state", %{env_id: env.id, state: "stopped"})
+
+            event
+        end
+
+      :ok = Foreman.Agents.handle_event(ctx.box.id, event)
+      :ok = report.(probe, running)
+      refute Foreman.Agents.LifecycleState.confirmed?(env, "running")
+      assert_receive {:dispatch, %{type: "box.inventory", op_id: next_probe}}
+      :ok = report.(next_probe, stopped)
+      assert Foreman.Agents.LifecycleState.confirmed?(env, "stopped")
+
+      assert {:ok, _, op_id} =
+               Mutations.operate(ctx.actor, env.id, "start-after-stop", %{"action" => "start"})
+
+      assert is_binary(op_id)
+    end
+  end
+
+  test "a fresh lifecycle result stays confirmed until a conflicting observation arrives", ctx do
+    :ok = Foreman.Agents.register(ctx.box.id)
+    {:ok, inventory} = ForemanProtocol.Event.new("box.inventory", %{environments: []})
+    :ok = Foreman.Agents.handle_event(ctx.box.id, inventory)
+    assert_receive {:dispatch, %{type: "box.inventory", op_id: probe}}
+
+    assert {:ok, env, create} = Mutations.create(ctx.actor, "create", ctx.input)
+    complete(ctx.box, create)
+
+    assert {:ok, ^env, nil} =
+             Mutations.operate(ctx.actor, env, "confirmed-create", %{"action" => "start"})
+
+    # The pre-create scan cannot supersede the successful command on this socket.
+    {:ok, old} =
+      ForemanProtocol.Event.new("op.result", %{
+        op_id: probe,
+        status: "ok",
+        result: %{"environments" => []}
+      })
+
+    :ok = Foreman.Agents.handle_event(ctx.box.id, old)
+    assert_receive {:dispatch, %{type: "box.inventory"}}
+    current = Repo.get!(Environment, env)
+    assert Foreman.Agents.LifecycleState.confirmed?(current, "running")
+
+    {:ok, running} = ForemanProtocol.Event.new("env.state", %{env_id: env, state: "running"})
+    :ok = Foreman.Agents.handle_event(ctx.box.id, running)
+    assert Foreman.Agents.LifecycleState.confirmed?(current, "running")
+
+    {:ok, same_inventory} =
+      ForemanProtocol.Event.new("box.inventory", %{
+        environments: [%{env_id: env, slug: current.slug, state: "running"}]
+      })
+
+    :ok = Foreman.Agents.handle_event(ctx.box.id, same_inventory)
+    assert Foreman.Agents.LifecycleState.confirmed?(current, "running")
+
+    {:ok, stopped} = ForemanProtocol.Event.new("env.state", %{env_id: env, state: "stopped"})
+    :ok = Foreman.Agents.handle_event(ctx.box.id, stopped)
+    refute Foreman.Agents.LifecycleState.confirmed?(current, "running")
+  end
+
   test "a queued start of an errored workspace reserves its boot allocation", ctx do
     online(ctx.box)
 

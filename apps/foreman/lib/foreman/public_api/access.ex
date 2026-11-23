@@ -38,9 +38,12 @@ defmodule Foreman.PublicAPI.Access do
   end
 
   def repos(principal, id \\ :all) do
-    query = from r in GitRepo, where: not r.archived and is_nil(r.removed_at)
-    query = by_id(query, id)
-    authorized_repos(query, principal)
+    # Personal verification can observe an archive or unarchive for manual
+    # repos outside an installation. Apply the launch filter after it runs.
+    from(r in GitRepo, where: is_nil(r.removed_at) and (not r.archived or r.manual))
+    |> by_id(id)
+    |> authorized_repos(principal)
+    |> where([r], not r.archived)
   rescue
     # A selector alone does not establish that a private repo exists.
     error in Unavailable ->

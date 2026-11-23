@@ -851,8 +851,8 @@ defmodule Foreman.Environments do
 
   @doc """
   Writes a finished operation's outcome to its environment. Returns the
-  environment; for a box operation, what a prebuild's result leaves to
-  send once it's committed (`Foreman.Prebuilds.record_result/1`).
+  environment, or `:expiry_already_consumed` when a sibling fulfilled its policy.
+  Box operations return the work left by `Foreman.Prebuilds.record_result/1`.
   """
   def record_result(%Foreman.Operations.Operation{environment_id: nil} = op) do
     if op.action == "agent.update" and op.status == "failed",
@@ -862,8 +862,16 @@ defmodule Foreman.Environments do
   end
 
   def record_result(%Foreman.Operations.Operation{} = op) do
-    env = locked_environment(op.environment_id)
+    record_environment_result(op, locked_environment(op.environment_id))
+  end
 
+  # A dispatched retry can finish after its sibling consumed the expiry.
+  # Keep its operation history without reapplying its old state or cleanup.
+  defp record_environment_result(%{trigger: "expiry"}, %{expiry_consumed_at: at})
+       when not is_nil(at),
+       do: :expiry_already_consumed
+
+  defp record_environment_result(op, env) do
     attrs = result_attrs(op, env)
 
     attrs =
@@ -964,6 +972,7 @@ defmodule Foreman.Environments do
   @doc "What follows a recorded result: tell the UI, clean up, send the next operation."
   def after_result(_op, nil), do: :ok
   def after_result(_op, {:prebuilds, _, _} = sends), do: Foreman.Prebuilds.after_result(sends)
+  def after_result(op, :expiry_already_consumed), do: Server.kick(op.environment_id)
 
   def after_result(op, %Environment{} = env) do
     broadcast(env)

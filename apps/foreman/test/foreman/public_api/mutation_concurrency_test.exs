@@ -175,6 +175,55 @@ defmodule Foreman.PublicAPI.MutationConcurrencyTest do
     end)
   end
 
+  test "a concurrent create replay survives its repo leaving the launch catalog", ctx do
+    handler = make_ref()
+
+    :ok =
+      :telemetry.attach(
+        handler,
+        [:foreman, :repo, :query],
+        fn _, _, meta, parent ->
+          if meta.source == "api_mutation_receipts" and String.starts_with?(meta.query, "SELECT") and
+               Process.delete(:pause_after_receipt_read) do
+            send(parent, {:receipt_read, self()})
+
+            receive do
+              :continue -> :ok
+            after
+              5000 -> raise "concurrent create did not finish"
+            end
+          end
+        end,
+        self()
+      )
+
+    on_exit(fn -> :telemetry.detach(handler) end)
+
+    input = %{"repo_id" => ctx.repo.id}
+
+    retry =
+      Task.async(fn ->
+        Sandbox.unboxed_run(Repo, fn ->
+          Process.put(:pause_after_receipt_read, true)
+          Mutations.create(ctx.actor, "same", input)
+        end)
+      end)
+
+    assert_receive {:receipt_read, pid}, 5000
+
+    Sandbox.unboxed_run(Repo, fn ->
+      assert {:ok, env, op} = Mutations.create(ctx.actor, "same", input)
+      Repo.update!(Ecto.Changeset.change(ctx.repo, archived: true))
+      send(pid, :continue)
+      assert {:ok, ^env, ^op} = Task.await(retry)
+      assert {:error, :resource_not_found, _} = Mutations.create(ctx.actor, "new-key", input)
+      refute Repo.get(Receipt, Receipt.key_hash(ctx.actor, "environments", "new-key"))
+
+      Repo.update!(Ecto.Changeset.change(ctx.repo, private: true))
+      assert {:error, :resource_not_found, _} = Mutations.create(ctx.actor, "same", input)
+    end)
+  end
+
   test "an outer rollback sends no agent command and leaves the key available", ctx do
     Sandbox.unboxed_run(Repo, fn ->
       input = %{"repo_id" => ctx.repo.id}
