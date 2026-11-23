@@ -138,6 +138,25 @@ defmodule Foreman.WorkloadGrantsTest do
     assert {:ok, _, _} = Commands.build(operation(env, grant, "stop"), env)
   end
 
+  test "a deferred first boot uses the start grant and rechecks launch eligibility", ctx do
+    {original, env} = personal(ctx, ctx.admin)
+    env = save(env, created_once: false, initial_create_deferred: true)
+    OAuth.revoke_grant(original.id)
+
+    grant =
+      Repo.insert!(%Grant{
+        user_id: ctx.admin.id,
+        client_id: "foreman-cli",
+        scopes: ["environments:start"]
+      })
+
+    start = %{operation(env, grant, "start") | command: "env.create"}
+
+    assert {:ok, %Command{type: "env.create"}, _} = Commands.build(start, env)
+    save(ctx.repo, archived: true)
+    assert {:error, :unauthorized} = Commands.build(start, env)
+  end
+
   test "a service workload cannot clone a replacement GitHub repository through an old secondary grant",
        ctx do
     github()
