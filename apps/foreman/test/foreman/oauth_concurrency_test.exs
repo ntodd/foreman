@@ -135,6 +135,48 @@ defmodule Foreman.OAuthConcurrencyTest do
     assert Repo.reload!(user).github_login_expired
   end
 
+  test "first sign-in waits for a pending denial of the same GitHub identity" do
+    github_id = Foreman.Fixtures.unique()
+    profile = %{"id" => github_id, "login" => "first-#{github_id}"}
+    config = %{admins: [], allowed_users: [], allowed_org: "acme"}
+    parent = self()
+
+    on_exit(fn ->
+      Sandbox.unboxed_run(Repo, fn ->
+        Repo.delete_all(from g in "github_sign_in_generations", where: g.github_id == ^github_id)
+      end)
+    end)
+
+    check = fn "acme" ->
+      send(parent, :membership_requested)
+      assert_receive :deliver_positive, 3000
+      true
+    end
+
+    {callback, pid} =
+      independent(fn ->
+        Accounts.sign_in_from_github(profile, %{}, config: config, check_membership: check)
+      end)
+
+    assert_receive :membership_requested, 3000
+
+    assert {:ok, :denied} =
+             Repo.transact(fn ->
+               assert {:error, :not_allowed} =
+                        Accounts.sign_in_from_github(profile, %{},
+                          config: config,
+                          org_member?: false
+                        )
+
+               send(callback.pid, :deliver_positive)
+               wait_for_lock(pid)
+               {:ok, :denied}
+             end)
+
+    assert {:error, :access_changed} = Task.await(callback)
+    refute Repo.get_by(Accounts.User, github_id: github_id)
+  end
+
   test "registration waits for a concurrent administrator demotion", %{user: user} do
     admin = Repo.update!(Ecto.Changeset.change(user, role: "admin"))
     scope = Foreman.Scope.for_user(admin)

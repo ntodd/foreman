@@ -282,6 +282,29 @@ defmodule ForemanWeb.OAuthControllerTest do
     assert [%Grant{revoked_at: %DateTime{}}] = ServiceAccounts.installations(other)
   end
 
+  for action <- [:index, :register, :rotate, :disable] do
+    @action action
+    test "admin #{action} refuses inventory when authority changes after the router check", %{
+      conn: conn
+    } do
+      admin = user_fixture(role: "admin")
+      scope = Scope.for_user(admin)
+      attrs = %{"kind" => "service", "name" => "Private installation", "scopes" => ["repos:list"]}
+      {:ok, %{client: client}} = ServiceAccounts.register(scope, "service", attrs)
+
+      conn = conn |> log_in(admin) |> bypass_through(ForemanWeb.Router) |> get("/admin/apps")
+      assert Scope.admin?(conn.assigns.current_scope)
+      Repo.update!(Ecto.Changeset.change(admin, role: "member"))
+
+      conn = %{conn | params: Map.put(attrs, "id", client.id)}
+      response = ForemanWeb.OAuthAdminController.call(conn, @action)
+      assert response.status == 403
+      assert get_resp_header(response, "cache-control") == ["no-store"]
+      refute response.resp_body =~ client.name
+      refute response.resp_body =~ client.id
+    end
+  end
+
   test "admin-only registration and one-time disclosure protect installation credentials", %{
     conn: conn
   } do

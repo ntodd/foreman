@@ -14,6 +14,7 @@ defmodule Foreman.Environments.Environment do
   schema "environments" do
     field :slug, :string
     field :index, :integer
+    field :repo_github_id, :integer
     belongs_to :repo, Foreman.Repos.Repo
     belongs_to :user, Foreman.Accounts.User
     belongs_to :box, Foreman.Boxes.Box
