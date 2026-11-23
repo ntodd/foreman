@@ -59,14 +59,20 @@ if config_env() != :test do
   # loopback: addresses, CIDR ranges, or `gateway`. See ForemanWeb.ClientIP.
   trusted_proxies = list.("FOREMAN_TRUSTED_PROXIES")
 
-  try do
-    ForemanWeb.ClientIP.parse_trusted(trusted_proxies)
-  rescue
-    e in ArgumentError ->
-      reraise ArgumentError, "FOREMAN_TRUSTED_PROXIES: #{Exception.message(e)}", __STACKTRACE__
+  parse_proxies = fn name, entries ->
+    try do
+      ForemanWeb.ClientIP.parse_trusted(entries)
+    rescue
+      e in ArgumentError ->
+        reraise ArgumentError, "#{name}: #{Exception.message(e)}", __STACKTRACE__
+    end
   end
 
-  config :foreman, trusted_proxies: trusted_proxies
+  parse_proxies.("FOREMAN_TRUSTED_PROXIES", trusted_proxies)
+
+  config :foreman,
+    trusted_proxies: trusted_proxies,
+    tls_proxy_ranges: parse_proxies.("FOREMAN_TLS_PROXIES", list.("FOREMAN_TLS_PROXIES"))
 
   deployment_tag = System.get_env("FOREMAN_TAILSCALE_DEPLOYMENT_TAG", "")
 

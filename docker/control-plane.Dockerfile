@@ -61,6 +61,9 @@ ENV DATABASE_PATH=/var/lib/foreman/foreman.db
 # Docker hands the connection over from the bridge network's gateway: let
 # that peer say who the client is. See ForemanWeb.ClientIP.
 ENV FOREMAN_TRUSTED_PROXIES=gateway
+# The documented loopback-only host port also receives TLS-terminated
+# requests from Tailscale Serve through this gateway.
+ENV FOREMAN_TLS_PROXIES=gateway
 # 200 once the app is up and its database answers. 127.0.0.1 is exempt
 # from the FOREMAN_FORCE_SSL redirect.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=60s \
