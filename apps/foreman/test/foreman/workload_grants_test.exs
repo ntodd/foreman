@@ -510,6 +510,91 @@ defmodule Foreman.WorkloadGrantsTest do
      environment_fixture(user: user, repo: ctx.repo, box: ctx.box) |> save(api_grant_id: grant.id)}
   end
 
+  test "delivery rechecks the verified primary and secondary without network calls", ctx do
+    {grant, env} = personal(ctx, ctx.admin)
+    github()
+    local_only = :atomics.new(1, [])
+    stub(ClientMock, :get_repo, fn _, name ->
+      assert :atomics.get(local_only, 1) == 0
+      repo = Enum.find([ctx.repo, ctx.extra, ctx.hidden], &(&1.full_name == name))
+      {:ok, %{"id" => repo.github_id, "full_name" => name}}
+    end)
+    stub(ClientMock, :scope_user_token, fn _, _, _, _, _ -> {:ok, %{token: "scoped"}} end)
+    for {target, action} <- [{ctx.extra, "secrets_write"}, {ctx.repo, "stop"}] do
+      op = operation(env, grant, action)
+      assert {:ok, _, _, proof} = Commands.prepare(op, env)
+      :atomics.put(local_only, 1, 1)
+      assert :sent = Environments.WorkloadAccess.deliver(op, env, proof, fn _ -> :sent end)
+      save(target, full_name: target.full_name <> "-renamed")
+      assert Environments.WorkloadAccess.deliver(op, env, proof, fn _ -> :sent end) in
+               [:retry, {:error, :unauthorized}]
+      save(Repo.reload!(target), full_name: target.full_name)
+      :atomics.put(local_only, 1, 0)
+    end
+  end
+
+  test "permission or enrollment changes invalidate a prepared personal command", ctx do
+    {grant, env} = personal(ctx, ctx.admin)
+    github()
+    config(:tailscale, %{client_id: "fixture", client_secret: "fixture"})
+    stub(ClientMock, :get_repo, fn _, name ->
+      repo = Enum.find([ctx.repo, ctx.extra, ctx.hidden], &(&1.full_name == name))
+      {:ok, %{"id" => repo.github_id, "full_name" => name}}
+    end)
+    stub(ClientMock, :scope_user_token, fn _, _, _, _, _ -> {:ok, %{token: "scoped"}} end)
+    stub(Foreman.Tailscale.ClientMock, :create_auth_key, fn _, _ -> {:ok, %{key: "fixture"}} end)
+    op = operation(env, grant, "create")
+    for change <- [[token_permissions: %{"contents" => "read"}], [tailscale_tags: []]] do
+      assert {:ok, _, _, proof} = Commands.prepare(op, env)
+      save(Repo.reload!(ctx.repo), change)
+      assert :retry = Environments.WorkloadAccess.deliver(op, env, proof, fn _ -> :sent end)
+    end
+  end
+
+  test "rotation and deletion supersede service file writes prepared with the old value", ctx do
+    secret = secret_fixture("repo", ctx.repo, "APPROVED", "first")
+    {grant, _, env} = service(ctx, [secret.id])
+    op = operation(env, grant, "secrets_write")
+    assert {:ok, _, _, first} = Commands.prepare(op, env)
+    rotated = save(Repo.reload!(secret), value: "second")
+    assert :retry = Environments.WorkloadAccess.deliver(op, env, first, fn _ -> :sent end)
+    assert {:ok, cmd, _, second} = Commands.prepare(op, env)
+    assert cmd.payload.files["secrets.env"] =~ "second"
+    Repo.delete!(rotated)
+    assert :retry = Environments.WorkloadAccess.deliver(op, env, second, fn _ -> :sent end)
+  end
+
+  test "an administrator or due expiry can stop ahead of a retrying personal file write", ctx do
+    {grant, env} = personal(ctx, ctx.admin)
+    github()
+    stub(ClientMock, :get_repo, fn _, _ -> {:error, :timeout} end)
+    {:ok, _} = Registry.register(Foreman.Registry, {:agent, ctx.box.id}, nil)
+    for trigger <- [:admin, :expiry] do
+      write = operation(env, grant, "secrets_write") |> Repo.insert!()
+      Server.kick(env.id)
+      assert Repo.reload!(write).status == "queued"
+      if trigger == :expiry do
+        save(Repo.reload!(env), expiry_at: DateTime.utc_now(), expiry_action: "stop")
+        Server.kick(env.id)
+      else
+        assert {:ok, _} = Environments.stop(Scope.for_user(ctx.admin), env)
+      end
+      assert_receive {:dispatch, %Command{type: "env.stop", op_id: id}}
+      assert Repo.reload!(write).status == "cancelled"
+      Operations.mark(Operations.get!(id), "succeeded")
+    end
+  end
+
+  test "a service without repository contents permission receives no installation token", ctx do
+    {grant, _, env} = service(ctx)
+    save(ctx.repo, token_permissions: %{"contents" => "none"})
+    github()
+    stub(ClientMock, :repo_read_token, fn _, _, _ -> {:ok, "inappropriate-token"} end)
+    assert {:ok, cmd, _} = Commands.build(operation(env, grant, "secrets_write"), Repo.reload!(env))
+    refute Map.has_key?(cmd.payload.files, "github-token")
+  end
+
+
   defp personal(ctx, user) do
     grant =
       Repo.insert!(%Grant{
