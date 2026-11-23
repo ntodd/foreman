@@ -45,6 +45,67 @@ defmodule Foreman.PublicAPI.MutationConcurrencyTest do
     end)
   end
 
+  test "concurrent agent acceptance cannot reopen a timeout or reset its retention deadline",
+       ctx do
+    parent = self()
+    handler = make_ref()
+
+    # Stop after the acceptance's first statement on the operation. A separate
+    # read followed by an unconditional write would overwrite the committed timeout.
+    :ok =
+      :telemetry.attach(
+        handler,
+        [:foreman, :repo, :query],
+        fn _, _, meta, owner ->
+          if meta.source == "operations" and Process.delete(:pause_acceptance) do
+            send(owner, {:accepting, self()})
+
+            receive do
+              :continue -> :ok
+            after
+              5_000 -> raise "timeout writer did not release the accepting connection"
+            end
+          end
+        end,
+        parent
+      )
+
+    on_exit(fn -> :telemetry.detach(handler) end)
+
+    Sandbox.unboxed_run(Repo, fn ->
+      env = environment_fixture(user: ctx.actor.user, box: ctx.box, repo: ctx.repo)
+
+      op =
+        Operations.create!(%{
+          environment_id: env.id,
+          box_id: ctx.box.id,
+          action: "start",
+          command: "env.start",
+          status: "dispatched",
+          dispatched_at: DateTime.utc_now()
+        })
+
+      acceptance =
+        Task.async(fn ->
+          Sandbox.unboxed_run(Repo, fn ->
+            Process.put(:pause_acceptance, true)
+            Operations.mark_running(op.id)
+          end)
+        end)
+
+      assert_receive {:accepting, pid}, 5_000
+      assert {:ok, failed} = Operations.timed_out(op, "timeout")
+      send(pid, :continue)
+      Task.await(acceptance)
+
+      refute Operations.active?(env.id)
+      assert :finished = Operations.timed_out(op, "second timeout")
+      assert {:ok, reconciled} = Operations.finish(op.id, "ok", %{}, nil)
+      assert reconciled.finished_at == failed.finished_at
+      assert reconciled.timeout_error == failed.timeout_error
+    end)
+  end
+
   test "independent transactions cannot see an uncommitted reservation or dispatch and identical retries recover it",
        ctx do
     parent = self()
@@ -279,7 +340,7 @@ defmodule Foreman.PublicAPI.MutationConcurrencyTest do
         :ok = EnvironmentExpiry.perform(job)
         assert_receive {:dispatch, %{op_id: first}}
 
-        assert {:ok, _, _} =
+        assert {:ok, timeout, _} =
                  Operations.timed_out(
                    Operations.get!(first),
                    "timeout",
@@ -314,6 +375,32 @@ defmodule Foreman.PublicAPI.MutationConcurrencyTest do
 
         check_expiry_delivery(@delivery, retry, finish)
         assert Repo.reload!(env) == settled
+        assert Operations.get!(first).finished_at == timeout.finished_at
+
+        {reader, _} = principal(ctx.actor.user, ~w(environments:read operations:list))
+        conn = Phoenix.ConnTest.build_conn() |> Plug.Conn.assign(:api_principal, reader)
+        params = %{"id" => env.id}
+        history = ForemanWeb.PublicReadController.operations(conn, params)
+        retry_status = if @delivery == :online, do: "succeeded", else: "cancelled"
+        retry_id = retry.id
+
+        assert [
+                 %{"id" => ^retry_id, "trigger" => "expiry", "status" => ^retry_status},
+                 %{
+                   "id" => ^first,
+                   "trigger" => "expiry",
+                   "status" => "failed",
+                   "error" => %{"code" => "operation_timeout", "message" => "timeout"}
+                 }
+               ] = Phoenix.ConnTest.json_response(history, 200)["items"]
+
+        response = ForemanWeb.PublicReadController.environment(conn, params)
+
+        if @action == "stop" do
+          assert Phoenix.ConnTest.json_response(response, 200)["observed_state"] == "stopped"
+        else
+          assert Phoenix.ConnTest.json_response(response, 404)["code"] == "resource_not_found"
+        end
       end)
     end
   end

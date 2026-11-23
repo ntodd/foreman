@@ -92,6 +92,12 @@ defmodule Foreman.LogBufferRedactionTest do
     |> Ecto.Changeset.change(finished_at: DateTime.add(DateTime.utc_now(), -10))
     |> Repo.update!()
 
+    assert Operations.prune_output(DateTime.utc_now()) == 0
+
+    op
+    |> Ecto.Changeset.change(finished_at: DateTime.add(DateTime.utc_now(), -31, :day))
+    |> Repo.update!()
+
     assert Operations.prune_output(DateTime.utc_now()) == 1
     assert Operations.log(op) == ""
   end

@@ -9,6 +9,7 @@ defmodule Foreman.PublicAPI.Mutations do
   alias Foreman.Environments.{Environment, Server}
   alias Foreman.Jobs.EnvironmentExpiry
   alias Foreman.OAuth.Principal
+  alias Foreman.Operations.Retention
   alias Foreman.PublicAPI.{Access, MutationInput, Receipt}
 
   @not_found {:error, :resource_not_found, "Resource not found."}
@@ -342,7 +343,9 @@ defmodule Foreman.PublicAPI.Mutations do
 
         receipt.operation_id &&
             not Repo.exists?(
-              from(o in Foreman.Operations.Operation, where: o.id == ^receipt.operation_id)
+              from(o in Retention.history(DateTime.utc_now()),
+                where: o.id == ^receipt.operation_id
+              )
             ) ->
           {:history_expired, env.id, receipt.operation_id}
 

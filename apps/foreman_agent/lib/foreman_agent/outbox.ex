@@ -28,6 +28,9 @@ defmodule ForemanAgent.Outbox do
   def detach(server \\ __MODULE__), do: GenServer.call(server, :detach)
   def ack(server \\ __MODULE__, ack_id), do: GenServer.cast(server, {:ack, ack_id})
 
+  def workspace_sample(server \\ __MODULE__, started_at, environments),
+    do: GenServer.cast(server, {:workspace_sample, started_at, environments})
+
   @doc "True when every result has been delivered and acknowledged."
   def settled?(server \\ __MODULE__), do: GenServer.call(server, :settled?)
 
@@ -48,6 +51,11 @@ defmodule ForemanAgent.Outbox do
   end
 
   @impl true
+  def handle_cast({:workspace_sample, _, _} = sample, state) do
+    if state.conn, do: send(state.conn, sample)
+    {:noreply, state}
+  end
+
   def handle_cast({:push, event}, state) do
     seq = state.seq + 1
     state = %{state | seq: seq}

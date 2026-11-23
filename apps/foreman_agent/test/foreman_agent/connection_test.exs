@@ -46,6 +46,49 @@ defmodule ForemanAgent.ConnectionTest do
     end
   end
 
+  test "a scan after rejoin carries its original start offset on the wire" do
+    parent = self()
+
+    channel =
+      spawn_link(fn ->
+        receive do
+          {:"$gen_call", from,
+           {:__slipstream_command__, %Slipstream.Commands.PushMessage{payload: payload}}} ->
+            send(parent, {:wire_sample, payload})
+            GenServer.reply(from, make_ref())
+        end
+      end)
+
+    joined = System.monotonic_time()
+    socket = %{closed_socket() | channel_pid: channel}
+    socket = put_in(socket.joins[@topic].status, :joined)
+
+    socket =
+      Slipstream.Socket.assign(socket, joined: true, topic: @topic, workspace_joined_at: joined)
+
+    env = ForemanProtocol.uuid()
+    started = joined + System.convert_time_unit(123, :millisecond, :native)
+
+    assert {:noreply, ^socket} =
+             Connection.handle_info({:workspace_sample, started, %{env => ["app"]}}, socket)
+
+    assert_receive {:wire_sample,
+                    %{
+                      "type" => "box.workspaces",
+                      "payload" => %{"since_join_ms" => 123, "environments" => %{^env => ["app"]}}
+                    }}
+  end
+
+  test "an older control plane receives no unsupported workspace reports" do
+    socket = Slipstream.Socket.assign(closed_socket(), joined: true, workspace_joined_at: nil)
+    sample = {:workspace_sample, System.monotonic_time(), %{}}
+    # Even attempting to push on this socket would log a transport error.
+    assert ExUnit.CaptureLog.capture_log(fn ->
+             assert {:noreply, ^socket} =
+                      Connection.handle_info(sample, socket)
+           end) == ""
+  end
+
   test "a refused upgrade logs the HTTP status without the response headers" do
     reason =
       {:error,

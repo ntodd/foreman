@@ -20,7 +20,11 @@ defmodule Foreman.Agents do
 
   @doc "Called by the channel process once an agent has joined."
   def register(box_id) do
-    case Registry.register(Foreman.Registry, {:agent, box_id}, nil) do
+    case Registry.register(
+           Foreman.Registry,
+           {:agent, box_id},
+           {System.monotonic_time(:millisecond), nil}
+         ) do
       {:ok, _} ->
         LifecycleState.joined(box_id)
         :ok
@@ -216,6 +220,10 @@ defmodule Foreman.Agents do
       error ->
         error
     end
+  end
+
+  def handle_event(box_id, %Event{type: "box.workspaces", payload: sample}) do
+    Foreman.PublicAPI.Readiness.record(box_id, sample.environments, sample.since_join_ms)
   end
 
   def handle_event(box_id, %Event{type: "box.inventory", payload: payload}) do

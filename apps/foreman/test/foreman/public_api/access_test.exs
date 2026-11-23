@@ -111,6 +111,37 @@ defmodule Foreman.PublicAPI.AccessTest do
     assert message == Exception.message(error)
   end
 
+  test "live environment reads skip repositories belonging only to destroyed workspaces" do
+    github_config()
+    user = user_fixture()
+    principal = principal(user)
+    active_repo = repo_fixture() |> change(manual: true, github_id: 411) |> Repo.update!()
+    gone_repo = repo_fixture() |> change(manual: true, github_id: 412) |> Repo.update!()
+    active = environment_fixture(user: user, repo: active_repo)
+    gone = environment_fixture(user: user, repo: gone_repo, destroyed_at: DateTime.utc_now())
+
+    stub(ClientMock, :get_repo, fn _, name ->
+      if name == active_repo.full_name,
+        do: {:ok, %{"id" => 411, "full_name" => name}},
+        else: {:error, :timeout}
+    end)
+
+    conn = Phoenix.ConnTest.build_conn() |> Plug.Conn.assign(:api_principal, principal)
+
+    assert %{"items" => [%{"id" => id}]} =
+             conn
+             |> ForemanWeb.PublicReadController.environments(%{})
+             |> Phoenix.ConnTest.json_response(200)
+
+    assert id == active.id
+
+    assert conn
+           |> ForemanWeb.PublicReadController.environment(%{"id" => gone.id})
+           |> Phoenix.ConnTest.json_response(404)
+
+    assert_raise Access.Unavailable, fn -> Access.environments(principal, gone.id) end
+  end
+
   test "listing and point lookup use the same policy for manual and synced repositories" do
     github_config()
     user = user_fixture()

@@ -28,7 +28,7 @@ defmodule ForemanAgent.VM.Machine do
 
   @doc "VM unit state and, for a retained OOM kill, the Unix time of its exit."
   @callback inventory_state(String.t(), Config.t()) ::
-              :running | :stopped | {:oom_kill, integer()}
+              :running | :stopped | :unknown | {:oom_kill, integer()}
 
   @doc "Boots the VM from its disks."
   @callback boot(env_id :: String.t(), spec(), Config.t()) :: :ok | {:error, String.t()}

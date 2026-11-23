@@ -65,7 +65,9 @@ defmodule ForemanWeb.AgentChannelTest do
       assert {:error, %{reason: "unauthorized"}} =
                subscribe_and_join(socket, "agent:#{other.id}", join_payload())
 
-      assert {:ok, _, _socket} = subscribe_and_join(socket, "agent:#{box.id}", join_payload())
+      assert {:ok, %{"workspace_samples" => 2}, _socket} =
+               subscribe_and_join(socket, "agent:#{box.id}", join_payload())
+
       assert Foreman.Boxes.online?(box.id)
       assert Repo.reload!(box).hostname == "desktop"
     end

@@ -995,6 +995,7 @@ defmodule Foreman.Environments do
     |> put_if(:applied_secret_hashes, args["secret_hashes"])
     |> put_token_pushed(args)
     # Results carry repo content (devcontainer.json): take only what fits.
+    |> Map.put(:workspace_container_id, workspace_id(result))
     |> put_if(:remote_user, string(result["remote_user"]))
     |> put_if(:workspace_folder, string(result["remote_workspace_folder"]))
     |> put_if(:services, strings(result["services"]))
@@ -1080,7 +1081,11 @@ defmodule Foreman.Environments do
        when status in ["failed", "cancelled"] and action in @up do
     op
     |> revert_desired(env)
-    |> Map.merge(%{observed_state: "error", status_message: error || status})
+    |> Map.merge(%{
+      observed_state: "error",
+      status_message: error || status,
+      workspace_container_id: nil
+    })
     # It never came up, so its next build is a first boot and gets a
     # fresh Tailscale key; this one may have expired by then.
     |> then(
@@ -1111,6 +1116,11 @@ defmodule Foreman.Environments do
        do: %{status_message: "secrets_write failed: #{error || status}", token_pushed_at: nil}
 
   defp result_attrs(_op, _env), do: %{}
+
+  defp workspace_id(%{"container_id" => id}) when is_binary(id) and byte_size(id) in 1..128,
+    do: id
+
+  defp workspace_id(_result), do: nil
 
   defp connect_hooks(hooks) when is_list(hooks), do: Connect.cast_hooks(hooks)
   defp connect_hooks(_), do: []
@@ -1435,11 +1445,14 @@ defmodule Foreman.Environments do
     end
   end
 
-  def active_lifecycle(env_id) do
+  def lifecycle_operations do
     from o in Foreman.Operations.Operation,
-      where:
-        o.environment_id == ^env_id and o.action in @lifecycle and
-          o.status in ["queued", "dispatched", "running"],
+      where: not is_nil(o.environment_id) and o.action in @lifecycle
+  end
+
+  def active_lifecycle(env_id) do
+    from o in lifecycle_operations(),
+      where: o.environment_id == ^env_id and o.status in ["queued", "dispatched", "running"],
       order_by: [asc: o.inserted_at, asc: o.id]
   end
 

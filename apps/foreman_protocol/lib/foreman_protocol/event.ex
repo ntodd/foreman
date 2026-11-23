@@ -27,6 +27,12 @@ defmodule ForemanProtocol.Event do
       result: {:json, default: %{}},
       error: {:text, []}
     ],
+    # Live samples only. Missing guests could not be observed. An empty
+    # list means the agent observed no running containers in that guest.
+    "box.workspaces" => [
+      since_join_ms: {:integer, required: true},
+      environments: {{:map_of, :uuid, {:list, :string}}, required: true}
+    ],
     "box.inventory" => [
       environments:
         {{:list,

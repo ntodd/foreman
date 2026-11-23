@@ -16,7 +16,7 @@ defmodule Foreman.Jobs.Housekeeping do
 
   alias Foreman.{Agents, Boxes, Environments, Operations, Prebuilds, Repo}
   alias Foreman.Boxes.Box
-  alias Foreman.Operations.{Operation, Redactions}
+  alias Foreman.Operations.{Operation, Redactions, Retention}
 
   @stale_hours 3
   # A connect hook's action is bounded at four minutes on the box; one that
@@ -30,7 +30,6 @@ defmodule Foreman.Jobs.Housekeeping do
   # A prebuild clones and builds a devcontainer from nothing, which the
   # agent gives up to four hours.
   @prebuild_minutes 300
-  @log_days 30
 
   @impl true
   def perform(_job) do
@@ -48,7 +47,9 @@ defmodule Foreman.Jobs.Housekeeping do
         where: s.inserted_at < ^DateTime.add(DateTime.utc_now(), -31 * 86_400)
     )
 
-    Operations.prune_output(DateTime.add(DateTime.utc_now(), -@log_days * 86_400))
+    now = DateTime.utc_now()
+    Operations.prune_output(Retention.log_cutoff(now))
+    Retention.prune_history(now)
     Foreman.OAuth.prune()
     Redactions.prune()
     :ok
