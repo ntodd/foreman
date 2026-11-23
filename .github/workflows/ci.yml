@@ -465,6 +465,13 @@ jobs:
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version-file: cli/go.mod
+          cache-dependency-path: cli/go.sum
+      - name: Build the CLI for the real workspace smoke
+        working-directory: cli
+        run: go build -o "$RUNNER_TEMP/foreman" ./cmd/foreman
       - name: Test the VM acceptance client
         run: python3 -B -m unittest discover -s e2e/vm
       # For mix foreman_agent.sign, which makes the release keys and signs
@@ -500,7 +507,7 @@ jobs:
       - name: Build the guest image
         if: steps.guest-image.outputs.cache-hit != 'true'
         run: guest/build.sh "$RUNNER_TEMP/guest"
-      - run: E2E_VM_THROWAWAY=1 E2E_GUEST_TAR="$RUNNER_TEMP/guest/foreman-guest-linux-amd64.tar" e2e/vm/run.sh
+      - run: FOREMAN_CLI="$RUNNER_TEMP/foreman" E2E_VM_THROWAWAY=1 E2E_GUEST_TAR="$RUNNER_TEMP/guest/foreman-guest-linux-amd64.tar" e2e/vm/run.sh
 
   # A control plane host that boots systemd, runs the control plane from
   # docker/compose.yml and installs the updater: refused requests, an

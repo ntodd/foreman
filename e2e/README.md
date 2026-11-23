@@ -47,6 +47,8 @@ From the checkout root, build the executable with Go 1.26.11 and run it against 
 
 The tests submit browser consent, run each CLI command in a fresh process and use the real OAuth, API, database and expiry worker. Fixture agent events supply operation results and workspace inventory. The install test serves release assets on loopback and exercises update notices through a pseudoterminal. PR CI also packages an archive and runs its help and version commands on each of the four native targets.
 
+The KVM job supplies the built executable to `e2e/vm/run.sh` through `FOREMAN_CLI`. A separate personal device login reads readiness and a log marker from the running guest, then stops it. The VM harness verifies that the guest powered off and its workspace disk survived.
+
 ## Through the UI (macOS or Linux)
 
 A dev control plane and a local agent, driven by a headless Chromium

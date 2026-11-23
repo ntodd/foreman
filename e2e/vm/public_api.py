@@ -7,6 +7,8 @@ from datetime import datetime
 import json
 import os
 import re
+import select
+import subprocess
 from html.parser import HTMLParser
 from pathlib import Path
 import tempfile
@@ -98,6 +100,27 @@ class ConsentForm(HTMLParser):
             self.code = fields.get("value")
 
 
+def approve(verification, code):
+    # Session authentication is the same fixture used for LiveView in run.sh.
+    # Carry forward the updated CSRF cookie issued by the GET.
+    browser = build_opener(NoRedirect)
+    cookie = os.environ["E2E_COOKIE"]
+    url = verification + "?" + urlencode({"user_code": code})
+    page = Request(url, headers={"Cookie": cookie})
+    with browser.open(page, timeout=30) as response:
+        assert response.url == url
+        for updated in response.headers.get_all("Set-Cookie", []):
+            if updated.startswith(cookie.split("=", 1)[0] + "="):
+                cookie = updated.split(";", 1)[0]
+        form = ConsentForm()
+        form.feed(response.read().decode())
+    assert form.code == code
+    decision = urlencode({"_csrf_token": form.csrf, "user_code": form.code,
+                          "decision": "approve"}).encode()
+    with browser.open(Request(verification, data=decision, headers={"Cookie": cookie}), timeout=30) as response:
+        assert response.status == 200
+
+
 def connect():
     metadata, _ = request("/.well-known/oauth-authorization-server")
     assert metadata["issuer"] == args.url
@@ -108,29 +131,45 @@ def connect():
     verification = device["verification_uri"]
     assert verification == args.url + "/oauth/device"
 
-    # Session authentication is the same fixture used for LiveView in run.sh.
-    # Carry forward the updated CSRF cookie issued by the GET.
-    browser = build_opener(NoRedirect)
-    cookie = os.environ["E2E_COOKIE"]
-    url = verification + "?" + urlencode({"user_code": device["user_code"]})
-    page = Request(url, headers={"Cookie": cookie})
-    with browser.open(page, timeout=30) as response:
-        assert response.url == url
-        for updated in response.headers.get_all("Set-Cookie", []):
-            if updated.startswith(cookie.split("=", 1)[0] + "="):
-                cookie = updated.split(";", 1)[0]
-        form = ConsentForm()
-        form.feed(response.read().decode())
-    assert form.code == device["user_code"]
-    decision = urlencode({"_csrf_token": form.csrf, "user_code": form.code,
-                          "decision": "approve"}).encode()
-    with browser.open(Request(verification, data=decision, headers={"Cookie": cookie}), timeout=30) as response:
-        assert response.status == 200
+    approve(verification, device["user_code"])
     time.sleep(device["interval"])
     tokens, _ = request(metadata["token_endpoint"], form={
         "grant_type": GRANT, "client_id": CLIENT, "device_code": device["device_code"],
     })
     return {"refresh_token": tokens["refresh_token"]}
+
+
+def cli_stop(state):
+    """Use the shipping CLI and a separate personal grant on a real running guest."""
+    cli = os.environ["FOREMAN_CLI"]
+    with tempfile.TemporaryDirectory() as directory:
+        env = {**os.environ, "XDG_STATE_HOME": directory}
+        def command(*words):
+            result = subprocess.run([cli, "--json", *words], env=env, stdin=subprocess.DEVNULL,
+                                    stdout=subprocess.PIPE, text=True, check=True, timeout=210)
+            return json.loads(result.stdout)
+        with subprocess.Popen([cli, "--instance", args.url, "login"], env=env, stdin=subprocess.DEVNULL,
+                              stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True) as login:
+            try:
+                assert select.select([login.stderr], [], [], 20)[0], "No CLI device login prompt"
+                prompt = re.fullmatch(r"Open (\S+) and enter ([A-Z2-9-]+)", login.stderr.readline().strip())
+                assert prompt and prompt[1] == args.url + "/oauth/device", "Unexpected CLI login prompt"
+                approve(prompt[1], prompt[2])
+                assert login.wait(timeout=30) == 0, "Device login failed"
+            finally:
+                if login.poll() is None:
+                    login.kill()
+        try:
+            identifier = state["environment_id"]
+            assert command("env", "show", identifier)["readiness"] == "ready"
+            page = command("op", "logs", state["operation_id"])
+            assert "PROBE workspace-marker " in page["text"], "Expected a log line from the guest"
+            receipt = command("env", "stop", identifier, "--timeout", "3m")
+            assert receipt["environment_id"] == identifier
+            assert receipt["operation"]["status"] == "succeeded"
+            return receipt["operation_id"]
+        finally:
+            command("logout")
 
 
 def save(state):
@@ -206,6 +245,10 @@ def run():
         return
 
     path = "/api/v1/environments/" + state["environment_id"]
+    if args.action == "cli-stop":
+        state["operation_id"] = cli_stop(state)
+        save(connection)
+        return
     if args.action in ("stop", "start", "destroy"):
         action, headers = request(path + "/operations", token=token, key=str(uuid4()),
                                   body={"action": args.action}, status=202)
@@ -308,7 +351,7 @@ if __name__ == "__main__":
     parser.add_argument("url")
     parser.add_argument("state", type=Path)
     parser.add_argument("action", choices=["login", "create", "ready", "not_ready",
-                                          "stop", "start", "destroy", "destroyed",
+                                          "stop", "cli-stop", "start", "destroy", "destroyed",
                                           "pending-expiry", "marker", "logout"])
     parser.add_argument("--workspace", default="primary")
     parser.add_argument("--expiry", nargs=2, metavar=("ACTION", "AT"))
