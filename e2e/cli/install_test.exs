@@ -139,7 +139,9 @@ defmodule Foreman.CLIInstallTest do
     File.mkdir!(path)
     hash = if System.find_executable("sha256sum"), do: "sha256sum", else: "shasum"
 
-    for name <- [hash | ~w(awk cat chmod curl grep gzip ln mkdir mktemp mv rm sh tar uname)] do
+    for name <- [
+          hash | ~w(awk cat chmod curl grep gzip id ln mkdir mktemp mv rm sh stat tar uname)
+        ] do
       File.ln_s!(System.find_executable(name), Path.join(path, name))
     end
 
