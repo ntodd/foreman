@@ -17,7 +17,8 @@ defmodule Foreman.Environments.Server do
   use GenServer, restart: :temporary
 
   alias Foreman.{Agents, Boxes, Environments, Operations, Repo}
-  alias Foreman.Environments.{Commands, Environment}
+  alias Foreman.Environments.{Commands, Environment, WorkloadAccess}
+  alias Foreman.Operations.Operation
 
   require Logger
 
@@ -79,12 +80,11 @@ defmodule Foreman.Environments.Server do
     case Operations.get(op_id) do
       # Someone asked for it to stop, and the cancel may have been lost with
       # the connection. Sending the operation again would run it.
-      %{status: status} = op when status in ["dispatched", "running"] ->
+      %{status: status, environment_id: ^env_id} = op when status in ["dispatched", "running"] ->
         if Operations.cancel_requested?(op) do
           Agents.cancel_operation(op, nil)
         else
           env = Repo.get!(Environment, env_id)
-          if op.action in @needs_files, do: rewrite_secrets(env)
           resend_op(op, env)
         end
 
@@ -93,22 +93,42 @@ defmodule Foreman.Environments.Server do
     end
   end
 
-  defp rewrite_secrets(env) do
-    op =
-      Operations.create!(%{
-        id: Ecto.UUID.generate(),
-        environment_id: env.id,
-        box_id: env.box_id,
-        action: "secrets_write",
-        command: "env.secrets.write",
-        args: %{}
-      })
+  defp rewrite_secrets(env, original) do
+    op = %Operation{
+      id: Ecto.UUID.generate(),
+      environment_id: env.id,
+      box_id: env.box_id,
+      user_id: original.user_id,
+      api_grant_id: original.api_grant_id,
+      action: "secrets_write",
+      command: "env.secrets.write",
+      args: %{}
+    }
 
-    dispatch(op, env)
+    # The source operation owns retries. A temporary verification outage must not
+    # leave detached file writes behind for each reconnect.
+    with {:ok, cmd, extra, policy} <- Commands.prepare(op, env) do
+      dispatch_built(Repo.insert!(op), env, cmd, extra, policy)
+    end
   end
 
   @impl true
   def handle_info(:timeout, env_id), do: {:noreply, env_id, :hibernate}
+
+  def handle_info({:retry, op_id}, env_id) do
+    case Operations.get(op_id) do
+      %{status: "queued"} -> dispatch_next(env_id)
+      %{status: status} when status in ["dispatched", "running"] -> do_resend(env_id, op_id)
+      _ -> :ok
+    end
+
+    {:noreply, env_id, @idle_timeout}
+  end
+
+  defp retry(op) do
+    unless sync?(), do: Process.send_after(self(), {:retry, op.id}, 30_000)
+    :retry
+  end
 
   defp dispatch_next(env_id) do
     env = Repo.get(Environment, env_id)
@@ -132,19 +152,19 @@ defmodule Foreman.Environments.Server do
   # sends. The state goes first so a fast result can't be overwritten by
   # it; the state it replaced is kept so a failed stop can go back to it.
   defp dispatch(op, env) do
-    case Commands.build(op, env) do
-      {:ok, cmd, extra} ->
-        state = Environments.transitional_state(op.action)
-        extra = if state, do: Map.put(extra, "prior_state", env.observed_state), else: extra
+    case Commands.prepare(op, env) do
+      {:ok, cmd, extra, policy} ->
+        dispatch_built(op, env, cmd, extra, policy)
 
-        case Operations.claim(op,
-               dispatched_at: DateTime.utc_now(),
-               args: Map.merge(op.args || %{}, extra)
-             ) do
-          {:ok, op} -> send_claimed(op, cmd, env, state)
-          # Cancelled since it was read.
-          :error -> dispatch_next(env.id)
-        end
+      :retry ->
+        retry(op)
+
+      {:error, :unauthorized} ->
+        with {:ok, failed} <-
+               Operations.fail_queued(op, "Workload authorization is no longer valid."),
+             do: Environments.dispatch_denied(failed, env)
+
+        :denied
 
       {:error, message} ->
         Logger.warning("couldn't send #{op.action} for #{env.slug}: #{message}")
@@ -153,7 +173,21 @@ defmodule Foreman.Environments.Server do
     end
   end
 
-  defp send_claimed(op, cmd, env, state) do
+  defp dispatch_built(op, env, cmd, extra, policy) do
+    state = Environments.transitional_state(op.action)
+    extra = if state, do: Map.put(extra, "prior_state", env.observed_state), else: extra
+
+    case Operations.claim(op,
+           dispatched_at: DateTime.utc_now(),
+           args: Map.merge(op.args || %{}, extra)
+         ) do
+      {:ok, op} -> send_claimed(op, cmd, env, state, policy)
+      # Cancelled since it was read.
+      :error -> dispatch_next(env.id)
+    end
+  end
+
+  defp send_claimed(op, cmd, env, state, policy) do
     updated =
       if state,
         do: Environments.update_env!(env, %{observed_state: state, status_message: nil}),
@@ -161,9 +195,19 @@ defmodule Foreman.Environments.Server do
 
     Foreman.Operations.Redactions.put(op.id, cmd, env)
 
-    case Agents.dispatch(env.box_id, cmd) do
+    case deliver(op, env, cmd, policy) do
       :ok ->
         :ok
+
+      {:error, :unauthorized} ->
+        if state, do: Environments.update_env!(updated, %{observed_state: env.observed_state})
+        deny_sent(op, env)
+        {:error, :unauthorized}
+
+      :retry ->
+        Operations.mark(op, "queued", dispatched_at: nil)
+        if state, do: Environments.update_env!(updated, %{observed_state: env.observed_state})
+        retry(op)
 
       # Gone since the check: back to the queue, and to the state it was in.
       {:error, :offline} ->
@@ -173,6 +217,36 @@ defmodule Foreman.Environments.Server do
     end
   end
 
+  defp deliver(op, env, cmd, policy) do
+    WorkloadAccess.deliver(op, env, policy, fn current ->
+      with :ok <- Agents.dispatch(current.box_id, cmd) do
+        remember_enrollment(cmd.payload, current)
+        bind_workload_grant(op, current)
+        :ok
+      end
+    end)
+  end
+
+  defp remember_enrollment(%{files: %{"ts-authkey" => key}, tailscale: %{tags: tags}}, env)
+       when env.ts_authkey != key or env.ts_authkey_tags != tags do
+    Environments.update_env!(env, %{ts_authkey: key, ts_authkey_tags: tags})
+  end
+
+  defp remember_enrollment(_payload, _env), do: :ok
+
+  defp deny_sent(op, env) do
+    with {:ok, failed, _} <-
+           Operations.timed_out(op, "Workload authorization is no longer valid.", fn _ -> nil end),
+         do: Environments.dispatch_denied(failed, env)
+  end
+
+  defp bind_workload_grant(%{action: "start", api_grant_id: id}, env)
+       when not is_nil(id) and env.workload_grant_id != id do
+    Environments.update_env!(env, %{workload_grant_id: id})
+  end
+
+  defp bind_workload_grant(_op, _env), do: :ok
+
   # Rebuilds the command (current secrets and token) and sends it again.
   # If it can't be rebuilt, it fails rather than sitting there as if it
   # were on the box, holding up the queue; it's failed the way Housekeeping
@@ -181,11 +255,27 @@ defmodule Foreman.Environments.Server do
   # a token) replaces what the first send recorded, since that's what the
   # result will be judged against. The state before it began stays.
   defp resend_op(op, env) do
-    case Commands.build(op, env) do
-      {:ok, cmd, extra} ->
+    result =
+      with {:ok, _} <- WorkloadAccess.authorize(op, env),
+           :ok <- resend_files(op, env),
+           do: Commands.prepare(op, env)
+
+    case result do
+      {:ok, cmd, extra, policy} ->
         Foreman.Operations.refresh_args(op, Map.delete(extra, "prior_state"))
         Foreman.Operations.Redactions.put(op.id, cmd, env)
-        Agents.dispatch(env.box_id, cmd)
+
+        case deliver(op, env, cmd, policy) do
+          :retry -> retry(op)
+          {:error, :unauthorized} -> deny_sent(op, env)
+          other -> other
+        end
+
+      :retry ->
+        retry(op)
+
+      {:error, :unauthorized} ->
+        deny_sent(op, env)
 
       {:error, message} ->
         Logger.warning("couldn't resend #{op.action} for #{env.slug}: #{message}")
@@ -194,4 +284,10 @@ defmodule Foreman.Environments.Server do
              do: Environments.after_result(op, env)
     end
   end
+
+  defp resend_files(%{action: action} = op, env) when action in @needs_files do
+    rewrite_secrets(env, op)
+  end
+
+  defp resend_files(_op, _env), do: :ok
 end

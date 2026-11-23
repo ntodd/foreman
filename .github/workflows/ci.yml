@@ -154,6 +154,9 @@ jobs:
       - run: mix credo --strict
       - run: mix sobelow --config --exit
       - run: mix test
+      - name: Test CLI credential replacement
+        if: matrix.db == 'sqlite'
+        run: python3 -B ../../e2e/oauth_cli_test.py
       # What Flatcar's Ignition (the version Flatcar ships) makes of the
       # first-boot configs the control plane makes for Flatcar boxes.
       - name: Validate Flatcar first-boot configs

@@ -65,6 +65,40 @@ defmodule ForemanWeb.EnvironmentMutationControllerTest do
     assert get_resp_header(replay, "location") == ["/api/v1/operations/#{op}"]
   end
 
+  test "invalid wire bodies return JSON errors that a headless client can decode", %{conn: conn} do
+    {actor, grant} = principal(user_fixture())
+    token = OAuth.issue(grant, actor.scopes, :user).access_token
+
+    conn =
+      conn
+      |> put_req_header("authorization", "Bearer " <> token)
+      |> put_req_header("idempotency-key", "wire")
+
+    path = "/api/v1/environments"
+
+    for {content_type, body, status, code} <- [
+          {"application/x-www-form-urlencoded", "repo_id=invalid", 415, "unsupported_media_type"},
+          {"application/json", "{", 400, "invalid_request"},
+          {"application/json", String.duplicate(" ", 2_000_001), 413, "request_too_large"}
+        ] do
+      response = conn |> put_req_header("content-type", content_type) |> post(path, body)
+      assert %{"code" => ^code, "message" => message} = json_response(response, status)
+      assert is_binary(message)
+    end
+  end
+
+  test "an unknown API route returns a machine-readable 404 without content negotiation", %{
+    conn: conn
+  } do
+    {actor, grant} = principal(user_fixture())
+    token = OAuth.issue(grant, actor.scopes, :user).access_token
+
+    result =
+      conn |> put_req_header("authorization", "Bearer " <> token) |> get("/api/v1/missing-route")
+
+    assert %{"code" => "resource_not_found", "message" => _} = json_response(result, 404)
+  end
+
   test "both mutations require a bearer credential", %{conn: conn} do
     for path <- [
           "/api/v1/environments",

@@ -31,11 +31,12 @@ defmodule Foreman.GitHub.Client do
   """
   @callback org_membership(token :: String.t(), org :: String.t()) ::
               {:ok, boolean()} | {:error, term()}
+  @type repository_selection :: [String.t()] | {:ids, [pos_integer(), ...]}
   @callback scope_user_token(
               app,
               token :: String.t(),
               target :: String.t(),
-              repos :: [String.t()],
+              repos :: repository_selection(),
               permissions :: map()
             ) ::
               {:ok, %{token: String.t(), expires_at: DateTime.t() | nil}} | {:error, term()}
@@ -43,11 +44,12 @@ defmodule Foreman.GitHub.Client do
   @callback installation_token(app, installation_id :: integer()) ::
               {:ok, String.t()} | {:error, term()}
   @doc "An installation token that reads `repos`' contents and nothing else."
-  @callback repo_read_token(app, installation_id :: integer(), repos :: [String.t()]) ::
+  @callback repo_read_token(app, installation_id :: integer(), repos :: repository_selection()) ::
               {:ok, String.t()} | {:error, term()}
   @callback list_installation_repos(token :: String.t()) :: {:ok, [map()]} | {:error, term()}
-  @callback list_user_installation_repos(token :: String.t(), installation_id :: integer()) ::
-              {:ok, [map()]} | {:error, term()}
+  @callback user_installation_membership(String.t(), integer(), MapSet.t({integer(), String.t()})) ::
+              {:ok, MapSet.t({integer(), String.t()})} | {:error, term()}
+
   @callback get_repo(token :: String.t(), full_name :: String.t()) ::
               {:ok, map()} | {:error, term()}
   @callback list_branches(token :: String.t(), full_name :: String.t()) ::

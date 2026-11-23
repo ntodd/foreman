@@ -5,9 +5,26 @@ defmodule Foreman.PublicAPI.RepositoryAccess do
   individual repositories outside an installation.
   """
   import Ecto.Query
-  alias Foreman.{GitHub, Repo}
+  alias Foreman.{Config, GitHub, Repo}
   alias Foreman.GitHub.Client
   alias Foreman.PublicAPI.Access.Unavailable
+
+  @doc "Repositories whose identity an administrator can approve for a service."
+  def grantable(query) do
+    if GitHub.configured?() or not local_git?(),
+      do: where(query, [r], not is_nil(r.github_id)),
+      else: query
+  end
+
+  def local_git? do
+    case URI.parse(Config.git_base_url()) do
+      %URI{host: host, scheme: scheme} when is_binary(host) and scheme in ["http", "https"] ->
+        String.downcase(host) not in ["github.com", "www.github.com"]
+
+      _ ->
+        false
+    end
+  end
 
   def visible_ids(query, user) do
     candidates =
@@ -45,15 +62,11 @@ defmodule Foreman.PublicAPI.RepositoryAccess do
   defp verified(_token, nil, _records), do: []
 
   defp verified(token, installation, records) do
-    case Client.impl().list_user_installation_repos(token, installation) do
-      {:ok, repositories} ->
-        remote =
-          MapSet.new(
-            for %{"id" => id, "full_name" => name} <- repositories,
-                is_integer(id) and is_binary(name),
-                do: {id, String.downcase(name)}
-          )
+    requested =
+      MapSet.new(records, fn {_, github_id, name, _, _} -> {github_id, String.downcase(name)} end)
 
+    case Client.impl().user_installation_membership(token, installation, requested) do
+      {:ok, remote} ->
         for {id, github_id, name, _, _} <- records,
             MapSet.member?(remote, {github_id, String.downcase(name)}),
             do: id
