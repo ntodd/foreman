@@ -8,21 +8,21 @@ Personal clients send a client ID and device code to exchange an approved grant,
 
 ## Personal CLI connection
 
-From the Foreman checkout on a Unix system with Python 3, run:
+Open **You → Connected apps → Install the CLI** on your Foreman instance. Run the install command on the Linux or macOS machine where you want to use Foreman. If the installer prints a command to add `~/.local/bin` to your `PATH`, run it in that shell. Then copy the login command from the same page. For example:
 
 ```sh
-bin/foreman --instance https://foreman.example.org login --scope 'repos:list environments:read'
-bin/foreman --instance https://foreman.example.org me
-bin/foreman --instance https://foreman.example.org logout
+foreman --instance https://foreman.example.org login
+foreman me
+foreman repo list
 ```
 
 Open the verification URL on a device with a browser, sign in, compare the code with the one printed in the terminal, and review the app name, client ID and permissions. The code expires in ten minutes. The built-in client ID is `foreman-cli`. Other apps get an ID when an administrator registers them under **Admin → API clients**.
 
 The CLI validates the discovery issuer against the selected HTTPS origin. Local development supports loopback HTTP. It saves each connection under `$XDG_STATE_HOME/foreman` (default `~/.local/state/foreman`) in an owner-only file. For multiple accounts on an instance, supply `--account UUID` before the command. The login output includes the account UUID and granted permissions.
 
-Access tokens last 15 minutes. Each successful refresh returns a replacement refresh token and starts a fresh 90-day inactivity period. The CLI locks each account file during refresh and replaces it atomically. If a refresh succeeds on the server but its response is lost, reuse of the old refresh token revokes the connection. Run `login` again to approve a new one. Logout revokes the connection server-side. **You → Connected apps** also lets you revoke a connection from the browser.
+Access tokens last 15 minutes. Each successful refresh returns a replacement refresh token and starts a fresh 90-day inactivity period. The CLI locks the account file during refresh and saves the replacement atomically. If the server receives the refresh but the response is lost, follow the printed login command to reauthorize the affected account. Replaying the previous refresh token can revoke the grant. Logout revokes the selected connection server-side. **You → Connected apps** also lets you revoke a connection from the browser.
 
-When you replace a connection with another login, the CLI saves and syncs the new credentials before revoking the old grant. If the old grant cannot be revoked immediately, the CLI records it in the private account file and retries on the next `me`, `login` or `logout`. If saving and revoking the new grant both fail, the CLI directs you to **Connected apps** for manual recovery.
+When you replace a connection with another login, the CLI saves and syncs the new credentials before revoking the old grant. If revocation is delayed, use the printed `me` command. It selects the exact instance and account and retries the pending revocation. If saving and revoking the new grant both fail, the CLI directs you to **Connected apps** for manual recovery.
 
 ## Environments with the installed CLI
 
@@ -50,6 +50,10 @@ Use `--json` for automation. Lists return an object with an `items` array. Diagn
 A single `op logs` read returns up to 16 whole pages and 1 MiB of text. In JSON mode it emits one object containing `text`, `next_cursor` and `truncated`. Continue with `foreman op logs "$OP_ID" --cursor "$CURSOR"` until an empty read returns the same cursor you supplied. The server sets `truncated` when earlier output has been discarded. The CLI preserves this flag on partial reads, including an empty page that advanced the cursor before a later request failed.
 
 Use `--follow` for a continuous log stream. JSON follow mode writes one page per line, including empty pages. To reconnect, run `foreman op logs "$OP_ID" --follow --cursor "$CURSOR"` using the last delivered cursor.
+
+## Update or disconnect
+
+Run `foreman update` to install the latest stable CLI release. An interactive command announces a newly available version once. Updating preserves your login, including personal connections saved by the checkout CLI. Run `foreman logout` to disconnect the selected account.
 
 ## TLS termination
 

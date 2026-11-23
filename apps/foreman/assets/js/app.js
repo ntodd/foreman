@@ -50,31 +50,31 @@ const LogTail = {
 
 // Copies data-copy (or the text of the element named by data-copy-from)
 // and flips the button's label for a moment.
-const Copy = {
-  mounted() {
-    this.el.addEventListener("click", async () => {
-      const source = this.el.dataset.copyFrom && document.getElementById(this.el.dataset.copyFrom)
-      const text = this.el.dataset.copy ?? source?.innerText ?? ""
-      try {
-        await navigator.clipboard.writeText(text.trim())
-        const label = this.el.querySelector("[data-copy-label]")
-        if (label) {
-          const before = label.textContent
-          label.textContent = "Copied"
-          setTimeout(() => (label.textContent = before), 1500)
-        }
-      } catch (_error) {
-        // Clipboard access needs a secure context; the text is still selectable.
-      }
-    })
-  },
-}
+// Delegate clicks so the same command component works in LiveViews and
+// controller-rendered pages such as Connected apps.
+document.addEventListener("click", async event => {
+  const button = event.target.closest("button[data-copy], button[data-copy-from]")
+  if (!button) return
+  const source = button.dataset.copyFrom && document.getElementById(button.dataset.copyFrom)
+  const text = button.dataset.copy ?? source?.innerText ?? ""
+  try {
+    await navigator.clipboard.writeText(text.trim())
+    const label = button.querySelector("[data-copy-label]")
+    if (label && label.textContent !== "Copied") {
+      const before = label.textContent
+      label.textContent = "Copied"
+      setTimeout(() => (label.textContent = before), 1500)
+    }
+  } catch (_error) {
+    // Clipboard access needs a secure context; the text is still selectable.
+  }
+})
 
 const csrfToken = document.querySelector("meta[name='csrf-token']").getAttribute("content")
 const liveSocket = new LiveSocket("/live", Socket, {
   longPollFallbackMs: 2500,
   params: {_csrf_token: csrfToken},
-  hooks: {...colocatedHooks, LogTail, Copy},
+  hooks: {...colocatedHooks, LogTail},
 })
 
 topbar.config({barColors: {0: "#5b50e8"}, shadowColor: "rgba(0, 0, 0, .15)"})

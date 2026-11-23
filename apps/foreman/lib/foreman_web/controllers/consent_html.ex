@@ -60,6 +60,19 @@ defmodule ForemanWeb.ConsentHTML do
       width="narrow"
     >
       <.header>Connected apps</.header>
+      <section aria-labelledby="cli-heading" class="my-6 space-y-4">
+        <h2 id="cli-heading" class="font-semibold">Install the CLI</h2>
+        <ForemanWeb.ForemanComponents.command
+          id="cli-install"
+          label="Install on your computer"
+          command={"curl -fsSL #{shell_arg(@instance <> "/cli/install.sh")} | sh"}
+        />
+        <ForemanWeb.ForemanComponents.command
+          id="cli-login"
+          label="Connect to this instance"
+          command={"foreman --instance #{shell_arg(@instance)} login"}
+        />
+      </section>
       <p :if={@grants == []}>You have no active connections.</p>
       <article :for={grant <- @grants} class="space-y-2 border-b border-line py-4">
         <h2 class="font-semibold">{grant.client.name}</h2>
@@ -75,5 +88,12 @@ defmodule ForemanWeb.ConsentHTML do
       </article>
     </Layouts.app>
     """
+  end
+
+  # IPv6 literals contain shell glob characters, so quote non-simple origins.
+  defp shell_arg(value) do
+    if Regex.match?(~r/\A[A-Za-z0-9.:_\/-]+\z/, value),
+      do: value,
+      else: "'" <> String.replace(value, "'", "'\\''") <> "'"
   end
 end
