@@ -147,6 +147,7 @@ defmodule ForemanWeb.SecretsComponent do
           <.repo_boxes
             :if={@scope_name == "user"}
             id={"#{@id}--repos"}
+            editing={@editing}
             field={@form[:repo_ids]}
             options={repo_options(@repos, @form)}
           />
@@ -209,6 +210,7 @@ defmodule ForemanWeb.SecretsComponent do
   defp promote_targets(_scope_name, _subject, _scope), do: []
 
   attr :id, :string, required: true
+  attr :editing, :string, default: nil
   attr :field, Phoenix.HTML.FormField, required: true
   attr :options, :list, required: true
 
@@ -229,7 +231,12 @@ defmodule ForemanWeb.SecretsComponent do
       <%!-- An unchecked box sends nothing, so this is what says none is checked. --%>
       <input type="hidden" name={@name} value="" />
       <%!-- A row each: side by side, an owner/name was cut too short to tell apart. --%>
-      <ul class="max-h-80 divide-y divide-line overflow-y-auto rounded-lg border border-line">
+      <%!-- The id follows the secret being replaced: a patch keeps a list's
+           scroll position, and those rows have just been put in a new order. --%>
+      <ul
+        id={"#{@id}-of-#{@editing}"}
+        class="max-h-80 divide-y divide-line overflow-y-auto rounded-lg border border-line"
+      >
         <li :for={{label, repo_id} <- @options}>
           <label class="flex cursor-pointer items-start gap-2.5 px-3 py-2 text-sm text-ink hover:bg-muted">
             <input

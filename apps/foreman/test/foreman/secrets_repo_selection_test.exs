@@ -112,6 +112,18 @@ defmodule Foreman.SecretsRepoSelectionTest do
            )
   end
 
+  # The browser keeps a list's scroll position across a patch, which would
+  # leave those first rows above the fold. A list with another id is a new
+  # element, and starts at the top.
+  test "Replace starts the list over rather than keeping its scroll", %{user: user} do
+    {:ok, view, _} = live(log_in(build_conn(), user), ~p"/secrets")
+    assert has_element?(view, "ul#user-secrets--repos-of-")
+
+    view |> element("button[phx-click=edit][phx-value-name=PROD_DEPLOY_KEY]") |> render_click()
+    assert has_element?(view, "ul#user-secrets--repos-of-PROD_DEPLOY_KEY")
+    refute has_element?(view, "ul#user-secrets--repos-of-")
+  end
+
   # A secret's row has the component's id and its name for an id. A name
   # can't hold two hyphens, so that's what keeps the group's id apart.
   test "a secret named repos doesn't share an id with the checkboxes", %{user: user} do
