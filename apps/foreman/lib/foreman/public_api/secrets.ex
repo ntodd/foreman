@@ -30,11 +30,32 @@ defmodule Foreman.PublicAPI.Secrets do
               "A name starts with a letter or underscore and holds only letters, digits " <>
               "and underscores."}
 
+  @doc "Why `subject/3` answered `{:error, :role}` for this connection."
+  def role_message(%Principal{environment_id: id}) when not is_nil(id),
+    do: "An environment's own connection manages that environment's secrets only."
+
+  def role_message(_principal),
+    do:
+      "Secrets are managed through a personal connection, and a repository's or an owner's take an admin."
+
   @doc """
   The scope and subject a path names, for a caller who may manage it.
   `{:error, :missing}` when it doesn't exist or isn't the caller's to see,
   `{:error, :role}` when it takes an admin or a personal connection.
   """
+  # An environment's own connection manages that environment's secrets.
+  # Its owner's, its repository's and the owner's of that are set from a
+  # connection the owner made, whatever the owner's role.
+  def subject(%Principal{environment_id: id} = principal, scope, raw)
+      when not is_nil(id) and is_binary(raw) do
+    cond do
+      scope != "environment" -> {:error, :role}
+      not Access.connected?(principal) -> {:error, :missing}
+      raw != id -> {:error, :missing}
+      true -> find(principal, scope, raw)
+    end
+  end
+
   def subject(%Principal{kind: :user} = principal, scope, raw) when is_binary(raw) do
     admin? = Scope.admin?(Scope.for_user(principal.user))
 

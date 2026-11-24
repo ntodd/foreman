@@ -51,6 +51,7 @@ defmodule Foreman.Jobs.Housekeeping do
     Operations.prune_output(Retention.log_cutoff(now))
     Retention.prune_history(now)
     Foreman.OAuth.prune()
+    Foreman.Agents.RelayNonce.prune()
     Redactions.prune()
     :ok
   end

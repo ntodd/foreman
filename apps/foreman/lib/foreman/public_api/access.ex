@@ -28,16 +28,33 @@ defmodule Foreman.PublicAPI.Access do
         join: account in assoc(g, :user),
         select: %{role: account.role, service: account.service_account}
 
-    from b in Box,
+    from(b in Box,
       join: actor in subquery(grant),
       on: not actor.service,
       where: is_nil(b.revoked_at),
       where:
         (^user.role == "admin" and actor.role == "admin") or
           b.owner_user_id == ^user.id or ^user.id in b.shared_user_ids
+    )
+    |> own_box(principal)
   end
 
-  def repos(principal, id \\ :all) do
+  # An environment's own connection reaches the box it runs on, which its
+  # owner must still have, and no other.
+  defp own_box(query, %{environment_id: nil}), do: query
+
+  defp own_box(query, %{environment_id: id}) do
+    host = from e in Environment, where: e.id == ^id, select: e.box_id
+    where(query, [b], b.id in subquery(host))
+  end
+
+  def repos(principal, id \\ :all)
+
+  # An environment's own connection lists and launches nothing. Its own
+  # repository is checked where the environment is read.
+  def repos(%{environment_id: id}, _id) when not is_nil(id), do: where(GitRepo, false)
+
+  def repos(principal, id) do
     # Personal verification can observe an archive or unarchive for manual
     # repos outside an installation. Apply the launch filter after it runs.
     from(r in GitRepo, where: is_nil(r.removed_at) and (not r.archived or r.manual))
@@ -112,12 +129,17 @@ defmodule Foreman.PublicAPI.Access do
   defp owned_environments(principal) do
     box_ids = select(boxes(principal), [b], b.id)
 
-    from e in Environment,
+    from(e in Environment,
       join: r in assoc(e, :repo),
       where:
         e.repo_github_id == r.github_id or (is_nil(e.repo_github_id) and is_nil(r.github_id)),
       where: e.user_id == ^principal.user.id and e.box_id in subquery(box_ids)
+    )
+    |> own_environment(principal)
   end
+
+  defp own_environment(query, %{environment_id: nil}), do: query
+  defp own_environment(query, %{environment_id: id}), do: where(query, [e], e.id == ^id)
 
   # Keep the installation check in the final SQL statement: callers can
   # prepare a query before entering the placement transaction.

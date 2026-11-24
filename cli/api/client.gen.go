@@ -30,10 +30,16 @@ type ScopeString = string
 type ID = string
 
 type Identity struct {
-	ID       ID      `json:"id"`
-	Kind     string  `json:"kind"`
-	ClientID string  `json:"client_id"`
-	Name     *string `json:"name,omitempty"`
+	ID          ID              `json:"id"`
+	Kind        string          `json:"kind"`
+	ClientID    string          `json:"client_id"`
+	Name        *string         `json:"name,omitempty"`
+	Environment *OwnEnvironment `json:"environment,omitempty"`
+}
+
+type OwnEnvironment struct {
+	ID   ID      `json:"id"`
+	Name *string `json:"name,omitempty"`
 }
 
 type Repository struct {

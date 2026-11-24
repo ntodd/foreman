@@ -8,6 +8,9 @@ defmodule ForemanWeb.Plugs.OAuthTransport do
   def call(conn, _) do
     case policy(conn.path_info) do
       :other -> conn
+      # A box sends these over the transport it enrolled and connects on.
+      # Each is signed over its method, target and body (RelayAuth).
+      :relay -> conn
       policy -> secure(conn, policy)
     end
   end
@@ -19,6 +22,7 @@ defmodule ForemanWeb.Plugs.OAuthTransport do
   defp route_policy(["cli", name]) when name in ["install.sh", "release"], do: :installer
   defp route_policy(["oauth" | _]), do: :oauth
   defp route_policy(["api", "v1" | _]), do: :resource
+  defp route_policy(["api", "agents", "relay", "v1" | _]), do: :relay
   defp route_policy([".well-known", "oauth-authorization-server"]), do: :oauth
   defp route_policy(["admin", "apps" | _]), do: :oauth
   defp route_policy(["settings", "connections" | _]), do: :oauth

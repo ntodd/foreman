@@ -352,4 +352,121 @@ defmodule Foreman.PublicAPI.RestartTest do
       assert env.desired_authority == earlier
     end
   end
+
+  describe "from inside the environment, on its own connection" do
+    alias Foreman.OAuth.EnvironmentConnection
+    alias ForemanProtocol.Command
+
+    test "a restart is queued, authorized again when it is sent, and runs", ctx do
+      {:ok, own} = EnvironmentConnection.principal(ctx.box.id, ctx.env.id)
+
+      assert {:ok, id, op} = restart(own, ctx.env, "restart_all", "inside")
+      assert id == ctx.env.id
+      complete_all(ctx.box, op)
+      settle(ctx.box)
+
+      done = Repo.get!(Operation, op)
+      assert done.status == "succeeded"
+      assert done.api_grant_id == own.grant_id
+    end
+
+    # The environment asked; it didn't become the authority for itself.
+    # Whoever launched it still is, and what its credentials cover is
+    # still theirs to say.
+    test "nothing the environment asks makes its own grant the one it runs on", ctx do
+      {:ok, own} = EnvironmentConnection.principal(ctx.box.id, ctx.env.id)
+      before = Repo.get!(Environment, ctx.env.id)
+      assert before.api_grant_id == ctx.actor.grant_id
+
+      assert {:ok, _, op} = restart(own, ctx.env, "restart_all", "inside")
+      complete_all(ctx.box, op)
+      settle(ctx.box)
+
+      env = Repo.get!(Environment, ctx.env.id)
+      assert env.workload_grant_id == before.workload_grant_id
+      assert env.api_grant_id == before.api_grant_id
+      assert env.desired_authority == before.desired_authority
+      refute own.grant_id in [env.workload_grant_id, env.api_grant_id]
+      refute own.grant_id == (env.desired_authority || %{})["grant_id"]
+
+      assert {:ok, _, stop} = Mutations.operate(own, env.id, "halt", %{"action" => "stop"})
+      complete_all(ctx.box, stop)
+      settle(ctx.box)
+
+      env = Repo.get!(Environment, ctx.env.id)
+      assert env.desired_state == "stopped"
+      assert env.workload_grant_id == before.workload_grant_id
+      assert env.api_grant_id == before.api_grant_id
+
+      # It is on record as the one that asked, which is a different thing,
+      # so the stop it asked for can still be repaired as it was asked.
+      assert %{"action" => "stop", "grant_id" => asked} = env.desired_authority
+      assert asked == own.grant_id
+
+      repair = %Operation{action: "stop", trigger: "reconcile", environment_id: env.id}
+      assert {:ok, _} = Foreman.Environments.WorkloadAccess.authorize(repair, env)
+    end
+
+    test "an environment whose launching connection was revoked can't restart itself back", ctx do
+      {:ok, own} = EnvironmentConnection.principal(ctx.box.id, ctx.env.id)
+      Foreman.OAuth.revoke_grant(ctx.actor.grant_id)
+
+      assert {:ok, _, op} = restart(own, ctx.env, "restart_all", "inside")
+
+      # Nothing goes to the box on the environment's own say-so.
+      refute_receive {:dispatch, %Command{type: "env.restart"}}
+      refute_received {:dispatch, %Command{type: "env.secrets.write"}}
+      assert Repo.get!(Operation, op).status == "failed"
+
+      env = Repo.get!(Environment, ctx.env.id)
+      refute own.grant_id in [env.workload_grant_id, env.api_grant_id]
+    end
+
+    test "one its owner made in the browser restarts on the owner's own authority", ctx do
+      ctx.env
+      |> change(api_grant_id: nil, workload_grant_id: nil, desired_authority: nil)
+      |> Repo.update!()
+
+      {:ok, own} = EnvironmentConnection.principal(ctx.box.id, ctx.env.id)
+
+      assert {:ok, _, op} = restart(own, ctx.env, "restart_all", "inside")
+      complete_all(ctx.box, op)
+      settle(ctx.box)
+
+      assert Repo.get!(Operation, op).status == "succeeded"
+      env = Repo.get!(Environment, ctx.env.id)
+      assert env.workload_grant_id == nil
+      assert env.api_grant_id == nil
+      assert env.desired_authority == nil
+    end
+
+    test "it can't destroy the environment or restart another of its owner's", ctx do
+      {:ok, own} = EnvironmentConnection.principal(ctx.box.id, ctx.env.id)
+
+      assert {:error, :insufficient_scope, _} =
+               Mutations.operate(own, ctx.env.id, "gone", %{"action" => "destroy"})
+
+      assert {:ok, other, create} =
+               Mutations.create(ctx.actor, "second", %{"repo_id" => ctx.repo.id})
+
+      complete(ctx.box, create)
+      flush()
+
+      assert {:error, :resource_not_found, _} =
+               restart(own, %{id: other}, "restart_all", "theirs")
+
+      assert {:error, :resource_not_found, _} =
+               Mutations.create(own, "third", %{"repo_id" => ctx.repo.id})
+    end
+
+    test "once the environment is destroyed, work its connection queued is refused", ctx do
+      {:ok, own} = EnvironmentConnection.principal(ctx.box.id, ctx.env.id)
+      Repo.update!(change(ctx.env, destroyed_at: DateTime.utc_now()))
+
+      assert :error = Foreman.OAuth.authorize_grant(own.grant_id)
+
+      assert {:error, :resource_not_found, _} =
+               restart(own, ctx.env, "restart_all", "late")
+    end
+  end
 end

@@ -11,6 +11,16 @@ defmodule Foreman.OAuth.Scopes do
 
   def all, do: @actions
 
+  # What an environment can do to itself from inside: read its own state,
+  # operations and logs, manage its own secrets, and stop, start and
+  # restart. Never destroy or create, and nothing that lists what else
+  # its owner can reach.
+  @environment ~w(environments:list environments:read operations:list operations:read
+                  logs:read environments:start environments:stop secrets:list secrets:write)
+
+  @doc "The actions an environment's own connection carries."
+  def environment, do: @environment
+
   @doc "The actions an admin can grant a service account."
   def service, do: @actions -- @personal
 end

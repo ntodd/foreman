@@ -12,6 +12,9 @@ defmodule Foreman.OAuth.Grant do
     field :box_ids, {:array, :string}, default: []
     field :secret_ids, {:array, :string}, default: []
     field :network_policy, :map
+    # Set on the grant a box's relayed requests act on: the one environment
+    # the grant reaches (`Foreman.OAuth.EnvironmentConnection`).
+    field :environment_id, :binary_id
     timestamps()
   end
 end

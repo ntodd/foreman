@@ -57,10 +57,16 @@ defmodule ForemanWeb.Endpoint do
     length: 2_000_000,
     json_decoder: Phoenix.json_library()
 
+  plug :wire_method
   plug Plug.MethodOverride
   plug Plug.Head
   plug :session
   plug ForemanWeb.Router
+
+  # The method as it was sent. The two plugs after this one can change
+  # it, and a relayed request is signed over the one the box sent
+  # (ForemanWeb.Plugs.RelayAuth).
+  defp wire_method(conn, _), do: put_private(conn, :foreman_wire_method, conn.method)
 
   @doc false
   # Health checks run every few seconds; logging each one drowns the log.
