@@ -471,3 +471,41 @@ func TestATerminalGetsAnAlignedListWithReadableTimes(t *testing.T) {
 		t.Fatalf("%v %q", r.failure, r.out.String())
 	}
 }
+
+// A name can pass to a newer environment. It is pinned to an ID before any
+// value is asked for or read, so what is typed goes where it was aimed.
+func TestANamedEnvironmentIsPinnedBeforeAnyValueIsRead(t *testing.T) {
+	var order []string
+	f := &fake{envs: func(string) (api.EnvironmentPage, error) {
+		order = append(order, "resolve")
+		return api.EnvironmentPage{Items: []api.Environment{{ID: envID, Slug: "app-me-1"}}}, nil
+	}}
+	prompt := func(string) (string, error) {
+		order = append(order, "ask")
+		return "typed", nil
+	}
+	r := invoke(t, f, Options{Prompt: prompt}, "set", "TOKEN", "--env", "app-me-1")
+	if r.failure != nil || strings.Join(order, " ") != "resolve ask" || f.changes[0].subject != envID {
+		t.Fatalf("%v %v %+v", r.failure, order, f.changes)
+	}
+	if !strings.Contains(r.out.String(), "environment app-me-1 ("+envID+")") {
+		t.Fatal(r.out.String())
+	}
+
+	order = nil
+	read := func(string) ([]byte, error) {
+		order = append(order, "read")
+		return []byte("A=1\n"), nil
+	}
+	r = invoke(t, f, Options{ReadFile: read}, "import", "team.env", "--env", "app-me-1")
+	if r.failure != nil || strings.Join(order, " ") != "resolve read" {
+		t.Fatalf("%v %v", r.failure, order)
+	}
+
+	// A name that matches nothing stops the command before it asks.
+	order = nil
+	r = invoke(t, f, Options{Prompt: prompt}, "set", "TOKEN", "--env", "app-me-9")
+	if code(r.failure) != "resource_not_found" || strings.Join(order, " ") != "resolve" {
+		t.Fatalf("%v %v", r.failure, order)
+	}
+}

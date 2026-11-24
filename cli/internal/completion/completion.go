@@ -53,6 +53,7 @@ func Candidates(words []string, lookup Lookup) []string {
 			current = ""
 		}
 	}
+	before = rejoin(before)
 	if len(before) > 0 {
 		if kind, ok := values[before[len(before)-1]]; ok {
 			return matching(choices(kind, lookup), current)
@@ -103,18 +104,72 @@ func Candidates(words []string, lookup Lookup) []string {
 		return nil
 	}
 	if flag {
-		return matching(workloads.Flags(command), current)
+		flags := workloads.Flags(command)
+		// Destroying by name always asks, so --yes goes with an ID only.
+		if command == "env destroy" && len(positional) > 2 && !uuidName.MatchString(positional[2]) {
+			flags = slices.DeleteFunc(flags, func(f string) bool { return f == "--yes" })
+		}
+		return matching(flags, current)
 	}
 	if len(positional) != 2 {
 		return nil
 	}
 	switch command {
-	case "env show", "env start", "env stop", "env restart", "env destroy", "op list":
+	case "env destroy":
+		if slices.Contains(before, "--yes") {
+			return nil
+		}
+		return matching(choices("env", lookup), current)
+	case "env show", "env start", "env stop", "env restart", "op list":
 		return matching(choices("env", lookup), current)
 	case "env create":
 		return matching(choices("repo", lookup), current)
 	}
 	return nil
+}
+
+// rejoin puts back together the words before the cursor that bash 4 and
+// later split at = and :, such as --account=two and an instance URL. Other
+// shells never produce a word that is one of those characters alone.
+func rejoin(words []string) []string {
+	var joined []string
+	for i := 0; i < len(words); i++ {
+		if word := words[i]; (word == "=" || word == ":") && len(joined) > 0 {
+			joined[len(joined)-1] += word
+			if i+1 < len(words) {
+				i++
+				joined[len(joined)-1] += words[i]
+			}
+			continue
+		}
+		joined = append(joined, words[i])
+	}
+	return joined
+}
+
+// Selectors returns the --instance and --account given before the cursor, so
+// names are looked up on the connection the command itself would use.
+func Selectors(words []string) (instance, account string) {
+	if len(words) == 0 {
+		return "", ""
+	}
+	before := rejoin(words[:len(words)-1])
+	for i, word := range before {
+		name, value, attached := strings.Cut(word, "=")
+		if !attached {
+			if i+1 >= len(before) {
+				continue
+			}
+			value = before[i+1]
+		}
+		switch name {
+		case "--instance":
+			instance = value
+		case "--account":
+			account = value
+		}
+	}
+	return instance, account
 }
 
 func choices(kind string, lookup Lookup) []string {
@@ -156,8 +211,8 @@ func matching(candidates []string, prefix string) []string {
 }
 
 // Script returns the completion script for a shell. Each one writes the words
-// before the cursor to "foreman __complete", one per line on standard input,
-// and offers what it prints. The words never become arguments: a secret
+// before the cursor to "foreman __complete" on standard input, each ended by
+// a NUL, and offers what it prints. The words never become arguments: a secret
 // typed as NAME=value would otherwise show in the process list the moment
 // Tab is pressed. With nothing printed, the shell falls back to file names.
 func Script(shell string) (string, bool) {
@@ -176,7 +231,7 @@ _foreman() {
             word="${word#"${current%%=*}="}"
         fi
         COMPREPLY+=("$word")
-    done < <(printf '%s\n' "${COMP_WORDS[@]:1:COMP_CWORD}" | foreman __complete 2>/dev/null)
+    done < <(printf '%s\0' "${COMP_WORDS[@]:1:COMP_CWORD}" | foreman __complete 2>/dev/null)
 }
 complete -o default -F _foreman foreman
 `
@@ -185,7 +240,7 @@ const zsh = `#compdef foreman
 # zsh completion for foreman
 _foreman() {
     local -a candidates
-    candidates=("${(@f)$(print -rl -- "${(@)words[2,CURRENT]}" | foreman __complete 2>/dev/null)}")
+    candidates=("${(@f)$(printf '%s\0' "${(@)words[2,CURRENT]}" | foreman __complete 2>/dev/null)}")
     if [[ -n "${candidates[1]}" ]]; then
         compadd -- "${candidates[@]}"
     else
@@ -203,7 +258,7 @@ const fish = `# fish completion for foreman
 function __foreman_complete
     set -l words (commandline -opc)
     set -l current (commandline -ct)
-    set -g __foreman_candidates (printf '%s\n' $words[2..-1] "$current" | foreman __complete 2>/dev/null)
+    set -g __foreman_candidates (printf '%s\0' $words[2..-1] "$current" | foreman __complete 2>/dev/null)
     test (count $__foreman_candidates) -gt 0
 end
 complete -c foreman -f -n __foreman_complete -a '$__foreman_candidates'

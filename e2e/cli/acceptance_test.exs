@@ -95,8 +95,8 @@ defmodule Foreman.CLIAcceptanceTest do
 
     assert {:ok, _, _} = DateTime.from_iso8601(created_at)
     assert [%{"id" => ^op}] = json(ctx, ["op", "list", slug]) |> items()
-    # A completion script writes the words before the cursor to standard input.
-    complete = ~S(printf 'env\nshow\n\n' | "$0" __complete)
+    # A completion script writes the words before the cursor to standard input, each ended by a NUL.
+    complete = ~S(printf 'env\0show\0\0' | "$0" __complete)
 
     assert {0, names, ""} =
              %{ctx | cli: "/bin/sh"} |> launch(["-c", complete, ctx.cli]) |> finish()

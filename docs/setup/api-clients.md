@@ -44,7 +44,7 @@ Commands that act on an environment take its name, as `env list` shows it, or it
 
 At a terminal, lists are aligned tables: the name first, one status per environment, relative times and the ID last. Piped or redirected, they stay tab-separated with their original columns. Use `--json` in scripts.
 
-For tab completion of commands, options and the names of your environments, repositories and boxes, install the script for your shell. `foreman help completion` lists where each one goes. Names complete for about fifteen minutes after your last command, because completion never refreshes the connection itself:
+For tab completion of commands, options and the names of your environments, repositories and boxes, install the script for your shell. `foreman help completion` lists where each one goes. Completion never refreshes the connection itself, so names complete while the access token is fresh: up to fifteen minutes after you log in or a command refreshes it.
 
 ```sh
 foreman completion zsh > ~/.zfunc/_foreman

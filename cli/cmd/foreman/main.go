@@ -149,9 +149,10 @@ func fail(stderr io.Writer, machine bool, err error, code string, status int) in
 const completionHelp = `Usage: foreman completion bash|zsh|fish
 
 Print a completion script for your shell. It completes commands, options and
-the names of your environments, repositories and boxes. Names are offered for
-about fifteen minutes after your last command: completion only reads, and
-leaves refreshing the connection to the commands you run.
+the names of your environments, repositories and boxes. Completion only reads
+and leaves refreshing the connection to the commands you run, so names are
+offered while the access token is fresh: up to fifteen minutes after you log
+in or a command refreshes it.
 
   bash   foreman completion bash > ~/.local/share/bash-completion/completions/foreman
   zsh    foreman completion zsh > ~/.zfunc/_foreman
@@ -164,32 +165,33 @@ To try it in the shell you have open: source <(foreman completion zsh)
 // stdin is a variable so a test can supply the words to complete.
 var stdin io.Reader = os.Stdin
 
+// completionDeadline bounds everything a press of Tab waits for.
+var completionDeadline = 3 * time.Second
+
 // complete answers a completion script. The words after "foreman" up to the
-// cursor come in on standard input, one per line: as arguments, a secret
-// typed as NAME=value would show in the process list as soon as Tab was
-// pressed. What could finish the last word goes out, one per line. It never
-// fails and never writes diagnostics into the middle of a prompt.
+// cursor come in on standard input, each ended by a NUL: as arguments, a
+// secret typed as NAME=value would show in the process list as soon as Tab
+// was pressed. What could finish the last word goes out, one per line. It
+// never fails and never writes diagnostics into the middle of a prompt.
 func complete(ctx context.Context, in io.Reader, stdout io.Writer) {
 	if terminal(in) {
 		return // Run by hand: there is nothing to read.
 	}
-	raw, _ := io.ReadAll(io.LimitReader(in, 1<<20))
-	words := strings.Split(strings.TrimSuffix(string(raw), "\n"), "\n")
-	ctx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	ctx, cancel := context.WithTimeout(ctx, completionDeadline)
 	defer cancel()
-	var instance, account string
-	for i, word := range words[:max(len(words)-1, 0)] {
-		name, value, assigned := strings.Cut(word, "=")
-		if !assigned && i+1 < len(words)-1 {
-			value = words[i+1]
-		}
-		switch name {
-		case "--instance":
-			instance = value
-		case "--account":
-			account = value
-		}
+	read := make(chan []byte, 1)
+	go func() {
+		raw, _ := io.ReadAll(io.LimitReader(in, 1<<20))
+		read <- raw
+	}()
+	var raw []byte
+	select {
+	case raw = <-read:
+	case <-ctx.Done():
+		return
 	}
+	words := strings.Split(strings.TrimSuffix(string(raw), "\x00"), "\x00")
+	instance, account := completion.Selectors(words)
 	lookup := func(kind string) []string {
 		// Tab can be cut off at any moment, so it only ever reads: a refresh
 		// interrupted here could spend the refresh token and lose the reply.

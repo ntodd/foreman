@@ -5,10 +5,12 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/ntodd/foreman/cli/session"
 )
@@ -160,11 +162,11 @@ func TestCompletionScriptsAndCandidates(t *testing.T) {
 		t.Fatalf("%d %q", status, out)
 	}
 
-	// The words to complete arrive on standard input, one per line, so that
-	// nothing typed on the command line shows up in a process list.
+	// The words to complete arrive on standard input, each ended by a NUL, so
+	// that nothing typed on the command line shows up in a process list.
 	complete := func(words ...string) (int, string, string) {
 		was := stdin
-		stdin = strings.NewReader(strings.Join(words, "\n") + "\n")
+		stdin = strings.NewReader(strings.Join(words, "\x00") + "\x00")
 		defer func() { stdin = was }()
 		return raw("__complete")
 	}
@@ -186,8 +188,31 @@ func TestCompletionScriptsAndCandidates(t *testing.T) {
 	if status, out, _ := complete("--j"); status != 0 || out != "--json\n" {
 		t.Fatalf("%d %q", status, out)
 	}
-	// Words given as arguments are ignored: the scripts never send them that way.
-	if status, out, _ := complete(); status != 0 || !strings.Contains(out, "login\n") {
+	// A word holding a line break is still one word, not a second selector.
+	if status, out, _ := complete("secrets", "set", "A=1\n--account=nobody", "--env", "app"); status != 0 || out != "app-me-1\napp-me-2\n" {
 		t.Fatalf("%d %q", status, out)
+	}
+	if status, out, _ := complete(""); status != 0 || !strings.Contains(out, "login\n") {
+		t.Fatalf("%d %q", status, out)
+	}
+
+	// A writer that never finishes doesn't hold the prompt past the deadline.
+	reader, writer := io.Pipe()
+	defer writer.Close()
+	was, limit := stdin, completionDeadline
+	stdin, completionDeadline = reader, 50*time.Millisecond
+	defer func() { stdin, completionDeadline = was, limit }()
+	done := make(chan int, 1)
+	go func() {
+		status, _, _ := raw("__complete")
+		done <- status
+	}()
+	select {
+	case status := <-done:
+		if status != 0 {
+			t.Fatal(status)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("completion waited on its input past the deadline")
 	}
 }

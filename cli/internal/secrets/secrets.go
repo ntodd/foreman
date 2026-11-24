@@ -113,8 +113,10 @@ type target struct{ scope, subject, label string }
 
 type invocation struct {
 	command string
-	flags   map[string]string
-	args    []string
+	// environment is the name --env was given as, once it is pinned to an ID.
+	environment string
+	flags       map[string]string
+	args        []string
 }
 
 // Run accepts arguments starting with the resource name. It writes the
@@ -145,6 +147,16 @@ func (o Options) run(ctx context.Context, args []string) error {
 	v, err := parse(args)
 	if err != nil {
 		return err
+	}
+	// A name can pass to a newer environment once the old one is destroyed.
+	// Pin it to an ID before a value is asked for or read, so what is typed
+	// goes where it was aimed however long the typing takes.
+	if name, ok := v.flags["env"]; ok && !uuidPattern.MatchString(name) {
+		t, err := o.environment(ctx, name)
+		if err != nil {
+			return err
+		}
+		v.flags["env"], v.environment = t.subject, name
 	}
 	switch v.command {
 	case "list":
@@ -239,10 +251,10 @@ func parse(args []string) (invocation, error) {
 // target resolves the scope flag. With none, the secrets are the caller's own.
 func (o Options) target(ctx context.Context, v invocation) (target, error) {
 	if id, ok := v.flags["env"]; ok {
-		if uuidPattern.MatchString(id) {
-			return target{"environment", id, "environment " + id}, nil
+		if v.environment != "" {
+			return target{"environment", id, "environment " + v.environment + " (" + id + ")"}, nil
 		}
-		return o.environment(ctx, id)
+		return target{"environment", id, "environment " + id}, nil
 	}
 	if owner, ok := v.flags["owner"]; ok {
 		return target{"owner", owner, "owner " + owner}, nil

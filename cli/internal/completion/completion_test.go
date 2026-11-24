@@ -40,7 +40,14 @@ func TestCandidatesFollowTheCommandLine(t *testing.T) {
 		{"env show ", "app-me-1 app-me-2 web-me-1"},
 		{"env stop app", "app-me-1 app-me-2"},
 		{"env restart w", "web-me-1"},
-		{"env destroy --yes ", "app-me-1 app-me-2 web-me-1"},
+		// Destroying by name always asks, so --yes and a name are not offered together.
+		{"env destroy --yes ", ""},
+		{"env destroy --no-wait ", "app-me-1 app-me-2 web-me-1"},
+		{"env destroy aaaaaaaa-0000-4000-8000-111111111111 -", "--yes --no-wait --timeout"},
+		// bash 4 and later split words at = and :, before the cursor too.
+		{"--account = two env show app", "app-me-1 app-me-2"},
+		{"--instance http : //foreman.example : 4000 env s", "show start stop"},
+		{"env create acme/app --box = one --b", "--branch --box"},
 		{"op list a", "app-me-1 app-me-2"},
 		{"env create ", "acme/app acme/web"},
 		{"env create acme/app --b", "--branch --box"},
@@ -51,7 +58,7 @@ func TestCandidatesFollowTheCommandLine(t *testing.T) {
 		{"secrets list --env =", "app-me-1 app-me-2 web-me-1"},
 		{"env create acme/app --on-expiry ", "stop destroy"},
 		{"env restart app-me-1 --", "--all --no-wait --timeout"},
-		{"env destroy app-me-1 -", "--yes --no-wait --timeout"},
+		{"env destroy app-me-1 -", "--no-wait --timeout"},
 		{"secrets set A=1 --", "--env --repo --owner --user"},
 		{"secrets list --env ", "app-me-1 app-me-2 web-me-1"},
 		{"secrets list --env=web", "--env=web-me-1"},
@@ -71,6 +78,22 @@ func TestCandidatesFollowTheCommandLine(t *testing.T) {
 		got := strings.Join(Candidates(words, lookup), " ")
 		if got != c.want {
 			t.Errorf("%q: %q, want %q", c.line, got, c.want)
+		}
+	}
+}
+
+func TestSelectorsComeFromTheWordsHoweverTheShellSplitThem(t *testing.T) {
+	for line, want := range map[string][2]string{
+		"--instance https://foreman.example --account two env show ":       {"https://foreman.example", "two"},
+		"--instance=https://foreman.example env show ":                     {"https://foreman.example", ""},
+		"--instance https : //foreman.example : 4000 --account = two env ": {"https://foreman.example:4000", "two"},
+		"env show ": {"", ""},
+		// The word being completed is not yet a selector.
+		"--account two": {"", ""},
+	} {
+		instance, account := Selectors(strings.Split(line, " "))
+		if instance != want[0] || account != want[1] {
+			t.Errorf("%q: %q %q", line, instance, account)
 		}
 	}
 }
@@ -131,13 +154,13 @@ func TestEveryShellHasAScriptThatAsksTheCLI(t *testing.T) {
 
 // stub puts a foreman on PATH that answers with one candidate: the word being
 // completed (so a shell that filters by prefix keeps it) and then every word
-// it was given. Words arrive on standard input, one per line. Anything typed
-// on the command line, a secret included, must stay out of its arguments.
+// it was given. Words arrive on standard input, each ended by a NUL. Anything
+// typed on the command line, a secret included, must stay out of its arguments.
 func stub(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()
 	body := "#!/bin/sh\nif [ \"$*\" != __complete ]; then echo \"arguments: $*\"; exit; fi\n" +
-		"last=; all=\nwhile IFS= read -r word; do last=$word; all=\"$all[$word]\"; done\nprintf '%s%s\\n' \"$last\" \"$all\"\n"
+		"tr '\\000' '\\n' | { last=; all=; while IFS= read -r word; do last=$word; all=\"$all[$word]\"; done; printf '%s%s\\n' \"$last\" \"$all\"; }\n"
 	if err := os.WriteFile(filepath.Join(dir, "foreman"), []byte(body), 0o700); err != nil {
 		t.Fatal(err)
 	}
