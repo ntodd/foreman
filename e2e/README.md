@@ -159,12 +159,16 @@ reaching the guest after a stop and a start, an agent restart leaving
 the VMs running, and destroy leaving nothing behind.
 
 It installs the agent and changes the machine's network, so it refuses
-to run without `E2E_VM_THROWAWAY=1`; CI runs it on a GitHub-hosted runner,
-which has KVM and is thrown away after. It needs KVM, Docker, sudo,
+to run without `E2E_VM_THROWAWAY=1`. CI runs `lifecycle` and `expiry` in
+parallel on separate disposable GitHub-hosted KVM runners. The required
+`e2e-vm` check waits for both. The expiry scenario keeps a no-deadline
+workspace running through the outage and checks stop and destroy on
+two other workspaces. It needs KVM, Docker, sudo,
 python3, zstd and Elixir (for `mix foreman_agent.sign`).
 
 ```sh
-E2E_VM_THROWAWAY=1 e2e/vm/run.sh
+E2E_VM_THROWAWAY=1 e2e/vm/run.sh           # both scenarios on one host
+E2E_VM_THROWAWAY=1 e2e/vm/run.sh expiry    # just expiry and recovery
 ```
 
 `vmctl/test.sh` checks the root helper for environment VMs

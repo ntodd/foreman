@@ -273,7 +273,8 @@ jobs:
         with:
           node-version: "22"
       - name: ShellCheck
-        run: shellcheck -s sh guest/build.sh guest/rootfs/usr/local/lib/foreman-guest/* e2e/guest/run.sh e2e/vm/run.sh e2e/vmctl/test.sh apps/foreman_agent/priv/vm/guest-forward apps/foreman_agent/priv/vm/vmctl features/src/foreman/install.sh features/src/foreman/scripts/* apps/foreman/priv/agent/install.sh apps/foreman/priv/agent/vm.sh apps/foreman/priv/flatcar/*.sh apps/foreman_agent/rel/tools/bundle.sh scripts/publish-agent-release.sh e2e/*.sh e2e/firewall/test.sh e2e/linux/run.sh e2e/flatcar/run.sh e2e/linux/bin/gh docker/foreman-update e2e/updater/run.sh
+        run: shellcheck -s sh guest/build.sh guest/rootfs/usr/local/lib/foreman-guest/* e2e/guest/run.sh e2e/vmctl/test.sh apps/foreman_agent/priv/vm/guest-forward apps/foreman_agent/priv/vm/vmctl features/src/foreman/install.sh features/src/foreman/scripts/* apps/foreman/priv/agent/install.sh apps/foreman/priv/agent/vm.sh apps/foreman/priv/flatcar/*.sh apps/foreman_agent/rel/tools/bundle.sh scripts/publish-agent-release.sh e2e/*.sh e2e/firewall/test.sh e2e/linux/run.sh e2e/flatcar/run.sh e2e/linux/bin/gh docker/foreman-update e2e/updater/run.sh
+      - run: shellcheck -a -x -s sh e2e/vm/run.sh
       - name: Test installer file ownership
         run: sudo sh e2e/flatcar/installer-files-test.sh
       - name: Test the VM helper
@@ -457,25 +458,30 @@ jobs:
           e2e/linux/run.sh --down || true
           docker image rm -f "$E2E_PROJECT-cp" "$E2E_PROJECT-box" 2>/dev/null || true
 
-  # Environments in real VMs: the agent installed with the served install
-  # script on a GitHub-hosted runner, which has KVM (Crew's VMs don't) and
-  # is thrown away after; the control plane in Docker beside it; two
-  # environments, what they can reach, secrets across a stop and start, an
-  # agent restart and destroy (e2e/vm/run.sh).
-  e2e-vm:
+  # Each scenario installs an agent, changes the host network and owns its
+  # KVM guests. Give each one its own disposable x86-64 Linux runner.
+  vm-scenario:
+    name: VM ${{ matrix.scenario }}
     if: github.event_name != 'schedule'
     runs-on: ubuntu-24.04
     timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        scenario: [lifecycle, expiry]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
+        if: matrix.scenario == 'lifecycle'
         with:
           go-version-file: cli/go.mod
           cache-dependency-path: cli/go.sum
       - name: Build the CLI for the real workspace smoke
+        if: matrix.scenario == 'lifecycle'
         working-directory: cli
         run: go build -o "$RUNNER_TEMP/foreman" ./cmd/foreman
       - name: Test the VM acceptance client
+        if: matrix.scenario == 'expiry'
         run: python3 -B -m unittest discover -s e2e/vm
       # For mix foreman_agent.sign, which makes the release keys and signs
       # the agent the run publishes.
@@ -510,7 +516,25 @@ jobs:
       - name: Build the guest image
         if: steps.guest-image.outputs.cache-hit != 'true'
         run: guest/build.sh "$RUNNER_TEMP/guest"
-      - run: FOREMAN_CLI="$RUNNER_TEMP/foreman" E2E_VM_THROWAWAY=1 E2E_GUEST_TAR="$RUNNER_TEMP/guest/foreman-guest-linux-amd64.tar" e2e/vm/run.sh
+      - name: Run the VM scenario
+        env:
+          SCENARIO: ${{ matrix.scenario }}
+          E2E_VM_THROWAWAY: '1'
+        run: |
+          if [ "$SCENARIO" = lifecycle ]; then export FOREMAN_CLI="$RUNNER_TEMP/foreman"; fi
+          E2E_GUEST_TAR="$RUNNER_TEMP/guest/foreman-guest-linux-amd64.tar" e2e/vm/run.sh "$SCENARIO"
+
+  # Keep the existing required check and require success from both runners.
+  e2e-vm:
+    needs: vm-scenario
+    if: always() && github.event_name != 'schedule'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 2
+    steps:
+      - name: Check both VM scenarios
+        env:
+          RESULT: ${{ needs.vm-scenario.result }}
+        run: test "$RESULT" = success
 
   # A control plane host that boots systemd, runs the control plane from
   # docker/compose.yml and installs the updater: refused requests, an
