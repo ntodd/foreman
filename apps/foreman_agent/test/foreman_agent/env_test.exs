@@ -1200,6 +1200,25 @@ defmodule ForemanAgent.EnvTest do
       assert opts[:env]["X"] == "1"
     end
 
+    # The VM is the limit. Docker refuses a container more CPUs than the
+    # VM has, and a spec an older agent saved can ask for more than that.
+    test "no service is limited, whatever limits the command or the saved spec holds",
+         %{ctx: ctx} do
+      stub_tools()
+
+      overlay = fn ->
+        {"devcontainer", params, _} = last_devcontainer()
+        File.read!(List.last(params.config["dockerComposeFile"]))
+      end
+
+      limits = %{"limits" => %{"cpus" => 4096, "memory_mb" => 4096}}
+      {:ok, _} = Env.run("env.create", payload(limits), ctx)
+      refute overlay.() =~ ~r/cpus|mem_limit/
+
+      assert {:ok, _} = Env.run("env.start", start_payload(), ctx)
+      refute overlay.() =~ ~r/cpus|mem_limit/
+    end
+
     # Environments created before the agent reported nodes get one recorded.
     test "reports the node the environment joined the tailnet as", %{ctx: ctx} do
       stub_tools()

@@ -25,7 +25,6 @@ defmodule ForemanAgent.Env.Overlay do
           devcontainer_service: String.t(),
           secrets_dir: Path.t(),
           tailscale: %{enabled: boolean()},
-          limits: map(),
           feature_version: String.t() | nil
         }
 
@@ -104,8 +103,7 @@ defmodule ForemanAgent.Env.Overlay do
           "        target: \"/var/lib/tailscale\"\n"
         ],
         else: []
-      ),
-      limits(params.limits)
+      )
     ]
   end
 
@@ -125,22 +123,6 @@ defmodule ForemanAgent.Env.Overlay do
       "          create_host_path: false\n"
     ]
   end
-
-  defp limits(limits) do
-    [
-      case limits[:cpus] do
-        nil -> []
-        cpus -> ["    cpus: ", number(cpus), "\n"]
-      end,
-      case limits[:memory_mb] do
-        nil -> []
-        mb -> ["    mem_limit: ", q("#{mb}m"), "\n"]
-      end
-    ]
-  end
-
-  defp number(n) when is_integer(n), do: Integer.to_string(n)
-  defp number(n) when is_float(n), do: :erlang.float_to_binary(n, [:short])
 
   defp q(value) when is_binary(value), do: JSON.encode!(value)
 

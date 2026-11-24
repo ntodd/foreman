@@ -903,7 +903,6 @@ defmodule ForemanAgent.Env do
         secrets_dir: paths.secrets,
         recovery_dir: if(recovery_directory?(paths), do: paths.recovery),
         tailscale: spec.tailscale,
-        limits: spec.limits,
         feature_version: Config.feature_version(ctx.config)
       })
 
