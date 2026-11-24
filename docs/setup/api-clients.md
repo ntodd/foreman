@@ -51,6 +51,38 @@ A single `op logs` read returns up to 16 whole pages and 1 MiB of text. In JSON 
 
 Use `--follow` for a continuous log stream. JSON follow mode writes one page per line, including empty pages. To reconnect, run `foreman op logs "$OP_ID" --follow --cursor "$CURSOR"` using the last delivered cursor.
 
+## Secrets with the installed CLI
+
+A default login leaves the secret permissions out. Connect with them once; `foreman help secrets` prints the exact line for your version:
+
+```sh
+foreman login --scope "repos:list boxes:list environments:list environments:read operations:list operations:read logs:read environments:create environments:start environments:stop secrets:list secrets:write"
+```
+
+Then set, list and remove secrets at one level:
+
+```sh
+foreman secrets set LOG_LEVEL=debug API_KEY=@key.txt --env "$ENV_ID"
+foreman secrets set DATABASE_PASSWORD            # asks, without showing what you type
+op read op://vault/item/token | foreman secrets set API_TOKEN=-
+foreman secrets import team.env --repo acme/payments
+foreman secrets list --repo acme/payments
+foreman secrets unset OLD_TOKEN --repo acme/payments
+foreman env restart "$ENV_ID"                    # recreate the services that use what changed
+```
+
+With no level named, the secrets are your own and reach all of your environments. `--env` takes an environment ID. `--repo` takes an exact owner/name or a repository UUID, and `--owner` a login; both of those need an admin. An environment gets the owner's secrets, then the repository's, then your own, then its own, and a later level wins.
+
+One `set`, `unset` or `import` is one request: everything in it is saved, or nothing is. A request takes up to 100 changes. `list` shows names and when each last changed. No command prints a value.
+
+A value written as `NAME=value` stays in your shell history and is visible to other processes while the command runs. For anything sensitive use `NAME=@file`, which reads the file and drops its final newline, `NAME=-`, which reads standard input the same way, or `NAME` alone, which asks on the terminal. A value that itself begins with `@` has to come one of those three ways. Empty values and values that aren't UTF-8 text are refused. The CLI's messages never repeat what you typed, in case a value landed where a name or an option belonged. `import` reads `NAME=value` lines from a dotenv file, or from standard input when the file is `-`. It skips blank lines and `#` comments, accepts a leading `export`, keeps single-quoted values as written, and reads `\n`, `\r`, `\t`, `\"` and `\\` inside double quotes, leaving any other backslash as it is. In an unquoted value a `#` after a space starts a comment.
+
+In a running environment new shells pick a change up once the box has written it, usually within seconds. Processes and services that were already running keep the values they started with. After a change the command lists your running environments that the level reaches, if your login includes `environments:list`.
+
+`foreman env restart "$ENV_ID"` applies a change, as **Restart affected** does in the browser. It recreates the services whose compose configuration uses a secret that changed and restarts the workspace container, whether or not anything changed. `foreman env restart "$ENV_ID" --all` stops and starts every container without recreating any, which is what a process that read `/run/foreman/secrets.env` at startup needs. A stop and a start does no more than `--all`: the services come back in the containers they already had, with the environment those were created with.
+
+Two limits to know. The default restart finds its services by the `$NAME` and `${NAME}` references in the compose files, so a service that receives a secret another way, such as a bare `NAME` in an `environment:` list, is not recreated. And once `--all` or a stop and start has run, Foreman counts the current values as applied and stops listing the environment as waiting, even though a container it did not recreate still has its old values. When in doubt, rebuild the environment from the browser.
+
 ## Update or disconnect
 
 Run `foreman update` to install the latest stable CLI release. An interactive command announces a newly available version once. Updating preserves your login, including personal connections saved by the checkout CLI. Run `foreman logout` to disconnect the selected account.

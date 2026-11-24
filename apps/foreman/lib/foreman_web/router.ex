@@ -39,6 +39,9 @@ defmodule ForemanWeb.Router do
     get "/me", IdentityController, :show
     post "/environments", EnvironmentMutationController, :create
     post "/environments/:id/operations", EnvironmentMutationController, :operate
+    # Unlogged: a body that isn't shaped the way the API expects is logged
+    # before anything can validate it, and its values are secrets.
+    patch "/secrets/:scope/:subject", SecretMutationController, :update, log: false
   end
 
   scope "/", ForemanWeb do
@@ -86,6 +89,7 @@ defmodule ForemanWeb.Router do
     get "/environments/:id/operations", PublicReadController, :operations
     get "/operations/:id", PublicReadController, :operation
     get "/operations/:id/logs", PublicReadController, :logs
+    get "/secrets/:scope/:subject", PublicReadController, :secrets
   end
 
   # Agents: enrollment, the install script and release downloads. Release

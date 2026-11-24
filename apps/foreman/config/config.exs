@@ -97,6 +97,8 @@ config :phoenix, :json_library, Jason
 
 # Kept out of request logs: join tokens (and the Tailscale keys and
 # first-boot configs that come with them), secrets, passwords.
-config :phoenix, :filter_parameters, ["password", "token", "secret", "auth_key", "code"]
+# "value" covers a secret sent in a body that isn't shaped the way the
+# API expects, which is logged before anything validates it.
+config :phoenix, :filter_parameters, ["password", "token", "secret", "auth_key", "code", "value"]
 
 import_config "#{config_env()}.exs"

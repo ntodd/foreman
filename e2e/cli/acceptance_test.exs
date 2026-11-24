@@ -118,6 +118,96 @@ defmodule Foreman.CLIAcceptanceTest do
     assert Repo.aggregate(Environment, :count) == 2
   end
 
+  test "secrets are set, imported, listed and removed without a value ever being printed", ctx do
+    # A default login leaves the secret permissions out, and says how to ask for them.
+    login(ctx, ctx.user)
+    assert {%{"code" => "insufficient_scope"}, "", _} = failure(ctx, ["secrets", "set", "A=1"])
+    {status, "", hint} = ctx |> launch(["secrets", "list"]) |> finish()
+    assert status != 0
+    assert hint =~ ~s(foreman login --scope ")
+    assert hint =~ "secrets:write"
+
+    # A workspace the box has confirmed is running.
+    created = json(ctx, ["env", "create", ctx.repo.full_name, "--no-wait"])
+    env_id = created["environment_id"]
+    complete(ctx.box, created["operation_id"])
+    env = Repo.get!(Environment, env_id)
+
+    login(
+      ctx,
+      ctx.user,
+      "repos:list environments:list operations:read environments:start environments:stop secrets:list secrets:write"
+    )
+
+    File.write!(Path.join(ctx.tmp_dir, "key.txt"), "from a file\n")
+
+    File.write!(
+      Path.join(ctx.tmp_dir, "team.env"),
+      "# shared\nDOTENV_ONE=1\nexport DOTENV_TWO=\"two words\"\n"
+    )
+
+    args = ["secrets", "set", "PLAIN=hunter2", "FROM_FILE=@key.txt", "--env", env_id]
+
+    assert %{
+             "set" => ["PLAIN", "FROM_FILE"],
+             "unset" => [],
+             "affected" => [%{"id" => ^env_id}],
+             "others_affected" => 0
+           } = json(ctx, args)
+
+    assert Foreman.Secrets.resolve(env) == %{"PLAIN" => "hunter2", "FROM_FILE" => "from a file"}
+
+    # The running services still hold what they started with. A restart recreates the
+    # ones that use what changed, and it reaches the box.
+    assert %{"environment_id" => ^env_id, "operation_id" => restart} =
+             json(ctx, ["env", "restart", env_id, "--no-wait"])
+
+    assert %{action: "restart_affected", args: %{"changed" => ["FROM_FILE", "PLAIN"]}} =
+             Repo.get!(Operation, restart)
+
+    # The box gets the current files before anything restarts.
+    assert deliver_files(ctx.box, env_id) > 0
+    assert Repo.get!(Operation, restart).status == "dispatched"
+    complete(ctx.box, restart)
+    assert %{"status" => "succeeded"} = json(ctx, ["op", "wait", restart])
+
+    {0, human, ""} = ctx |> launch(["secrets", "list", "--env", env_id]) |> finish()
+
+    assert ["NAME\tUPDATED", "FROM_FILE\t" <> _, "PLAIN\t" <> _] =
+             String.split(human, "\n", trim: true)
+
+    listed = json(ctx, ["secrets", "list", "--env", env_id])
+    assert Enum.map(items(listed), & &1["name"]) == ["FROM_FILE", "PLAIN"]
+    refute human <> inspect(listed) =~ "hunter2"
+
+    # With no level named, the secrets are the caller's own.
+    assert %{"set" => ["DOTENV_ONE", "DOTENV_TWO"]} = json(ctx, ["secret", "import", "team.env"])
+
+    assert Enum.map(items(json(ctx, ["secrets", "list"])), & &1["name"]) ==
+             ["DOTENV_ONE", "DOTENV_TWO"]
+
+    assert Foreman.Secrets.resolve(env)["DOTENV_TWO"] == "two words"
+
+    assert %{"set" => [], "unset" => ["PLAIN"]} =
+             json(ctx, ["secrets", "unset", "PLAIN", "NEVER_SET", "--env", env_id])
+
+    # One refused name leaves the whole request unapplied.
+    assert {%{"code" => "invalid_request", "message" => message}, "", _} =
+             failure(ctx, ["secrets", "set", "GOOD=1", "FOREMAN_TOKEN=2", "--env", env_id])
+
+    assert message =~ "FOREMAN_TOKEN"
+    refute Map.has_key?(Foreman.Secrets.resolve(env), "GOOD")
+
+    # A repository's secrets take an admin, and another person's environment is not found.
+    assert {%{"code" => "forbidden"}, "", _} =
+             failure(ctx, ["secrets", "set", "A=1", "--repo", ctx.repo.full_name])
+
+    foreign = environment_fixture(repo: ctx.repo)
+
+    assert {%{"code" => "resource_not_found"}, "", _} =
+             failure(ctx, ["secrets", "list", "--env", foreign.id])
+  end
+
   test "create-only authorization submits by UUID and preserves accepted IDs on a wait error",
        ctx do
     login(ctx, ctx.user, "environments:create")
@@ -372,6 +462,25 @@ defmodule Foreman.CLIAcceptanceTest do
 
   defp sample(box, id, ids),
     do: event(box, "box.workspaces", %{since_join_ms: 0, environments: %{id => ids}})
+
+  # Acknowledge each secrets file write the box has been sent, oldest first.
+  defp deliver_files(box, env_id, done \\ 0) do
+    sent =
+      Repo.one(
+        from o in Operation,
+          where: o.environment_id == ^env_id and o.action == "secrets_write",
+          where: o.status == "dispatched",
+          order_by: o.inserted_at,
+          limit: 1
+      )
+
+    if sent do
+      complete(box, sent.id)
+      deliver_files(box, env_id, done + 1)
+    else
+      done
+    end
+  end
 
   defp complete(box, id),
     do:

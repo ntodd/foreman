@@ -277,6 +277,13 @@ func (o Options) operate(ctx context.Context, v invocation, action string) (subm
 		}
 	}
 	body := api.Action{Action: action}
+	if action == "restart" {
+		// Only the services whose secrets changed, unless asked for all.
+		body.Action = "restart_affected"
+		if v.flags["all"] != "" {
+			body.Action = "restart_all"
+		}
+	}
 	if v.flags["confirm-capacity-warning"] != "" {
 		body.ConfirmCapacityWarning = new(true)
 	}

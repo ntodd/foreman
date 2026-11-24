@@ -35,7 +35,7 @@ defmodule ForemanWeb.OAuthAdminController do
           clients: inventory.clients,
           installations: Map.new(inventory.installations, &{&1.client_id, &1}),
           choices: inventory.choices,
-          scopes: Scopes.all(),
+          scopes: Scopes.service(),
           credential: credential
         )
 

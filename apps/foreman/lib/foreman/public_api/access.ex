@@ -129,6 +129,44 @@ defmodule Foreman.PublicAPI.Access do
       on: type(resource.id, :string) in field(g, ^field)
   end
 
+  @doc """
+  Whether the connection's grant is still live. The resource queries
+  above check it in the same statement that reads the resource; this is
+  for a subject they don't cover.
+  """
+  def connected?(principal), do: Foreman.Repo.exists?(matching_grants(principal))
+
+  @doc """
+  The same check inside a transaction, holding the grant row: a
+  revocation that hasn't committed yet waits for the caller, and one
+  that has is seen. Shared, and on the grant alone, so two writers
+  through one client don't queue behind each other on its row.
+
+  The user's row is taken first, the order token refresh and
+  offboarding take the two in. A write that audits itself needs that
+  row anyway, for the audit entry's reference to its actor, and taking
+  it after the grant would cross with a refresh in flight.
+  """
+  def lock_connection(principal) do
+    grant = from g in matching_grants(principal), select: g.id
+
+    unless Foreman.Repo.sqlite?() do
+      user = from u in Foreman.Accounts.User, where: u.id == ^principal.user.id, select: u.id
+      Foreman.Repo.one(lock(user, "FOR SHARE"))
+    end
+
+    grant =
+      if Foreman.Repo.sqlite?(),
+        do: grant,
+        else: lock(grant, [g], fragment("FOR SHARE OF ?", g))
+
+    not is_nil(Foreman.Repo.one(grant))
+  end
+
+  @doc "Narrows a query to nothing unless the connection's grant is still live."
+  def while_connected(query, principal),
+    do: where(query, exists(subquery(matching_grants(principal))))
+
   defp matching_grants(principal) do
     from g in OAuth.live_grants(),
       where:

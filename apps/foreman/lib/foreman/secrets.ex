@@ -114,6 +114,104 @@ defmodule Foreman.Secrets do
     end
   end
 
+  @doc """
+  Sets and removes several secrets at one scope together: every change is
+  saved, or none is. `set` is a list of `{name, value}`; `unset` a list of
+  names, where one that isn't set is skipped. Environments hear about the
+  whole batch once.
+
+  Returns the names set and the names actually removed, or
+  `{:error, {:invalid, name, message}}` for the first secret refused.
+  `opts[:audit]` is merged into each audit entry, for a caller that acts
+  through something worth recording (an API client, say).
+
+  `opts[:recheck]` runs inside the transaction, before anything is
+  written, and its error ends the batch: for a caller whose authority
+  was established earlier in the request and may have gone since.
+
+  Batches at one scope run one at a time, so two that touch the same
+  name can't both find it absent, or both remove it.
+  """
+  def apply_changes(%Scope{} = scope, scope_name, subject, set, unset, opts \\ []) do
+    audit = Keyword.get(opts, :audit, %{})
+    recheck = Keyword.get(opts, :recheck, fn -> :ok end)
+
+    # The scope's turn is taken first: a check made while still waiting
+    # for it could be out of date by the time the write runs.
+    change = fn ->
+      serialize(scope_key(scope_name, subject))
+      with :ok <- recheck.(), do: change_all(scope, scope_name, subject, set, unset, audit)
+    end
+
+    with :ok <- authorize(scope, scope_name, subject),
+         {:ok, changed} <- Foreman.Repo.transact(fn -> while_live(subject, change) end) do
+      Foreman.Environments.secrets_changed(affected_environment_ids(scope_name, subject))
+      {:ok, changed}
+    end
+  end
+
+  defp change_all(scope, scope_name, subject, set, unset, audit) do
+    saved =
+      Enum.reduce_while(set, {:ok, []}, fn {name, value}, {:ok, names} ->
+        attrs = %{"name" => name, "value" => value}
+
+        case save_secret(scope, scope_name, subject, attrs, audit) do
+          {:ok, secret} -> {:cont, {:ok, [secret.name | names]}}
+          {:error, changeset} -> {:halt, {:error, {:invalid, name, refusal(changeset)}}}
+        end
+      end)
+
+    with {:ok, names} <- saved do
+      removed = Enum.filter(unset, &remove_secret(scope, scope_name, subject, &1, audit))
+      {:ok, %{set: Enum.reverse(names), unset: removed}}
+    end
+  end
+
+  # SQLite's write transactions already run one at a time. On Postgres a
+  # lock on the scope, held to the end of the transaction, does the same.
+  defp serialize(key) do
+    unless Foreman.Repo.sqlite?() do
+      Foreman.Repo.query!("SELECT pg_advisory_xact_lock(hashtext($1))", ["secrets:" <> key])
+    end
+
+    :ok
+  end
+
+  defp remove_secret(scope, scope_name, subject, name, audit) do
+    key = scope_key(scope_name, subject)
+
+    # Unlogged, like the write: a value pasted where a name belongs would
+    # otherwise be the query's parameter.
+    with %Secret{} = secret <- lookup(key, name),
+         {1, _} <- Foreman.Repo.delete_all(from s in Secret, where: s.id == ^secret.id) do
+      Audit.log(
+        scope,
+        "secret.delete",
+        secret,
+        Map.merge(audit, %{"scope" => key, "name" => name})
+      )
+
+      true
+    else
+      _ -> false
+    end
+  end
+
+  # The first reason a secret was refused, as a sentence fragment: "name
+  # must start with a letter…", "value should be at most 65536 byte(s)".
+  defp refusal(changeset) do
+    {field, [message | _]} =
+      changeset
+      |> Ecto.Changeset.traverse_errors(fn {text, opts} ->
+        Regex.replace(~r/%{(\w+)}/, text, fn _, key ->
+          opts |> Keyword.get(String.to_existing_atom(key), key) |> to_string()
+        end)
+      end)
+      |> Enum.min()
+
+    "#{field} #{message}"
+  end
+
   # Serialize an environment write with the update that marks it destroyed.
   defp while_live(%Environment{id: id}, save) do
     Foreman.Repo.transact(fn ->
@@ -125,10 +223,10 @@ defmodule Foreman.Secrets do
 
   defp while_live(_subject, save), do: save.()
 
-  defp save_secret(scope, scope_name, subject, attrs) do
+  defp save_secret(scope, scope_name, subject, attrs, audit \\ %{}) do
     key = scope_key(scope_name, subject)
     name = attrs["name"] || attrs[:name]
-    existing = name && Foreman.Repo.get_by(Secret, scope_key: key, name: name)
+    existing = name && lookup(key, name)
 
     secret =
       existing ||
@@ -148,11 +246,19 @@ defmodule Foreman.Secrets do
       |> Secret.changeset(attrs)
       |> Ecto.Changeset.put_change(:updated_by_id, Scope.user_id(scope))
 
-    with {:ok, saved} <- Foreman.Repo.insert_or_update(changeset) do
-      Audit.log(scope, if(existing, do: "secret.update", else: "secret.create"), saved, %{
-        "scope" => key,
-        "name" => saved.name
-      })
+    # Ecto logs a write's parameters as they were cast, before the column
+    # type encrypts them, so this write stays out of the query log.
+    #
+    # Forced, so the timestamp moves on every set. Left alone, setting the
+    # value a secret already holds would write nothing, and anyone who can
+    # list names would learn that the value they sent was the one stored.
+    with {:ok, saved} <- Foreman.Repo.insert_or_update(changeset, log: false, force: true) do
+      Audit.log(
+        scope,
+        if(existing, do: "secret.update", else: "secret.create"),
+        saved,
+        Map.merge(audit, %{"scope" => key, "name" => saved.name})
+      )
 
       {:ok, %{saved | value: nil}}
     end
@@ -244,8 +350,11 @@ defmodule Foreman.Secrets do
     |> Map.merge(subject_fields(to, target))
     |> Secret.changeset(Map.merge(attrs, %{"name" => secret.name, "value" => secret.value}))
     |> Ecto.Changeset.put_change(:updated_by_id, Scope.user_id(scope))
-    |> Foreman.Repo.insert()
+    |> Foreman.Repo.insert(log: false)
   end
+
+  defp lookup(key, name),
+    do: Foreman.Repo.get_by(Secret, [scope_key: key, name: name], log: false)
 
   defp subject_fields("owner", %Owner{id: id}), do: %{owner_id: id}
   defp subject_fields("repo", %Repo{id: id}), do: %{repo_id: id}
@@ -254,7 +363,8 @@ defmodule Foreman.Secrets do
 
   defp stringify(attrs), do: Map.new(attrs, fn {k, v} -> {to_string(k), v} end)
 
-  defp affected_environment_ids(scope_name, subject) do
+  @doc "The live environments a scope's secrets reach."
+  def affected_environment_ids(scope_name, subject) do
     base = from e in Environment, where: is_nil(e.destroyed_at), select: e.id
 
     query =

@@ -172,8 +172,10 @@ defmodule Foreman.Environments.WorkloadAccess do
 
   # An independently authorized personal start may take over an existing workspace.
   # The source of every request and the creator's grant remain on their original rows.
+  # A restart starts the workspace again, on the same footing.
   defp owner(%{action: action}, env, %{kind: :user} = actor)
-       when action in ["start", "secrets_write"] and actor.user.id == env.user_id,
+       when action in ["start", "secrets_write", "restart_affected", "restart_all"] and
+              actor.user.id == env.user_id,
        do: {:ok, actor}
 
   defp owner(_op, %{workload_grant_id: id} = env, actor) when not is_nil(id),
@@ -244,6 +246,10 @@ defmodule Foreman.Environments.WorkloadAccess do
 
   defp scope?(principal, action) when action in ~w(create start stop destroy),
     do: ("environments:" <> action) in principal.scopes
+
+  # A restart stops and starts, and is admitted on both permissions.
+  defp scope?(principal, action) when action in ~w(restart_affected restart_all),
+    do: scope?(principal, "stop") and scope?(principal, "start")
 
   defp scope?(_principal, _action), do: false
 

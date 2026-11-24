@@ -238,7 +238,7 @@ paths:
         default: {$ref: '#/components/responses/Error'}
     post:
       operationId: operateEnvironment
-      x-required-permission: 'environments:start, environments:stop, or environments:destroy according to the requested action'
+      x-required-permission: 'environments:start, environments:stop, or environments:destroy according to the requested action. A restart needs both environments:stop and environments:start.'
       summary: Queue a lifecycle action
       security: [{foremanToken: []}]
       parameters:
@@ -307,6 +307,45 @@ paths:
             application/json:
               schema: {$ref: '#/components/schemas/LogPage'}
         default: {$ref: '#/components/responses/Error'}
+  /api/v1/secrets/{scope}/{subject}:
+    get:
+      operationId: listSecrets
+      x-required-permission: 'secrets:list'
+      summary: List the names of the secrets set at one scope
+      description: Personal connections only. Values are never returned. Repository and owner secrets take an admin.
+      security: [{foremanToken: []}]
+      parameters:
+        - {$ref: '#/components/parameters/SecretScope'}
+        - {$ref: '#/components/parameters/SecretSubject'}
+        - {$ref: '#/components/parameters/Cursor'}
+      responses:
+        '200':
+          description: Success
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/SecretPage'}
+        default: {$ref: '#/components/responses/Error'}
+    patch:
+      operationId: changeSecrets
+      x-required-permission: 'secrets:write'
+      summary: Set and remove secrets at one scope together
+      description: Every change in the request is saved, or none is. Repeating a request leaves the same secrets in place. Running environments the scope reaches keep their current values until they restart.
+      security: [{foremanToken: []}]
+      parameters:
+        - {$ref: '#/components/parameters/SecretScope'}
+        - {$ref: '#/components/parameters/SecretSubject'}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/SecretChanges'}
+      responses:
+        '200':
+          description: The names changed and the running environments the scope reaches
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/SecretChangeResult'}
+        default: {$ref: '#/components/responses/Error'}
 components:
   securitySchemes:
     serviceCredential:
@@ -327,6 +366,18 @@ components:
       description: Opaque position issued for this grant and collection. Omit on the first request.
       name: cursor
       in: query
+      schema: {type: string}
+    SecretScope:
+      name: scope
+      in: path
+      required: true
+      description: Which level the secrets belong to. Later levels override earlier ones in an environment.
+      schema: {type: string, enum: [owner, repo, user, environment]}
+    SecretSubject:
+      name: subject
+      in: path
+      required: true
+      description: The environment or repository ID, the owner's ID or login, or `me` for the connected user.
       schema: {type: string}
     Key:
       name: Idempotency-Key
@@ -436,7 +487,7 @@ components:
       additionalProperties: false
       required: [action]
       properties:
-        action: {type: string, enum: [start, stop, destroy]}
+        action: {type: string, enum: [start, stop, destroy, restart_affected, restart_all], description: 'restart_affected recreates the services whose compose configuration uses a secret that changed since they last came up, and always restarts the workspace container. restart_all stops and starts every container without recreating any, so processes start again and read the current secrets file. Both need a running environment.'}
         confirm_capacity_warning: {type: boolean, default: false}
     Accepted:
       type: object
@@ -494,6 +545,63 @@ components:
       properties:
         code: {type: string}
         message: {type: string}
+    Secret:
+      type: object
+      required: [name, updated_at]
+      properties:
+        name: {type: string}
+        updated_at: {type: string, format: date-time}
+    SecretPage:
+      type: object
+      required: [items, next_cursor]
+      properties:
+        items:
+          type: array
+          items: {$ref: '#/components/schemas/Secret'}
+        next_cursor: {type: [string, 'null']}
+    SecretValue:
+      type: object
+      additionalProperties: false
+      required: [name, value]
+      properties:
+        name: {type: string, description: An environment variable name. The FOREMAN_ prefix is reserved.}
+        value: {type: string, description: Up to 64 KiB, without NUL bytes.}
+    SecretChanges:
+      type: object
+      additionalProperties: false
+      description: At least one change and at most 100, with each name appearing once.
+      properties:
+        secrets:
+          type: array
+          items: {$ref: '#/components/schemas/SecretValue'}
+        unset:
+          type: array
+          description: Names to remove. One that isn't set is skipped.
+          items: {type: string}
+    EnvironmentRef:
+      type: object
+      required: [id, slug]
+      properties:
+        id: {$ref: '#/components/schemas/Id'}
+        slug: {type: string}
+    SecretChangeResult:
+      type: object
+      required: [set, unset, affected, others_affected]
+      properties:
+        set:
+          type: array
+          items: {type: string}
+        unset:
+          type: array
+          description: The names that were set and are now removed.
+          items: {type: string}
+        affected:
+          type: array
+          description: The caller's running environments the scope reaches, for a connection that may list environments, and empty otherwise. Their running services keep the values they started with until restarted. The list does not depend on the values sent.
+          items: {$ref: '#/components/schemas/EnvironmentRef'}
+        others_affected:
+          type: integer
+          description: How many of other people's running environments the scope reaches.
     EnvironmentPage:
       type: object
       required: [items, next_cursor]

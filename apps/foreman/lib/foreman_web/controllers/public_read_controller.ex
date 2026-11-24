@@ -5,7 +5,7 @@ defmodule ForemanWeb.PublicReadController do
 
   alias Foreman.{Boxes, Repo}
   alias Foreman.Operations.{LogStore, Retention}
-  alias Foreman.PublicAPI.{Access, Readiness}
+  alias Foreman.PublicAPI.{Access, Readiness, Secrets}
   alias ForemanWeb.{EnvironmentConnection, PublicCursor}
 
   @page_size 50
@@ -80,6 +80,27 @@ defmodule ForemanWeb.PublicReadController do
 
         cursor = if offset == next, do: params["cursor"], else: PublicCursor.encode(context, next)
         {:ok, %{text: text, next_cursor: cursor, truncated: truncated}}
+      end
+
+    respond(conn, result)
+  end
+
+  def secrets(conn, %{"scope" => scope, "subject" => raw} = params) do
+    p = conn.assigns.api_principal
+
+    result =
+      with :ok <- permit(p, "secrets:list"),
+           {:ok, scope, subject} <- Secrets.subject(p, scope, raw) do
+        resource = {:secrets, Foreman.Secrets.scope_key(scope, subject)}
+
+        page(
+          Secrets.listing(p, scope, subject),
+          :name,
+          &Map.take(&1, [:name, :updated_at]),
+          p,
+          resource,
+          params
+        )
       end
 
     respond(conn, result)
@@ -252,6 +273,15 @@ defmodule ForemanWeb.PublicReadController do
 
   defp respond(conn, {:error, :forbidden}),
     do: error(conn, 403, "insufficient_scope", "The connection does not have the required scope.")
+
+  defp respond(conn, {:error, :role}),
+    do:
+      error(
+        conn,
+        403,
+        "forbidden",
+        "Secrets are managed through a personal connection, and a repository's or an owner's take an admin."
+      )
 
   defp respond(conn, {:error, :cursor}),
     do: error(conn, 422, "invalid_request", "Invalid cursor for this collection.")
