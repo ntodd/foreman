@@ -146,7 +146,7 @@ defmodule ForemanWeb.SecretsComponent do
           </div>
           <.repo_boxes
             :if={@scope_name == "user"}
-            id={"#{@id}-repos"}
+            id={"#{@id}--repos"}
             field={@form[:repo_ids]}
             options={repo_options(@repos, @form)}
           />
