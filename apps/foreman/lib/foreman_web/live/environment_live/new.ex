@@ -234,7 +234,13 @@ defmodule ForemanWeb.EnvironmentLive.New do
           </div>
         </.panel>
 
-        <details class="group rounded-xl border border-line bg-raised shadow-xs">
+        <%!-- The browser opens this, so the server's markup never says open:
+             a patch from typing in a field would close it again. --%>
+        <details
+          id="resource-limits"
+          phx-mounted={JS.ignore_attributes("open")}
+          class="group rounded-xl border border-line bg-raised shadow-xs"
+        >
           <summary class="flex cursor-pointer list-none items-center justify-between px-5 py-3.5 text-sm font-semibold text-ink">
             Resource limits
             <span class="text-xs font-normal text-ink-3 group-open:hidden">Optional overrides</span>

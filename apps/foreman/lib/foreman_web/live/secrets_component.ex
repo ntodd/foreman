@@ -144,12 +144,10 @@ defmodule ForemanWeb.SecretsComponent do
               </p>
             </div>
           </div>
-          <.input
-            :if={@scope_name == "user" and repo_options(@repos, @form) != []}
+          <.repo_boxes
+            :if={@scope_name == "user"}
+            id={"#{@id}-repos"}
             field={@form[:repo_ids]}
-            type="select"
-            multiple
-            label="Only for these repos (leave empty for all)"
             options={repo_options(@repos, @form)}
           />
           <div class="flex items-center gap-2">
@@ -209,6 +207,41 @@ defmodule ForemanWeb.SecretsComponent do
   end
 
   defp promote_targets(_scope_name, _subject, _scope), do: []
+
+  attr :id, :string, required: true
+  attr :field, Phoenix.HTML.FormField, required: true
+  attr :options, :list, required: true
+
+  defp repo_boxes(assigns) do
+    assigns =
+      assign(assigns,
+        name: assigns.field.name <> "[]",
+        checked: assigns.field.value |> List.wrap() |> MapSet.new()
+      )
+
+    ~H"""
+    <fieldset :if={@options != []} id={@id} class="min-w-0">
+      <legend class="label">Only for these repos (leave empty for all)</legend>
+      <%!-- An unchecked box sends nothing, so this is what says none is checked. --%>
+      <input type="hidden" name={@name} value="" />
+      <div class="grid gap-x-6 gap-y-2 sm:grid-cols-2 lg:grid-cols-3">
+        <label
+          :for={{label, repo_id} <- @options}
+          class="flex min-w-0 cursor-pointer items-center gap-2.5 text-sm text-ink"
+        >
+          <input
+            type="checkbox"
+            class="checkbox"
+            name={@name}
+            value={repo_id}
+            checked={repo_id in @checked}
+          />
+          <span class="truncate" title={label}>{label}</span>
+        </label>
+      </div>
+    </fieldset>
+    """
+  end
 
   # The repos a secret can be limited to, plus any it's limited to that
   # aren't listed any more (no devcontainer now, or gone). Without an
