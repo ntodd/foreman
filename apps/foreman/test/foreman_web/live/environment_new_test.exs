@@ -46,6 +46,19 @@ defmodule ForemanWeb.EnvironmentNewTest do
     refute has_element?(view, "#placement-refuse")
   end
 
+  # The browser opens the overrides, so the server's markup never says
+  # open. Without this a patch from typing in them closes them again.
+  test "the resource limits stay open while their fields change", %{conn: conn, user: user} do
+    online(box_fixture(owner_user_id: user.id))
+    {:ok, view, _html} = live(conn, ~p"/environments/new")
+
+    for value <- ["", "4"] do
+      view |> form("#new-environment", environment: %{cpu_limit: value}) |> render_change()
+      assert has_element?(view, "details#resource-limits[phx-mounted*='ignore_attrs']")
+      assert has_element?(view, "details#resource-limits[phx-mounted*='open']")
+    end
+  end
+
   test "a malformed hostRequirements doesn't take the page down", %{conn: conn, user: user} do
     online(box_fixture(owner_user_id: user.id))
     bad = repo_fixture(name: "aaa", host_requirements: %{"cpus" => %{"n" => 1}})
