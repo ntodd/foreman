@@ -76,8 +76,12 @@ defmodule ForemanAgent.Devcontainer.LifecycleTest do
       {status, output} =
         Enum.find_value(answers, fn answer -> answer.(exec) end) || default(exec, files)
 
-      if output != "", do: opts[:on_output].(output)
-      {:ok, %{status: status, output: output}}
+      # As the real runner does: what's heard and what's kept are made
+      # valid text (a NUL becomes a replacement character) unless the
+      # caller asked for the output raw.
+      shown = ForemanAgent.Text.scrub(output)
+      if output != "", do: opts[:on_output].(shown)
+      {:ok, %{status: status, output: if(opts[:raw], do: output, else: shown)}}
     end)
 
     files

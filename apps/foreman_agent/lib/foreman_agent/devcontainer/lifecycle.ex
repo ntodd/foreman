@@ -239,7 +239,11 @@ defmodule ForemanAgent.Devcontainer.Lifecycle do
       [state.shell | probe_flags(state.shell, probe)] ++
         ["echo -n #{mark}; #{command}; echo -n #{mark}"]
 
-    case quiet(state, state.exec_user, argv, timeout: @probe_timeout, keep: 1_048_576) do
+    # Raw: the environment is separated by NULs, which output made into
+    # text for the log doesn't keep. Without them it reads as one
+    # variable, and every command after runs without the shell's
+    # environment: no secrets from /run/foreman, no PATH a profile set.
+    case quiet(state, state.exec_user, argv, timeout: @probe_timeout, keep: 1_048_576, raw: true) do
       {:ok, %{status: 0, output: output}} ->
         probed(output, mark, separator)
 
@@ -283,11 +287,13 @@ defmodule ForemanAgent.Devcontainer.Lifecycle do
   defp probed(output, mark, separator) do
     case Regex.run(~r/#{mark}(.*)#{mark}/s, output) do
       [_, inner] when inner != "" ->
+        # Made text only now, a variable at a time: these go into command
+        # lines and into what the control plane is told.
         for pair <- String.split(inner, separator),
             [name, value] <- [String.split(pair, "=", parts: 2)],
             name != "PWD",
             into: %{},
-            do: {name, value}
+            do: {ForemanAgent.Text.scrub(name), ForemanAgent.Text.scrub(value)}
 
       _ ->
         :unreadable
@@ -576,6 +582,7 @@ defmodule ForemanAgent.Devcontainer.Lifecycle do
           env: state.docker_env,
           timeout: timeout,
           keep: Keyword.get(opts, :keep, 65_536),
+          raw: Keyword.get(opts, :raw, false),
           label: opts[:label],
           timed_out: opts[:timed_out]
         ],

@@ -7,17 +7,23 @@ defmodule ForemanAgent.Runner.Collector do
   # character. Those bytes wait for the next chunk, and anything still
   # invalid is replaced, so the callback and the kept output only ever see
   # valid UTF-8 (events to the control plane are JSON).
+  #
+  # With `raw`, the kept output is the bytes as they came, for a caller
+  # that parses them itself: a NUL-separated list can't survive being
+  # made text. The callback still gets text.
 
   alias ForemanAgent.Text
 
-  defstruct keep: 65_536, on_output: nil, chunks: [], size: 0, carry: <<>>
+  defstruct keep: 65_536, on_output: nil, raw: false, chunks: [], size: 0, carry: <<>>
 
-  def output(%__MODULE__{chunks: chunks, keep: keep}) do
+  def output(%__MODULE__{chunks: chunks, keep: keep, raw: raw}) do
     binary = chunks |> Enum.reverse() |> IO.iodata_to_binary()
 
-    if byte_size(binary) > keep,
-      do: binary |> binary_part(byte_size(binary) - keep, keep) |> Text.trim_leading_partial(),
-      else: binary
+    cond do
+      byte_size(binary) <= keep -> binary
+      raw -> binary_part(binary, byte_size(binary) - keep, keep)
+      true -> binary |> binary_part(byte_size(binary) - keep, keep) |> Text.trim_leading_partial()
+    end
   end
 
   defimpl Collectable do
@@ -42,9 +48,10 @@ defmodule ForemanAgent.Runner.Collector do
     defp emit(acc, <<>>), do: acc
 
     defp emit(acc, data) do
-      data = Text.scrub(data)
-      acc.on_output.(data)
-      trim(%{acc | chunks: [data | acc.chunks], size: acc.size + byte_size(data)})
+      shown = Text.scrub(data)
+      acc.on_output.(shown)
+      kept = if acc.raw, do: data, else: shown
+      trim(%{acc | chunks: [kept | acc.chunks], size: acc.size + byte_size(kept)})
     end
 
     # Trims lazily, once twice the limit has built up.
@@ -53,10 +60,8 @@ defmodule ForemanAgent.Runner.Collector do
     defp trim(acc) do
       binary = acc.chunks |> Enum.reverse() |> IO.iodata_to_binary()
 
-      kept =
-        binary
-        |> binary_part(byte_size(binary) - acc.keep, acc.keep)
-        |> Text.trim_leading_partial()
+      kept = binary_part(binary, byte_size(binary) - acc.keep, acc.keep)
+      kept = if acc.raw, do: kept, else: Text.trim_leading_partial(kept)
 
       %{acc | chunks: [kept], size: byte_size(kept)}
     end
