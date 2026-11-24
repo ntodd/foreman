@@ -9,6 +9,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/ntodd/foreman/cli/api"
 )
@@ -27,6 +28,7 @@ type change struct {
 // An unset function panics, so an unexpected request fails the test.
 type fake struct {
 	repos   func(string) (api.RepositoryPage, error)
+	envs    func(string) (api.EnvironmentPage, error)
 	list    func(scope, subject, cursor string) (api.SecretPage, error)
 	result  api.SecretChangeResult
 	err     error
@@ -36,6 +38,11 @@ type fake struct {
 func (f *fake) ListRepos(_ context.Context, cursor string) (*api.Response[api.RepositoryPage], error) {
 	page, err := f.repos(cursor)
 	return &api.Response[api.RepositoryPage]{Value: page}, err
+}
+
+func (f *fake) ListEnvironments(_ context.Context, cursor string) (*api.Response[api.EnvironmentPage], error) {
+	page, err := f.envs(cursor)
+	return &api.Response[api.EnvironmentPage]{Value: page}, err
 }
 
 func (f *fake) ListSecrets(_ context.Context, scope, subject, cursor string) (*api.Response[api.SecretPage], error) {
@@ -364,7 +371,7 @@ func TestNothingTheCallerTypedIsRepeatedBack(t *testing.T) {
 
 func TestLevelSelectorsMustLookLikeWhatTheyName(t *testing.T) {
 	for _, flags := range [][]string{
-		{"--env", "not-a-uuid"}, {"--env", "acme/storefront"},
+		{"--env", "Not_A_Name"}, {"--env", "acme/storefront"}, {"--env", "-app"},
 		{"--repo", "justaname"}, {"--repo", "acme/store front"}, {"--repo", "a/b/c"},
 		{"--owner", "acme/storefront"}, {"--owner", "-acme"}, {"--owner", "ac me"},
 	} {
@@ -414,5 +421,53 @@ func TestEmptyAndUnencodableValuesAreRefusedBeforeSending(t *testing.T) {
 	r := invoke(t, f, Options{Prompt: func(string) (string, error) { return "", nil }}, "set", "ASKED")
 	if code(r.failure) != "invalid_invocation" || len(f.changes) != 0 {
 		t.Fatalf("%v %+v", r.failure, f.changes)
+	}
+}
+
+func TestAnEnvironmentIsChosenByNameAcrossPages(t *testing.T) {
+	next := "page-2"
+	f := &fake{envs: func(cursor string) (api.EnvironmentPage, error) {
+		if cursor == "" {
+			return api.EnvironmentPage{Items: []api.Environment{{ID: repoID, Slug: "app-me-1"}}, NextCursor: &next}, nil
+		}
+		return api.EnvironmentPage{Items: []api.Environment{{ID: envID, Slug: "app-me-2"}}}, nil
+	}}
+	r := invoke(t, f, Options{}, "set", "A=1", "--env", "app-me-2")
+	if r.failure != nil || len(f.changes) != 1 || f.changes[0].scope != "environment" || f.changes[0].subject != envID {
+		t.Fatalf("%v %+v", r.failure, f.changes)
+	}
+	if !strings.Contains(r.out.String(), "environment app-me-2") {
+		t.Fatal(r.out.String())
+	}
+
+	// A name that matches nothing is not repeated: it may be a value typed after the wrong flag.
+	r = invoke(t, f, Options{}, "set", "A=1", "--env", "sk-live-4242")
+	if code(r.failure) != "resource_not_found" || len(f.changes) != 1 || strings.Contains(r.out.String()+r.err.String(), "4242") {
+		t.Fatalf("%v %s %+v", r.failure, r.err.String(), f.changes)
+	}
+}
+
+func TestATerminalGetsAnAlignedListWithReadableTimes(t *testing.T) {
+	f := &fake{list: func(string, string, string) (api.SecretPage, error) {
+		return api.SecretPage{Items: []api.Secret{
+			{Name: "CLAUDE_CODE_OAUTH_TOKEN", UpdatedAt: "2026-11-24T05:00:00.628073Z"},
+			{Name: "NPM_TOKEN", UpdatedAt: "2026-11-21T11:00:00Z"},
+		}}, nil
+	}}
+	now := func() time.Time { return time.Date(2026, 11, 24, 12, 0, 0, 0, time.UTC) }
+	r := invoke(t, f, Options{Pretty: true, Now: now}, "list")
+	want := "NAME                     UPDATED\n" +
+		"CLAUDE_CODE_OAUTH_TOKEN  6h ago\n" +
+		"NPM_TOKEN                3d ago\n"
+	if r.failure != nil || r.out.String() != want {
+		t.Fatalf("%v\n%s\n%s", r.failure, r.out.String(), want)
+	}
+
+	f.list = func(string, string, string) (api.SecretPage, error) {
+		return api.SecretPage{Items: []api.Secret{}}, nil
+	}
+	r = invoke(t, f, Options{Pretty: true, Now: now}, "list")
+	if r.failure != nil || r.out.String() != "No secrets set.\n" {
+		t.Fatalf("%v %q", r.failure, r.out.String())
 	}
 }

@@ -11,14 +11,17 @@ import (
 	"regexp"
 	"slices"
 	"strings"
+	"time"
 	"unicode/utf8"
 
 	"github.com/ntodd/foreman/cli/api"
+	"github.com/ntodd/foreman/cli/internal/render"
 )
 
 // API is the subset of the generated v1 client used by secrets commands.
 type API interface {
 	ListRepos(context.Context, string) (*api.Response[api.RepositoryPage], error)
+	ListEnvironments(context.Context, string) (*api.Response[api.EnvironmentPage], error)
 	ListSecrets(context.Context, string, string, string) (*api.Response[api.SecretPage], error)
 	ChangeSecrets(context.Context, string, string, api.SecretChanges) (*api.Response[api.SecretChangeResult], error)
 }
@@ -34,6 +37,10 @@ type Options struct {
 	In       io.Reader
 	Out, Err io.Writer
 	JSON     bool
+	// Pretty lays the list out for a person: standard output is a terminal
+	// and --json is off. Anything else gets tab-separated lines.
+	Pretty, Colour bool
+	Now            func() time.Time // Defaults to time.Now.
 	// Prompt reads one value without echoing it. Nil when there is no terminal to ask.
 	Prompt func(name string) (string, error)
 	// ReadFile defaults to os.ReadFile.
@@ -89,6 +96,9 @@ var (
 	// filters from logs, and a misplaced NAME=value would go with it.
 	repoPattern  = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9-]*/[A-Za-z0-9._-]+$`)
 	ownerPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9-]*$`)
+	// An environment is also chosen by its name, which is matched against the
+	// caller's own environments here and never sent.
+	slugPattern = regexp.MustCompile(`^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$`)
 )
 
 // Diagnostics never repeat an operand. What looks like a mistyped name or
@@ -207,12 +217,13 @@ func parse(args []string) (invocation, error) {
 				}
 				value = args[i]
 			}
-			shaped := map[string]*regexp.Regexp{"env": uuidPattern, "owner": ownerPattern}[key]
 			switch {
 			case key == "repo" && !uuidPattern.MatchString(value) && !repoPattern.MatchString(value):
 				return v, invalid("--repo takes an owner/name or a repository ID.")
-			case shaped != nil && !shaped.MatchString(value):
-				return v, invalid("--%s takes %s.", key, map[string]string{"env": "an environment ID", "owner": "an owner's login"}[key])
+			case key == "env" && !uuidPattern.MatchString(value) && !slugPattern.MatchString(value):
+				return v, invalid("--env takes an environment's name or ID.")
+			case key == "owner" && !ownerPattern.MatchString(value):
+				return v, invalid("--owner takes an owner's login.")
 			}
 			v.flags[key] = value
 		default:
@@ -228,7 +239,10 @@ func parse(args []string) (invocation, error) {
 // target resolves the scope flag. With none, the secrets are the caller's own.
 func (o Options) target(ctx context.Context, v invocation) (target, error) {
 	if id, ok := v.flags["env"]; ok {
-		return target{"environment", id, "environment " + id}, nil
+		if uuidPattern.MatchString(id) {
+			return target{"environment", id, "environment " + id}, nil
+		}
+		return o.environment(ctx, id)
 	}
 	if owner, ok := v.flags["owner"]; ok {
 		return target{"owner", owner, "owner " + owner}, nil
@@ -262,6 +276,32 @@ func (o Options) target(ctx context.Context, v invocation) (target, error) {
 	}
 }
 
+// environment finds one of the caller's environments by name. Only its ID
+// goes to the server, and a name that matches nothing is not repeated back:
+// it may be a value typed after the wrong flag.
+func (o Options) environment(ctx context.Context, name string) (target, error) {
+	cursor, seen := "", map[string]bool{"": true}
+	for {
+		page, err := o.API.ListEnvironments(ctx, cursor)
+		if err != nil {
+			return target{}, err
+		}
+		for _, env := range page.Value.Items {
+			if env.Slug == name {
+				return target{"environment", env.ID, "environment " + name}, nil
+			}
+		}
+		if page.Value.NextCursor == nil {
+			return target{}, &Failure{Code: "resource_not_found", Message: "No environment you can see has that name."}
+		}
+		cursor = *page.Value.NextCursor
+		if seen[cursor] {
+			return target{}, &Failure{Code: "invalid_response", Message: "The environment list repeated a page."}
+		}
+		seen[cursor] = true
+	}
+}
+
 func (o Options) list(ctx context.Context, v invocation) error {
 	t, err := o.target(ctx, v)
 	if err != nil {
@@ -286,6 +326,21 @@ func (o Options) list(ctx context.Context, v invocation) error {
 	}
 	if o.JSON {
 		return json.NewEncoder(o.Out).Encode(map[string]any{"items": items})
+	}
+	if o.Pretty {
+		if len(items) == 0 {
+			_, err := fmt.Fprintln(o.Out, "No secrets set.")
+			return err
+		}
+		now := time.Now()
+		if o.Now != nil {
+			now = o.Now()
+		}
+		rows := make([][]render.Cell, len(items))
+		for i, item := range items {
+			rows[i] = []render.Cell{{Text: item.Name}, {Text: render.Ago(now, item.UpdatedAt)}}
+		}
+		return render.Table(o.Out, o.Colour, []string{"NAME", "UPDATED"}, rows)
 	}
 	if _, err := fmt.Fprintln(o.Out, "NAME\tUPDATED"); err != nil {
 		return err

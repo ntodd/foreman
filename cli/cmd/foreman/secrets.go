@@ -23,7 +23,7 @@ const secretsHelp = `Usage: foreman [--instance ORIGIN] [--account ID] [--json] 
   secrets import FILE            Set every NAME=value line of a dotenv file (- for standard input).
 
 Choose the level with one of:
-  --env ID                       One environment of yours
+  --env ENV                      One environment of yours, by name or ID
   --repo OWNER/NAME | ID         Every environment of a repository (admins)
   --owner LOGIN                  Every environment of an owner's repositories (admins)
   --user                         All of your own environments (the default)
@@ -47,7 +47,7 @@ func runSecrets(ctx context.Context, args []string, o options, stdout, stderr io
 	if err != nil {
 		return fail(stderr, o.json, err, "connection_error", 1)
 	}
-	options := secrets.Options{API: s.Client, In: os.Stdin, Out: stdout, Err: stderr, JSON: o.json}
+	options := secrets.Options{API: s.Client, In: os.Stdin, Out: stdout, Err: stderr, JSON: o.json, Pretty: pretty(o, stdout), Colour: colour(o, stdout)}
 	if terminal(os.Stdin) {
 		options.Prompt = func(name string) (string, error) {
 			fmt.Fprintf(stderr, "Value for %s: ", name)

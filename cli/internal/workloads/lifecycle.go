@@ -268,7 +268,11 @@ func (o Options) submitSaved(ctx context.Context, j *journal, r *record, result 
 func (o Options) operate(ctx context.Context, v invocation, action string) (submission, error) {
 	result := submission{EnvironmentID: v.arg}
 	if action == "destroy" && v.flags["yes"] == "" {
-		confirmed, err := o.confirm(ctx, "Destroy environment "+v.arg+" and remove its disk?")
+		subject := v.arg
+		if v.name != "" {
+			subject = v.name + " (" + v.arg + ")"
+		}
+		confirmed, err := o.confirm(ctx, "Destroy environment "+subject+" and remove its disk?")
 		if err != nil {
 			return result, attach(err, result)
 		}

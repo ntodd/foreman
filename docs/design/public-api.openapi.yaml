@@ -442,6 +442,7 @@ components:
         id: {$ref: '#/components/schemas/Id'}
         kind: {type: string, enum: [user, service_account]}
         client_id: {type: string}
+        name: {type: string, description: A user's GitHub login, or the name an administrator gave a service account.}
     Repository:
       type: object
       required: [id, full_name, default_branch]
@@ -510,6 +511,7 @@ components:
         desired_state: {type: string}
         observed_state: {type: string}
         readiness: {type: string, enum: [ready, not_ready, unknown]}
+        created_at: {type: string, format: date-time}
         expiry: {$ref: '#/components/schemas/Expiry'}
         hostname: {type: string}
         ssh_user: {type: string}

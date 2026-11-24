@@ -123,7 +123,9 @@ defmodule Foreman.CLIInstallTest do
       |> finish()
 
     assert status == 0, err
-    assert Jason.decode!(out)["id"] == member.id
+    # At a terminal, me is written for a person. --json and a pipe keep the document.
+    assert out =~ "#{member.login} on "
+    assert out =~ "Account:      #{member.id}"
     String.trim(err)
   end
 
