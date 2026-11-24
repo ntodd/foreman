@@ -442,7 +442,7 @@ components:
         id: {$ref: '#/components/schemas/Id'}
         kind: {type: string, enum: [user, service_account]}
         client_id: {type: string}
-        name: {type: string, description: A user's GitHub login, or the name an administrator gave a service account.}
+        name: {type: string, description: "A user's GitHub login, or the name an administrator gave a service account."}
     Repository:
       type: object
       required: [id, full_name, default_branch]

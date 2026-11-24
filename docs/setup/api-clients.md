@@ -40,11 +40,11 @@ foreman op list payments-you-1
 foreman op logs "$OP_ID" --follow
 ```
 
-Commands that act on an environment take its name, as `env list` shows it, or its UUID. An operation is always given by UUID.
+Commands that act on an environment take its name, as `env list` shows it, or its UUID. An operation is always given by UUID. A name can pass to a newer environment once the old one is destroyed, so use UUIDs in scripts. `env destroy` by name always asks for confirmation; `--yes` works with a UUID.
 
 At a terminal, lists are aligned tables: the name first, one status per environment, relative times and the ID last. Piped or redirected, they stay tab-separated with their original columns. Use `--json` in scripts.
 
-For tab completion of commands, options and the names of your environments, repositories and boxes, install the script for your shell. `foreman help completion` lists where each one goes:
+For tab completion of commands, options and the names of your environments, repositories and boxes, install the script for your shell. `foreman help completion` lists where each one goes. Names complete for about fifteen minutes after your last command, because completion never refreshes the connection itself:
 
 ```sh
 foreman completion zsh > ~/.zfunc/_foreman

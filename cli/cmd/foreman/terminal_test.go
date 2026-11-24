@@ -160,22 +160,34 @@ func TestCompletionScriptsAndCandidates(t *testing.T) {
 		t.Fatalf("%d %q", status, out)
 	}
 
+	// The words to complete arrive on standard input, one per line, so that
+	// nothing typed on the command line shows up in a process list.
+	complete := func(words ...string) (int, string, string) {
+		was := stdin
+		stdin = strings.NewReader(strings.Join(words, "\n") + "\n")
+		defer func() { stdin = was }()
+		return raw("__complete")
+	}
 	// Before login there are no names to offer, and nothing is said about it.
-	if status, out, stderr := raw("__complete", "env", "sh"); status != 0 || out != "show\n" || stderr != "" {
+	if status, out, stderr := complete("env", "sh"); status != 0 || out != "show\n" || stderr != "" {
 		t.Fatalf("%d %q %q", status, out, stderr)
 	}
-	if status, out, stderr := raw("__complete", "env", "show", ""); status != 0 || out != "" || stderr != "" {
+	if status, out, stderr := complete("env", "show", ""); status != 0 || out != "" || stderr != "" {
 		t.Fatalf("%d %q %q", status, out, stderr)
 	}
 	at(t, false, "--instance", s.URL, "--account", "one", "login")
-	if status, out, stderr := raw("__complete", "env", "show", "app"); status != 0 || out != "app-me-1\napp-me-2\n" || stderr != "" {
+	if status, out, stderr := complete("env", "show", "app"); status != 0 || out != "app-me-1\napp-me-2\n" || stderr != "" {
 		t.Fatalf("%d %q %q", status, out, stderr)
 	}
-	if status, out, _ := raw("__complete", "env", "create", "--box", ""); status != 0 || out != "number-two\none\n" {
+	if status, out, _ := complete("env", "create", "--box", ""); status != 0 || out != "number-two\none\n" {
 		t.Fatalf("%d %q", status, out)
 	}
 	// A word that looks like a global option is still a word to complete.
-	if status, out, _ := raw("__complete", "--j"); status != 0 || out != "--json\n" {
+	if status, out, _ := complete("--j"); status != 0 || out != "--json\n" {
+		t.Fatalf("%d %q", status, out)
+	}
+	// Words given as arguments are ignored: the scripts never send them that way.
+	if status, out, _ := complete(); status != 0 || !strings.Contains(out, "login\n") {
 		t.Fatalf("%d %q", status, out)
 	}
 }

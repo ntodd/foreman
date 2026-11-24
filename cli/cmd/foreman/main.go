@@ -38,7 +38,8 @@ const help = `Usage: foreman [--instance ORIGIN] [--account ID] [--json] COMMAND
     [--branch NAME] [--box BOX] [--expires-at TIME --on-expiry stop|destroy]
     [--request-key KEY] [--confirm-capacity-warning]
   env create --resume KEY        Replay a saved submission
-  env start|stop|destroy ENV     Change the environment state (--yes confirms destroy)
+  env start|stop|destroy ENV     Change the environment state (destroy asks, or takes
+                                 --yes with an ID)
   env restart ENV [--all]        Recreate the services that use a changed secret
                                  (--all: stop and start every container instead)
   op list ENV | op show OP_ID
@@ -51,7 +52,8 @@ const help = `Usage: foreman [--instance ORIGIN] [--account ID] [--json] COMMAND
   secrets import FILE            Set everything in a dotenv file (- for standard input)
     [--env ENV | --repo REPO | --owner LOGIN | --user]  Default: your own secrets
 
-ENV is an environment's name, as env list shows it, or its ID.
+ENV is an environment's name, as env list shows it, or its ID. A name can pass
+to a newer environment after a destroy, so scripts should use IDs.
 Lifecycle commands wait by default. Use --no-wait for submission only
 or --timeout 30s to bound a wait.
 
@@ -147,7 +149,9 @@ func fail(stderr io.Writer, machine bool, err error, code string, status int) in
 const completionHelp = `Usage: foreman completion bash|zsh|fish
 
 Print a completion script for your shell. It completes commands, options and
-the names of your environments, repositories and boxes.
+the names of your environments, repositories and boxes. Names are offered for
+about fifteen minutes after your last command: completion only reads, and
+leaves refreshing the connection to the commands you run.
 
   bash   foreman completion bash > ~/.local/share/bash-completion/completions/foreman
   zsh    foreman completion zsh > ~/.zfunc/_foreman
@@ -157,10 +161,20 @@ the names of your environments, repositories and boxes.
 To try it in the shell you have open: source <(foreman completion zsh)
 `
 
-// complete answers a completion script: the words after "foreman" up to the
-// cursor come in, and what could finish the last one goes out, one per line.
-// It never fails and never writes diagnostics into the middle of a prompt.
-func complete(ctx context.Context, words []string, stdout io.Writer) {
+// stdin is a variable so a test can supply the words to complete.
+var stdin io.Reader = os.Stdin
+
+// complete answers a completion script. The words after "foreman" up to the
+// cursor come in on standard input, one per line: as arguments, a secret
+// typed as NAME=value would show in the process list as soon as Tab was
+// pressed. What could finish the last word goes out, one per line. It never
+// fails and never writes diagnostics into the middle of a prompt.
+func complete(ctx context.Context, in io.Reader, stdout io.Writer) {
+	if terminal(in) {
+		return // Run by hand: there is nothing to read.
+	}
+	raw, _ := io.ReadAll(io.LimitReader(in, 1<<20))
+	words := strings.Split(strings.TrimSuffix(string(raw), "\n"), "\n")
 	ctx, cancel := context.WithTimeout(ctx, 3*time.Second)
 	defer cancel()
 	var instance, account string
@@ -177,7 +191,10 @@ func complete(ctx context.Context, words []string, stdout io.Writer) {
 		}
 	}
 	lookup := func(kind string) []string {
-		s, err := session.Open(ctx, instance, account)
+		// Tab can be cut off at any moment, so it only ever reads: a refresh
+		// interrupted here could spend the refresh token and lose the reply.
+		// Names are offered while the saved access token is still good.
+		s, err := session.OpenReadOnly(ctx, instance, account)
 		if err != nil {
 			return nil
 		}
@@ -192,7 +209,7 @@ func complete(ctx context.Context, words []string, stdout io.Writer) {
 func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	// The words being completed are not this invocation's own options.
 	if len(args) > 0 && args[0] == "__complete" {
-		complete(ctx, args[1:], stdout)
+		complete(ctx, stdin, stdout)
 		return 0
 	}
 	o, args, err := parse(args)

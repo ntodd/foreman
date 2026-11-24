@@ -47,6 +47,8 @@ func TestCandidatesFollowTheCommandLine(t *testing.T) {
 		{"env create acme/app --box ", "one two"},
 		{"env create acme/app --box=t", "--box=two"},
 		{"env create acme/app --box = t", "two"},
+		{"env create acme/app --box =", "one two"},
+		{"secrets list --env =", "app-me-1 app-me-2 web-me-1"},
 		{"env create acme/app --on-expiry ", "stop destroy"},
 		{"env restart app-me-1 --", "--all --no-wait --timeout"},
 		{"env destroy app-me-1 -", "--yes --no-wait --timeout"},
@@ -91,6 +93,18 @@ func TestNamesAreOnlyLookedUpWhereTheyBelong(t *testing.T) {
 	}
 }
 
+// A name comes from a server. One that a shell could read as syntax, or that
+// would be taken for an ID, is not offered.
+func TestOnlyPlainNamesAreOffered(t *testing.T) {
+	hostile := func(string) []string {
+		return []string{"ok-1", "acme/app.js", "two words", "$(reboot)", "a;b", "back`tick", "tab\tname", "new\nline", "star*", "", "aaaaaaaa-0000-4000-8000-111111111111", "-dash-first"}
+	}
+	got := strings.Join(Candidates([]string{"env", "show", ""}, hostile), " ")
+	if got != "ok-1 acme/app.js" {
+		t.Fatalf("%q", got)
+	}
+}
+
 func TestEveryShellHasAScriptThatAsksTheCLI(t *testing.T) {
 	for _, shell := range []string{"bash", "zsh", "fish"} {
 		script, ok := Script(shell)
@@ -117,11 +131,13 @@ func TestEveryShellHasAScriptThatAsksTheCLI(t *testing.T) {
 
 // stub puts a foreman on PATH that answers with one candidate: the word being
 // completed (so a shell that filters by prefix keeps it) and then every word
-// it was given.
+// it was given. Words arrive on standard input, one per line. Anything typed
+// on the command line, a secret included, must stay out of its arguments.
 func stub(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()
-	body := "#!/bin/sh\nshift\nfor last; do :; done\nprintf '%s' \"$last\"\nfor word in \"$@\"; do printf '[%s]' \"$word\"; done\necho\n"
+	body := "#!/bin/sh\nif [ \"$*\" != __complete ]; then echo \"arguments: $*\"; exit; fi\n" +
+		"last=; all=\nwhile IFS= read -r word; do last=$word; all=\"$all[$word]\"; done\nprintf '%s%s\\n' \"$last\" \"$all\"\n"
 	if err := os.WriteFile(filepath.Join(dir, "foreman"), []byte(body), 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -138,6 +154,11 @@ func TestBashPassesTheWordsUpToTheCursor(t *testing.T) {
 		{"foreman env sh", "2", "sh[env][sh]"},
 		{"foreman env show ''", "3", "[env][show][]"},
 		{"foreman env show app-me-1 --all", "2", "show[env][show]"},
+		// A candidate is text, not a pattern to expand.
+		{"foreman env show '*'", "3", "*[env][show][*]"},
+		// Readline replaces only what follows an =, so the flag is cut from
+		// the candidate (bash 3.2 on macOS passes --flag=value as one word).
+		{"foreman env create r --on-expiry=d", "4", "d[env][create][r][--on-expiry=d]"},
 	} {
 		program := script + "\nCOMP_WORDS=(" + c.words + "); COMP_CWORD=" + c.cword + "; _foreman; echo \"${COMPREPLY[*]}\"\n"
 		cmd := exec.Command(bash, "--norc", "--noprofile", "-c", program)
@@ -180,7 +201,7 @@ func TestZshPassesTheWordsUpToTheCursor(t *testing.T) {
 	script, _ := Script("zsh")
 	// Outside the line editor the completion builtins don't exist, so stand
 	// in for the three the script uses.
-	prelude := "compdef() { : }; compadd() { shift 2; print -r -- \"offered: $*\" }; _files() { print files }\n"
+	prelude := "compdef() { : }; compadd() { [[ $1 == -- ]] || print -r -- \"options: $*\"; shift; print -r -- \"offered: $*\" }; _files() { print files }\n"
 	for _, c := range []struct{ words, current, want string }{
 		{"foreman env sh", "3", "offered: sh[env][sh]"},
 		{"foreman env show ''", "4", "offered: [env][show][]"},

@@ -202,13 +202,9 @@ func TestEnvironmentsAreNamedBySlug(t *testing.T) {
 	})
 	h.success(t, "env", "show", "app-me-2")
 	h.success(t, "op", "list", "app-me-2")
-	for _, action := range []string{"start", "stop", "restart", "destroy"} {
+	for _, action := range []string{"start", "stop", "restart"} {
 		acted = ""
-		args := []string{"env", action, "app-me-2", "--no-wait"}
-		if action == "destroy" {
-			args = append(args, "--yes")
-		}
-		h.success(t, args...)
+		h.success(t, "env", action, "app-me-2", "--no-wait")
 		if acted != otherEnvID || h.doc(t)["environment_id"] != otherEnvID {
 			t.Fatal(action, acted, h.out.String())
 		}
@@ -236,14 +232,48 @@ func TestAnIDNeedsNoPermissionToListEnvironments(t *testing.T) {
 }
 
 func TestDestroyByNameAsksAboutTheEnvironmentItFound(t *testing.T) {
-	h := setup(t, fake{envs: envs(api.Environment{ID: envID, Slug: "app-me-1"})})
+	var destroyed string
+	h := setup(t, fake{
+		envs: envs(api.Environment{ID: envID, Slug: "app-me-1"}),
+		act: func(_ context.Context, id, _ string, _ api.Action) (*api.Response[api.OperateEnvironmentResult], error) {
+			destroyed = id
+			return &api.Response[api.OperateEnvironmentResult]{StatusCode: 202, Value: api.OperateEnvironmentResult{EnvironmentID: id, OperationID: ptr(opID)}}, nil
+		},
+	})
 	h.JSON = false
 	h.Interactive = true
 	h.In = strings.NewReader("no\n")
-	if err := h.run(t, "env", "destroy", "app-me-1"); err == nil {
+	if err := h.run(t, "env", "destroy", "app-me-1"); err == nil || destroyed != "" {
 		t.Fatal("destroyed without confirmation")
 	}
 	if !strings.Contains(h.diag.String(), "Destroy environment app-me-1 ("+envID+") and remove its disk? [y/N]") {
 		t.Fatal(h.diag.String())
+	}
+	h.In = strings.NewReader("yes\n")
+	if err := h.run(t, "env", "destroy", "app-me-1", "--no-wait"); err != nil || destroyed != envID {
+		t.Fatal(err, destroyed, h.diag.String())
+	}
+}
+
+// A name passes to the next environment that takes it, so a command saved
+// and run again could remove a disk its author never saw. Only an ID, or a
+// person answering the prompt, destroys.
+func TestANameAloneNeverDestroysUnattended(t *testing.T) {
+	h := setup(t, fake{envs: envs(api.Environment{ID: envID, Slug: "app-me-1"})})
+	for _, args := range [][]string{
+		{"env", "destroy", "app-me-1", "--yes"},
+		{"env", "destroy", "app-me-1", "--yes", "--no-wait"},
+		{"env", "destroy", "app-me-1"},
+	} {
+		f := h.failure(t, "confirmation_required", args...)
+		if !strings.Contains(f["message"].(string), "ID with --yes") || f["environment_id"] != envID {
+			t.Fatal(args, f)
+		}
+	}
+	h.JSON = false
+	h.Interactive = true
+	h.In = strings.NewReader("yes\n")
+	if err := h.run(t, "env", "destroy", "app-me-1", "--yes"); err == nil || !strings.Contains(h.diag.String(), "ID with --yes") {
+		t.Fatal(err, h.diag.String())
 	}
 }

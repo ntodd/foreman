@@ -4,6 +4,7 @@
 package completion
 
 import (
+	"regexp"
 	"slices"
 	"strings"
 
@@ -47,6 +48,10 @@ func Candidates(words []string, lookup Lookup) []string {
 	// splits it) --flag = value.
 	if len(before) > 1 && before[len(before)-1] == "=" {
 		before = before[:len(before)-1]
+	} else if current == "=" && len(before) > 0 {
+		if _, takesValue := values[before[len(before)-1]]; takesValue {
+			current = ""
+		}
 	}
 	if len(before) > 0 {
 		if kind, ok := values[before[len(before)-1]]; ok {
@@ -105,9 +110,9 @@ func Candidates(words []string, lookup Lookup) []string {
 	}
 	switch command {
 	case "env show", "env start", "env stop", "env restart", "env destroy", "op list":
-		return matching(lookup("env"), current)
+		return matching(choices("env", lookup), current)
 	case "env create":
-		return matching(lookup("repo"), current)
+		return matching(choices("repo", lookup), current)
 	}
 	return nil
 }
@@ -117,9 +122,27 @@ func choices(kind string, lookup Lookup) []string {
 	case "":
 		return nil
 	case "env", "repo", "box":
-		return lookup(kind)
+		return plain(lookup(kind))
 	}
 	return strings.Fields(kind)
+}
+
+var (
+	plainName = regexp.MustCompile(`^[A-Za-z0-9_][A-Za-z0-9._/-]*$`)
+	uuidName  = regexp.MustCompile(`^[[:xdigit:]]{8}-[[:xdigit:]]{4}-[[:xdigit:]]{4}-[[:xdigit:]]{4}-[[:xdigit:]]{12}$`)
+)
+
+// plain keeps the names that are safe to put on a command line. They come
+// from a server, so one a shell could read as syntax is left out, and so is
+// one shaped like an ID: the command would take it for a different thing.
+func plain(names []string) []string {
+	var kept []string
+	for _, name := range names {
+		if plainName.MatchString(name) && !uuidName.MatchString(name) {
+			kept = append(kept, name)
+		}
+	}
+	return kept
 }
 
 func matching(candidates []string, prefix string) []string {
@@ -132,9 +155,11 @@ func matching(candidates []string, prefix string) []string {
 	return found
 }
 
-// Script returns the completion script for a shell. Each one hands the words
-// before the cursor to "foreman __complete" and offers what it prints. With
-// nothing printed, the shell falls back to file names.
+// Script returns the completion script for a shell. Each one writes the words
+// before the cursor to "foreman __complete", one per line on standard input,
+// and offers what it prints. The words never become arguments: a secret
+// typed as NAME=value would otherwise show in the process list the moment
+// Tab is pressed. With nothing printed, the shell falls back to file names.
 func Script(shell string) (string, bool) {
 	script, ok := map[string]string{"bash": bash, "zsh": zsh, "fish": fish}[shell]
 	return script, ok
@@ -142,11 +167,16 @@ func Script(shell string) (string, bool) {
 
 const bash = `# bash completion for foreman
 _foreman() {
-    # Slice before changing IFS: bash 3.2 (macOS) joins a quoted slice into
-    # one word when IFS has no space.
-    local words=("${COMP_WORDS[@]:1:COMP_CWORD}")
-    local IFS=$'\n'
-    COMPREPLY=($(foreman __complete "${words[@]}" 2>/dev/null))
+    local word current="${COMP_WORDS[COMP_CWORD]}"
+    COMPREPLY=()
+    # Each candidate is read as text, so nothing in one is expanded.
+    while IFS= read -r word; do
+        # Readline replaces only what follows an =, when = breaks words.
+        if [[ "$current" == --*=* && "$COMP_WORDBREAKS" == *=* ]]; then
+            word="${word#"${current%%=*}="}"
+        fi
+        COMPREPLY+=("$word")
+    done < <(printf '%s\n' "${COMP_WORDS[@]:1:COMP_CWORD}" | foreman __complete 2>/dev/null)
 }
 complete -o default -F _foreman foreman
 `
@@ -155,9 +185,9 @@ const zsh = `#compdef foreman
 # zsh completion for foreman
 _foreman() {
     local -a candidates
-    candidates=("${(@f)$(foreman __complete "${(@)words[2,CURRENT]}" 2>/dev/null)}")
+    candidates=("${(@f)$(print -rl -- "${(@)words[2,CURRENT]}" | foreman __complete 2>/dev/null)}")
     if [[ -n "${candidates[1]}" ]]; then
-        compadd -Q -- "${candidates[@]}"
+        compadd -- "${candidates[@]}"
     else
         _files
     fi
@@ -173,7 +203,7 @@ const fish = `# fish completion for foreman
 function __foreman_complete
     set -l words (commandline -opc)
     set -l current (commandline -ct)
-    set -g __foreman_candidates (foreman __complete $words[2..-1] "$current" 2>/dev/null)
+    set -g __foreman_candidates (printf '%s\n' $words[2..-1] "$current" | foreman __complete 2>/dev/null)
     test (count $__foreman_candidates) -gt 0
 end
 complete -c foreman -f -n __foreman_complete -a '$__foreman_candidates'

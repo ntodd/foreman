@@ -520,3 +520,42 @@ func TestInvalidGrantRequestsNewApproval(t *testing.T) {
 		t.Fatal("sent expired access token")
 	}
 }
+
+func TestReadOnlyUseNeverRefreshesOrWrites(t *testing.T) {
+	f := setup(t)
+	if _, e := f.login("user"); e != nil {
+		t.Fatal(e)
+	}
+	before, _ := os.ReadFile(f.path("user"))
+	sent := len(f.bearers) // Login reads the identity once itself.
+	s, e := f.store.OpenReadOnly(context.Background(), "", "")
+	if e != nil {
+		t.Fatal(e)
+	}
+	if _, e = s.Client.GetIdentity(context.Background()); e != nil || len(f.bearers) != sent+1 {
+		t.Fatal(e, f.bearers)
+	}
+
+	// Once the access token is due for a refresh, a read-only caller goes
+	// without. It sends nothing and leaves the saved connection as it was.
+	f.now.Add(900)
+	if _, e = s.Client.GetIdentity(context.Background()); !errors.Is(e, ErrRefreshDue) {
+		t.Fatal(e)
+	}
+	after, _ := os.ReadFile(f.path("user"))
+	if f.refreshAttempts != 0 || len(f.rotations) != 0 || len(f.bearers) != sent+1 || !bytes.Equal(before, after) {
+		t.Fatal(f.refreshAttempts, f.rotations, f.bearers)
+	}
+
+	// The next ordinary command refreshes, and read-only use works again.
+	full, e := f.store.Open(context.Background(), "", "")
+	if e != nil {
+		t.Fatal(e)
+	}
+	if _, e = full.Client.GetIdentity(context.Background()); e != nil {
+		t.Fatal(e)
+	}
+	if _, e = s.Client.GetIdentity(context.Background()); e != nil || len(f.bearers) != sent+3 {
+		t.Fatal(e, f.bearers)
+	}
+}
