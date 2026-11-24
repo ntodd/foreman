@@ -112,7 +112,9 @@ What it can't do from inside: destroy the environment, create another, list repo
 
 To act as yourself from inside an environment, log in there with `foreman --instance URL login`. That connection is used until `foreman logout`, which goes back to the environment's own.
 
-It needs an environment started by a box on a release with this feature, and a box that reaches its control plane over HTTPS (or `FOREMAN_RELAY_INSECURE=1` on the box, see the agent settings). An environment owned by a service account has no connection of its own.
+The CLI is installed by the Foreman feature when an environment's image is built, in your own `~/.local/bin`, and `foreman update` keeps it current. An environment built before this has no `foreman` until it is rebuilt.
+
+It needs a box and control plane on a release with this feature, an environment started since its box updated, and a box that reaches its control plane over HTTPS (or `FOREMAN_RELAY_INSECURE=1` on the box, see the agent settings). An environment owned by a service account has no connection of its own.
 
 ## Update or disconnect
 

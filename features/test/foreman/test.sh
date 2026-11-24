@@ -10,6 +10,39 @@ check "profile hook is linked" test -L /etc/profile.d/zz-foreman.sh
 check "bashrc sources the hook" grep -q "/usr/local/share/foreman/profile.sh" /etc/bash.bashrc
 check "gitconfig includes /run/foreman" grep -q "path = /run/foreman/gitconfig" /etc/gitconfig
 
+# The CLI is the user's own copy, so `foreman update` can replace it.
+has_receipt() { ls "$HOME"/.local/state/foreman/cli-update/*.version >/dev/null 2>&1; }
+reinstalls() {
+  rm -f "$HOME/.local/bin/foreman" "$HOME"/.local/state/foreman/cli-update/*.version
+  /usr/local/share/foreman/bin/foreman --version 2>/tmp/foreman-install.log | grep -q '^foreman v' &&
+    grep -q 'installing the CLI' /tmp/foreman-install.log && has_receipt
+}
+# A login shell finds the user's own copy when its ~/.local/bin is on PATH
+# (Debian's ~/.profile puts it there), and the launcher otherwise.
+on_path() {
+  case "$(bash -lc 'command -v foreman')" in
+    /usr/local/share/foreman/bin/foreman | "$HOME/.local/bin/foreman") return 0 ;;
+    *) return 1 ;;
+  esac
+}
+check "foreman is on PATH in login shells" on_path
+check "the launcher is installed" test -x /usr/local/share/foreman/bin/foreman
+check "the CLI was installed for the devcontainer's user at build" test -x "$HOME/.local/bin/foreman"
+own_copy() { [ "$(stat -c %u "$HOME/.local/bin/foreman")" = "$(id -u)" ] && has_receipt; }
+check "it is the user's own, with the receipt foreman update needs" own_copy
+check "the launcher runs it" bash -c "/usr/local/share/foreman/bin/foreman --version | grep -q '^foreman v'"
+check "a user without one gets it the first time they run foreman" reinstalls
+# Something else where the CLI goes is reported, not run and not replaced.
+in_the_way() {
+  mv "$HOME/.local/bin/foreman" /tmp/foreman.kept && mkdir "$HOME/.local/bin/foreman"
+  /usr/local/share/foreman/bin/foreman --version >/tmp/foreman-conflict.log 2>&1
+  status=$?
+  rmdir "$HOME/.local/bin/foreman" && mv /tmp/foreman.kept "$HOME/.local/bin/foreman"
+  [ "$status" = 127 ] && grep -q "isn't a runnable CLI" /tmp/foreman-conflict.log
+}
+check "something else in the CLI's place is reported, not replaced" in_the_way
+check "curl is in the image for a later install" bash -c "command -v curl"
+
 # Simulate what the agent delivers. /run/foreman is a read-only bind mount
 # in a real environment; here the test creates it.
 sudo mkdir -p /run/foreman

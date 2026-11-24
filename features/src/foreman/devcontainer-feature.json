@@ -1,14 +1,19 @@
 {
   "id": "foreman",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "name": "Foreman",
-  "description": "Joins a Foreman environment to the tailnet and wires up the secrets, git identity and GitHub credentials Foreman delivers to /run/foreman.",
+  "description": "Joins a Foreman environment to the tailnet, wires up the secrets, git identity and GitHub credentials Foreman delivers to /run/foreman, and installs the Foreman CLI, which works inside the environment with no login.",
   "documentationURL": "https://github.com/ntodd/foreman/tree/main/features/src/foreman",
   "options": {
     "tailscale": {
       "type": "boolean",
       "default": true,
       "description": "Install Tailscale and join the tailnet on every container start."
+    },
+    "cli": {
+      "type": "boolean",
+      "default": true,
+      "description": "Install the Foreman CLI for the devcontainer's user. Inside the environment it needs no login and reaches that environment alone."
     },
     "acceptDns": {
       "type": "boolean",

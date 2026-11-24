@@ -1,0 +1,26 @@
+#!/bin/sh
+# Runs the user's own copy of the Foreman CLI (~/.local/bin/foreman),
+# installing it first if they have none. Inside an environment the CLI
+# needs no login: it reaches Foreman through /run/foreman/api.sock, as the
+# environment's owner and for this environment alone.
+#
+# The copy is the user's, not the image's, so `foreman update` can replace
+# it: an image is only as new as its last build.
+own="${HOME:-}/.local/bin/foreman"
+
+# A regular file that can be run, itself and not a link to one: what the
+# installer installs, and the only thing it leaves alone. (A directory
+# passes -x too.)
+runnable() { [ -f "$own" ] && [ ! -L "$own" ] && [ -x "$own" ]; }
+
+if ! runnable; then
+  if [ -z "${HOME:-}" ]; then
+    echo "foreman: HOME isn't set, so there's nowhere to install the CLI" >&2
+    exit 127
+  fi
+  echo "foreman: installing the CLI for $(id -un 2>/dev/null || id -u)" >&2
+  # Another first run may have finished installing while this one failed.
+  /usr/local/share/foreman/install-cli >&2 || runnable || exit 127
+fi
+
+exec "$own" "$@"
