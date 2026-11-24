@@ -88,6 +88,30 @@ defmodule Foreman.SecretsRepoSelectionTest do
              [other.id]
   end
 
+  # Columns cut an owner/name short enough that the repos couldn't be told
+  # apart. Each gets a row of its own, and a long name wraps.
+  test "each repo has a row to itself and its whole name", %{user: user, prod: prod} do
+    {:ok, view, _} = live(log_in(build_conn(), user), ~p"/secrets")
+
+    assert has_element?(view, "#user-secrets--repos ul > li > label", prod.full_name)
+    refute has_element?(view, "#user-secrets--repos [class*='grid-cols']")
+    refute has_element?(view, "#user-secrets--repos .truncate")
+  end
+
+  # The list scrolls once it's long, so what's checked mustn't start out of sight.
+  test "Replace lists the secret's repos first", %{user: user, prod: prod} do
+    for n <- 1..3, do: repo_fixture(owner: owner_fixture(login: "aaa#{n}"))
+    {:ok, view, _} = live(log_in(build_conn(), user), ~p"/secrets")
+
+    refute has_element?(view, "#user-secrets--repos li:first-child input[value='#{prod.id}']")
+    view |> element("button[phx-click=edit][phx-value-name=PROD_DEPLOY_KEY]") |> render_click()
+
+    assert has_element?(
+             view,
+             "#user-secrets--repos li:first-child input[value='#{prod.id}'][checked]"
+           )
+  end
+
   # A secret's row has the component's id and its name for an id. A name
   # can't hold two hyphens, so that's what keeps the group's id apart.
   test "a secret named repos doesn't share an id with the checkboxes", %{user: user} do
