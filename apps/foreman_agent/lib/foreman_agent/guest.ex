@@ -12,7 +12,7 @@ defmodule ForemanAgent.Guest do
   """
 
   alias ForemanAgent.{Config, Handler, Ports, Runner}
-  alias ForemanAgent.Guest.Reclaim
+  alias ForemanAgent.Guest.{API, Reclaim}
   alias ForemanProtocol.Command
 
   require Logger
@@ -27,11 +27,23 @@ defmodule ForemanAgent.Guest do
   @doc "Runs a command from the host. See `ForemanAgent.Handler`."
   @spec handle(Command.t(), (String.t(), String.t() -> any())) ::
           {:ok, map()} | {:error, String.t()} | {:error, String.t(), map()}
-  def handle(%Command{type: "env." <> _} = cmd, log), do: Handler.handle(cmd, log)
+  def handle(%Command{type: "env." <> _} = cmd, log) do
+    listen(cmd)
+    Handler.handle(cmd, log)
+  end
+
   def handle(%Command{type: "box.gc"} = cmd, log), do: Handler.handle(cmd, log)
 
   def handle(%Command{type: type}, _log),
     do: {:error, "#{type} isn't run in an environment's VM"}
+
+  # Every command that leaves the environment standing makes sure its
+  # containers can reach the public API (`ForemanAgent.Guest.API`). The
+  # listener outlives the command; one that can't be made isn't the
+  # command's failure.
+  defp listen(%Command{type: "env.destroy"}), do: :ok
+  defp listen(%Command{payload: %{env_id: env_id}}), do: _ = API.ensure(env_id)
+  defp listen(_cmd), do: :ok
 
   @doc "The queries the host can make of the guest."
   def queries do

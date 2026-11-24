@@ -63,8 +63,10 @@ defmodule ForemanAgent.GuestChannelTest do
       ]
       |> Keyword.merge(extra)
 
-    start_supervised!({Server, name: nil, path: ctx.guest, session: session}, id: :server)
-    %{ops: ops, outbox: outbox}
+    server =
+      start_supervised!({Server, name: nil, path: ctx.guest, session: session}, id: :server)
+
+    %{ops: ops, outbox: outbox, server: server}
   end
 
   defp start_link(ctx, opts \\ []) do
@@ -1227,6 +1229,575 @@ defmodule ForemanAgent.GuestChannelTest do
       assert Link.reclaim(link, 5) == invalid
       assert Link.query(link, "other") == {:error, "no suchquery"}
       assert :sys.get_state(link).guest_version == "0.1.0[31m"
+    end
+  end
+
+  describe "the public API from inside an environment, end to end" do
+    alias ForemanAgent.Guest.{API, Session}
+
+    # The guest's listener, its session, the link and a relay standing in
+    # for the box's call to the control plane.
+    defp start_api(ctx, relay) do
+      %{server: server} = start_guest(ctx)
+      root = Path.join(ctx.dir, "envs")
+
+      api =
+        start_supervised!(
+          {API, name: nil, root: root, relay: &Server.request(server, &1)},
+          id: :api
+        )
+
+      :ok = API.ensure(api, @env)
+      link = start_link(ctx, relay: relay)
+      wait_until(fn -> Link.connected?(link) end)
+      %{socket: Path.join([root, @env, "api.sock"]), link: link, server: server}
+    end
+
+    defp ask(api, target, opts \\ []) do
+      Req.request(
+        [url: "http://foreman" <> target, unix_socket: api.socket, retry: false] ++ opts
+      )
+    end
+
+    test "a client in the environment gets the control plane's answer", ctx do
+      test = self()
+
+      api =
+        start_api(ctx, fn request ->
+          send(test, {:relayed, request})
+
+          %{
+            status: 202,
+            body: ~s({"operation_id":"op-1"}),
+            headers: %{"location" => "/api/v1/operations/op-1"}
+          }
+        end)
+
+      body = ~s({"action":"restart_all"})
+
+      assert {:ok, response} =
+               ask(api, "/api/v1/environments/#{@env}/operations",
+                 method: :post,
+                 body: body,
+                 headers: [{"idempotency-key", "k-1"}, {"authorization", "Bearer nothing"}]
+               )
+
+      assert response.status == 202
+      assert response.body == %{"operation_id" => "op-1"}
+      assert Req.Response.get_header(response, "location") == ["/api/v1/operations/op-1"]
+
+      assert_receive {:relayed, request}
+
+      assert request == %{
+               method: "POST",
+               path: "/environments/#{@env}/operations",
+               query: nil,
+               body: body,
+               key: "k-1"
+             }
+    end
+
+    test "what the box won't send is refused there, and never relayed", ctx do
+      test = self()
+      api = start_api(ctx, fn request -> send(test, {:relayed, request}) end)
+
+      for {target, opts} <- [
+            {"/api/agents/enroll", []},
+            {"/admin/apps", []},
+            {"/api/v1/me", [method: :delete]},
+            {"/api/v1/..%2fagents/enroll", []}
+          ] do
+        assert {:ok, %{status: 400, body: %{"code" => "invalid_relay_request"}}} =
+                 ask(api, target, opts)
+      end
+
+      refute_received {:relayed, _}
+    end
+
+    test "several clients at once each get their own answer", ctx do
+      api =
+        start_api(ctx, fn request ->
+          Process.sleep(:rand.uniform(50))
+          %{status: 200, body: JSON.encode!(%{"path" => request.path}), headers: %{}}
+        end)
+
+      asked =
+        for n <- 1..Link.max_relays() do
+          Task.async(fn -> {n, ask(api, "/api/v1/operations/op#{n}")} end)
+        end
+
+      for task <- asked do
+        {n, {:ok, response}} = Task.await(task)
+        assert response.body == %{"path" => "/operations/op#{n}"}
+      end
+    end
+
+    test "with the box gone, a client is told so and isn't left waiting", ctx do
+      api = start_api(ctx, fn _request -> %{status: 200, body: "{}", headers: %{}} end)
+      assert {:ok, %{status: 200}} = ask(api, "/api/v1/me")
+
+      stop_supervised!(:link)
+      stop_supervised!(:bridge)
+      wait_until(fn -> :sys.get_state(api.server).session == nil end)
+
+      assert {:ok, %{status: 503, body: %{"code" => "relay_unavailable"}}} =
+               ask(api, "/api/v1/me")
+    end
+
+    test "a session asks nothing of a box that hasn't said hello, and only so much at once",
+         ctx do
+      %{server: server} = start_guest_agent(ctx)
+
+      {:ok, host} =
+        :gen_tcp.connect({:local, ctx.guest}, 0, [:binary, active: false, packet: 4], 2_000)
+
+      wait_until(fn -> :sys.get_state(server).session != nil end)
+      %{session: pid, budget: budget} = :sys.get_state(server)
+      session = {pid, budget}
+      held = fn -> {:atomics.get(budget, 1), :atomics.get(budget, 2)} end
+      request = %{"method" => "GET", "target" => "/api/v1/me", "junk" => "dropped"}
+
+      assert Session.request(session, request) == {:error, :not_connected}
+      assert held.() == {0, 0}
+
+      :ok = :gen_tcp.send(host, Channel.encode(%{"t" => "hello", "now" => Channel.now()}))
+      {:ok, _hello} = :gen_tcp.recv(host, 0, 5_000)
+
+      test = self()
+      spawn(fn -> send(test, {:answered, Session.request(session, request, 5_000)}) end)
+      {:ok, data} = :gen_tcp.recv(host, 0, 5_000)
+      {:ok, frame} = Channel.decode(data)
+      assert frame == %{"t" => "api", "id" => 1, "method" => "GET", "target" => "/api/v1/me"}
+
+      # Counted while it waits, by what it takes on the wire.
+      assert {1, bytes} = held.()
+      assert bytes >= byte_size(data)
+
+      # An answer for a request nobody made is dropped; a malformed one is an error.
+      :ok =
+        :gen_tcp.send(
+          host,
+          Channel.encode(%{"t" => "api.reply", "id" => 99, "status" => 200, "body" => "{}"})
+        )
+
+      :ok =
+        :gen_tcp.send(host, Channel.encode(%{"t" => "api.reply", "id" => 1, "status" => "200"}))
+
+      assert_receive {:answered, {:error, :invalid}}, 5_000
+      assert held.() == {0, 0}
+
+      # One that times out stops waiting. It stays counted, since the box
+      # may not have read it yet, until the box answers. The late answer
+      # goes nowhere.
+      assert Session.request(session, request, 50) == {:error, :timeout}
+      assert {:ok, _sent} = :gen_tcp.recv(host, 0, 1_000)
+      wait_until(fn -> match?(%{2 => {nil, _, _}}, :sys.get_state(pid).requests) end)
+      assert {1, _} = held.()
+
+      :ok =
+        :gen_tcp.send(
+          host,
+          Channel.encode(%{"t" => "api.reply", "id" => 2, "status" => 200, "body" => "{}"})
+        )
+
+      wait_until(fn -> held.() == {0, 0} end)
+      assert :sys.get_state(pid).requests == %{}
+      refute_received {:api_reply, _, _}
+
+      # One whose caller has already given up, or gone, is never sent, and
+      # what it had reserved is given back.
+      {:ok, wire, size} = {:ok, Map.put(Map.delete(request, "junk"), "t", "api"), 100}
+      past = System.monotonic_time(:millisecond) - 1
+      :atomics.add(budget, 1, 2)
+      :atomics.add(budget, 2, 2 * size)
+      send(pid, {:api, self(), make_ref(), wire, size, past})
+      gone = spawn(fn -> :ok end)
+      Process.sleep(20)
+      send(pid, {:api, gone, make_ref(), wire, size, nil})
+      wait_until(fn -> held.() == {0, 0} end)
+      assert :sys.get_state(pid).requests == %{}
+      assert {:error, :timeout} = :gen_tcp.recv(host, 0, 100)
+
+      # What isn't text never reaches the session at all, which is still
+      # there for the environment's commands afterwards.
+      for bad <- [
+            %{"method" => "GET", "target" => <<"/api/v1/", 255, 254>>},
+            %{"method" => "GET", "target" => 7},
+            %{"method" => "POST", "target" => "/api/v1/x", "body" => <<255>>},
+            %{"method" => "POST", "target" => "/api/v1/x", "idempotency_key" => <<195, 40>>},
+            %{"target" => "/api/v1/me"}
+          ] do
+        assert Session.request(session, bad) == {:error, :invalid}
+      end
+
+      assert held.() == {0, 0}
+      assert Process.alive?(pid)
+
+      # More at once than a connection keeps are told it's busy, by count
+      # and by bytes, before anything of theirs is queued for the session.
+      big = %{
+        "method" => "POST",
+        "target" => "/api/v1/x",
+        "body" => String.duplicate("a", 900_000)
+      }
+
+      for _ <- 1..2, do: spawn(fn -> Session.request(session, big, 5_000) end)
+      wait_until(fn -> elem(held.(), 0) == 2 end)
+      assert Session.request(session, big) == {:error, :busy}
+      assert elem(held.(), 0) == 2
+
+      for _ <- 1..30, do: spawn(fn -> Session.request(session, request, 5_000) end)
+      wait_until(fn -> elem(held.(), 0) == 32 end)
+      assert Session.request(session, request) == {:error, :busy}
+      assert elem(held.(), 0) == 32
+
+      # The connection closing answers everyone still waiting.
+      spawn(fn -> send(test, {:late, Session.request(session, request, 5_000)}) end)
+      :gen_tcp.close(host)
+      assert_receive {:late, {:error, reason}}, 5_000
+      assert reason in [:not_connected, :busy]
+    end
+
+    test "a new connection starts with nothing held by the last one's requests", ctx do
+      %{server: server} = start_guest_agent(ctx)
+      request = %{"method" => "GET", "target" => "/api/v1/me"}
+
+      connect = fn ->
+        {:ok, host} =
+          :gen_tcp.connect({:local, ctx.guest}, 0, [:binary, active: false, packet: 4], 2_000)
+
+        :ok = :gen_tcp.send(host, Channel.encode(%{"t" => "hello", "now" => Channel.now()}))
+        {:ok, _hello} = :gen_tcp.recv(host, 0, 5_000)
+        host
+      end
+
+      first = connect.()
+      old = :sys.get_state(server).session
+      for _ <- 1..32, do: spawn(fn -> Server.request(server, request) end)
+      wait_until(fn -> map_size(:sys.get_state(old).requests) == 32 end)
+      assert Server.request(server, request) == {:error, :busy}
+
+      :gen_tcp.close(first)
+      second = connect.()
+      wait_until(fn -> :sys.get_state(server).session not in [nil, old] end)
+
+      test = self()
+      spawn(fn -> send(test, {:answered, Server.request(server, request)}) end)
+      {:ok, data} = :gen_tcp.recv(second, 0, 5_000)
+      assert {:ok, %{"t" => "api", "id" => 1}} = Channel.decode(data)
+    end
+  end
+
+  describe "a public API request from the guest" do
+    alias ForemanAgent.VM.Relay
+
+    defp api(id, fields \\ %{}) do
+      Channel.encode(
+        Map.merge(
+          %{"t" => "api", "id" => id, "method" => "GET", "target" => "/api/v1/me"},
+          fields
+        )
+      )
+    end
+
+    # A VM that says hello, then sends `frames` once.
+    defp asking(frames) do
+      reactive(fn
+        %{"t" => "hello"} -> [hello() | frames]
+        _ -> []
+      end)
+    end
+
+    # A relay that tells the test what it was asked, and answers when told.
+    defp held_relay do
+      test = self()
+
+      fn request ->
+        send(test, {:relaying, request, self()})
+
+        receive do
+          {:answer, reply} -> reply
+        end
+      end
+    end
+
+    defp answer(pid, body \\ "{}"),
+      do: send(pid, {:answer, %{status: 200, body: body, headers: %{}}})
+
+    test "is checked, relayed and answered", ctx do
+      start_fake_vm(
+        ctx,
+        asking([
+          api(7, %{
+            "method" => "PATCH",
+            "target" => "/api/v1/secrets/environment/#{@env}?limit=2",
+            "body" => ~s({"unset":["A"]}),
+            "idempotency_key" => "k1"
+          })
+        ])
+      )
+
+      start_link(ctx,
+        relay: fn request ->
+          %{
+            status: 202,
+            body: JSON.encode!(%{"seen" => request}),
+            headers: %{"location" => "/api/v1/operations/x"}
+          }
+        end
+      )
+
+      assert_receive {:host_sent, %{"t" => "api.reply", "id" => 7} = reply}, 5_000
+      assert reply["status"] == 202
+      assert reply["headers"] == %{"location" => "/api/v1/operations/x"}
+
+      assert JSON.decode!(reply["body"])["seen"] == %{
+               "method" => "PATCH",
+               "path" => "/secrets/environment/#{@env}",
+               "query" => "limit=2",
+               "body" => ~s({"unset":["A"]}),
+               "key" => "k1"
+             }
+    end
+
+    test "one the box won't send is answered without being relayed", ctx do
+      test = self()
+
+      start_fake_vm(
+        ctx,
+        asking([
+          api(1, %{"target" => "/api/agents/enroll"}),
+          api(2, %{"method" => "DELETE"}),
+          api(3, %{"target" => "/api/v1/../admin"})
+        ])
+      )
+
+      start_link(ctx, relay: fn request -> send(test, {:relayed, request}) end)
+
+      for id <- [1, 2, 3] do
+        assert_receive {:host_sent, %{"t" => "api.reply", "id" => ^id, "status" => 400} = reply},
+                       5_000
+
+        assert %{"code" => "invalid_relay_request"} = JSON.decode!(reply["body"])
+      end
+
+      refute_received {:relayed, _}
+    end
+
+    test "one with no id the box can answer to is dropped", ctx do
+      test = self()
+
+      start_fake_vm(
+        ctx,
+        asking([
+          Channel.encode(%{"t" => "api", "method" => "GET", "target" => "/api/v1/me"}),
+          api(-1),
+          api("7"),
+          api(9_007_199_254_740_993),
+          api(5, %{"target" => "/admin"}),
+          api(5)
+        ])
+      )
+
+      start_link(ctx,
+        relay: fn request ->
+          send(test, {:relayed, request})
+          %{status: 200, body: "{}", headers: %{}}
+        end
+      )
+
+      assert_receive {:host_sent, %{"t" => "api.reply", "id" => 5, "status" => 400}}, 5_000
+      assert_receive {:host_sent, %{"t" => "api.reply", "id" => 5, "status" => 200}}, 5_000
+      assert_received {:relayed, _}
+      refute_received {:relayed, _}
+
+      # Neither the negative id nor the one past what a reply can carry was
+      # answered: every reply the box sent was for 5.
+      refute_received {:host_sent, %{"t" => "api.reply"}}
+    end
+
+    test "a link with no relay refuses", ctx do
+      start_fake_vm(ctx, asking([api(1)]))
+      start_link(ctx)
+
+      assert_receive {:host_sent, %{"t" => "api.reply", "id" => 1, "status" => 400}}, 5_000
+    end
+
+    test "nothing is relayed for a guest that hasn't said hello", ctx do
+      test = self()
+
+      start_fake_vm(ctx, fn socket ->
+        :gen_tcp.send(socket, api(1))
+        Process.sleep(:infinity)
+      end)
+
+      start_link(ctx, relay: fn request -> send(test, {:relayed, request}) end)
+
+      assert_receive :vm_connected, 5_000
+      refute_receive {:relayed, _}, 300
+    end
+
+    test "only so many are relayed at once, and an id in flight isn't taken twice", ctx do
+      frames = for id <- 1..(Link.max_relays() + 1), do: api(id)
+      start_fake_vm(ctx, asking(frames ++ [api(1)]))
+      start_link(ctx, relay: held_relay())
+
+      relays =
+        for _ <- 1..Link.max_relays() do
+          assert_receive {:relaying, _request, pid}, 5_000
+          pid
+        end
+
+      over = Link.max_relays() + 1
+      assert_receive {:host_sent, %{"t" => "api.reply", "id" => ^over, "status" => 429}}, 5_000
+      assert_receive {:host_sent, %{"t" => "api.reply", "id" => 1, "status" => 400}}, 5_000
+      refute_received {:relaying, _, _}
+
+      Enum.each(relays, &answer/1)
+
+      for id <- 1..Link.max_relays() do
+        assert_receive {:host_sent, %{"t" => "api.reply", "id" => ^id, "status" => 200}}, 5_000
+      end
+    end
+
+    test "a slot comes free when its request is answered", ctx do
+      test = self()
+
+      start_fake_vm(ctx, fn socket ->
+        :gen_tcp.send(socket, hello())
+        for id <- 1..Link.max_relays(), do: :gen_tcp.send(socket, api(id))
+        send(test, {:vm, self()})
+
+        receive do
+          :more -> :gen_tcp.send(socket, api(99))
+        end
+
+        react(socket, test, fn _ -> [] end)
+      end)
+
+      start_link(ctx, relay: held_relay())
+      assert_receive {:vm, vm}, 5_000
+
+      [first | _] =
+        for _ <- 1..Link.max_relays() do
+          assert_receive {:relaying, _request, pid}, 5_000
+          pid
+        end
+
+      answer(first)
+      Process.sleep(100)
+      send(vm, :more)
+      assert_receive {:relaying, _request, _pid}, 5_000
+    end
+
+    test "a relay that fails or takes too long is answered with an error", ctx do
+      start_fake_vm(ctx, asking([api(1), api(2)]))
+      test = self()
+
+      start_link(ctx,
+        relay_timeout: 200,
+        relay: fn request ->
+          send(test, {:relaying, self()})
+          if request.path == "/me", do: Process.sleep(:infinity)
+        end
+      )
+
+      assert_receive {:relaying, pid}, 5_000
+      assert_receive {:relaying, _}, 5_000
+      assert_receive {:host_sent, %{"t" => "api.reply", "status" => 504}}, 5_000
+      assert_receive {:host_sent, %{"t" => "api.reply", "status" => 504}}, 5_000
+      refute Process.alive?(pid)
+
+      assert Relay.timed_out().status == 504
+    end
+
+    test "a relay that crashes is answered with an error", ctx do
+      start_fake_vm(ctx, asking([api(1)]))
+
+      capture_log(fn ->
+        start_link(ctx, relay: fn _request -> raise "boom" end)
+        assert_receive {:host_sent, %{"t" => "api.reply", "id" => 1, "status" => 502}}, 5_000
+      end)
+    end
+
+    test "an answer that isn't one, or is too large for a frame, becomes an error", ctx do
+      start_fake_vm(ctx, asking([api(1), api(2, %{"target" => "/api/v1/boxes"})]))
+
+      start_link(ctx,
+        relay: fn
+          %{path: "/me"} ->
+            %{status: "200", body: 5, headers: []}
+
+          %{path: "/boxes"} ->
+            %{status: 200, body: String.duplicate("a", 5_000_000), headers: %{}}
+        end
+      )
+
+      for id <- [1, 2] do
+        assert_receive {:host_sent, %{"t" => "api.reply", "id" => ^id, "status" => 502} = reply},
+                       5_000
+
+        assert %{"code" => "relay_failed"} = JSON.decode!(reply["body"])
+      end
+    end
+
+    test "what is in flight ends with the link, however the link ends", ctx do
+      start_fake_vm(ctx, asking([api(1)]))
+      start_link(ctx, relay: held_relay())
+
+      assert_receive {:relaying, _request, relay}, 5_000
+      monitor = Process.monitor(relay)
+
+      stop_supervised!(:link)
+      assert_receive {:DOWN, ^monitor, :process, ^relay, _}, 5_000
+    end
+
+    test "what was in flight when the connection dropped is never answered on the next", ctx do
+      test = self()
+
+      # Each connection waits to be told what to do.
+      start_fake_vm(ctx, fn socket ->
+        send(test, {:connection, self()})
+
+        receive do
+          {:script, script} -> script.(socket)
+        end
+      end)
+
+      start_link(ctx, relay: held_relay(), retry: 50)
+
+      assert_receive {:connection, first}, 5_000
+
+      send(first, {
+        :script,
+        fn socket ->
+          :gen_tcp.send(socket, hello())
+          :gen_tcp.send(socket, api(1))
+
+          receive do
+            :hang_up -> :gen_tcp.close(socket)
+          end
+        end
+      })
+
+      assert_receive {:relaying, _request, relay}, 5_000
+      monitor = Process.monitor(relay)
+      send(first, :hang_up)
+
+      # The request died with the connection it came on.
+      assert_receive {:DOWN, ^monitor, :process, ^relay, _}, 5_000
+
+      assert_receive {:connection, second}, 5_000
+
+      send(second, {
+        :script,
+        fn socket ->
+          :gen_tcp.send(socket, hello())
+          react(socket, test, fn _ -> [] end)
+        end
+      })
+
+      refute_receive {:host_sent, %{"t" => "api.reply"}}, 500
     end
   end
 

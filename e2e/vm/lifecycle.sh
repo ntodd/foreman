@@ -45,11 +45,26 @@ probe lan 0 create
 probe dind 0 create
 echo "ok: the environment reaches the internet and the LAN, not the box, and runs docker-in-docker"
 
+# The box is still unreachable from inside, as above. The API is asked of
+# the guest agent over a socket, and the box relays it.
+probe api-socket self:600 create
+probe api-me 200 create
+probe api-is this-environment create
+probe api-environments "200 1" create
+probe api-repos 403 create
+probe api-boxes 403 create
+probe api-user-secrets 403 create
+probe api-outside 400 create
+echo "ok: the environment reaches Foreman's API as itself, with no token, and nothing beyond itself"
+
 say "a second environment can't reach the first"
 create_primary hello-2
 cp_eval 'E2E.log("hello-2", "create")' > "$work/create2.log"
 probe first-guest 124 create2
 probe gateway 124 create2
+# Each asks as itself, with the other running beside it on the same box.
+probe api-is this-environment create2
+probe api-environments "200 1" create2
 echo "ok: environments don't reach each other"
 
 say "the API stops and starts the same workspace disk"

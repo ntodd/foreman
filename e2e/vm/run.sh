@@ -279,6 +279,19 @@ echo "PROBE secret \$secret"
   if [ -n "\${API_TEST_APPROVED:-}" ]; then echo 'PROBE approved-secret present'; else echo 'PROBE approved-secret absent'; fi
   if [ -n "\${API_TEST_UNAPPROVED:-}" ]; then echo 'PROBE unapproved-secret present'; else echo 'PROBE unapproved-secret absent'; fi
 )
+# Foreman's own API from inside: through the socket beside the secrets, the
+# guest agent, the VM's link and the box, with no token anywhere. It
+# answers as this environment, and for nothing else of its owner's.
+api() { curl -sS --max-time 30 --unix-socket /run/foreman/api.sock -o /tmp/api.out -w '%{http_code}' "http://localhost/api/v1\$1" 2>/dev/null || echo failed; }
+echo "PROBE api-socket \$(stat -c '%u:%a' /run/foreman/api.sock 2>/dev/null | sed "s/^\$(id -u):/self:/")"
+echo "PROBE api-me \$(api /me)"
+grep -q "\"name\":\"\${FOREMAN_ENV:?}\"" /tmp/api.out && grep -q '"client_id":"foreman-environment"' /tmp/api.out &&
+  echo "PROBE api-is this-environment" || echo "PROBE api-is \$(cat /tmp/api.out 2>/dev/null | head -c 200)"
+echo "PROBE api-environments \$(api /environments) \$(grep -o '"slug"' /tmp/api.out | wc -l | tr -d ' ')"
+echo "PROBE api-repos \$(api /repos)"
+echo "PROBE api-boxes \$(api /boxes)"
+echo "PROBE api-user-secrets \$(api /secrets/user/me)"
+echo "PROBE api-outside \$(curl -sS --max-time 30 --unix-socket /run/foreman/api.sock -o /dev/null -w '%{http_code}' http://localhost/api/agents/enroll 2>/dev/null || echo failed)"
 try gateway 10.250.0.1 1
 try box $box_ip 1
 try first-guest 10.250.0.2 1

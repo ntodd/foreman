@@ -21,6 +21,9 @@ defmodule ForemanAgent.Config do
             proc: "/proc",
             allowed_git_hosts: ["github.com"],
             insecure_git_hosts: [],
+            # Relay an environment's public API requests over plain HTTP to
+            # a control plane that isn't on this box (ForemanAgent.VM.Relay).
+            relay_insecure: false,
             cleanup_image: "alpine:3.22",
             release_root: "/opt/foreman-agent",
             release_public_key: nil,

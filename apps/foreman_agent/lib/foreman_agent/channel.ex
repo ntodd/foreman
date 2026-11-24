@@ -23,6 +23,9 @@ defmodule ForemanAgent.Channel do
       `reclaim`, `args`: `keep_mb`, the MiB of page cache to keep (see
       `ForemanAgent.Guest.Reclaim`).
 
+    * `api.reply`: `id`, `status`, `body` and `headers`, answering an `api`
+      frame.
+
   Guest to host:
 
     * `hello`: `agent_version`, and `instance`: an id the guest agent's
@@ -31,6 +34,11 @@ defmodule ForemanAgent.Channel do
     * `event`: a protocol event (`op.accepted`, `op.log`, `op.result`) and
       `seq`, which the host acknowledges when it's set.
     * `reply`: `id`, `ok` and `result`, answering a query.
+    * `api`: a public API request from inside the environment
+      (`ForemanAgent.Guest.API`): `id`, `method`, `target` and, where
+      there are any, `body` and `idempotency_key`. The host checks it and
+      relays it as the environment the link is for
+      (`ForemanAgent.VM.Relay`). A host from before this drops it.
 
   The guest is the environment's, and anything in the environment can
   take it over, so the host treats every frame it reads as hostile: see
