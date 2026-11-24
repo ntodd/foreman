@@ -48,6 +48,9 @@ What still applies:
   containers inside it, so a CPU limit with a fraction gives a VM with the
   next whole number of vCPUs, all of them usable. The repo's own Compose
   files can still limit a service.
+- A container made by Foreman 0.8.3 or earlier keeps the limit it was made
+  with. If its VM is later made smaller than that limit, starting it fails
+  with Docker's `range of CPUs` error. **Rebuild** once to clear it.
 - The network: the internet, and the box's LAN unless the box blocks it.
   Not the box itself, not other environments, and not the tailnet except
   through the environment's own node.
