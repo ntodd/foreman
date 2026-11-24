@@ -226,6 +226,20 @@ defmodule ForemanAgent.VMEnvTest do
       assert cpus == min(2, System.schedulers_online())
     end
 
+    # The VM is the limit. Docker in the guest refuses more CPUs than the
+    # VM has, and the VM can have fewer than the environment asked for.
+    test "keeps the limits out of the guest, on a create and on a rebuild", ctx do
+      limits = %{cpus: 4096, memory_mb: 3072}
+
+      assert {:ok, _} = run(create(%{limits: limits}), ctx)
+      assert_receive {:guest, "env.create", %{limits: sent}}
+      assert sent == %{}
+
+      assert {:ok, _} = run(%{create(%{limits: limits}) | type: "env.rebuild"}, ctx)
+      assert_receive {:guest, "env.rebuild", %{limits: sent}}
+      assert sent == %{}
+    end
+
     test "refuses a clone host the box doesn't allow, before making anything", ctx do
       assert {:error, "cloning from evil.example isn't allowed" <> _} =
                run(create(%{clone_url: "https://evil.example/x.git"}), ctx)
@@ -1332,6 +1346,8 @@ defmodule ForemanAgent.VMEnvTest do
     test "builds in a VM the size of the repo's environments", ctx do
       assert {:ok, _} = handle(prebuild_command(%{limits: %{cpus: 1, memory_mb: 3072}}))
       assert_received {:machine, {:boot, %{memory_mb: 3072}}, @prebuild}
+      assert_receive {:guest, "env.create", %{limits: sent}}
+      assert sent == %{}
     end
 
     test "box.gc reports candidate disks for confirmation and preserves new prebuilds",
