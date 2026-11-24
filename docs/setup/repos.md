@@ -44,10 +44,13 @@ What still applies:
   GiB. Clearing either field restores inheritance for that resource.
   Save, then **Stop** and **Start** to boot with the new size. A suspended
   VM resumes with its saved size. The data disk defaults to 64 GB.
-- A Compose devcontainer can also have its own CPU or memory limit inside
-  the VM. Foreman writes its limits into the app service's Compose overlay
-  on creation or rebuild. If the app still has an older, tighter limit
-  after resizing the VM, **Rebuild** refreshes that overlay.
+- The VM is the only limit. Foreman sets no CPU or memory limit on the
+  containers inside it, so a CPU limit with a fraction gives a VM with the
+  next whole number of vCPUs, all of them usable. The repo's own Compose
+  files can still limit a service.
+- A container made by Foreman 0.8.3 or earlier keeps the limit it was made
+  with. If its VM is later made smaller than that limit, starting it fails
+  with Docker's `range of CPUs` error. **Rebuild** once to clear it.
 - The network: the internet, and the box's LAN unless the box blocks it.
   Not the box itself, not other environments, and not the tailnet except
   through the environment's own node.

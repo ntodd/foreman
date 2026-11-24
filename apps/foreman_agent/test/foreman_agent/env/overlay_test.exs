@@ -13,8 +13,7 @@ defmodule ForemanAgent.Env.OverlayTest do
         services: ["app", "db"],
         devcontainer_service: "app",
         secrets_dir: "/run/foreman/envs/#{@env_id}",
-        tailscale: %{enabled: true, tags: []},
-        limits: %{}
+        tailscale: %{enabled: true, tags: []}
       },
       overrides
     )
@@ -89,15 +88,6 @@ defmodule ForemanAgent.Env.OverlayTest do
 
     test "always sets FOREMAN_ENV" do
       assert Overlay.compose(params()) =~ ~s("FOREMAN_ENV": "storefront-2")
-    end
-
-    test "applies limits to the devcontainer service only when set" do
-      refute Overlay.compose(params()) =~ "cpus"
-
-      yaml = Overlay.compose(params(%{limits: %{cpus: 2.5, memory_mb: 4096}}))
-      [app, _db] = String.split(yaml, ~r/\n  "db":\n/)
-      assert app =~ "cpus: 2.5"
-      assert app =~ ~s(mem_limit: "4096m")
     end
 
     test "quotes service names so YAML special values stay strings" do

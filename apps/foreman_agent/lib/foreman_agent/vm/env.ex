@@ -352,11 +352,11 @@ defmodule ForemanAgent.VM.Env do
   # (`:relay_timeout` in its ctx).
   defp relay(cmd, log, ctx, opts \\ []) do
     opts = Keyword.put_new(opts, :timeout, Map.get(ctx, :relay_timeout, :infinity))
-    # Resource limits are for the host. A running guest can still speak protocol 6.
-    cmd =
-      if cmd.type in ["env.start", "env.stop"],
-        do: %{cmd | payload: Map.delete(cmd.payload, :limits)},
-        else: cmd
+    # The limits size the VM, and nothing in it: Docker in the guest
+    # refuses more CPUs than the VM has, which can be fewer than the
+    # environment asked for. A running guest can still speak protocol 6,
+    # where a start or a stop with limits is refused.
+    cmd = %{cmd | payload: Map.delete(cmd.payload, :limits)}
 
     Link.run(Links.get(cmd.payload.env_id, ctx.config), cmd, log, opts)
   end

@@ -258,7 +258,6 @@ services:
     environment:
       FOREMAN_ENV: <slug>
       TS_HOSTNAME: <slug>
-    # cpus / mem_limit only when limits are set (see Capacity)
   db:                       # every other service gets the same reset
     ports: !reset []
     restart: "no"
@@ -511,7 +510,7 @@ Foreman never assumes a box has room for everything provisioned on it. By defaul
 ### Limits
 
 - **Default:** every environment's VM has a size and a cgroup, even with no limits set: the box's `FOREMAN_VM_CPUS` and `FOREMAN_VM_MEMORY_MB` (4 and 8192), capped at what the box has, and `FOREMAN_VM_DISK_GB` (64) of disk. Before environment VMs the default was no limits at all.
-- **Optional limits:** CPU and memory limits can be set per repo as a default, and per environment as an override. When set, they size the VM (see [Environment VMs](#environment-vms)), and the overlay also applies `cpus` and `mem_limit` to the devcontainer service inside it. Per-service limits for sidecars can come later if needed.
+- **Optional limits:** CPU and memory limits can be set per repo as a default, and per environment as an override. When set, they size the VM (see [Environment VMs](#environment-vms)) and nothing inside it: the box keeps them out of the commands it relays to the guest, and the overlay never limits a service. The VM can be smaller than the limit asks for (it's capped at the box's cores), and Docker refuses a container more CPUs than its host has.
 - **`hostRequirements`:** never treated as a limit. A repo that asks for 8 CPUs and 8 GB gets a warning when it's placed on a box that has less. On agents that report VM defaults, this check is independent of the allocation.
 
 ### Reporting

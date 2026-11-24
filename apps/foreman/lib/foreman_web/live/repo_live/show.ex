@@ -98,7 +98,7 @@ defmodule ForemanWeb.RepoLive.Show do
          |> assign(:token_choices, Repos.Repo.permissions(repo))
          |> put_flash(
            :info,
-           "Saved. Running environments get a token with the new scope when they next start, or within four hours. New limits apply when an environment is rebuilt."
+           "Saved. Running environments get a token with the new scope when they next start, or within four hours. New limits apply at an environment's next cold boot."
          )}
 
       {:error, %Ecto.Changeset{} = changeset} ->
