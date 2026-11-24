@@ -14,7 +14,10 @@ import (
 )
 
 const ClientID = "foreman-cli"
-const DefaultScope = "repos:list boxes:list environments:list environments:read operations:list operations:read logs:read environments:create environments:start environments:stop"
+
+// DefaultScope is everything the CLI can do. A login that should do less
+// names its permissions with --scope.
+const DefaultScope = "repos:list boxes:list environments:list environments:read operations:list operations:read logs:read environments:create environments:start environments:stop environments:destroy secrets:list secrets:write"
 
 type Connection struct {
 	Instance string `json:"instance"`

@@ -325,8 +325,8 @@ func TestOutputSaysWhatNeedsARestart(t *testing.T) {
 
 func TestRemoteErrorsKeepTheirCodeAndAMissingPermissionSaysHowToGetIt(t *testing.T) {
 	f := &fake{err: &api.HTTPError{Code: "insufficient_scope", Message: "This connection lacks permission to change secrets.", StatusCode: 403}}
-	r := invoke(t, f, Options{LoginScope: "repos:list secrets:list secrets:write"}, "set", "A=1")
-	if code(r.failure) != "insufficient_scope" || !strings.Contains(r.err.String(), `foreman login --scope "repos:list secrets:list secrets:write"`) {
+	r := invoke(t, f, Options{}, "set", "A=1")
+	if code(r.failure) != "insufficient_scope" || !strings.HasSuffix(r.err.String(), "Connect again for the permission: foreman login\n") {
 		t.Fatalf("%v %q", r.failure, r.err.String())
 	}
 
