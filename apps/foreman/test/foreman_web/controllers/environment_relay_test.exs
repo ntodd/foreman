@@ -428,6 +428,8 @@ defmodule ForemanWeb.EnvironmentRelayTest do
 
   describe "one environment asking too much" do
     test "is slowed itself, and its box's other environments aren't", ctx do
+      within_one_window()
+
       statuses =
         for _ <- 1..620, do: relay(ctx, "GET", "/environments/#{ctx.env.id}").status
 
@@ -451,6 +453,8 @@ defmodule ForemanWeb.EnvironmentRelayTest do
     end
 
     test "a body that can't be read as what it says it is counts like any other request", ctx do
+      within_one_window()
+
       path = "/secrets/environment/#{ctx.env.id}"
       target = @prefix <> path
       broken = ~s({"secrets": [)
@@ -489,6 +493,8 @@ defmodule ForemanWeb.EnvironmentRelayTest do
     end
 
     test "a box that has used its own allowance is refused before any more is counted", ctx do
+      within_one_window()
+
       key = "relay-box:#{ctx.box.id}"
       for _ <- 1..6_000, do: Foreman.RateLimit.hit(key, 60_000, 6_000)
       before = :ets.info(Foreman.RateLimit, :size)

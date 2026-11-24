@@ -63,6 +63,8 @@ defmodule ForemanWeb.RateLimitTest do
     end
 
     test "a flood of failures from one client is cut off before verification" do
+      within_one_window()
+
       peer = {10, 79, :rand.uniform(250), :rand.uniform(250)}
 
       for _ <- 1..600,
@@ -102,6 +104,7 @@ defmodule ForemanWeb.RateLimitTest do
     test "is limited per client behind the proxy, not for everyone at once", %{conn: conn} do
       Mox.stub(Foreman.GitHub.ClientMock, :exchange_code, fn _, _, _, _ -> {:error, :bad} end)
       busy = client()
+      within_one_window(60_000, 1_000)
 
       for _ <- 1..20, do: callback(conn, busy)
       assert Phoenix.Flash.get(callback(conn, busy).assigns.flash, :error) =~ "Too many"
@@ -125,6 +128,7 @@ defmodule ForemanWeb.RateLimitTest do
   describe "enrollment" do
     test "bad join tokens from one client don't block another" do
       busy = client()
+      within_one_window(60_000, 1_000)
 
       for _ <- 1..10 do
         build_conn()

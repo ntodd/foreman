@@ -30,6 +30,21 @@ defmodule ForemanWeb.ConnCase do
     end
   end
 
+  @doc """
+  Waits, if it must, until at least `needed` ms are left in the current
+  `window` of `Foreman.RateLimit`.
+
+  Its windows are fixed and start on the wall clock's multiples of the
+  window, so every counter starts again from nothing at each one. A test
+  that sends a limit's worth of requests and expects the last to be
+  refused has to send them all inside one window.
+  """
+  def within_one_window(window \\ 60_000, needed \\ 15_000) do
+    left = window - rem(System.system_time(:millisecond), window)
+    if left < needed, do: Process.sleep(left + 10)
+    :ok
+  end
+
   @doc "Signs `user` in on `conn`."
   def log_in(conn, user) do
     token = Foreman.Accounts.create_session(user, "test")
