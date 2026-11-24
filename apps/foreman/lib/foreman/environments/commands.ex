@@ -157,13 +157,14 @@ defmodule Foreman.Environments.Commands do
   # create starts from the box's prebuild of the repo's branch, if it has
   # one the user may start from.
   # Prebuild disks can contain layers fetched with the owner's registry credential.
-  # Foreman does not have a complete dependency manifest for these disks.
-  defp up_command("create", _env, _token, policy) when not is_nil(policy), do: {"env.create", %{}}
-
-  defp up_command("create", env, token, nil) do
-    case prebuild_id(env, token) do
-      nil -> {"env.create", %{}}
-      prebuild_id -> {"env.create", %{prebuild_id: prebuild_id}}
+  # Foreman does not have a complete dependency manifest for these disks, so a
+  # service, which is held to what it was approved for, builds from nothing.
+  defp up_command("create", env, token, policy) do
+    with true <- owners?(policy),
+         prebuild_id when not is_nil(prebuild_id) <- prebuild_id(env, token) do
+      {"env.create", %{prebuild_id: prebuild_id}}
+    else
+      _ -> {"env.create", %{}}
     end
   end
 
@@ -301,7 +302,7 @@ defmodule Foreman.Environments.Commands do
   defp secrets(env, policy, get_token) do
     {shared?, source} = share_credentials(env, get_token)
     values = Secrets.resolve(env, include_shared: shared?)
-    auth = if shared? and is_nil(policy), do: registry_auth(env.repo.owner)
+    auth = if shared? and owners?(policy), do: registry_auth(env.repo.owner)
 
     %{
       values: values,
@@ -311,6 +312,8 @@ defmodule Foreman.Environments.Commands do
       options: [include_shared: shared?]
     }
   end
+
+  defp owners?(policy), do: WorkloadAccess.owners?(policy)
 
   defp share_credentials(env, get_token) do
     cond do

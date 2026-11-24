@@ -118,6 +118,121 @@ defmodule Foreman.WorkloadGrantsTest do
     assert cmd.payload.files["github-token"] == "scoped-personal"
   end
 
+  # A personal connection is its owner asking from somewhere else. A build
+  # it asks for is the build the owner would get from the browser: with
+  # the owner's registry credential for the repo's private features, and
+  # from the box's prebuild. Only a service is held to what it was approved.
+  describe "a build on a personal connection" do
+    setup ctx do
+      save(ctx.repo.owner, registry_username: "reader", registry_token: "registry-credential")
+
+      Repo.insert!(%Foreman.Prebuilds.Prebuild{
+        repo_id: ctx.repo.id,
+        box_id: ctx.box.id,
+        branch: "main",
+        config_path: ".devcontainer/devcontainer.json",
+        status: "ready",
+        repos: [ctx.repo.name, ctx.extra.name]
+      })
+
+      github()
+      {grant, env} = personal(ctx, ctx.admin)
+      env = save(env, created_once: false)
+
+      stub(ClientMock, :scope_user_token, fn _, _, _, _, _ ->
+        {:ok, %{token: "scoped-personal"}}
+      end)
+
+      %{grant: grant, env: env}
+    end
+
+    # What GitHub says the owner's token reads, by the ids Foreman knows them by.
+    # The build's own token is the one scoped for it; anything else is the
+    # owner's sign-in, which is what says they may have the environment at all.
+    defp readable(ctx, repos, sign_in \\ nil) do
+      ids = fn repos -> Map.new(repos, &{&1.full_name, &1.github_id}) end
+      {scoped, sign_in} = {ids.(repos), ids.(sign_in || repos)}
+
+      stub(ClientMock, :get_repo, fn token, name ->
+        case if(token == "scoped-personal", do: scoped, else: sign_in) do
+          %{^name => id} -> {:ok, %{"id" => id, "full_name" => name}}
+          _ -> {:error, :not_found}
+        end
+      end)
+
+      ctx
+    end
+
+    @credential [%{host: "ghcr.io", username: "reader", token: "registry-credential"}]
+
+    test "carries the owner's registry credential, on a create and a start", ctx do
+      readable(ctx, [ctx.repo, ctx.extra])
+
+      for action <- ~w(create start) do
+        assert {:ok, cmd, _} = Commands.build(operation(ctx.env, ctx.grant, action), ctx.env)
+        assert cmd.payload.registry_auth == @credential, action
+      end
+    end
+
+    # The connection the environment was last started on stays what it runs
+    # on. A rebuild its owner then asks for in the browser has to work.
+    test "and so does a rebuild from the browser of an environment started on one", ctx do
+      readable(ctx, [ctx.repo, ctx.extra])
+      env = save(ctx.env, api_grant_id: nil, workload_grant_id: ctx.grant.id, created_once: true)
+      rebuild = %{operation(env, ctx.grant, "rebuild") | api_grant_id: nil}
+
+      assert {:ok, %{type: "env.rebuild"} = cmd, _} = Commands.build(rebuild, env)
+      assert cmd.payload.registry_auth == @credential
+    end
+
+    test "starts from the box's prebuild", ctx do
+      readable(ctx, [ctx.repo, ctx.extra])
+
+      assert {:ok, cmd, _} = Commands.build(operation(ctx.env, ctx.grant, "create"), ctx.env)
+      assert is_binary(cmd.payload.prebuild_id)
+    end
+
+    test "gets neither when its owner can't read everything they were made with", ctx do
+      # The repo, but not the second one the prebuild holds.
+      readable(ctx, [ctx.repo])
+      assert {:ok, cmd, _} = Commands.build(operation(ctx.env, ctx.grant, "create"), ctx.env)
+      assert cmd.payload.registry_auth == @credential
+      refute Map.has_key?(cmd.payload, :prebuild_id)
+
+      # Not even the repo: there's no build to give anything to.
+      readable(ctx, [])
+      assert {:error, _} = Commands.build(operation(ctx.env, ctx.grant, "create"), ctx.env)
+    end
+
+    # The owner may have the environment, but the token its build clones
+    # with reads nothing: that token is the one the check is about.
+    test "gets neither when the build's own token can't read the repo", ctx do
+      readable(ctx, [], [ctx.repo, ctx.extra])
+
+      assert {:ok, cmd, _} = Commands.build(operation(ctx.env, ctx.grant, "create"), ctx.env)
+      refute Map.has_key?(cmd.payload, :registry_auth)
+      refute Map.has_key?(cmd.payload, :prebuild_id)
+    end
+
+    # The credential is in the prepared command, so one an admin has since
+    # replaced or removed mustn't still be sent.
+    test "isn't sent with a registry credential that changed after it was prepared", ctx do
+      readable(ctx, [ctx.repo, ctx.extra])
+      op = operation(ctx.env, ctx.grant, "create")
+
+      for change <- [[registry_token: "rotated"], [registry_username: nil, registry_token: nil]] do
+        assert {:ok, cmd, _, proof} = Commands.prepare(op, ctx.env)
+        assert [%{token: _}] = cmd.payload.registry_auth
+        save(Repo.reload!(ctx.repo.owner), change)
+
+        assert :retry =
+                 Environments.WorkloadAccess.deliver(op, ctx.env, proof, fn _ ->
+                   flunk("sent a stale registry credential")
+                 end)
+      end
+    end
+  end
+
   test "changed repo, box, or action scope blocks already accepted API work", ctx do
     {grant, _, env} = service(ctx)
 
