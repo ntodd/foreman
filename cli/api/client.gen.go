@@ -30,9 +30,10 @@ type ScopeString = string
 type ID = string
 
 type Identity struct {
-	ID       ID     `json:"id"`
-	Kind     string `json:"kind"`
-	ClientID string `json:"client_id"`
+	ID       ID      `json:"id"`
+	Kind     string  `json:"kind"`
+	ClientID string  `json:"client_id"`
+	Name     *string `json:"name,omitempty"`
 }
 
 type Repository struct {
@@ -80,6 +81,7 @@ type Environment struct {
 	DesiredState    string  `json:"desired_state"`
 	ObservedState   string  `json:"observed_state"`
 	Readiness       string  `json:"readiness"`
+	CreatedAt       *string `json:"created_at,omitempty"`
 	Expiry          *Expiry `json:"expiry,omitempty"`
 	Hostname        *string `json:"hostname,omitempty"`
 	SSHUser         *string `json:"ssh_user,omitempty"`
@@ -109,6 +111,38 @@ type LogPage struct {
 type Error struct {
 	Code    string `json:"code"`
 	Message string `json:"message"`
+}
+
+type Secret struct {
+	Name      string `json:"name"`
+	UpdatedAt string `json:"updated_at"`
+}
+
+type SecretPage struct {
+	Items      []Secret `json:"items"`
+	NextCursor *string  `json:"next_cursor"`
+}
+
+type SecretValue struct {
+	Name  string `json:"name"`
+	Value string `json:"value"`
+}
+
+type SecretChanges struct {
+	Secrets *[]SecretValue `json:"secrets,omitempty"`
+	Unset   *[]string      `json:"unset,omitempty"`
+}
+
+type EnvironmentRef struct {
+	ID   ID     `json:"id"`
+	Slug string `json:"slug"`
+}
+
+type SecretChangeResult struct {
+	Set            []string         `json:"set"`
+	Unset          []string         `json:"unset"`
+	Affected       []EnvironmentRef `json:"affected"`
+	OthersAffected int64            `json:"others_affected"`
 }
 
 type EnvironmentPage struct {
@@ -298,4 +332,14 @@ func (c *Client) GetOperation(ctx context.Context, id string) (*Response[Operati
 // GetOperationLogs — Read the next portion of the operation log.
 func (c *Client) GetOperationLogs(ctx context.Context, id string, cursor string) (*Response[LogPage], error) {
 	return call[LogPage](ctx, c, request{method: "GET", bearer: true, cursor: cursor, path: "/api/v1/operations/" + url.PathEscape(id) + "/logs", success: []int{200}})
+}
+
+// ListSecrets — List the names of the secrets set at one scope.
+func (c *Client) ListSecrets(ctx context.Context, scope string, subject string, cursor string) (*Response[SecretPage], error) {
+	return call[SecretPage](ctx, c, request{method: "GET", bearer: true, cursor: cursor, path: "/api/v1/secrets/" + url.PathEscape(scope) + "/" + url.PathEscape(subject), success: []int{200}})
+}
+
+// ChangeSecrets — Set and remove secrets at one scope together.
+func (c *Client) ChangeSecrets(ctx context.Context, scope string, subject string, body SecretChanges) (*Response[SecretChangeResult], error) {
+	return call[SecretChangeResult](ctx, c, request{method: "PATCH", bearer: true, path: "/api/v1/secrets/" + url.PathEscape(scope) + "/" + url.PathEscape(subject), body: body, success: []int{200}})
 }

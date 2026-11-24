@@ -330,3 +330,22 @@ func TestShowReportsTerminalFailureAfterPrintingOperation(t *testing.T) {
 		})
 	}
 }
+
+func TestRestartRecreatesChangedServicesOrAllOfThem(t *testing.T) {
+	var sent []string
+	h := setup(t, fake{act: func(_ context.Context, id, key string, b api.Action) (*api.Response[api.OperateEnvironmentResult], error) {
+		if id != envID || key == "" {
+			t.Fatal(id, key)
+		}
+		sent = append(sent, b.Action)
+		return &api.Response[api.OperateEnvironmentResult]{StatusCode: 202, Value: api.OperateEnvironmentResult{EnvironmentID: envID, OperationID: ptr(opID)}}, nil
+	}})
+	h.success(t, "env", "restart", envID, "--no-wait")
+	h.success(t, "env", "restart", envID, "--all", "--no-wait")
+	if strings.Join(sent, " ") != "restart_affected restart_all" {
+		t.Fatal(sent)
+	}
+
+	h.failure(t, "invalid_invocation", "env", "restart", envID, "--all=yes")
+	h.failure(t, "invalid_invocation", "env", "restart", envID, "--yes")
+}

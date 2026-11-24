@@ -33,7 +33,7 @@ defmodule Foreman.GeneratedClientsTest do
     {:ok, installation} =
       ServiceAccounts.register(Scope.for_user(admin), "service", %{
         "name" => "Generated client",
-        "scopes" => Scopes.all(),
+        "scopes" => Scopes.service(),
         "repo_ids" => [repo.id],
         "box_ids" => [box.id]
       })

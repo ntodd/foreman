@@ -16,6 +16,9 @@ defmodule Foreman.PublicAPI.Mutations do
   @no_box {:error, :no_provisionable_boxes, "You have no provisionable boxes."}
   @conflict {:error, :lifecycle_conflict,
              "An opposing lifecycle action or due expiry prevents this action."}
+  @not_running {:error, :lifecycle_conflict,
+                "The environment is not running, so there is nothing to restart. Use start."}
+  @restarts ~w(restart_affected restart_all)
 
   def create(%Principal{} = actor, key, params) do
     with :ok <- MutationInput.key(key),
@@ -254,6 +257,13 @@ defmodule Foreman.PublicAPI.Mutations do
         {:ok, op} = EnvironmentExpiry.reserve(env)
         accepted_existing(actor, env, action, op.id)
 
+      action in @restarts ->
+        restart_locked(actor, env, input, active)
+
+      # A start can't follow a restart in flight as if it were its own.
+      Enum.any?(active, &(&1.action in @restarts)) ->
+        @conflict
+
       Enum.any?(active, &(target(&1.action) != target(action))) ->
         @conflict
 
@@ -278,6 +288,41 @@ defmodule Foreman.PublicAPI.Mutations do
 
           {:accept, env.id, op.id}
         end
+    end
+  end
+
+  # A restart is its own transition: it follows only the same restart
+  # already in flight, and conflicts with anything else that is moving,
+  # including a start it would otherwise seem to agree with.
+  defp restart_locked(actor, env, %{"action" => action}, active) do
+    cond do
+      Enum.any?(active, &(&1.action != action)) ->
+        @conflict
+
+      active != [] ->
+        accepted_existing(actor, env, action, hd(active).id)
+
+      # Desired alone isn't enough: a VM that stopped or failed on its own
+      # still says running there, and has nothing up to restart.
+      not env.created_once or not stable?(env, "start") ->
+        @not_running
+
+      # Queued whether or not anything is known to have changed. Answering
+      # "nothing to restart" would tell a caller who had just set a secret
+      # that the value it sent was the one already applied.
+      true ->
+        {:ok, op} =
+          Environments.queue_action(
+            Scope.for_user(actor.user),
+            env,
+            String.to_existing_atom(action),
+            %{},
+            api_grant_id: actor.grant_id,
+            audit: audit(actor),
+            dedupe: false
+          )
+
+        {:accept, env.id, op.id}
     end
   end
 
@@ -362,6 +407,11 @@ defmodule Foreman.PublicAPI.Mutations do
     with :ok <- permit(actor, "create") do
       if expiry = input["expiry"], do: permit(actor, expiry["action"]), else: :ok
     end
+  end
+
+  # A restart stops and starts, so it takes permission for both.
+  defp permit(actor, action) when action in @restarts do
+    with :ok <- permit(actor, "stop"), do: permit(actor, "start")
   end
 
   defp permit(actor, action) do

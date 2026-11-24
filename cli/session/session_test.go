@@ -245,13 +245,11 @@ func TestDevicePollingAndSavedSelection(t *testing.T) {
 	if !reflect.DeepEqual(f.sleeps, []time.Duration{time.Second, time.Second, 6 * time.Second}) {
 		t.Fatal(f.sleeps)
 	}
-	for _, scope := range strings.Fields("repos:list boxes:list environments:list environments:read operations:list operations:read logs:read environments:create environments:start environments:stop") {
+	// A plain login asks for everything the CLI can do; --scope narrows it.
+	for _, scope := range strings.Fields("repos:list boxes:list environments:list environments:read operations:list operations:read logs:read environments:create environments:start environments:stop environments:destroy secrets:list secrets:write") {
 		if !slices.Contains(strings.Fields(f.requested), scope) {
 			t.Error("missing scope", scope)
 		}
-	}
-	if strings.Contains(f.requested, "destroy") {
-		t.Fatal(f.requested)
 	}
 	st, e := os.Stat(f.path("user"))
 	if e != nil || st.Mode().Perm() != 0600 {
@@ -520,5 +518,44 @@ func TestInvalidGrantRequestsNewApproval(t *testing.T) {
 	}
 	if len(f.bearers) != 0 {
 		t.Fatal("sent expired access token")
+	}
+}
+
+func TestReadOnlyUseNeverRefreshesOrWrites(t *testing.T) {
+	f := setup(t)
+	if _, e := f.login("user"); e != nil {
+		t.Fatal(e)
+	}
+	before, _ := os.ReadFile(f.path("user"))
+	sent := len(f.bearers) // Login reads the identity once itself.
+	s, e := f.store.OpenReadOnly(context.Background(), "", "")
+	if e != nil {
+		t.Fatal(e)
+	}
+	if _, e = s.Client.GetIdentity(context.Background()); e != nil || len(f.bearers) != sent+1 {
+		t.Fatal(e, f.bearers)
+	}
+
+	// Once the access token is due for a refresh, a read-only caller goes
+	// without. It sends nothing and leaves the saved connection as it was.
+	f.now.Add(900)
+	if _, e = s.Client.GetIdentity(context.Background()); !errors.Is(e, ErrRefreshDue) {
+		t.Fatal(e)
+	}
+	after, _ := os.ReadFile(f.path("user"))
+	if f.refreshAttempts != 0 || len(f.rotations) != 0 || len(f.bearers) != sent+1 || !bytes.Equal(before, after) {
+		t.Fatal(f.refreshAttempts, f.rotations, f.bearers)
+	}
+
+	// The next ordinary command refreshes, and read-only use works again.
+	full, e := f.store.Open(context.Background(), "", "")
+	if e != nil {
+		t.Fatal(e)
+	}
+	if _, e = full.Client.GetIdentity(context.Background()); e != nil {
+		t.Fatal(e)
+	}
+	if _, e = s.Client.GetIdentity(context.Background()); e != nil || len(f.bearers) != sent+3 {
+		t.Fatal(e, f.bearers)
 	}
 }

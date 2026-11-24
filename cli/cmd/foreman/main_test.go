@@ -22,6 +22,8 @@ func TestInformationAndErrorsWithoutInstance(t *testing.T) {
 		{[]string{"login", "--help"}, "--scope", 0}, {[]string{"--json", "me"}, "", 1},
 		{[]string{"--json", "me", "surprise"}, "", 2}, {[]string{"bad", "--json"}, "", 2},
 		{[]string{"--json", "login", "--scope="}, "", 2},
+		{[]string{"--help"}, "secrets set NAME=value", 0}, {[]string{"secrets", "--help"}, "NAME=@file", 0},
+		{[]string{"help", "secret"}, "secrets:write", 0},
 	} {
 		var out, stderr bytes.Buffer
 		status := run(context.Background(), tc.args, &out, &stderr)
@@ -89,6 +91,28 @@ func TestHeadlessCommands(t *testing.T) {
 		if err := json.Unmarshal([]byte(out), &identity); err != nil || identity.ID != "one" || len(identity.Extra) != 2 || stderr != "" {
 			t.Fatalf("me %q %q", out, stderr)
 		}
+	}
+	var patched []string
+	mux.HandleFunc("PATCH /api/v1/secrets/user/me", func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			Secrets []struct{ Name, Value string }
+		}
+		if r.Header.Get("Authorization") != "Bearer access" || json.NewDecoder(r.Body).Decode(&body) != nil || len(body.Secrets) != 1 {
+			t.Error("unexpected secrets request")
+			return
+		}
+		patched = append(patched, body.Secrets[0].Name+"="+body.Secrets[0].Value)
+		fmt.Fprintf(w, `{"set":[%q],"unset":[],"affected":[],"others_affected":0}`, body.Secrets[0].Name)
+	})
+	// Both spellings of the command reach the same handler.
+	for _, name := range []string{"secrets", "secret"} {
+		out, stderr := command(name, "set", "TOKEN="+name)
+		if out != "Set TOKEN on your own secrets.\n" || stderr != "" {
+			t.Fatalf("%s set: %q %q", name, out, stderr)
+		}
+	}
+	if strings.Join(patched, " ") != "TOKEN=secrets TOKEN=secret" {
+		t.Fatalf("secrets requests %v", patched)
 	}
 	out, stderr := command("logout")
 	if !revoked || out != "Disconnected one\n" || stderr != "" {

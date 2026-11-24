@@ -256,6 +256,9 @@ up as an error from Foreman.
 | A compose file (`${DATABASE_URL}`) | Compose interpolation at start | **Restart affected** recreates the services that use it |
 | git and `gh` | `/run/foreman/github-token` | Nothing; read on every use |
 
+Secrets are set in the browser, or from a shell with `foreman secrets`
+([api-clients.md](api-clients.md#secrets-with-the-installed-cli)).
+
 ## Coming from Codespaces
 
 - **`workspaceFolder`:** `/workspaces/${localWorkspaceFolderBasename}`

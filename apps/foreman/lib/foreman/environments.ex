@@ -649,7 +649,7 @@ defmodule Foreman.Environments do
     # Reconciliation can happen long after operation history has been pruned.
     # Keep the authority for this desired state until another lifecycle request replaces it.
     env =
-      if desired_for(name) do
+      if sets_authority?(action, opts) do
         authority =
           if opts[:api_grant_id] || Scope.user_id(scope) != env.user_id do
             %{
@@ -669,13 +669,30 @@ defmodule Foreman.Environments do
 
     env = prepare_queue(env, name, opts[:trigger])
 
-    if action == :start and not env.initial_create_deferred,
+    if files_first?(action, env, opts),
       do: queue_operation(env, "secrets_write", %{}, scope.user, opts)
 
     op = queue_operation(env, name, args, scope.user, opts)
     Audit.log(scope, "environment.#{action}", env, Keyword.get(opts, :audit, %{}))
     {:ok, op}
   end
+
+  # A restart through an API grant leaves the desired state as it is, and
+  # the authority behind it too: who wants the workspace running hasn't
+  # changed, so there is nothing to restore if the restart is cancelled
+  # or refused.
+  defp api_restart?(action, opts),
+    do: action in [:restart_affected, :restart_all] and not is_nil(opts[:api_grant_id])
+
+  defp sets_authority?(action, opts),
+    do: not is_nil(desired_for(Atom.to_string(action))) and not api_restart?(action, opts)
+
+  # A start gets the current files first. So does a restart asked for
+  # through an API grant: the workspace may have been launched by a
+  # connection since revoked, whose automatic file writes were refused,
+  # and the restart would otherwise bring services up on stale files.
+  defp files_first?(action, env, opts),
+    do: (action == :start or api_restart?(action, opts)) and not env.initial_create_deferred
 
   defp prepare_queue(env, "stop", "expiry") do
     cancelled = cancel_queued(env, &(&1 in @up or &1 in ["suspend", "secrets_write"]))
@@ -1555,6 +1572,18 @@ defmodule Foreman.Environments do
   def lifecycle_operations do
     from o in Foreman.Operations.Operation,
       where: not is_nil(o.environment_id) and o.action in @lifecycle
+  end
+
+  @doc """
+  Whether a lifecycle request has been made for the operation's
+  environment since the operation itself. Such a request, and not the
+  older operation, is what the environment currently answers to.
+  """
+  def superseded?(%{id: id, environment_id: env_id, inserted_at: at}) do
+    Repo.exists?(
+      from o in lifecycle_operations(),
+        where: o.environment_id == ^env_id and o.id != ^id and o.inserted_at >= ^at
+    )
   end
 
   def active_lifecycle(env_id) do

@@ -14,7 +14,10 @@ import (
 )
 
 const ClientID = "foreman-cli"
-const DefaultScope = "repos:list boxes:list environments:list environments:read operations:list operations:read logs:read environments:create environments:start environments:stop"
+
+// DefaultScope is everything the CLI can do. A login that should do less
+// names its permissions with --scope.
+const DefaultScope = "repos:list boxes:list environments:list environments:read operations:list operations:read logs:read environments:create environments:start environments:stop environments:destroy secrets:list secrets:write"
 
 type Connection struct {
 	Instance string `json:"instance"`
@@ -72,6 +75,58 @@ func (s *Store) Open(ctx context.Context, instance, account string) (*Session, e
 		return nil, err
 	}
 	client := public.WithBearer(func(ctx context.Context) (string, error) { return s.accessToken(ctx, public, instance, path) })
+	return &Session{Connection: Connection{Instance: instance, Account: account, Scope: state.Scope}, StateDir: s.root, Client: client}, nil
+}
+
+// ErrRefreshDue is returned by a read-only session whose saved access token
+// can't be used as it is.
+var ErrRefreshDue = errors.New("the connection needs a refresh that read-only use doesn't do")
+
+// OpenReadOnly uses the default state store. See Store.OpenReadOnly.
+func OpenReadOnly(ctx context.Context, instance, account string) (*Session, error) {
+	s, err := DefaultStore()
+	if err != nil {
+		return nil, err
+	}
+	return s.OpenReadOnly(ctx, instance, account)
+}
+
+// OpenReadOnly opens a connection that sends its saved access token as it is.
+// It never refreshes, retires a previous grant, repairs a rotation or writes
+// anything, so a caller that can be cut off at any moment (shell completion)
+// can't spend the single-use refresh token and lose the reply. When the token
+// is due for a refresh, requests fail with ErrRefreshDue until an ordinary
+// command has done it.
+func (s *Store) OpenReadOnly(ctx context.Context, instance, account string) (*Session, error) {
+	instance, account, err := s.selectConnection(instance, account, "open")
+	if err != nil {
+		return nil, err
+	}
+	path := accountPath(s.directory(instance), account)
+	state, err := readCredential(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, noConnection()
+	}
+	if err != nil {
+		return nil, err
+	}
+	public, err := discover(ctx, instance)
+	if err != nil {
+		return nil, err
+	}
+	client := public.WithBearer(func(context.Context) (string, error) {
+		state, err := readCredential(path)
+		if err != nil {
+			return "", err
+		}
+		if _, err := os.Stat(path + ".rotation"); !errors.Is(err, os.ErrNotExist) {
+			return "", ErrRefreshDue
+		}
+		if state.RefreshPending || state.VerifyRotation || len(state.PendingRevocations) > 0 || state.Expires <= unixSeconds(s.now())+30 {
+			return "", ErrRefreshDue
+		}
+		return state.AccessToken, nil
+	})
 	return &Session{Connection: Connection{Instance: instance, Account: account, Scope: state.Scope}, StateDir: s.root, Client: client}, nil
 }
 

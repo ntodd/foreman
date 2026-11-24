@@ -211,7 +211,7 @@ defmodule E2E do
     allowed = new_secret.("API_TEST_APPROVED")
     new_secret.("API_TEST_UNAPPROVED")
     {:ok, installation} = Foreman.OAuth.ServiceAccounts.register(scope, "service", %{
-      "name" => "VM acceptance", "scopes" => Foreman.OAuth.Scopes.all(),
+      "name" => "VM acceptance", "scopes" => Foreman.OAuth.Scopes.service(),
       "repo_ids" => [repo.id], "box_ids" => [box().id], "secret_ids" => [allowed]
     })
     IO.puts("E2E_SERVICE=" <> JSON.encode!(%{client_id: installation.client.id, client_secret: installation.secret}))

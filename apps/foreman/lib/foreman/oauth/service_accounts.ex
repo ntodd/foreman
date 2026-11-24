@@ -130,7 +130,7 @@ defmodule Foreman.OAuth.ServiceAccounts do
   end
 
   defp register_client(scope, "service", name, attrs) do
-    with {:ok, scopes} <- Store.validate_scopes(attrs["scopes"], Scopes.all()),
+    with {:ok, scopes} <- Store.validate_scopes(attrs["scopes"], Scopes.service()),
          {:ok, ids, repositories} <- resources(attrs),
          {:ok, tags} <- tags(attrs["tailscale_tags"] || []) do
       id = Ecto.UUID.generate()
