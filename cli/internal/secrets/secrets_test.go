@@ -432,7 +432,7 @@ func TestAnEnvironmentIsChosenByNameAcrossPages(t *testing.T) {
 		}
 		return api.EnvironmentPage{Items: []api.Environment{{ID: envID, Slug: "app-me-2"}}}, nil
 	}}
-	r := invoke(t, f, Options{}, "set", "A=1", "--env", "app-me-2")
+	r := invoke(t, f, Options{Pretty: true}, "set", "A=1", "--env", "app-me-2")
 	if r.failure != nil || len(f.changes) != 1 || f.changes[0].scope != "environment" || f.changes[0].subject != envID {
 		t.Fatalf("%v %+v", r.failure, f.changes)
 	}
@@ -441,7 +441,7 @@ func TestAnEnvironmentIsChosenByNameAcrossPages(t *testing.T) {
 	}
 
 	// A name that matches nothing is not repeated: it may be a value typed after the wrong flag.
-	r = invoke(t, f, Options{}, "set", "A=1", "--env", "sk-live-4242")
+	r = invoke(t, f, Options{Pretty: true}, "set", "A=1", "--env", "sk-live-4242")
 	if code(r.failure) != "resource_not_found" || len(f.changes) != 1 || strings.Contains(r.out.String()+r.err.String(), "4242") {
 		t.Fatalf("%v %s %+v", r.failure, r.err.String(), f.changes)
 	}
@@ -484,7 +484,7 @@ func TestANamedEnvironmentIsPinnedBeforeAnyValueIsRead(t *testing.T) {
 		order = append(order, "ask")
 		return "typed", nil
 	}
-	r := invoke(t, f, Options{Prompt: prompt}, "set", "TOKEN", "--env", "app-me-1")
+	r := invoke(t, f, Options{Pretty: true, Prompt: prompt}, "set", "TOKEN", "--env", "app-me-1")
 	if r.failure != nil || strings.Join(order, " ") != "resolve ask" || f.changes[0].subject != envID {
 		t.Fatalf("%v %v %+v", r.failure, order, f.changes)
 	}
@@ -497,15 +497,56 @@ func TestANamedEnvironmentIsPinnedBeforeAnyValueIsRead(t *testing.T) {
 		order = append(order, "read")
 		return []byte("A=1\n"), nil
 	}
-	r = invoke(t, f, Options{ReadFile: read}, "import", "team.env", "--env", "app-me-1")
+	r = invoke(t, f, Options{Pretty: true, ReadFile: read}, "import", "team.env", "--env", "app-me-1")
 	if r.failure != nil || strings.Join(order, " ") != "resolve read" {
 		t.Fatalf("%v %v", r.failure, order)
 	}
 
 	// A name that matches nothing stops the command before it asks.
 	order = nil
-	r = invoke(t, f, Options{Prompt: prompt}, "set", "TOKEN", "--env", "app-me-9")
+	r = invoke(t, f, Options{Pretty: true, Prompt: prompt}, "set", "TOKEN", "--env", "app-me-9")
 	if code(r.failure) != "resource_not_found" || strings.Join(order, " ") != "resolve" {
 		t.Fatalf("%v %v", r.failure, order)
+	}
+}
+
+// Names are built from a repository's name alone, so two repositories can
+// hand the same one to different environments over time. A command saved in a
+// script would then deliver a secret to code it was never meant for. Changing
+// secrets by name takes a person at a terminal. A script uses the ID.
+func TestAScriptChangesAnEnvironmentsSecretsByIDOnly(t *testing.T) {
+	read := func(string) ([]byte, error) { return []byte("A=1\n"), nil }
+	for _, o := range []Options{{ReadFile: read}, {ReadFile: read, JSON: true, Pretty: true}} {
+		for _, args := range [][]string{
+			{"set", "A=1", "--env", "app-me-1"},
+			{"unset", "A", "--env", "app-me-1"},
+			{"import", "team.env", "--env", "app-me-1"},
+		} {
+			// The fake has no environment list: nothing is looked up or sent.
+			f := &fake{}
+			r := invoke(t, f, o, args...)
+			if code(r.failure) != "environment_id_required" || len(f.changes) != 0 || !strings.Contains(r.err.String(), "ID") {
+				t.Fatalf("%v: %v %s", args, r.failure, r.err.String())
+			}
+		}
+	}
+
+	// Reading the names of secrets changes nothing, and an ID works anywhere.
+	f := &fake{
+		envs: func(string) (api.EnvironmentPage, error) {
+			return api.EnvironmentPage{Items: []api.Environment{{ID: envID, Slug: "app-me-1"}}}, nil
+		},
+		list: func(scope, subject, _ string) (api.SecretPage, error) {
+			if scope != "environment" || subject != envID {
+				t.Fatalf("%s %s", scope, subject)
+			}
+			return api.SecretPage{Items: []api.Secret{}}, nil
+		},
+	}
+	if r := invoke(t, f, Options{}, "list", "--env", "app-me-1"); r.failure != nil {
+		t.Fatal(r.failure)
+	}
+	if r := invoke(t, f, Options{}, "set", "A=1", "--env", envID); r.failure != nil || len(f.changes) != 1 {
+		t.Fatal(r.failure, f.changes)
 	}
 }

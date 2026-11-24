@@ -40,7 +40,7 @@ foreman op list payments-you-1
 foreman op logs "$OP_ID" --follow
 ```
 
-Commands that act on an environment take its name, as `env list` shows it, or its UUID. An operation is always given by UUID. A name can pass to a newer environment once the old one is destroyed, so use UUIDs in scripts. `env destroy` by name always asks for confirmation; `--yes` works with a UUID.
+Commands that act on an environment take its name, as `env list` shows it, or its UUID. An operation is always given by UUID. A name can pass to a newer environment once the old one is destroyed, so use UUIDs in scripts. `env destroy` by name always asks for confirmation; `--yes` works with a UUID. Changing an environment's secrets by name works at a terminal; in a script, give `--env` the UUID.
 
 At a terminal, lists are aligned tables: the name first, one status per environment, relative times and the ID last. Piped or redirected, they stay tab-separated with their original columns. Use `--json` in scripts.
 

@@ -24,6 +24,7 @@ const secretsHelp = `Usage: foreman [--instance ORIGIN] [--account ID] [--json] 
 
 Choose the level with one of:
   --env ENV                      One environment of yours, by name or ID
+                                 (set, unset and import in a script take the ID)
   --repo OWNER/NAME | ID         Every environment of a repository (admins)
   --owner LOGIN                  Every environment of an owner's repositories (admins)
   --user                         All of your own environments (the default)

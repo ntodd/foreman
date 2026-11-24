@@ -152,6 +152,13 @@ func (o Options) run(ctx context.Context, args []string) error {
 	// Pin it to an ID before a value is asked for or read, so what is typed
 	// goes where it was aimed however long the typing takes.
 	if name, ok := v.flags["env"]; ok && !uuidPattern.MatchString(name) {
+		// A name is built from a repository's name alone, so over time two
+		// repositories can hand the same one to different environments. A
+		// saved command would then deliver a secret to code it was never
+		// meant for, so a change by name takes a person at a terminal.
+		if v.command != "list" && (o.JSON || !o.Pretty) {
+			return &Failure{Code: "environment_id_required", Message: "A name can pass to a newer environment, so changing an environment's secrets by name needs a terminal. In a script, give --env the environment's ID."}
+		}
 		t, err := o.environment(ctx, name)
 		if err != nil {
 			return err
