@@ -164,7 +164,7 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		if len(args) > 0 {
 			switch args[0] {
 			case "login":
-				usage = "Usage: foreman [--instance ORIGIN] [--account ID] [--json] login [--scope 'PERMISSIONS']\n\nApprove on any device using the printed verification URL and code.\nDefault permissions: " + session.DefaultScope + "\n"
+				usage = "Usage: foreman [--instance ORIGIN] [--account ID] [--json] login [--scope 'PERMISSIONS']\n\nApprove on any device using the printed verification URL and code.\nA login asks for every permission by default: " + session.DefaultScope + "\nPass --scope to connect with fewer.\n"
 			case "me":
 				usage = "Usage: foreman [--instance ORIGIN] [--account ID] me\n\nPrint the selected connection's acting identity as JSON.\n"
 			case "logout":

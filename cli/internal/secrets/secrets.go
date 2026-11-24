@@ -38,8 +38,6 @@ type Options struct {
 	Prompt func(name string) (string, error)
 	// ReadFile defaults to os.ReadFile.
 	ReadFile func(string) ([]byte, error)
-	// LoginScope is the permission list to suggest when the connection lacks one.
-	LoginScope string
 }
 
 // Failure is the final stderr document in JSON mode.
@@ -125,8 +123,10 @@ func Run(ctx context.Context, args []string, o Options) error {
 		return f
 	}
 	fmt.Fprintln(o.Err, f.Error())
-	if f.Code == "insufficient_scope" && o.LoginScope != "" {
-		fmt.Fprintf(o.Err, "Connect with the permission: foreman login --scope %q\n", o.LoginScope)
+	if f.Code == "insufficient_scope" {
+		// A plain login asks for the secret permissions. A connection without
+		// them was narrowed with --scope or made by an older CLI.
+		fmt.Fprintln(o.Err, "Connect again for the permission: foreman login")
 	}
 	return f
 }

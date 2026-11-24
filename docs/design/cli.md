@@ -53,7 +53,7 @@ The current CLI uses the public client ID `foreman-cli`. Retain issuer and endpo
 
 Remember the instance and account after a successful login. Explicit `--instance` and `--account` take priority. For an explicit instance with multiple accounts and no selected account for that instance, list the choices and require a selection. Never borrow credentials from a different origin. Preserve working connections under `$XDG_STATE_HOME/foreman` (default `~/.local/state/foreman`), including account locks, atomic credential replacement, and pending revocations. An upgrade must allow the next refresh and logout to succeed using an existing personal connection.
 
-Default login scopes cover discovery, reads, operations, logs, create, start and stop. Request destroy explicitly through `login --scope` when needed. The secret permissions are requested the same way: `foreman help secrets` prints the full `login --scope` line, and a secrets command refused for lack of permission prints it too. Honor a narrower grant. For example, `env create REPO_UUID --no-wait` can submit with create permission alone. Report any missing read permission for a later wait as a separate error with the accepted IDs. Foreman authorizes every request.
+A default login asks for every permission the CLI can use: discovery, reads, operations, logs, create, start, stop, destroy and secrets. Asking for less is the exception, done with `login --scope`. A secrets command refused for lack of permission says to log in again. Honor a narrower grant. For example, `env create REPO_UUID --no-wait` can submit with create permission alone. Report any missing read permission for a later wait as a separate error with the accepted IDs. Foreman authorizes every request.
 
 ## Long-running work and recovery
 

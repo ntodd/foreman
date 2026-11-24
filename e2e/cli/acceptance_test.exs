@@ -87,9 +87,6 @@ defmodule Foreman.CLIAcceptanceTest do
     shown = json(ctx, ["env", "show", id])
     assert {shown["branch"], shown["box_id"]} == {ctx.repo.default_branch, ctx.box.id}
 
-    assert {%{"code" => "insufficient_scope"}, "", _} =
-             failure(ctx, ["env", "destroy", id, "--yes"])
-
     complete(ctx.box, op)
 
     Repo.get!(Operation, op)
@@ -119,25 +116,32 @@ defmodule Foreman.CLIAcceptanceTest do
   end
 
   test "secrets are set, imported, listed and removed without a value ever being printed", ctx do
-    # A default login leaves the secret permissions out, and says how to ask for them.
-    login(ctx, ctx.user)
+    # A connection narrowed with --scope is refused, and told that a plain login is enough.
+    login(ctx, ctx.user, "repos:list environments:list")
     assert {%{"code" => "insufficient_scope"}, "", _} = failure(ctx, ["secrets", "set", "A=1"])
     {status, "", hint} = ctx |> launch(["secrets", "list"]) |> finish()
     assert status != 0
-    assert hint =~ ~s(foreman login --scope ")
-    assert hint =~ "secrets:write"
+    assert hint =~ "Connect again for the permission: foreman login\n"
+
+    # A plain login asks for every permission, secrets and destroy included.
+    login(ctx, ctx.user)
+
+    granted =
+      Repo.one!(
+        from g in Foreman.OAuth.Grant,
+          where: g.user_id == ^ctx.user.id and is_nil(g.revoked_at),
+          order_by: [desc: g.inserted_at],
+          limit: 1,
+          select: g.scopes
+      )
+
+    assert Enum.sort(granted) == Enum.sort(Foreman.OAuth.Scopes.all())
 
     # A workspace the box has confirmed is running.
     created = json(ctx, ["env", "create", ctx.repo.full_name, "--no-wait"])
     env_id = created["environment_id"]
     complete(ctx.box, created["operation_id"])
     env = Repo.get!(Environment, env_id)
-
-    login(
-      ctx,
-      ctx.user,
-      "repos:list environments:list operations:read environments:start environments:stop secrets:list secrets:write"
-    )
 
     File.write!(Path.join(ctx.tmp_dir, "key.txt"), "from a file\n")
 

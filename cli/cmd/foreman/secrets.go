@@ -11,10 +11,6 @@ import (
 	"golang.org/x/term"
 )
 
-// A default login leaves these out: changing what every environment of a
-// repository runs with is asked for by name.
-const secretsScope = session.DefaultScope + " secrets:list secrets:write"
-
 const secretsHelp = `Usage: foreman [--instance ORIGIN] [--account ID] [--json] secrets COMMAND
 
   secrets list                   List secret names at one level. Values are never shown.
@@ -42,8 +38,8 @@ for a process that read the secrets file when it started.
 A value typed as NAME=value is saved in your shell history. Use NAME=@file, NAME=- or NAME
 for anything sensitive. A value that itself begins with @ has to come one of those ways.
 
-Secrets need permissions a default login leaves out. Connect with:
-  foreman login --scope "` + secretsScope + `"
+Secrets need the secrets:list and secrets:write permissions. foreman login asks for both.
+A connection narrowed with --scope, or made by an older CLI, has to log in again.
 `
 
 func runSecrets(ctx context.Context, args []string, o options, stdout, stderr io.Writer) int {
@@ -51,7 +47,7 @@ func runSecrets(ctx context.Context, args []string, o options, stdout, stderr io
 	if err != nil {
 		return fail(stderr, o.json, err, "connection_error", 1)
 	}
-	options := secrets.Options{API: s.Client, In: os.Stdin, Out: stdout, Err: stderr, JSON: o.json, LoginScope: secretsScope}
+	options := secrets.Options{API: s.Client, In: os.Stdin, Out: stdout, Err: stderr, JSON: o.json}
 	if terminal(os.Stdin) {
 		options.Prompt = func(name string) (string, error) {
 			fmt.Fprintf(stderr, "Value for %s: ", name)

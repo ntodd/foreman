@@ -245,13 +245,11 @@ func TestDevicePollingAndSavedSelection(t *testing.T) {
 	if !reflect.DeepEqual(f.sleeps, []time.Duration{time.Second, time.Second, 6 * time.Second}) {
 		t.Fatal(f.sleeps)
 	}
-	for _, scope := range strings.Fields("repos:list boxes:list environments:list environments:read operations:list operations:read logs:read environments:create environments:start environments:stop") {
+	// A plain login asks for everything the CLI can do; --scope narrows it.
+	for _, scope := range strings.Fields("repos:list boxes:list environments:list environments:read operations:list operations:read logs:read environments:create environments:start environments:stop environments:destroy secrets:list secrets:write") {
 		if !slices.Contains(strings.Fields(f.requested), scope) {
 			t.Error("missing scope", scope)
 		}
-	}
-	if strings.Contains(f.requested, "destroy") {
-		t.Fatal(f.requested)
 	}
 	st, e := os.Stat(f.path("user"))
 	if e != nil || st.Mode().Perm() != 0600 {
