@@ -6,9 +6,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -214,5 +218,98 @@ func TestCompletionScriptsAndCandidates(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("completion waited on its input past the deadline")
+	}
+}
+
+// inEnvironment is the API as an environment's own socket serves it.
+func inEnvironment(t *testing.T) *[]string {
+	t.Helper()
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	t.Setenv("NO_COLOR", "")
+	t.Setenv("TERM", "xterm-256color")
+	dir, err := os.MkdirTemp("/tmp", "fmcmd")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(dir) })
+	path := filepath.Join(dir, "api.sock")
+	listener, err := net.Listen("unix", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var mu sync.Mutex
+	var asked []string
+	mux := http.NewServeMux()
+	note := func(r *http.Request) {
+		mu.Lock()
+		defer mu.Unlock()
+		body, _ := io.ReadAll(r.Body)
+		asked = append(asked, strings.TrimSpace(r.Method+" "+r.URL.Path+" "+string(body)))
+	}
+	mux.HandleFunc("/api/v1/me", func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprintf(w, `{"id":"acct-1","kind":"user","client_id":"foreman-environment","name":"ada","environment":{"id":%q,"name":"storefront-2"}}`, ownEnv)
+	})
+	mux.HandleFunc("/api/v1/environments/"+ownEnv+"/operations", func(w http.ResponseWriter, r *http.Request) {
+		note(r)
+		w.WriteHeader(http.StatusAccepted)
+		fmt.Fprintf(w, `{"environment_id":%q,"operation_id":"00000000-0000-4000-8000-000000000001"}`, ownEnv)
+	})
+	mux.HandleFunc("/api/v1/secrets/environment/"+ownEnv, func(w http.ResponseWriter, r *http.Request) {
+		note(r)
+		if r.Method == http.MethodPatch {
+			fmt.Fprint(w, `{"set":["TOKEN"],"unset":[],"affected":[]}`)
+			return
+		}
+		fmt.Fprint(w, `{"items":[{"name":"TOKEN","updated_at":"2026-11-24T12:00:00Z"}],"next_cursor":null}`)
+	})
+	server := &http.Server{Handler: mux}
+	go server.Serve(listener)
+	t.Cleanup(func() { server.Close() })
+	t.Setenv("FOREMAN_API_SOCKET", path)
+	return &asked
+}
+
+const ownEnv = "eeeeeeee-0000-4000-8000-111111111111"
+
+func TestInsideAnEnvironmentCommandsWorkWithNoLogin(t *testing.T) {
+	asked := inEnvironment(t)
+
+	me := at(t, true, "me")
+	for _, want := range []string{"ada, from inside environment storefront-2", "Environment:  " + ownEnv, "this environment only", "foreman --instance URL login"} {
+		if !strings.Contains(me, want) {
+			t.Fatalf("%q is missing from:\n%s", want, me)
+		}
+	}
+	var identity map[string]any
+	if err := json.Unmarshal([]byte(at(t, false, "me")), &identity); err != nil || identity["environment"].(map[string]any)["id"] != ownEnv {
+		t.Fatal(err, identity)
+	}
+
+	if out := at(t, false, "secrets", "list"); !strings.Contains(out, "TOKEN") {
+		t.Fatal(out)
+	}
+	at(t, false, "secrets", "set", "TOKEN=abc")
+	at(t, false, "env", "restart", "--no-wait")
+	at(t, false, "env", "stop", "--no-wait")
+
+	got := strings.Join(*asked, "\n")
+	for _, want := range []string{
+		"GET /api/v1/secrets/environment/" + ownEnv,
+		`PATCH /api/v1/secrets/environment/` + ownEnv + ` {"secrets":[{"name":"TOKEN","value":"abc"}]}`,
+		`POST /api/v1/environments/` + ownEnv + `/operations {"action":"restart_affected"}`,
+		`POST /api/v1/environments/` + ownEnv + `/operations {"action":"stop"}`,
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("%q was never asked:\n%s", want, got)
+		}
+	}
+}
+
+func TestHelpSaysWhatWorksInsideAnEnvironment(t *testing.T) {
+	if out := at(t, false, "--help"); !strings.Contains(out, "Inside a Foreman environment no login is needed") {
+		t.Fatal(out)
+	}
+	if out := at(t, false, "help", "secrets"); !strings.Contains(out, "Inside an environment") {
+		t.Fatal(out)
 	}
 }

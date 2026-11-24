@@ -88,6 +88,10 @@ defmodule Foreman.CLITestSupport do
           {~c"https_proxy", String.to_charlist(ctx.origin)},
           {~c"NO_PROXY", ~c"127.0.0.1,localhost,::1"},
           {~c"no_proxy", ~c"127.0.0.1,localhost,::1"}
+          | for(
+              {name, value} <- Map.get(ctx, :extra_env, []),
+              do: {String.to_charlist(name), String.to_charlist(value)}
+            )
         ]
       ])
 

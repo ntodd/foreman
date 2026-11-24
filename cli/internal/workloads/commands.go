@@ -44,6 +44,10 @@ type Options struct {
 	Now            func() time.Time // Defaults to time.Now.
 	Scopes         []string         // A nil grant leaves authorization to the server, including readiness reads.
 	PollInterval   time.Duration
+	// Environment is the ID of the environment the command runs inside, on
+	// that environment's own connection. A command that takes an
+	// environment and is given none means this one. Never destroy.
+	Environment string
 }
 
 // Failure is the final stderr document in JSON mode. Accepted IDs and the last
@@ -106,7 +110,7 @@ func Run(ctx context.Context, args []string, o Options) error {
 	if o.PollInterval <= 0 {
 		o.PollInterval = time.Second
 	}
-	v, err := parse(localArgs)
+	v, err := parse(localArgs, o.Environment)
 	if err == nil {
 		err = o.dispatch(ctx, v)
 	}
@@ -116,6 +120,9 @@ func Run(ctx context.Context, args []string, o Options) error {
 			_ = json.NewEncoder(o.Err).Encode(f)
 		} else {
 			fmt.Fprintln(o.Err, f.Error())
+			if o.Environment != "" && (f.HTTPStatus == 403 || f.Code == "forbidden") {
+				fmt.Fprintln(o.Err, insideOnly)
+			}
 			if f.EnvironmentID != "" {
 				fmt.Fprintln(o.Err, "Environment:", f.EnvironmentID)
 			}
@@ -134,7 +141,15 @@ func Run(ctx context.Context, args []string, o Options) error {
 	return nil
 }
 
+// An environment's own connection reaches that environment alone.
+const insideOnly = "Inside an environment, foreman reaches that environment alone.\nTo act as yourself: foreman --instance URL login"
+
 func (o Options) dispatch(ctx context.Context, v invocation) error {
+	// Refused here rather than by the control plane: a create first saves
+	// its request, and there is nowhere in an environment it belongs.
+	if o.Environment != "" && v.command == "env create" {
+		return &Failure{Code: "forbidden", Message: "An environment's own connection can't create environments."}
+	}
 	if takesEnvironment(v.command) && !uuidPattern.MatchString(v.arg) {
 		id, err := resolve(ctx, "environment", v.arg, o.environments, func(e api.Environment) (string, string) { return e.Slug, e.ID })
 		if err != nil {

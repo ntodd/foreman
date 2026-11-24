@@ -92,6 +92,28 @@ In a running environment new shells pick a change up once the box has written it
 
 Two limits to know. The default restart finds its services by the `$NAME` and `${NAME}` references in the compose files, so a service that receives a secret another way, such as a bare `NAME` in an `environment:` list, is not recreated. And once `--all` or a stop and start has run, Foreman counts the current values as applied and stops listing the environment as waiting, even though a container it did not recreate still has its old values. When in doubt, rebuild the environment from the browser.
 
+## Inside an environment
+
+`foreman` works inside an environment with no login. It reaches Foreman through the environment's box, acts as the environment's owner, and reaches that environment alone:
+
+```sh
+foreman me                      # who it acts as, and which environment this is
+foreman secrets set API_KEY     # asks for the value; sets it on this environment
+foreman secrets list
+foreman env restart             # recreate the services that use what changed
+foreman env show
+```
+
+The environment can be left out of a command, and secrets default to the environment's own. This is for a person at the environment's terminal, and for a coding agent running there, which can set a secret it was given and restart without holding anything that reaches further.
+
+What it can't do from inside: destroy the environment, create another, list repositories or boxes, see another environment, or touch your own, a repository's or an owner's secrets, even when you are an administrator. There is no token in the environment to copy out. Requests go over a socket at `/run/foreman/api.sock`, which only the environment's user can open, and the box says which environment is asking. A restart from inside uses the credentials the environment already had, and is refused once the connection that launched the environment has been revoked.
+
+`curl --unix-socket /run/foreman/api.sock http://localhost/api/v1/me` reaches the same API for a script that doesn't use the CLI.
+
+To act as yourself from inside an environment, log in there with `foreman --instance URL login`. That connection is used until `foreman logout`, which goes back to the environment's own.
+
+It needs an environment started by a box on a release with this feature, and a box that reaches its control plane over HTTPS (or `FOREMAN_RELAY_INSECURE=1` on the box, see the agent settings). An environment owned by a service account has no connection of its own.
+
 ## Update or disconnect
 
 Run `foreman update` to install the latest stable CLI release. An interactive command announces a newly available version once. Updating preserves your login, including personal connections saved by the checkout CLI. Run `foreman logout` to disconnect the selected account.

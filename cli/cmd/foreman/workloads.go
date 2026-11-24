@@ -36,9 +36,16 @@ func runWorkload(ctx context.Context, args []string, o options, stdout, stderr i
 	if err != nil {
 		return fail(stderr, o.json, err, "connection_error", 1)
 	}
+	// An environment's own connection has no saved permissions to read: the
+	// control plane says what it may do. A command there means that
+	// environment when it names none.
+	scopes, own := strings.Fields(s.Scope), ""
+	if s.Environment != nil {
+		scopes, own = nil, s.Environment.ID
+	}
 	err = workloads.Run(ctx, args, workloads.Options{
 		API: s.Client, StateDir: s.StateDir, Instance: s.Instance, Account: s.Account,
-		ClientID: session.ClientID, Scopes: strings.Fields(s.Scope),
+		ClientID: session.ClientID, Scopes: scopes, Environment: own,
 		In: os.Stdin, Out: stdout, Err: stderr, JSON: o.json, Interactive: !o.json && interactive(stdout, stderr),
 		Pretty: pretty(o, stdout), Colour: colour(o, stdout),
 	})

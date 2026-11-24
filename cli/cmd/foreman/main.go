@@ -57,6 +57,11 @@ to a newer environment after a destroy, so scripts should use IDs.
 Lifecycle commands wait by default. Use --no-wait for submission only
 or --timeout 30s to bound a wait.
 
+Inside a Foreman environment no login is needed. foreman acts as the
+environment's owner there and reaches that environment alone: ENV can be left
+out, secrets are the environment's own, and it can't be destroyed from inside.
+Log in there to act as yourself instead, and log out to go back.
+
 At a terminal, lists are aligned tables. Piped or redirected, they stay
 tab-separated with their original columns. Scripts should use --json.
 
@@ -354,12 +359,19 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	case "me":
 		var s *session.Session
 		if s, err = store.Open(ctx, o.instance, o.account); err == nil {
-			var reply *api.Response[api.Identity]
-			if reply, err = s.Client.GetIdentity(ctx); err == nil {
-				if pretty(o, stdout) {
-					_, err = fmt.Fprintf(stdout, "%s on %s\nAccount:      %s\nClient:       %s\nPermissions:  %s\n", named(reply.Value), s.Instance, reply.Value.ID, reply.Value.ClientID, permissions(s.Scope))
-				} else {
+			// An environment's own connection has asked already.
+			reply := s.Identity
+			if reply == nil {
+				reply, err = s.Client.GetIdentity(ctx)
+			}
+			if err == nil {
+				switch {
+				case !pretty(o, stdout):
 					err = json.NewEncoder(stdout).Encode(reply.Body)
+				case s.Environment != nil:
+					_, err = fmt.Fprintf(stdout, "%s, from inside environment %s\nAccount:      %s\nEnvironment:  %s\nPermissions:  this environment only: its state, logs and secrets, and stopping, starting and restarting it\nTo connect as yourself instead: foreman --instance URL login\n", named(reply.Value), environmentName(s), reply.Value.ID, s.Environment.ID)
+				default:
+					_, err = fmt.Fprintf(stdout, "%s on %s\nAccount:      %s\nClient:       %s\nPermissions:  %s\n", named(reply.Value), s.Instance, reply.Value.ID, reply.Value.ClientID, permissions(s.Scope))
 				}
 			}
 		}
@@ -377,6 +389,15 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		return fail(stderr, o.json, err, "connection_error", 1)
 	}
 	return 0
+}
+
+// environmentName is what to call the environment a command runs inside:
+// its name, or its ID when the control plane sent none.
+func environmentName(s *session.Session) string {
+	if s.Environment.Name != nil && *s.Environment.Name != "" {
+		return *s.Environment.Name
+	}
+	return s.Environment.ID
 }
 
 // named is what an identity is called: a name when the server gives one

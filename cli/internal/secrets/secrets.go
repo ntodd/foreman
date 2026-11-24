@@ -45,7 +45,14 @@ type Options struct {
 	Prompt func(name string) (string, error)
 	// ReadFile defaults to os.ReadFile.
 	ReadFile func(string) ([]byte, error)
+	// Environment is the environment the command runs inside, on that
+	// environment's own connection. With no level chosen, its secrets are
+	// the ones meant: the connection reaches no others.
+	Environment *Environment
 }
+
+// Environment names the environment a command runs inside.
+type Environment struct{ ID, Name string }
 
 // Failure is the final stderr document in JSON mode.
 type Failure struct {
@@ -139,6 +146,9 @@ func Run(ctx context.Context, args []string, o Options) error {
 		// A plain login asks for the secret permissions. A connection without
 		// them was narrowed with --scope or made by an older CLI.
 		fmt.Fprintln(o.Err, "Connect again for the permission: foreman login")
+	}
+	if o.Environment != nil && f.HTTPStatus == 403 {
+		fmt.Fprintln(o.Err, "Inside an environment, foreman manages that environment's secrets only.\nFor your own or a repository's, connect as yourself: foreman --instance URL login")
 	}
 	return f
 }
@@ -268,6 +278,9 @@ func (o Options) target(ctx context.Context, v invocation) (target, error) {
 	}
 	name, ok := v.flags["repo"]
 	if !ok {
+		if _, user := v.flags["user"]; !user && o.Environment != nil {
+			return target{"environment", o.Environment.ID, "this environment (" + o.Environment.Name + ")"}, nil
+		}
 		return target{"user", "me", "your own secrets"}, nil
 	}
 	if uuidPattern.MatchString(name) {

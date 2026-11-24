@@ -48,6 +48,9 @@ type Client struct {
 	discovered           map[string]string
 	token                func(context.Context) (string, error)
 	basicID, basicSecret string
+	// socket is set by NewSocketClient. Such a client never sends a
+	// credential, whatever it is given.
+	socket bool
 }
 
 func validURL(raw string) (*url.URL, error) {
@@ -89,6 +92,31 @@ func NewClient(instance string, h *http.Client) (*Client, error) {
 		client.Timeout = 20 * time.Second
 	}
 	return &Client{origin: origin, http: &client}, nil
+}
+
+// NewSocketClient talks to the API through a unix socket, as an environment
+// reaches it from inside: its box relays each request as that environment,
+// so there is no token to send and no instance to name. The host in a
+// request's URL is never resolved or dialled. Nothing that authenticates
+// goes this way: a bearer or basic credential given to the client is left
+// out, and a request to an OAuth endpoint is refused before it is sent.
+func NewSocketClient(path string) *Client {
+	transport := &http.Transport{
+		// The socket is the only way out: no proxy from the shell's settings.
+		Proxy: nil,
+		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+			var d net.Dialer
+			return d.DialContext(ctx, "unix", path)
+		},
+		// The other end serves one request to a connection.
+		DisableKeepAlives: true,
+	}
+	return &Client{socket: true, origin: "http://localhost", http: &http.Client{
+		Transport:     transport,
+		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+		// The box gives the control plane half a minute, and its guest a little longer.
+		Timeout: time.Minute,
+	}}
 }
 
 // CheckEndpoint checks even endpoints that are only displayed to the user.
@@ -164,7 +192,16 @@ func (b *refreshBody) abortFailedDial(err error) bool {
 	return errors.As(err, &op) && op.Op == "dial" && b.state.CompareAndSwap(refreshUnread, refreshAborted)
 }
 
+// ErrNoCredentials is returned when a request that carries or asks for a
+// credential is made of a client that reaches the API through a socket.
+var ErrNoCredentials = errors.New("an environment's own connection takes no login and sends no credentials")
+
 func call[T any](ctx context.Context, c *Client, s request) (*Response[T], error) {
+	// Only the resource API is there to ask: the OAuth endpoints and their
+	// discovery are for a login, which this connection has no use for.
+	if c.socket && (s.oauthOperation != "" || s.form != nil || s.basic || !strings.HasPrefix(s.path, "/api/v1/")) {
+		return nil, ErrNoCredentials
+	}
 	target := c.origin + s.path
 	if endpoint, ok := c.discovered[s.oauthOperation]; ok {
 		target = endpoint
@@ -212,14 +249,14 @@ func call[T any](ctx context.Context, c *Client, s request) (*Response[T], error
 	if s.key != "" {
 		req.Header.Set("Idempotency-Key", s.key)
 	}
-	if s.bearer && c.token != nil {
+	if s.bearer && c.token != nil && !c.socket {
 		token, err := c.token(ctx)
 		if err != nil {
 			return nil, err
 		}
 		req.Header.Set("Authorization", "Bearer "+token)
 	}
-	if s.basic && c.basicID != "" {
+	if s.basic && c.basicID != "" && !c.socket {
 		req.SetBasicAuth(c.basicID, c.basicSecret)
 	}
 	res, err := c.http.Do(req)
