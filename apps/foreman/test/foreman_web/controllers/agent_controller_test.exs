@@ -187,6 +187,8 @@ defmodule ForemanWeb.AgentControllerTest do
 
     # The same budget as enrollment: a token is a token.
     test "bad tokens count against the client's enroll attempts", %{conn: conn, public: public} do
+      within_one_window(60_000, 1_000)
+
       for _ <- 1..10 do
         post(again(conn), ~p"/agent/flatcar/ignition", %{
           "join_token" => "fj_nope",
