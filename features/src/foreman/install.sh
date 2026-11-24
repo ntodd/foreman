@@ -9,9 +9,12 @@
 #   - a login-shell hook that loads /run/foreman/secrets.env
 #   - git config that includes /run/foreman/gitconfig, and a credential
 #     helper (plus a gh wrapper) that read /run/foreman/github-token
+#   - the Foreman CLI, which reaches Foreman from inside the environment
+#     through /run/foreman/api.sock with no login
 set -eu
 
 TAILSCALE=${TAILSCALE:-true}
+CLI=${CLI:-true}
 ACCEPTDNS=${ACCEPTDNS:-true}
 DNSCHECKHOST=${DNSCHECKHOST:-}
 
@@ -31,6 +34,10 @@ install -m 0755 "$here/scripts/tailscale-up.sh" "$share/tailscale-up.sh"
 install -m 0755 "$here/scripts/git-credential-foreman" "$share/git-credential-foreman"
 install -m 0755 "$here/scripts/gh" "$share/bin/gh"
 install -m 0644 "$here/scripts/profile.sh" "$share/profile.sh"
+if [ "$CLI" = "true" ]; then
+  install -m 0755 "$here/scripts/install-cli" "$share/install-cli"
+  install -m 0755 "$here/scripts/foreman" "$share/bin/foreman"
+fi
 
 # Build-time options the entrypoint reads at runtime. The file is sourced
 # as root on every start, and a repo can set these options itself, so each
@@ -128,6 +135,49 @@ if [ "$TAILSCALE" = "true" ]; then
   rm -rf "$tmp"
   mkdir -p /var/lib/tailscale /var/run/tailscale
   echo "foreman: installed Tailscale $TS_VERSION ($arch)"
+fi
+
+# --- foreman CLI --------------------------------------------------------------
+# Installed for the user the devcontainer runs as, in their own
+# ~/.local/bin, so `foreman update` can replace it later: an image is only
+# as new as its last build. Never fatal: without it the launcher on PATH
+# installs it the first time `foreman` is run.
+# The installer fetches with curl, at build or the first time someone
+# runs foreman, so curl goes into the image whoever that turns out to be.
+ensure_curl() {
+  command -v curl >/dev/null 2>&1 && return 0
+  if command -v apt-get >/dev/null 2>&1; then
+    # The lists are removed either way, and that mustn't pass for success.
+    if apt-get update -y && apt-get install -y --no-install-recommends curl ca-certificates; then
+      installed=0
+    else
+      installed=1
+    fi
+    rm -rf /var/lib/apt/lists/*
+    return "$installed"
+  elif command -v apk >/dev/null 2>&1; then
+    apk add --no-cache curl ca-certificates
+  else
+    return 1
+  fi
+}
+
+install_cli() {
+  user=${_REMOTE_USER:-}
+  [ -n "$user" ] || return 1
+  id "$user" >/dev/null 2>&1 || return 1
+  if [ "$(id -u "$user")" = "$(id -u)" ]; then
+    HOME=${_REMOTE_USER_HOME:-$HOME} "$share/install-cli"
+  elif command -v su >/dev/null 2>&1; then
+    su "$user" -s /bin/sh -c "$share/install-cli"
+  else
+    return 1
+  fi
+}
+
+if [ "$CLI" = "true" ]; then
+  ensure_curl || echo "foreman: curl couldn't be installed; the CLI needs it to install, then or later"
+  install_cli || echo "foreman: the CLI will be installed the first time it's run"
 fi
 
 echo "foreman: feature installed"

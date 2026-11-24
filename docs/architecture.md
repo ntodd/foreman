@@ -301,6 +301,7 @@ The feature goes into the image, and the CLI builds the image only when it creat
   - Installs an `/etc/gitconfig` that includes `/run/foreman/gitconfig`.
   - Installs a git credential helper that reads `/run/foreman/github-token`.
   - Points `gh` at the same token file.
+- **Foreman CLI:** installs `foreman` for the devcontainer's user, in their own `~/.local/bin`, with a launcher on the login `PATH` that runs it and installs it first for a user who has none. It is the latest stable release from GitHub at the time, checked against the release's checksum manifest the way an instance's own installer does it. The copy is the user's and not the image's so `foreman update` can replace it: an image is only as new as its last build, and a prebuilt one older still. Inside an environment the CLI needs no login (see [Relayed API requests](#relayed-api-requests)). The feature's `cli` option turns it off.
 - **Ownership:** Tailscale bootstrap now belongs to the feature. Repo-level copies (`install-tailscale.sh`, `tailscale-up.sh`, the shared `devcontainer-authkey` mount) go away.
 
 ### Stop, restart, rebuild, destroy

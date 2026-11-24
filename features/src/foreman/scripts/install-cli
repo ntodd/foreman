@@ -1,0 +1,92 @@
+#!/bin/sh
+# Installs the Foreman CLI for the user running it, in ~/.local/bin: the
+# latest stable release from GitHub, checked against the release's own
+# checksum manifest, the way an instance's installer (/cli/install.sh)
+# does it. `foreman update` keeps it current from there, which is why it
+# is the user's own copy and not one in the image.
+#
+# Does nothing when the user already has one.
+set -eu
+
+fail() { echo "foreman: couldn't install the CLI: $*" >&2; exit 1; }
+
+# -q first disables .curlrc, including credentials and custom headers.
+fetch() {
+  curl -q -fsSL --connect-timeout 10 --max-time 120 --proto '=https' --proto-redir '=https' "$1" -o "$2"
+}
+
+digest() {
+  sum=$(sha256sum < "$1") || fail "cannot hash $1"
+  printf '%s\n' "${sum%% *}"
+}
+
+[ -n "${HOME:-}" ] || fail "HOME isn't set"
+bin="$HOME/.local/bin"
+binary="$bin/foreman"
+# The CLI is a regular file that can be run, itself and not a link to one:
+# the launcher and this script agree on that, before and after installing.
+runnable() { [ -f "$binary" ] && [ ! -L "$binary" ] && [ -x "$binary" ]; }
+taken() { [ -e "$binary" ] || [ -L "$binary" ]; }
+conflict() { fail "$binary exists and isn't a runnable CLI; remove it and run foreman again"; }
+
+# One that runs is left to `foreman update`. Anything else in its place
+# (a directory, a file that can't be run, a link) isn't ours to replace.
+if runnable; then exit 0; fi
+if taken; then conflict; fi
+
+command -v curl >/dev/null 2>&1 || fail "curl isn't installed; install it and run foreman again"
+command -v sha256sum >/dev/null 2>&1 || fail "sha256sum isn't installed"
+case $(uname -m) in
+  x86_64 | amd64) arch=amd64 ;;
+  aarch64 | arm64) arch=arm64 ;;
+  *) fail "supported CPUs are x86-64 and arm64" ;;
+esac
+
+umask 077
+case "${XDG_STATE_HOME:-}" in /*) state_base=$XDG_STATE_HOME ;; *) state_base=$HOME/.local/state ;; esac
+state="$state_base/foreman/cli-update"
+mkdir -p "$bin" "$state" || fail "cannot create $bin"
+stage=$(mktemp -d "$bin/.foreman-install.XXXXXXXX") || fail "cannot write to $bin"
+trap 'rm -rf "$stage"' EXIT
+trap 'exit 1' HUP INT TERM
+
+# GitHub answers /releases/latest with a redirect to the release's own
+# page, whose last path component is the tag.
+latest=$(curl -q -fsSLI --connect-timeout 10 --max-time 30 --proto '=https' --proto-redir '=https' \
+  -o /dev/null -w '%{url_effective}' https://github.com/ntodd/foreman/releases/latest) ||
+  fail "cannot discover the current release"
+tag=${latest##*/}
+# A single safe path component, whatever came back.
+case "$tag" in *[!v0-9.]*) fail "invalid release tag" ;; esac
+printf '%s\n' "$tag" | grep -Eq '^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$' || fail "invalid release tag"
+
+base="https://github.com/ntodd/foreman/releases/download/$tag"
+name="foreman-cli-$tag-linux-$arch.tar.gz"
+fetch "$base/foreman-cli-$tag-SHA256SUMS" "$stage/sums" || fail "cannot download the checksum manifest"
+expected=$(awk -v name="$name" 'NF == 2 && $2 == name {n++; sum=$1} END {if (n != 1) exit 1; print tolower(sum)}' "$stage/sums") ||
+  fail "missing or duplicate checksum for $name"
+fetch "$base/$name" "$stage/archive" || fail "cannot download $name"
+[ "$expected" = "$(digest "$stage/archive")" ] || fail "SHA-256 verification failed for $name"
+tar -tzf "$stage/archive" > "$stage/list" || fail "cannot read the archive"
+[ "$(cat "$stage/list")" = foreman ] || fail "expected a single foreman executable in $name"
+tar -tvzf "$stage/archive" > "$stage/details" || fail "cannot read the archive"
+case $(cat "$stage/details") in -*) ;; *) fail "expected a regular file in $name" ;; esac
+tar -xOzf "$stage/archive" foreman > "$stage/foreman" || fail "cannot unpack $name"
+[ -s "$stage/foreman" ] || fail "invalid CLI executable"
+chmod 755 "$stage/foreman"
+
+# The receipt `foreman update` looks for before it will replace a binary.
+hash=$(digest "$stage/foreman")
+receipt=$(mktemp "$state/.version.XXXXXXXX")
+trap 'rm -rf "$stage"; rm -f "$receipt"' EXIT
+printf '%s\n' "$tag" > "$receipt"
+mv -f "$receipt" "$state/$hash.version"
+# A link publishes the whole executable at once. Losing a race to another
+# install leaves that one's binary in place, which is as good.
+#
+# Something that appeared at the path meanwhile and isn't the CLI is a
+# conflict: `ln` into a directory there would succeed and install nothing.
+if taken && ! runnable; then conflict; fi
+ln "$stage/foreman" "$binary" 2>/dev/null || runnable || fail "cannot install $binary"
+runnable || conflict
+echo "foreman: installed the CLI ($tag) in $binary"

@@ -1299,14 +1299,14 @@ defmodule ForemanAgent.EnvTest do
     end
 
     test "is read from the feature the agent ships", %{config: config, tmp_dir: tmp} do
-      assert Config.feature_version(config) == "1.1.0"
+      assert Config.feature_version(config) == "1.2.0"
       assert Config.feature_version(%{config | feature_dir: feature_at(tmp, "2.0.0")}) == "2.0.0"
       assert Config.feature_version(%{config | feature_dir: Path.join(tmp, "missing")}) == nil
     end
 
     test "a create reports the version it built with", %{ctx: ctx} do
       stub_tools()
-      assert {:ok, %{"feature_version" => "1.1.0"}} = Env.run("env.create", payload(), ctx)
+      assert {:ok, %{"feature_version" => "1.2.0"}} = Env.run("env.create", payload(), ctx)
     end
 
     test "a rebuild reports the version it built with", %{ctx: ctx, tmp_dir: tmp} do
@@ -1323,7 +1323,7 @@ defmodule ForemanAgent.EnvTest do
       {:ok, _} = Env.run("env.create", payload(), ctx)
       _ = runs()
 
-      assert {:ok, %{"feature_version" => "1.1.0"}} =
+      assert {:ok, %{"feature_version" => "1.2.0"}} =
                Env.run("env.start", start_payload(), with_feature(ctx, tmp, "1.2.0"))
 
       refute rebuilt?()
@@ -1361,7 +1361,7 @@ defmodule ForemanAgent.EnvTest do
       {:ok, _} = Env.run("env.create", payload(), with_feature(ctx, tmp, "1.0.0"))
       _ = runs()
 
-      assert {:ok, %{"feature_version" => "1.1.0"}} = Env.run("env.start", start_payload(), ctx)
+      assert {:ok, %{"feature_version" => "1.2.0"}} = Env.run("env.start", start_payload(), ctx)
       assert rebuilt?()
       assert Enum.any?(logged(), &(&1 =~ "older Foreman feature"))
 
@@ -1376,7 +1376,7 @@ defmodule ForemanAgent.EnvTest do
       update_container(&%{&1 | label: nil})
       _ = runs()
 
-      assert {:ok, %{"feature_version" => "1.1.0"}} = Env.run("env.start", start_payload(), ctx)
+      assert {:ok, %{"feature_version" => "1.2.0"}} = Env.run("env.start", start_payload(), ctx)
       assert rebuilt?()
     end
 
@@ -1468,7 +1468,7 @@ defmodule ForemanAgent.EnvTest do
       {:ok, _} = Env.run("env.create", payload(), with_feature(ctx, tmp, "1.0.0"))
       _ = runs()
 
-      assert {:ok, %{"restarted" => ["app"], "feature_version" => "1.1.0", "container_id" => id}} =
+      assert {:ok, %{"restarted" => ["app"], "feature_version" => "1.2.0", "container_id" => id}} =
                Env.run("env.restart", restart_payload("affected", []), ctx)
 
       assert id == Agent.get(fake_containers(), & &1.id)
@@ -1484,7 +1484,7 @@ defmodule ForemanAgent.EnvTest do
       {:ok, _} = Env.run("env.create", payload(), ctx)
 
       assert {:ok,
-              %{"restarted" => "all", "feature_version" => "1.1.0", "container_id" => "abc123"}} =
+              %{"restarted" => "all", "feature_version" => "1.2.0", "container_id" => "abc123"}} =
                Env.run("env.restart", restart_payload("all", []), ctx)
     end
 
@@ -1496,7 +1496,7 @@ defmodule ForemanAgent.EnvTest do
       {:ok, _} = Env.run("env.stop", %{env_id: @env_id, slug: "storefront-2"}, ctx)
       _ = runs()
 
-      assert {:ok, %{"feature_version" => "1.1.0"}} =
+      assert {:ok, %{"feature_version" => "1.2.0"}} =
                Env.run("env.rebuild", Map.put(payload(), :pull, true), ctx)
 
       assert [start, rebuild] = for({"devcontainer", params, _} <- runs(), do: params)
