@@ -1458,6 +1458,40 @@ defmodule ForemanAgent.GuestChannelTest do
       assert reason in [:not_connected, :busy]
     end
 
+    # The box reconnects the moment the old connection is gone, which can
+    # be before the guest's server has heard that its session ended.
+    test "a connection accepted over a session that just ended doesn't take the server down",
+         ctx do
+      %{server: server} = start_guest_agent(ctx)
+
+      connect = fn ->
+        {:ok, host} =
+          :gen_tcp.connect({:local, ctx.guest}, 0, [:binary, active: false, packet: 4], 2_000)
+
+        host
+      end
+
+      _first = connect.()
+      wait_until(fn -> :sys.get_state(server).session != nil end)
+      old = :sys.get_state(server).session
+
+      # The next connection is accepted, and asked about, before the server
+      # reads that the old session is down.
+      :sys.suspend(server)
+      second = connect.()
+      Process.sleep(50)
+      Process.exit(old, :kill)
+      Process.sleep(50)
+      :sys.resume(server)
+
+      wait_until(fn -> :sys.get_state(server).session not in [nil, old] end)
+      assert Process.alive?(server)
+
+      :ok = :gen_tcp.send(second, Channel.encode(%{"t" => "hello", "now" => Channel.now()}))
+      assert {:ok, data} = :gen_tcp.recv(second, 0, 5_000)
+      assert {:ok, %{"t" => "hello"}} = Channel.decode(data)
+    end
+
     test "a new connection starts with nothing held by the last one's requests", ctx do
       %{server: server} = start_guest_agent(ctx)
       request = %{"method" => "GET", "target" => "/api/v1/me"}

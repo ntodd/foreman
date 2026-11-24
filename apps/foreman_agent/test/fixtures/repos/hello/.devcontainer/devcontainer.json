@@ -5,6 +5,10 @@
   "service": "app",
   "workspaceFolder": "/workspaces/${localWorkspaceFolderBasename}",
   "remoteUser": "vscode",
+  // What a lifecycle command gets of the environment's secrets: they reach
+  // it through the user's login shell, which the agent reads before it
+  // runs anything.
+  "onCreateCommand": "printf %s \"${HELLO_SECRET:-unset}\" > /tmp/on-create-secret",
   "postStartCommand": "date +%s%N >> /tmp/poststart.log",
   // Runs outside the containers: in the environment's VM.
   "initializeCommand": "touch .initialized",

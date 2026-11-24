@@ -26,7 +26,8 @@ defmodule ForemanAgent.Runner.Local do
         keep = Keyword.get(opts, :keep, @default_keep)
         on_output = Keyword.get(opts, :on_output, fn _ -> :ok end)
 
-        collector = %Collector{keep: keep, on_output: on_output}
+        raw = Keyword.get(opts, :raw, false)
+        collector = %Collector{keep: keep, on_output: on_output, raw: raw}
 
         cmd_opts =
           [

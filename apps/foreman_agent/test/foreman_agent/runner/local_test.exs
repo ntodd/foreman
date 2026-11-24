@@ -146,4 +146,26 @@ defmodule ForemanAgent.Runner.LocalTest do
       assert is_binary(seen["PATH"])
     end
   end
+
+  # A caller that parses output (a shell's environment, NUL-separated) asks
+  # for it as it came. Everyone else gets text the control plane can take.
+  test "kept output is made valid text unless asked for raw; the callback always is" do
+    test = self()
+    script = "printf 'A=1\\0B=two words\\0C=\\377x\\0'"
+
+    assert {:ok, %{status: 0, output: shown}} =
+             Local.run("sh", ["-c", script], on_output: &send(test, {:out, &1}))
+
+    refute shown =~ <<0>>
+    assert String.valid?(shown)
+    assert_received {:out, heard}
+    assert heard == shown
+
+    assert {:ok, %{status: 0, output: raw}} =
+             Local.run("sh", ["-c", script], raw: true, on_output: &send(test, {:out, &1}))
+
+    assert raw == <<"A=1", 0, "B=two words", 0, "C=", 255, "x", 0>>
+    assert_received {:out, heard}
+    assert heard == shown
+  end
 end

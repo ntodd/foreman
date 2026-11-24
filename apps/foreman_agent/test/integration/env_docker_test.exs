@@ -229,6 +229,11 @@ defmodule ForemanAgent.Integration.EnvDockerTest do
     # -- secrets, identity and the feature ----------------------------------
     app1 = c1["app"]["Id"]
     assert {"first value\n", 0} = exec(app1, ["bash", "-lc", "echo \"$HELLO_SECRET\""])
+
+    # A lifecycle command has them too, without sourcing anything itself:
+    # a repo's own setup (registering a private package registry, say)
+    # reads them from its environment.
+    assert {"first value", 0} = exec(app1, ["cat", "/tmp/on-create-secret"])
     assert {"test@example.com\n", 0} = exec(app1, ["git", "config", "user.email"])
     assert {version, 0} = exec(app1, ["tailscale", "version"])
     assert version =~ ~r/^1\.\d+/

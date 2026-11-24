@@ -53,7 +53,14 @@ defmodule ForemanAgent.Guest.Session do
 
   def go(pid), do: send(pid, :go)
 
-  def close(pid), do: GenServer.stop(pid, :normal)
+  # One that has already ended is closed. The box reconnects the moment its
+  # old connection is gone, which can be before whoever holds this session
+  # has heard that it stopped.
+  def close(pid) do
+    GenServer.stop(pid, :normal)
+  catch
+    :exit, _ -> :ok
+  end
 
   @doc """
   Asks the box, through `session` and within its `budget/0`, to relay a
