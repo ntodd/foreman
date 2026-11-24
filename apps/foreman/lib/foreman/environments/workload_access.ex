@@ -74,7 +74,7 @@ defmodule Foreman.Environments.WorkloadAccess do
              {:ok, workspaces} <- workspace_access(origin, env, mode, workspaces),
              true <- launchable?(op, env, origin || actor),
              :ok <- automatic_scope(op, origin),
-             {:ok, policy, secondaries} <- policy(origin || actor, env, mode),
+             {:ok, policy, secondaries} <- policy(origin || credentials(actor), env, mode),
              true <- still_active?(actor) and still_active?(origin) do
           {:ok, %{policy: policy, workspaces: workspaces, secondaries: secondaries}}
         else
@@ -173,7 +173,10 @@ defmodule Foreman.Environments.WorkloadAccess do
   # An independently authorized personal start may take over an existing workspace.
   # The source of every request and the creator's grant remain on their original rows.
   # A restart starts the workspace again, on the same footing.
-  defp owner(%{action: action}, env, %{kind: :user} = actor)
+  #
+  # Not the environment's own connection: what it asks runs on the
+  # authority the workspace already has, or not at all.
+  defp owner(%{action: action}, env, %{kind: :user, environment_id: nil} = actor)
        when action in ["start", "secrets_write", "restart_affected", "restart_all"] and
               actor.user.id == env.user_id,
        do: {:ok, actor}
@@ -252,6 +255,12 @@ defmodule Foreman.Environments.WorkloadAccess do
     do: scope?(principal, "stop") and scope?(principal, "start")
 
   defp scope?(_principal, _action), do: false
+
+  # With no grant behind the workspace, its credentials are its owner's,
+  # as when the owner asks from the browser. The environment's own
+  # connection reaches no repository, and isn't what they're made from.
+  defp credentials(%{environment_id: id}) when not is_nil(id), do: nil
+  defp credentials(actor), do: actor
 
   defp policy(nil, _env, _mode), do: {:ok, nil, %{}}
   defp policy(%{kind: :browser}, _env, _mode), do: {:ok, nil, %{}}

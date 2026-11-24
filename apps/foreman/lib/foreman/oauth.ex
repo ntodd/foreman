@@ -3,7 +3,7 @@ defmodule Foreman.OAuth do
   import Ecto.Query
 
   alias Foreman.{Accounts, Audit, Repo}
-  alias Foreman.OAuth.{Client, Device, Grant, Principal, Store, Token}
+  alias Foreman.OAuth.{Client, Device, EnvironmentConnection, Grant, Principal, Store, Token}
 
   @access_seconds 900
   @refresh_days 90
@@ -59,6 +59,11 @@ defmodule Foreman.OAuth do
       is_nil(user) or not is_nil(user.disabled_at) ->
         :error
 
+      # An environment's own grant lasts as long as the environment does,
+      # and only for the owner it was made for.
+      grant.environment_id && not EnvironmentConnection.live?(grant) ->
+        :error
+
       not user.service_account and Accounts.access(user) == :denied ->
         Accounts.revoke_access(user, "no longer allowed to use the API")
         :error
@@ -70,7 +75,8 @@ defmodule Foreman.OAuth do
            kind: if(user.service_account, do: :service_account, else: :user),
            grant_id: grant.id,
            client_id: grant.client_id,
-           scopes: grant.scopes
+           scopes: grant.scopes,
+           environment_id: grant.environment_id
          }}
     end
   end
@@ -204,7 +210,9 @@ defmodule Foreman.OAuth do
   def connections(user_id) do
     Repo.all(
       from g in live_grants(),
-        where: g.user_id == ^user_id,
+        # An environment's own grant is Foreman's to manage, not an app
+        # the user connected.
+        where: g.user_id == ^user_id and is_nil(g.environment_id),
         preload: [:client],
         order_by: [desc: g.inserted_at]
     )

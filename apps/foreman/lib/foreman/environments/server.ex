@@ -246,7 +246,11 @@ defmodule Foreman.Environments.Server do
     WorkloadAccess.deliver(op, env, policy, phase, fn current ->
       with :ok <- Agents.dispatch(current.box_id, cmd) do
         remember_enrollment(cmd.payload, current)
-        bind_workload_grant(op, current)
+        # An environment's own connection asks; it never becomes what the
+        # environment runs on (`Foreman.OAuth.EnvironmentConnection`).
+        unless Foreman.OAuth.EnvironmentConnection.grant?(op.api_grant_id),
+          do: bind_workload_grant(op, current)
+
         :ok
       end
     end)

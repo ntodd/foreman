@@ -284,7 +284,7 @@ defmodule ForemanWeb.PublicReadController do
         conn,
         403,
         "forbidden",
-        "Secrets are managed through a personal connection, and a repository's or an owner's take an admin."
+        Foreman.PublicAPI.Secrets.role_message(conn.assigns.api_principal)
       )
 
   defp respond(conn, {:error, :cursor}),

@@ -143,6 +143,16 @@ One devcontainer compose project, plus a Foreman overlay and the Foreman devcont
 
 Distributed Erlang is not used between the control plane and agents. It is a full-trust mesh, so any connected node could run code on any other.
 
+### Relayed API requests
+
+An environment reaches the public API from inside itself through its box, with no token of its own. The box sends each request over HTTP to `/api/agents/relay/v1/…`, which mounts the same routes as `/api/v1`, and signs it with its enrolled key (`ForemanProtocol.Auth.relay_headers/4`). The signature covers the environment the request is for, the method as sent, the path and query, the body's SHA-256 and the idempotency key or the lack of one, with a timestamp and a nonce. It is good for that one request: the control plane refuses a signature that is stale, made for a different request, or for an environment the box doesn't run, and it accepts each nonce once. Accepted nonces are kept in the database (`relay_nonces`), by the request's own timestamp, so a control plane that restarts, or a second one, refuses a replay too. A relay signature opens nothing under `/api/v1`, and a bearer token opens nothing under the relay.
+
+The request then acts as the environment's owner on a grant made for that environment (`Foreman.OAuth.EnvironmentConnection`). The grant reaches that environment and nothing else of the owner's: its state, operations and logs, its own secrets, and stopping, starting and restarting it. It can't destroy the environment, create another, list repositories or boxes, or touch user, repository or owner secrets, whatever the owner's role. No token is issued for it. It ends when the environment is destroyed or its owner is disabled or loses access, and a service account's environment has none.
+
+Who asked for a state and whose authority supplies an environment's credentials are two things, and this grant can only be the first. A stop or a start asked from inside is recorded as the grant's request, so a later repair of that state is authorized the way the request was. The grant is never recorded as the one an environment runs on, never takes a workspace over from the connection that launched it, and isn't what its credentials are made from. So a restart from inside runs with the credentials the environment already had, and is refused once the connection that launched it has been revoked. An environment can't renew its own access.
+
+A box can only ever speak for its own environments, which it already runs and whose secrets it already holds. A request a box signed counts against that box's allowance for that environment, then the box's own, before anything is looked up for it. One environment can't use up its box's allowance, and a box can't spend an allowance on another box's account. Unsigned requests count against the address they came from, as refused agent connects do.
+
 ### Messages
 
 Each agent joins topic `agent:<agent_id>`. Commands are a fixed vocabulary; there is no generic `exec`.

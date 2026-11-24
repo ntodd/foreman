@@ -443,6 +443,14 @@ components:
         kind: {type: string, enum: [user, service_account]}
         client_id: {type: string}
         name: {type: string, description: "A user's GitHub login, or the name an administrator gave a service account."}
+        environment: {$ref: '#/components/schemas/OwnEnvironment'}
+    OwnEnvironment:
+      type: object
+      description: "Present on an identity when the request came from inside an environment, relayed by its box. The connection acts as the environment's owner and reaches this environment alone."
+      required: [id]
+      properties:
+        id: {$ref: '#/components/schemas/Id'}
+        name: {type: string}
     Repository:
       type: object
       required: [id, full_name, default_branch]

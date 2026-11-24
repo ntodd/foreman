@@ -274,7 +274,7 @@ defmodule Foreman.PublicAPI.Mutations do
         accepted_existing(actor, env, action, nil)
 
       true ->
-        with :ok <- admit_action(env, input) do
+        with :ok <- admitted(actor, admit_action(env, input)) do
           {:ok, op} =
             Environments.queue_action(
               Scope.for_user(actor.user),
@@ -290,6 +290,14 @@ defmodule Foreman.PublicAPI.Mutations do
         end
     end
   end
+
+  # Why a start can't be admitted names the box, what its VMs report and
+  # how full it is. That is its owner's to read, on a connection of their
+  # own, and not something an environment learns about its host.
+  defp admitted(%Principal{environment_id: id}, {:error, _code, _message}) when not is_nil(id),
+    do: {:error, :start_unavailable, "The environment can't be started right now."}
+
+  defp admitted(_actor, result), do: result
 
   # A restart is its own transition: it follows only the same restart
   # already in flight, and conflicts with anything else that is moving,
