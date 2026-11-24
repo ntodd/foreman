@@ -34,9 +34,20 @@ After device login, run these commands from any directory.
 foreman repo list
 foreman box list
 foreman env create acme/payments --branch topic --timeout 15m
-foreman env show "$ENV_ID"
-foreman op list "$ENV_ID"
+foreman env list
+foreman env show payments-you-1
+foreman op list payments-you-1
 foreman op logs "$OP_ID" --follow
+```
+
+Commands that act on an environment take its name, as `env list` shows it, or its UUID. An operation is always given by UUID. A name can pass to a newer environment once the old one is destroyed, so use UUIDs in scripts. `env destroy` by name always asks for confirmation; `--yes` works with a UUID. Changing an environment's secrets by name works at a terminal; in a script, give `--env` the UUID.
+
+At a terminal, lists are aligned tables: the name first, one status per environment, relative times and the ID last. Piped or redirected, they stay tab-separated with their original columns. Use `--json` in scripts.
+
+For tab completion of commands, options and the names of your environments, repositories and boxes, install the script for your shell. `foreman help completion` lists where each one goes. Completion never refreshes the connection itself, so names complete while the access token is fresh: up to fifteen minutes after you log in or a command refreshes it.
+
+```sh
+foreman completion zsh > ~/.zfunc/_foreman
 ```
 
 `env create` accepts a repository UUID or an exact owner/name. Omit `--branch` to use the repository default. Omit `--box` for automatic placement, or supply a box UUID or exact name. With a create-only grant, use UUIDs and add `--no-wait`. To request expiry, supply both `--expires-at` with an absolute RFC 3339 timestamp and `--on-expiry stop` or `--on-expiry destroy`.

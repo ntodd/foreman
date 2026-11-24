@@ -267,13 +267,26 @@ func (o Options) submitSaved(ctx context.Context, j *journal, r *record, result 
 
 func (o Options) operate(ctx context.Context, v invocation, action string) (submission, error) {
 	result := submission{EnvironmentID: v.arg}
+	if action == "destroy" {
+		// A name passes to the next environment that takes it. A command
+		// saved and run again would then remove a disk its author never saw,
+		// so a name destroys only when a person confirms what it found.
+		unattended := v.flags["yes"] != "" || !o.Interactive || o.JSON || o.In == nil
+		if v.name != "" && unattended {
+			return result, &Failure{Code: "confirmation_required", Message: "A name can pass to a newer environment, so destroying by name asks for confirmation at a terminal. To destroy without being asked, use the environment's ID with --yes.", EnvironmentID: v.arg}
+		}
+	}
 	if action == "destroy" && v.flags["yes"] == "" {
-		confirmed, err := o.confirm(ctx, "Destroy environment "+v.arg+" and remove its disk?")
+		subject, declined := v.arg, "Destroy requires confirmation. Use --yes to confirm destruction."
+		if v.name != "" {
+			subject, declined = v.name+" ("+v.arg+")", "Destroy was not confirmed."
+		}
+		confirmed, err := o.confirm(ctx, "Destroy environment "+subject+" and remove its disk?")
 		if err != nil {
 			return result, attach(err, result)
 		}
 		if !confirmed {
-			return result, &Failure{Code: "confirmation_required", Message: "Destroy requires confirmation. Use --yes to confirm destruction.", EnvironmentID: v.arg}
+			return result, &Failure{Code: "confirmation_required", Message: declined, EnvironmentID: v.arg}
 		}
 	}
 	body := api.Action{Action: action}

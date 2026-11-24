@@ -34,6 +34,12 @@ defmodule ForemanWeb.PublicReadControllerTest do
     json_response(apply(PublicReadController, action, [conn, params]), status)
   end
 
+  test "an environment says when it was created", ctx do
+    created = DateTime.to_iso8601(Repo.reload!(ctx.env).inserted_at)
+    assert read(ctx.principal, :environment, %{"id" => ctx.env.id})["created_at"] == created
+    assert [%{"created_at" => ^created}] = read(ctx.principal, :environments)["items"]
+  end
+
   test "denial during reconnect remains an authorization failure on public reads", ctx do
     {_actor, grant} =
       Foreman.PublicAPIMutationFixtures.principal(ctx.principal.user, ["environments:start"])

@@ -21,8 +21,31 @@ var commandFlags = map[string]string{
 	"op list": "", "op show": "", "op wait": "timeout", "op logs": "cursor follow timeout",
 }
 
+// A name is an environment's slug.
+var namePattern = regexp.MustCompile(`^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$`)
+
+// takesEnvironment is true for commands whose argument is an environment,
+// given by name or ID. An operation only has an ID.
+func takesEnvironment(command string) bool {
+	switch command {
+	case "env show", "env start", "env stop", "env restart", "env destroy", "op list":
+		return true
+	}
+	return false
+}
+
+// Flags lists the options a command takes, as a shell completes them.
+func Flags(command string) []string {
+	var flags []string
+	for _, name := range strings.Fields(commandFlags[command]) {
+		flags = append(flags, "--"+name)
+	}
+	return flags
+}
+
 type invocation struct {
 	command, arg string
+	name         string // The environment name arg was resolved from, if it was one.
 	flags        map[string]string
 	timeout      time.Duration
 }
@@ -101,8 +124,16 @@ func parse(args []string) (invocation, error) {
 	}
 	if want == 1 {
 		v.arg = positional[0]
-		if strings.TrimSpace(v.arg) == "" || (v.command != "env create" && !uuidPattern.MatchString(v.arg)) {
+		switch {
+		case v.command == "env create":
+			if strings.TrimSpace(v.arg) == "" {
+				return v, invalid("Supply a repository for %s.", v.command)
+			}
+		case uuidPattern.MatchString(v.arg):
+		case !takesEnvironment(v.command):
 			return v, invalid("Supply a valid resource ID for %s.", v.command)
+		case !namePattern.MatchString(v.arg):
+			return v, invalid("Supply an environment name or ID for %s.", v.command)
 		}
 	}
 	if duration := v.flags["timeout"]; duration != "" {

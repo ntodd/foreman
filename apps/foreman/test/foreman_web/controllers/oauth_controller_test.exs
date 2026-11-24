@@ -173,7 +173,9 @@ defmodule ForemanWeb.OAuthControllerTest do
     assert id == owner.id
     assert bearer(conn, first["access_token"]).assigns.api_principal == p1
 
-    assert %{"id" => ^id, "kind" => "user", "client_id" => @client} =
+    login = owner.login
+
+    assert %{"id" => ^id, "kind" => "user", "client_id" => @client, "name" => ^login} =
              json_response(bearer(conn, first["access_token"]), 200)
 
     assert get(log_in(conn, owner), "/settings/connections").resp_body =~ "Foreman CLI"
@@ -244,6 +246,12 @@ defmodule ForemanWeb.OAuthControllerTest do
              OAuth.authenticate(service["access_token"])
 
     assert p.user.id != installer.id and p.user.service_account
+
+    # A service account goes by the name its administrator gave it.
+    assert %{"kind" => "service_account", "name" => name} =
+             json_response(bearer(conn, service["access_token"]), 200)
+
+    assert name == p.user.name
     assert {:ok, full} = ServiceAccounts.principal_for_user(p.user.id)
     assert full.grant_id == grant.id
     assert full.scopes == attrs["scopes"]

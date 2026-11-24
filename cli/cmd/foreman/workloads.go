@@ -11,9 +11,20 @@ import (
 	"golang.org/x/term"
 )
 
-func terminal(stream any) bool {
+// isTerminal is a variable so a test can stand in for a terminal.
+var isTerminal = func(stream any) bool {
 	file, ok := stream.(*os.File)
 	return ok && term.IsTerminal(int(file.Fd()))
+}
+
+func terminal(stream any) bool { return isTerminal(stream) }
+
+// pretty is true when a person reads standard output. A pipe, a file and
+// --json keep the formats scripts depend on.
+func pretty(o options, stdout io.Writer) bool { return !o.json && terminal(stdout) }
+
+func colour(o options, stdout io.Writer) bool {
+	return pretty(o, stdout) && os.Getenv("NO_COLOR") == "" && os.Getenv("TERM") != "dumb"
 }
 
 func interactive(stdout, stderr io.Writer) bool {
@@ -29,6 +40,7 @@ func runWorkload(ctx context.Context, args []string, o options, stdout, stderr i
 		API: s.Client, StateDir: s.StateDir, Instance: s.Instance, Account: s.Account,
 		ClientID: session.ClientID, Scopes: strings.Fields(s.Scope),
 		In: os.Stdin, Out: stdout, Err: stderr, JSON: o.json, Interactive: !o.json && interactive(stdout, stderr),
+		Pretty: pretty(o, stdout), Colour: colour(o, stdout),
 	})
 	if err != nil {
 		return 1

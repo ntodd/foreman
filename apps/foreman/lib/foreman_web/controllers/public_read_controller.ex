@@ -10,7 +10,7 @@ defmodule ForemanWeb.PublicReadController do
 
   @page_size 50
   @environment_fields ~w(id slug repo_id branch box_id desired_state observed_state)a
-  @observations ~w(expiry_at expiry_action workspace_container_id created_once tailscale_device_id remote_user workspace_folder)a
+  @observations ~w(inserted_at expiry_at expiry_action workspace_container_id created_once tailscale_device_id remote_user workspace_folder)a
   @operation_fields ~w(id environment_id action trigger status error timeout_error workload_denied inserted_at finished_at log_truncated)a
 
   def repos(conn, params) do
@@ -215,7 +215,11 @@ defmodule ForemanWeb.PublicReadController do
   end
 
   defp environment_json(env, principal) do
-    row = Map.take(env, @environment_fields) |> Map.put(:readiness, Readiness.get(env))
+    row =
+      env
+      |> Map.take(@environment_fields)
+      |> Map.put(:readiness, Readiness.get(env))
+      |> Map.put(:created_at, env.inserted_at)
 
     row =
       if env.expiry_at && env.expiry_action,

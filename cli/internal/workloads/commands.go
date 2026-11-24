@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/ntodd/foreman/cli/api"
+	"github.com/ntodd/foreman/cli/internal/render"
 )
 
 // API is the subset of the generated v1 client used by workload commands.
@@ -37,8 +38,12 @@ type Options struct {
 	In                                    io.Reader
 	Out, Err                              io.Writer
 	JSON, Interactive                     bool
-	Scopes                                []string // A nil grant leaves authorization to the server, including readiness reads.
-	PollInterval                          time.Duration
+	// Pretty lays lists out for a person: standard output is a terminal and
+	// --json is off. Anything else gets the tab-separated lines scripts read.
+	Pretty, Colour bool
+	Now            func() time.Time // Defaults to time.Now.
+	Scopes         []string         // A nil grant leaves authorization to the server, including readiness reads.
+	PollInterval   time.Duration
 }
 
 // Failure is the final stderr document in JSON mode. Accepted IDs and the last
@@ -130,33 +135,48 @@ func Run(ctx context.Context, args []string, o Options) error {
 }
 
 func (o Options) dispatch(ctx context.Context, v invocation) error {
+	if takesEnvironment(v.command) && !uuidPattern.MatchString(v.arg) {
+		id, err := resolve(ctx, "environment", v.arg, o.environments, func(e api.Environment) (string, string) { return e.Slug, e.ID })
+		if err != nil {
+			return err
+		}
+		v.name, v.arg = v.arg, id
+	}
 	switch v.command {
 	case "repo list":
 		rows, err := collect(ctx, o.repos)
 		if err != nil {
 			return err
 		}
-		return printList(o, rows, "ID\tREPOSITORY\tDEFAULT BRANCH", func(r api.Repository) string { return r.ID + "\t" + r.FullName + "\t" + r.DefaultBranch })
+		return list(o, rows, view[api.Repository]{
+			tabs: "ID\tREPOSITORY\tDEFAULT BRANCH", line: func(r api.Repository) string { return r.ID + "\t" + r.FullName + "\t" + r.DefaultBranch },
+			header: []string{"REPOSITORY", "DEFAULT BRANCH", "ID"}, empty: "No repositories.",
+			row: func(r api.Repository) []render.Cell {
+				return []render.Cell{{Text: r.FullName}, {Text: r.DefaultBranch}, {Text: r.ID, Tone: render.Dim}}
+			},
+		})
 	case "box list":
 		rows, err := collect(ctx, o.boxes)
 		if err != nil {
 			return err
 		}
-		return printList(o, rows, "ID\tBOX\tONLINE", func(b api.Box) string { return fmt.Sprintf("%s\t%s\t%t", b.ID, b.Name, b.Online) })
-	case "env list":
-		rows, err := collect(ctx, func(ctx context.Context, cursor string) ([]api.Environment, *string, error) {
-			r, err := o.API.ListEnvironments(ctx, cursor)
-			if err != nil {
-				return nil, nil, err
-			}
-			return r.Value.Items, r.Value.NextCursor, nil
+		return list(o, rows, view[api.Box]{
+			tabs: "ID\tBOX\tONLINE", line: func(b api.Box) string { return fmt.Sprintf("%s\t%s\t%t", b.ID, b.Name, b.Online) },
+			header: []string{"BOX", "STATUS", "ID"}, empty: "No boxes.",
+			row: func(b api.Box) []render.Cell {
+				online := render.Cell{Text: "offline", Tone: render.Bad}
+				if b.Online {
+					online = render.Cell{Text: "online", Tone: render.Good}
+				}
+				return []render.Cell{{Text: b.Name}, online, {Text: b.ID, Tone: render.Dim}}
+			},
 		})
+	case "env list":
+		rows, err := collect(ctx, o.environments)
 		if err != nil {
 			return err
 		}
-		return printList(o, rows, "ID\tENVIRONMENT\tBRANCH\tDESIRED\tOBSERVED\tREADINESS", func(e api.Environment) string {
-			return strings.Join([]string{e.ID, e.Slug, e.Branch, e.DesiredState, e.ObservedState, e.Readiness}, "\t")
-		})
+		return o.listEnvironments(ctx, rows)
 	case "op list":
 		rows, err := collect(ctx, func(ctx context.Context, cursor string) ([]api.Operation, *string, error) {
 			r, err := o.API.ListEnvironmentOperations(ctx, v.arg, cursor)
@@ -168,8 +188,24 @@ func (o Options) dispatch(ctx context.Context, v invocation) error {
 		if err != nil {
 			return err
 		}
-		return printList(o, rows, "ID\tENVIRONMENT ID\tACTION\tTRIGGER\tSTATUS", func(p api.Operation) string {
-			return strings.Join([]string{p.ID, p.EnvironmentID, p.Action, p.Trigger, p.Status}, "\t")
+		return list(o, rows, view[api.Operation]{
+			tabs: "ID\tENVIRONMENT ID\tACTION\tTRIGGER\tSTATUS",
+			line: func(p api.Operation) string {
+				return strings.Join([]string{p.ID, p.EnvironmentID, p.Action, p.Trigger, p.Status}, "\t")
+			},
+			header: []string{"ACTION", "STATUS", "TRIGGER", "ID"}, empty: "No operations.",
+			row: func(p api.Operation) []render.Cell {
+				tone := render.Plain
+				switch p.Status {
+				case "succeeded":
+					tone = render.Good
+				case "failed":
+					tone = render.Bad
+				case "cancelled":
+					tone = render.Warn
+				}
+				return []render.Cell{{Text: p.Action}, {Text: p.Status, Tone: tone}, {Text: p.Trigger}, {Text: p.ID, Tone: render.Dim}}
+			},
 		})
 	case "env show":
 		r, err := o.API.GetEnvironment(ctx, v.arg)
@@ -218,6 +254,39 @@ func (o Options) boxes(ctx context.Context, cursor string) ([]api.Box, *string, 
 	return r.Value.Items, r.Value.NextCursor, nil
 }
 
+func (o Options) environments(ctx context.Context, cursor string) ([]api.Environment, *string, error) {
+	r, err := o.API.ListEnvironments(ctx, cursor)
+	if err != nil {
+		return nil, nil, err
+	}
+	return r.Value.Items, r.Value.NextCursor, nil
+}
+
+// Names lists what a shell can complete: the names of the environments
+// ("env"), repositories ("repo") or boxes ("box") the caller can see.
+func Names(ctx context.Context, a API, kind string) ([]string, error) {
+	o := Options{API: a}
+	var found map[string]string
+	var err error
+	switch kind {
+	case "env":
+		found, err = named(ctx, o.environments, func(e api.Environment) (string, string) { return e.Slug, e.ID })
+	case "repo":
+		found, err = named(ctx, o.repos, func(r api.Repository) (string, string) { return r.FullName, r.ID })
+	case "box":
+		found, err = named(ctx, o.boxes, func(b api.Box) (string, string) { return b.Name, b.ID })
+	}
+	if err != nil {
+		return nil, err
+	}
+	list := make([]string, 0, len(found))
+	for _, name := range found {
+		list = append(list, name)
+	}
+	slices.Sort(list)
+	return list, nil
+}
+
 func collect[T any](ctx context.Context, page func(context.Context, string) ([]T, *string, error)) ([]T, error) {
 	items := []T{}
 	cursor := ""
@@ -264,19 +333,150 @@ func resolve[T any](ctx context.Context, kind, name string, page func(context.Co
 	return match, nil
 }
 
-func printList[T any](o Options, items []T, header string, row func(T) string) error {
-	if o.JSON {
+// view is one list three ways: JSON, the tab-separated lines a script reads
+// from a pipe (tabs and line, which stay as they are), and a table for a
+// person at a terminal.
+type view[T any] struct {
+	tabs   string
+	line   func(T) string
+	header []string
+	row    func(T) []render.Cell
+	empty  string
+}
+
+func list[T any](o Options, items []T, v view[T]) error {
+	switch {
+	case o.JSON:
 		return json.NewEncoder(o.Out).Encode(map[string]any{"items": items})
-	}
-	if _, err := fmt.Fprintln(o.Out, header); err != nil {
-		return err
-	}
-	for _, item := range items {
-		if _, err := fmt.Fprintln(o.Out, row(item)); err != nil {
+	case !o.Pretty:
+		if _, err := fmt.Fprintln(o.Out, v.tabs); err != nil {
 			return err
 		}
+		for _, item := range items {
+			if _, err := fmt.Fprintln(o.Out, v.line(item)); err != nil {
+				return err
+			}
+		}
+		return nil
+	case len(items) == 0:
+		_, err := fmt.Fprintln(o.Out, v.empty)
+		return err
 	}
-	return nil
+	rows := make([][]render.Cell, len(items))
+	for i, item := range items {
+		rows[i] = v.row(item)
+	}
+	return render.Table(o.Out, o.Colour, v.header, rows)
+}
+
+func (o Options) now() time.Time {
+	if o.Now != nil {
+		return o.Now()
+	}
+	return time.Now()
+}
+
+// names maps IDs to what people call them. The list is decoration, so a
+// connection that may not read it gets the IDs instead of an error.
+func names[T any](ctx context.Context, page func(context.Context, string) ([]T, *string, error), fields func(T) (string, string)) (map[string]string, error) {
+	found, err := named(ctx, page, fields)
+	if err != nil && ctx.Err() != nil {
+		return nil, ctx.Err()
+	}
+	return found, nil
+}
+
+// named maps the IDs in a collection to their names.
+func named[T any](ctx context.Context, page func(context.Context, string) ([]T, *string, error), fields func(T) (string, string)) (map[string]string, error) {
+	rows, err := collect(ctx, page)
+	if err != nil {
+		return nil, err
+	}
+	found := make(map[string]string, len(rows))
+	for _, row := range rows {
+		name, id := fields(row)
+		found[id] = name
+	}
+	return found, nil
+}
+
+func (o Options) listEnvironments(ctx context.Context, rows []api.Environment) error {
+	v := view[api.Environment]{
+		tabs: "ID\tENVIRONMENT\tBRANCH\tDESIRED\tOBSERVED\tREADINESS",
+		line: func(e api.Environment) string {
+			return strings.Join([]string{e.ID, e.Slug, e.Branch, e.DesiredState, e.ObservedState, e.Readiness}, "\t")
+		},
+		empty: "No environments.",
+	}
+	if o.JSON || !o.Pretty || len(rows) == 0 {
+		return list(o, rows, v)
+	}
+	repos, err := names(ctx, o.repos, func(r api.Repository) (string, string) { return r.FullName, r.ID })
+	if err != nil {
+		return err
+	}
+	boxes, err := names(ctx, o.boxes, func(b api.Box) (string, string) { return b.Name, b.ID })
+	if err != nil {
+		return err
+	}
+	named := func(known map[string]string, id string) string {
+		if name := known[id]; name != "" {
+			return name
+		}
+		return id
+	}
+	// A server older than created_at has no ages, and an empty column says nothing.
+	aged := slices.ContainsFunc(rows, func(e api.Environment) bool { return e.CreatedAt != nil })
+	v.header = []string{"ENVIRONMENT", "STATUS", "REPOSITORY", "BRANCH", "BOX"}
+	if aged {
+		v.header = append(v.header, "AGE")
+	}
+	v.header = append(v.header, "ID")
+	now := o.now()
+	v.row = func(e api.Environment) []render.Cell {
+		cells := []render.Cell{{Text: e.Slug}, status(e), {Text: named(repos, e.RepoID)}, {Text: e.Branch}, {Text: named(boxes, e.BoxID)}}
+		if aged {
+			age := ""
+			if e.CreatedAt != nil {
+				age = render.Age(now, *e.CreatedAt)
+			}
+			cells = append(cells, render.Cell{Text: age})
+		}
+		return append(cells, render.Cell{Text: e.ID, Tone: render.Dim})
+	}
+	return list(o, rows, v)
+}
+
+// status is the one thing to read about an environment: what its box last
+// reported, and where it is headed when that differs from what was asked for.
+func status(e api.Environment) render.Cell {
+	settled := func(text string, tone render.Tone) render.Cell {
+		if e.DesiredState != "" && e.DesiredState != e.ObservedState {
+			return render.Cell{Text: e.ObservedState + " → " + e.DesiredState, Tone: render.Warn}
+		}
+		return render.Cell{Text: text, Tone: tone}
+	}
+	switch e.ObservedState {
+	case "running":
+		switch e.Readiness {
+		case "ready":
+			return settled("running", render.Good)
+		case "not_ready":
+			return settled("running (not ready)", render.Warn)
+		default:
+			return settled("running (unconfirmed)", render.Warn)
+		}
+	case "stopped", "suspended":
+		return settled(e.ObservedState, render.Plain)
+	case "partial":
+		return render.Cell{Text: "partly running", Tone: render.Warn}
+	case "pending":
+		return render.Cell{Text: "queued"}
+	case "error", "missing":
+		return render.Cell{Text: e.ObservedState, Tone: render.Bad}
+	default:
+		return render.Cell{Text: e.ObservedState}
+	}
 }
 
 func (o Options) show(value any) error {

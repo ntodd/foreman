@@ -62,6 +62,9 @@ jobs:
           sudo apt-get install -y --no-install-recommends ruby
           go generate ./api
           git diff --exit-code -- api
+      # The completion tests drive each shell's script when the shell is there.
+      - name: Install the shells completion is tested in
+        run: sudo apt-get install -y --no-install-recommends zsh fish
       - run: go vet ./...
       - run: go test -race ./...
       - run: go build -o "$RUNNER_TEMP/foreman" ./cmd/foreman

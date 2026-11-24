@@ -87,6 +87,23 @@ defmodule Foreman.CLIAcceptanceTest do
     shown = json(ctx, ["env", "show", id])
     assert {shown["branch"], shown["box_id"]} == {ctx.repo.default_branch, ctx.box.id}
 
+    # An environment also goes by its name, which the shell can complete.
+    slug = Repo.get!(Environment, id).slug
+
+    assert %{"id" => ^id, "slug" => ^slug, "created_at" => created_at} =
+             json(ctx, ["env", "show", slug])
+
+    assert {:ok, _, _} = DateTime.from_iso8601(created_at)
+    assert [%{"id" => ^op}] = json(ctx, ["op", "list", slug]) |> items()
+    # A completion script writes the words before the cursor to standard input, each ended by a NUL.
+    complete = ~S(printf 'env\0show\0\0' | "$0" __complete)
+
+    assert {0, names, ""} =
+             %{ctx | cli: "/bin/sh"} |> launch(["-c", complete, ctx.cli]) |> finish()
+
+    assert String.split(names) == [slug]
+    assert json(ctx, ["me"])["name"] == ctx.user.login
+
     complete(ctx.box, op)
 
     Repo.get!(Operation, op)

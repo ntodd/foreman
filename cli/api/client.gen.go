@@ -30,9 +30,10 @@ type ScopeString = string
 type ID = string
 
 type Identity struct {
-	ID       ID     `json:"id"`
-	Kind     string `json:"kind"`
-	ClientID string `json:"client_id"`
+	ID       ID      `json:"id"`
+	Kind     string  `json:"kind"`
+	ClientID string  `json:"client_id"`
+	Name     *string `json:"name,omitempty"`
 }
 
 type Repository struct {
@@ -80,6 +81,7 @@ type Environment struct {
 	DesiredState    string  `json:"desired_state"`
 	ObservedState   string  `json:"observed_state"`
 	Readiness       string  `json:"readiness"`
+	CreatedAt       *string `json:"created_at,omitempty"`
 	Expiry          *Expiry `json:"expiry,omitempty"`
 	Hostname        *string `json:"hostname,omitempty"`
 	SSHUser         *string `json:"ssh_user,omitempty"`
