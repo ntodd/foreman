@@ -412,12 +412,24 @@ defmodule Foreman.Environments.WorkloadAccess do
     {repo.github_id, repo.full_name, repo.owner_id, repo.devcontainer_path, owner.login,
      owner.installation_id, Config.git_base_url(), GitHub.token_permissions(repo),
      GitHub.configured?(), Tailscale.configured?(), tags,
-     is_nil(policy) &&
-       {repo.token_mode, Repos.token_repos(repo), owner.registry_host, owner.registry_username,
-        owner.registry_token}, env.user.access_generation}
+     is_nil(policy) && {repo.token_mode, Repos.token_repos(repo)},
+     owners?(policy) && {owner.registry_host, owner.registry_username, owner.registry_token},
+     env.user.access_generation}
     |> :erlang.term_to_binary()
     |> then(&:crypto.hash(:sha256, &1))
   end
+
+  @doc """
+  Whether a build is its owner's own: asked for in the browser (no
+  policy), or through a personal connection, which is the same person
+  asking from somewhere else. It then gets what the owner's builds get,
+  the registry credential and the box's prebuild, on the same check that
+  their token reads the repo. Without this an environment made or
+  started from the CLI couldn't fetch a private feature, from then on.
+  """
+  def owners?(nil), do: true
+  def owners?(%{principal: %{kind: :user}}), do: true
+  def owners?(_policy), do: false
 
   def current_material?(_env, %{material: nil}, _lock), do: true
 

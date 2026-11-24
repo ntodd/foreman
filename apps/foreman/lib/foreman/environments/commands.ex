@@ -313,15 +313,7 @@ defmodule Foreman.Environments.Commands do
     }
   end
 
-  # Whether a build is its owner's own: asked for in the browser (no
-  # policy), or through a personal connection, which is the same person
-  # asking from somewhere else. It then gets what the owner's builds get,
-  # the registry credential and the box's prebuild, on the same check that
-  # their token reads the repo. Without this an environment made or
-  # started from the CLI couldn't fetch a private feature, from then on.
-  defp owners?(nil), do: true
-  defp owners?(%{principal: %{kind: :user}}), do: true
-  defp owners?(_policy), do: false
+  defp owners?(policy), do: WorkloadAccess.owners?(policy)
 
   defp share_credentials(env, get_token) do
     cond do
