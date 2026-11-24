@@ -40,7 +40,10 @@ defmodule ForemanAgent.Application do
           [
             ForemanAgent.Outbox,
             {ForemanAgent.Ops, handler: &ForemanAgent.Guest.handle/2},
-            {ForemanAgent.Guest.Server, path: config.guest_socket}
+            {ForemanAgent.Guest.Server, path: config.guest_socket},
+            # The public API for the environment's own containers, asked
+            # of the box over that connection.
+            ForemanAgent.Guest.API
           ]
 
         # Before connecting: what a suspend cut short by the agent's own

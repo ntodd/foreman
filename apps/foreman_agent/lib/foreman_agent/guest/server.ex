@@ -23,6 +23,20 @@ defmodule ForemanAgent.Guest.Server do
     GenServer.start_link(__MODULE__, opts, gen_opts)
   end
 
+  @doc """
+  Asks the box, over the connection it has to this guest, to relay a
+  public API request (see `ForemanAgent.Guest.Session.request/3`).
+  """
+  @spec request(GenServer.server(), map()) :: {:ok, map()} | {:error, atom()}
+  def request(server \\ __MODULE__, request) do
+    case GenServer.call(server, :session) do
+      nil -> {:error, :not_connected}
+      connection -> Session.request(connection, request)
+    end
+  catch
+    :exit, _ -> {:error, :not_connected}
+  end
+
   @impl true
   def init(opts) do
     path = Keyword.get_lazy(opts, :path, fn -> ForemanAgent.Config.get().guest_socket end)
@@ -43,6 +57,7 @@ defmodule ForemanAgent.Guest.Server do
        listen: listen,
        acceptor: acceptor,
        session: nil,
+       budget: nil,
        session_opts: Keyword.get(opts, :session, [])
      }}
   end
@@ -51,10 +66,16 @@ defmodule ForemanAgent.Guest.Server do
   def handle_call({:accepted, socket}, _from, state) do
     if state.session, do: Session.close(state.session)
 
-    {:ok, pid} = Session.start(socket, state.session_opts)
+    # A new connection starts with nothing reserved: what the old one's
+    # requests held went with it.
+    budget = Session.budget()
+    {:ok, pid} = Session.start(socket, Keyword.put(state.session_opts, :budget, budget))
     Process.monitor(pid)
-    {:reply, {:ok, pid}, %{state | session: pid}}
+    {:reply, {:ok, pid}, %{state | session: pid, budget: budget}}
   end
+
+  def handle_call(:session, _from, %{session: nil} = state), do: {:reply, nil, state}
+  def handle_call(:session, _from, state), do: {:reply, {state.session, state.budget}, state}
 
   @impl true
   def handle_info({:DOWN, _ref, :process, pid, _reason}, %{session: pid} = state),

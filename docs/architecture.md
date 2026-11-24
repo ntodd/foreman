@@ -153,6 +153,12 @@ Who asked for a state and whose authority supplies an environment's credentials 
 
 A box can only ever speak for its own environments, which it already runs and whose secrets it already holds. A request a box signed counts against that box's allowance for that environment, then the box's own, before anything is looked up for it. One environment can't use up its box's allowance, and a box can't spend an allowance on another box's account. Unsigned requests count against the address they came from, as refused agent connects do.
 
+Inside the VM, the guest agent listens on `api.sock` in the environment's directory, which the devcontainer already has read-only at `/run/foreman`, and speaks plain HTTP/1.1 there (`ForemanAgent.Guest.API`). The socket has the mode the secrets beside it have, so whoever can read them can ask. Each request goes to the box as one `api` frame on the VM's link and comes back as one `api.reply`. The link is the environment's, so the box knows which environment is asking without being told, and nothing in a frame can say otherwise.
+
+The guest is hostile, so the box passes very little (`ForemanAgent.VM.Relay`): `GET`, `POST` and `PATCH`; a target under `/api/v1/` made of plain path segments and a plain query, with no dots alone, no encoding in the path and no empty segment; a body on a change only; and an idempotency key of printable characters. No other header of the guest's reaches the control plane. At most four requests are in flight for a VM, each has a time limit, and none outlives the connection it came on. The frames are read under the same byte-rate limit as everything else the guest sends.
+
+The box relays over HTTPS, or to a control plane on its own loopback. The signature protects the request, but nothing vouches for the answer over plain HTTP, so there the box refuses unless `FOREMAN_RELAY_INSECURE=1` is set on a network its operator trusts.
+
 ### Messages
 
 Each agent joins topic `agent:<agent_id>`. Commands are a fixed vocabulary; there is no generic `exec`.

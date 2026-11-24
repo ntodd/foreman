@@ -6,7 +6,7 @@ defmodule ForemanAgent.VM.Links do
   """
 
   alias ForemanAgent.VM
-  alias ForemanAgent.VM.{Link, Machine}
+  alias ForemanAgent.VM.{Link, Machine, Relay}
 
   @registry ForemanAgent.VM.Registry
   @supervisor ForemanAgent.VM.LinkSupervisor
@@ -38,7 +38,10 @@ defmodule ForemanAgent.VM.Links do
                  name: {:via, Registry, {@registry, env_id}},
                  socket: fn -> VM.pin_socket(config, env_id, :vsock) end,
                  config: hello_config(config),
-                 alive?: fn -> machine.running?(env_id, config) end
+                 alive?: fn -> machine.running?(env_id, config) end,
+                 # The link is this environment's, so what its guest asks
+                 # of the public API is asked as this environment.
+                 relay: fn request -> Relay.forward(env_id, request) end
                ]
              ]}
         }

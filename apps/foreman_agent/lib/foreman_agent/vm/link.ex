@@ -49,6 +49,13 @@ defmodule ForemanAgent.VM.Link do
       up. Reconnects back off, and connection warnings are rate-limited.
     * Query replies are checked for size and type, and text from the
       guest loses its control characters.
+    * A public API request (`api`) is checked by `ForemanAgent.VM.Relay`
+      before anything is sent for it, at most `max_relays/0` are in
+      flight at once, each has a time limit, and none outlives the
+      connection it came on or the link itself. Which environment a
+      request is for is the link's to say, never the guest's. An answer
+      is sent like any other frame: a guest that won't read it loses the
+      connection after the send timeout, as it would for a command.
 
   Options:
 
@@ -67,11 +74,17 @@ defmodule ForemanAgent.VM.Link do
       rate limit bites (default 8 MiB)
     * `:read_rate` - bytes per second the link reads from the guest once
       the burst is spent (default 2 MiB/s)
+    * `:relay` - `fn request -> reply end`: sends a public API request
+      the guest asked for (a `ForemanAgent.VM.Relay.request/0`) and
+      returns the answer. Without one, every request is refused.
+    * `:relay_timeout` - milliseconds a relayed request may take
+      (default a little over `ForemanAgent.VM.Relay.timeout/0`)
   """
   use GenServer
 
   alias ForemanAgent.{Channel, Text}
   alias ForemanAgent.Guest.Reclaim
+  alias ForemanAgent.VM.Relay
   alias ForemanProtocol.{Command, Event, Schema}
 
   require Logger
@@ -104,6 +117,12 @@ defmodule ForemanAgent.VM.Link do
   # 4,000/second.
   @frame_charge 512
 
+  # Public API requests relayed for the guest at once. Each holds a
+  # process and a connection to the control plane on the box.
+  @max_relays 4
+  # The largest request id answered: what a JSON number holds exactly.
+  @max_relay_id 9_007_199_254_740_991
+
   @lost "lost the connection to the environment's VM"
   @restarted "the environment's VM restarted while running it"
   @timed_out "the environment's VM didn't finish it in time"
@@ -114,6 +133,9 @@ defmodule ForemanAgent.VM.Link do
     {gen_opts, opts} = Keyword.split(opts, [:name])
     GenServer.start_link(__MODULE__, opts, gen_opts)
   end
+
+  @doc "How many public API requests a guest can have relayed at once."
+  def max_relays, do: @max_relays
 
   @doc """
   Runs a command in the guest and returns its result. `log` gets each
@@ -266,6 +288,11 @@ defmodule ForemanAgent.VM.Link do
        cancels: :queue.new(),
        # query id => {from, q, timer}
        queries: %{},
+       relay: Keyword.get(opts, :relay),
+       relay_timeout: Keyword.get(opts, :relay_timeout, Relay.timeout() + 5_000),
+       # The guest's request id => {pid, monitor, timer}, for this
+       # connection only.
+       relays: %{},
        next_query: 1,
        warned_at: nil,
        unwarned: 0
@@ -417,15 +444,39 @@ defmodule ForemanAgent.VM.Link do
     end
   end
 
-  # A caller that went away (its operation cancelled) takes its command
-  # with it.
-  def handle_info({:DOWN, monitor, :process, _pid, _reason}, state) do
-    case Enum.find(state.pending, fn {_, e} -> e.monitor == monitor end) do
-      {op_id, _} ->
+  # A relayed request's answer, from the process that sent it.
+  def handle_info({:relayed, id, pid, reply}, state) do
+    case state.relays do
+      %{^id => {^pid, _monitor, _timer}} -> {:noreply, answer_relay(state, id, reply)}
+      _ -> {:noreply, state}
+    end
+  end
+
+  def handle_info({:relay_timeout, id, pid}, state) do
+    case state.relays do
+      %{^id => {^pid, _monitor, _timer}} ->
+        Process.exit(pid, :kill)
+        {:noreply, answer_relay(state, id, Relay.timed_out())}
+
+      _ ->
+        {:noreply, state}
+    end
+  end
+
+  # A relay that died without an answer, or a caller that went away (its
+  # operation cancelled), which takes its command with it.
+  def handle_info({:DOWN, monitor, :process, pid, _reason}, state) do
+    relay = Enum.find(state.relays, fn {_id, {_pid, ref, _timer}} -> ref == monitor end)
+
+    case {relay, Enum.find(state.pending, fn {_, e} -> e.monitor == monitor end)} do
+      {{id, {^pid, _, _}}, _} ->
+        {:noreply, answer_relay(state, id, Relay.failed())}
+
+      {nil, {op_id, _}} ->
         {_entry, state} = forget(state, op_id)
         {:noreply, state |> cancel(op_id) |> arm()}
 
-      nil ->
+      {nil, nil} ->
         {:noreply, state}
     end
   end
@@ -482,6 +533,8 @@ defmodule ForemanAgent.VM.Link do
       GenServer.reply(from, {:error, :disconnected})
     end)
 
+    drop_relays(state)
+
     # A connection that stayed up starts the waits over.
     stable? = state.ready_at != nil and now() - state.ready_at >= state.max_retry
     backoff = if stable?, do: state.retry, else: state.backoff
@@ -494,8 +547,20 @@ defmodule ForemanAgent.VM.Link do
         ready_at: nil,
         rate_timer: nil,
         queries: %{},
+        relays: %{},
         backoff: backoff
     })
+  end
+
+  # A request belongs to the connection it came on: the next one's guest
+  # numbers its own from the start, and an answer for an old id would
+  # reach whoever asked with the same one.
+  defp drop_relays(state) do
+    Enum.each(state.relays, fn {_id, {pid, monitor, timer}} ->
+      Process.demonitor(monitor, [:flush])
+      Process.cancel_timer(timer)
+      Process.exit(pid, :kill)
+    end)
   end
 
   defp retry_later(state) do
@@ -595,7 +660,107 @@ defmodule ForemanAgent.VM.Link do
     end
   end
 
+  # A public API request from inside the environment. Only an id the box
+  # can answer to gets an answer at all.
+  defp handle_frame(%{"t" => "api", "id" => id} = frame, %{ready: true} = state)
+       when is_integer(id) and id >= 0 and id <= @max_relay_id do
+    cond do
+      is_nil(state.relay) or Map.has_key?(state.relays, id) ->
+        send_relay(state, id, Relay.invalid())
+
+      map_size(state.relays) >= @max_relays ->
+        send_relay(state, id, Relay.busy())
+
+      true ->
+        case Relay.request(frame) do
+          {:ok, request} -> start_relay(state, id, request)
+          :error -> send_relay(state, id, Relay.invalid())
+        end
+    end
+  end
+
   defp handle_frame(_frame, state), do: state
+
+  # Its own process: the request waits on the control plane, and the link
+  # has the guest's other frames to read meanwhile.
+  defp start_relay(state, id, request) do
+    link = self()
+    relay = state.relay
+
+    # The worker waits to be told to go, so it is watched before it asks
+    # anything of the control plane. One never told (the link died in
+    # between) gives up.
+    {pid, monitor} =
+      spawn_monitor(fn ->
+        receive do
+          :go -> send(link, {:relayed, id, self(), relay.(request)})
+        after
+          5_000 -> :ok
+        end
+      end)
+
+    watch(pid)
+    send(pid, :go)
+    timer = Process.send_after(self(), {:relay_timeout, id, pid}, state.relay_timeout)
+    %{state | relays: Map.put(state.relays, id, {pid, monitor, timer})}
+  end
+
+  # A relay doesn't outlive its link, however the link ends: stopped by
+  # its supervisor, crashed, or killed. The relay itself is waiting on
+  # the control plane and can't look, so something small does it for it.
+  defp watch(relay) do
+    link = self()
+
+    spawn(fn ->
+      link_down = Process.monitor(link)
+      relay_down = Process.monitor(relay)
+
+      receive do
+        {:DOWN, ^link_down, :process, _, _} -> Process.exit(relay, :kill)
+        {:DOWN, ^relay_down, :process, _, _} -> :ok
+      end
+    end)
+  end
+
+  defp answer_relay(state, id, reply) do
+    {{_pid, monitor, timer}, relays} = Map.pop(state.relays, id)
+    Process.demonitor(monitor, [:flush])
+    Process.cancel_timer(timer)
+    send_relay(%{state | relays: relays}, id, reply)
+  end
+
+  # What the relay returned is the box's own code's, but it's checked all
+  # the same before it is put in a frame.
+  defp send_relay(state, id, reply) do
+    reply = if relay_reply?(reply), do: reply, else: Relay.failed()
+
+    frame = fn reply ->
+      %{
+        "t" => "api.reply",
+        "id" => id,
+        "status" => reply.status,
+        "headers" => reply.headers,
+        "body" => reply.body
+      }
+    end
+
+    case send_frame(state, frame.(reply)) do
+      {:too_large, state} ->
+        {_, state} = send_frame(state, frame.(Relay.failed()))
+        state
+
+      {_, state} ->
+        state
+    end
+  end
+
+  defp relay_reply?(%{status: status, body: body, headers: headers})
+       when is_integer(status) and status in 100..599 and is_binary(body) and is_map(headers) do
+    String.valid?(body) and
+      Enum.all?(headers, fn {name, value} -> is_binary(name) and is_binary(value) end)
+  end
+
+  defp relay_reply?(_reply), do: false
 
   defp instance?(id), do: byte_size(id) in 1..64 and id =~ ~r/\A[A-Za-z0-9-]+\z/
 

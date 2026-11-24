@@ -48,6 +48,10 @@ if config_env() != :test do
     docker_socket: docker_socket,
     allowed_git_hosts: list.("FOREMAN_ALLOWED_GIT_HOSTS", ["github.com"]),
     insecure_git_hosts: list.("FOREMAN_INSECURE_GIT_HOSTS", []),
+    # An environment's own public API requests are relayed over HTTPS, or
+    # to a control plane on this box. Plain HTTP to anywhere else is
+    # refused unless this is set (ForemanAgent.VM.Relay).
+    relay_insecure: System.get_env("FOREMAN_RELAY_INSECURE") in ["1", "true"],
     # Not guest_url and guest_sha256: those are read at compile time.
     guest_url_override: System.get_env("FOREMAN_GUEST_URL"),
     guest_sha256_override: System.get_env("FOREMAN_GUEST_SHA256"),
