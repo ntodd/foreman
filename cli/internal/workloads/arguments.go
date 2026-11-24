@@ -54,7 +54,10 @@ func invalid(format string, args ...any) error {
 	return &Failure{Code: "invalid_invocation", Message: fmt.Sprintf(format, args...)}
 }
 
-func parse(args []string) (invocation, error) {
+// parse reads a command line. own is the environment the command runs
+// inside, if it does: a command that takes an environment and names none
+// then means that one.
+func parse(args []string, own string) (invocation, error) {
 	v := invocation{flags: map[string]string{}, timeout: defaultTimeout}
 	if len(args) < 2 {
 		return v, invalid("Specify a resource and command. See foreman --help.")
@@ -118,6 +121,10 @@ func parse(args []string) (invocation, error) {
 		if (v.flags["expires-at"] == "") != (v.flags["on-expiry"] == "") {
 			return v, invalid("Supply --expires-at and --on-expiry together.")
 		}
+	}
+	// Destroying is never left unsaid.
+	if own != "" && len(positional) == 0 && takesEnvironment(v.command) && v.command != "env destroy" {
+		positional = []string{own}
 	}
 	if len(positional) != want {
 		return v, invalid("%s expects %d positional argument(s). See foreman --help.", v.command, want)

@@ -276,7 +276,7 @@ func (s *Store) selectConnection(instance, account, command string) (string, str
 		instance = p.Instance
 	}
 	if instance == "" {
-		return "", "", errors.New("select --instance to connect to Foreman")
+		return "", "", notConnected("select --instance to connect to Foreman")
 	}
 	origin, err := api.Origin(instance)
 	if err != nil {
@@ -354,4 +354,10 @@ func accountsIn(dir string) ([]string, error) {
 	return accounts, nil
 }
 
-func noConnection() error { return errors.New("no connection for this account; run login first") }
+// notConnected is the failure of having nothing saved to connect with, as
+// opposed to something saved that can't be used.
+type notConnected string
+
+func (e notConnected) Error() string { return string(e) }
+
+func noConnection() error { return notConnected("no connection for this account; run login first") }

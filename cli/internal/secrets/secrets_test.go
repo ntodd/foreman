@@ -550,3 +550,50 @@ func TestAScriptChangesAnEnvironmentsSecretsByIDOnly(t *testing.T) {
 		t.Fatal(r.failure, f.changes)
 	}
 }
+
+// Inside an environment, its own secrets are the ones meant.
+func TestInsideAnEnvironmentSecretsAreItsOwn(t *testing.T) {
+	own := &Environment{ID: envID, Name: "storefront-2"}
+	f := &fake{list: func(scope, subject, _ string) (api.SecretPage, error) {
+		if scope != "environment" || subject != envID {
+			t.Fatal(scope, subject)
+		}
+		return api.SecretPage{Items: []api.Secret{{Name: "TOKEN", UpdatedAt: "2026-11-24T12:00:00Z"}}}, nil
+	}}
+
+	if r := invoke(t, f, Options{Environment: own}, "list"); r.failure != nil || !strings.Contains(r.out.String(), "TOKEN") {
+		t.Fatal(r.failure, r.out.String())
+	}
+	r := invoke(t, f, Options{Environment: own}, "set", "A=1")
+	if r.failure != nil || len(f.changes) != 1 || f.changes[0].scope != "environment" || f.changes[0].subject != envID {
+		t.Fatal(r.failure, f.changes)
+	}
+	if !strings.Contains(r.out.String(), "this environment (storefront-2)") {
+		t.Fatal(r.out.String())
+	}
+	invoke(t, f, Options{Environment: own}, "unset", "A")
+	if len(f.changes) != 2 || f.changes[1].scope != "environment" || f.changes[1].subject != envID {
+		t.Fatal(f.changes)
+	}
+
+	// A level that is named is asked for as named.
+	invoke(t, f, Options{Environment: own}, "set", "--user", "B=2")
+	if f.changes[2].scope != "user" || f.changes[2].subject != "me" {
+		t.Fatal(f.changes[2])
+	}
+}
+
+func TestInsideAnEnvironmentARefusalSaysWhatItCanReach(t *testing.T) {
+	own := &Environment{ID: envID, Name: "storefront-2"}
+	f := &fake{err: &api.HTTPError{StatusCode: 403, Code: "forbidden", Message: "This takes an administrator or a personal connection."}}
+	r := invoke(t, f, Options{Environment: own}, "set", "--user", "B=2")
+	if code(r.failure) != "forbidden" || !strings.Contains(r.err.String(), "manages that environment's secrets only") || !strings.Contains(r.err.String(), "login") {
+		t.Fatal(r.failure, r.err.String())
+	}
+
+	// The same refusal outside an environment has no such note.
+	r = invoke(t, f, Options{}, "set", "--user", "B=2")
+	if strings.Contains(r.err.String(), "environment") {
+		t.Fatal(r.err.String())
+	}
+}

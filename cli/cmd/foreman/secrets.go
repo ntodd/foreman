@@ -39,6 +39,9 @@ for a process that read the secrets file when it started.
 A value typed as NAME=value is saved in your shell history. Use NAME=@file, NAME=- or NAME
 for anything sensitive. A value that itself begins with @ has to come one of those ways.
 
+Inside an environment, with no login, the default is that environment's secrets,
+and they are the only ones its connection can reach.
+
 Secrets need the secrets:list and secrets:write permissions. foreman login asks for both.
 A connection narrowed with --scope, or made by an older CLI, has to log in again.
 `
@@ -49,6 +52,9 @@ func runSecrets(ctx context.Context, args []string, o options, stdout, stderr io
 		return fail(stderr, o.json, err, "connection_error", 1)
 	}
 	options := secrets.Options{API: s.Client, In: os.Stdin, Out: stdout, Err: stderr, JSON: o.json, Pretty: pretty(o, stdout), Colour: colour(o, stdout)}
+	if s.Environment != nil {
+		options.Environment = &secrets.Environment{ID: s.Environment.ID, Name: environmentName(s)}
+	}
 	if terminal(os.Stdin) {
 		options.Prompt = func(name string) (string, error) {
 			fmt.Fprintf(stderr, "Value for %s: ", name)

@@ -31,6 +31,12 @@ type Session struct {
 	Connection
 	Client   *api.Client
 	StateDir string
+	// Environment is set when this is an environment's own connection, made
+	// from inside it with no login. It reaches that environment alone.
+	Environment *api.OwnEnvironment
+	// Identity is who such a connection acts as, already asked for when it
+	// was opened.
+	Identity *api.Response[api.Identity]
 }
 
 type DevicePrompt struct{ VerificationURI, UserCode string }
@@ -57,6 +63,11 @@ func Open(ctx context.Context, instance, account string) (*Session, error) {
 }
 
 func (s *Store) Open(ctx context.Context, instance, account string) (*Session, error) {
+	session, err := s.open(ctx, instance, account)
+	return s.orOwn(ctx, instance, account, session, err)
+}
+
+func (s *Store) open(ctx context.Context, instance, account string) (*Session, error) {
 	instance, account, err := s.selectConnection(instance, account, "open")
 	if err != nil {
 		return nil, err
@@ -98,6 +109,11 @@ func OpenReadOnly(ctx context.Context, instance, account string) (*Session, erro
 // is due for a refresh, requests fail with ErrRefreshDue until an ordinary
 // command has done it.
 func (s *Store) OpenReadOnly(ctx context.Context, instance, account string) (*Session, error) {
+	session, err := s.openReadOnly(ctx, instance, account)
+	return s.orOwn(ctx, instance, account, session, err)
+}
+
+func (s *Store) openReadOnly(ctx context.Context, instance, account string) (*Session, error) {
 	instance, account, err := s.selectConnection(instance, account, "open")
 	if err != nil {
 		return nil, err

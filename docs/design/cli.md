@@ -60,6 +60,14 @@ Remember the instance and account after a successful login. Explicit `--instance
 
 A default login asks for every permission the CLI can use: discovery, reads, operations, logs, create, start, stop, destroy and secrets. Asking for less is the exception, done with `login --scope`. A secrets command refused for lack of permission says to log in again. Honor a narrower grant. For example, `env create REPO_UUID --no-wait` can submit with create permission alone. Report any missing read permission for a later wait as a separate error with the accepted IDs. Foreman authorizes every request.
 
+### Inside an environment
+
+A command run inside an environment, with nothing saved to connect with and no `--instance` or `--account`, uses the environment's own connection: plain HTTP on the unix socket at `/run/foreman/api.sock`, which the environment's box relays as that environment. The CLI sends no token and looks for no login endpoints there. It asks `GET /api/v1/me` once to learn which environment it is in, then a command that takes an environment and names none means that one (never `env destroy`), and `secrets` defaults to that environment's level. `env create` is refused before anything is saved. A refusal from the control plane is followed by how to act as yourself.
+
+A login made inside an environment takes precedence until logout. Asking for more than the environment's own reach is something a person does on purpose, through the device flow.
+
+`FOREMAN_API_SOCKET` names a different socket, for tests.
+
 ## Long-running work and recovery
 
 - The default for lifecycle commands is to wait, with `--no-wait` for submission only. Wait for the operation's terminal status. A successful create or start reports current workspace readiness separately when the grant allows it. An operation that succeeded yesterday and a workspace that is ready now are separate observations.
