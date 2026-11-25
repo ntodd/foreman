@@ -14,6 +14,8 @@ gaps" section is the place to start.
 | GitHub App private key and client secret | Control plane DB (encrypted) or its environment |
 | Tailscale OAuth client secret | Control plane environment |
 | Registry (GHCR) tokens | Control plane DB, encrypted; in an environment's VM only during a build |
+| Attachment tokens (fine-grained, no permissions) | Control plane DB, encrypted; never sent to a box |
+| Files being attached to an issue or pull request | Control plane DB, encrypted with the same key, for the minutes an upload takes |
 | `FOREMAN_ENCRYPTION_KEY`, `SECRET_KEY_BASE` | Control plane environment |
 | Agent private keys | Each box, `/var/lib/foreman-agent/identity.json` (0600, agent user) |
 | Environments' work (the clone, Docker volumes, Tailscale state) | Each VM's data disk, `/srv/foreman/vms/<id>/data.raw` on the box (agent user) |
@@ -543,6 +545,32 @@ These are accepted for now, or need someone to try them:
     environment starts from a prebuild only once its user's own GitHub
     token has read the repo and its extra repos; without a GitHub App
     configured, nothing checks.
+22. **Anything in an environment can attach files to its repository.**
+    The control plane uploads what an environment sends it to that
+    environment's repository's attachments, with the owner's attachment
+    token ([attachments.md](setup/attachments.md)). Whatever runs in the
+    environment can ask, as it can push with the scoped token. The file
+    is whatever was sent: its kind is taken from its name and the bytes
+    aren't looked at. An upload can't be deleted from GitHub, and shows
+    nowhere until something references its URL. It is bounded to that
+    one repository, to images and video, to 10 MB and 25 MB a file,
+    and by the relay's request limit, and each one is in the audit log.
+    The token is a machine user's and can write wherever attachments
+    go, so Foreman asks GitHub whether the person acting can write to
+    the repository themselves before it uploads for them: without that,
+    someone who can only read a repository could attach to it.
+    The token itself stays in the control plane: one that leaked could
+    upload to the repos it includes and read their metadata.
+    In the environment, the `gh` it applies to runs behind a proxy that
+    answers for `uploads.github.com` with a certificate authority made
+    for that run. The authority is name-constrained to that host alone, with
+    the names under it and every address excluded, signs one
+    certificate, and its key is discarded; only that gh process is told to trust it. The
+    proxy's port is on loopback, which other users in the container can
+    reach, so it tunnels only for a request carrying a secret made for
+    the run, and answers uploads on a socket in a directory of the
+    user's own. The secret is in gh's environment, which the same user
+    and root can read, as they can the API socket it stands in front of.
 
 ## Things worth trying
 
@@ -571,6 +599,11 @@ These are accepted for now, or need someone to try them:
   environments.
 - Cross-user access as a member: another user's environments, secrets,
   boxes, or admin pages and Oban Web.
+- Attachments from inside an environment: get a file into another
+  repository's attachments (a `repository_id`, another environment's
+  upload id), past the kinds and sizes allowed, or hold more than the
+  cap in the database; get the attachment token, or anything about it,
+  back in an error.
 - Sign-in: the OAuth state and PKCE, open redirects in `return_to`, the
   dev sign-in route in a production build (it shouldn't be compiled in).
 - A Flatcar box's first-boot config: get one, or a Tailscale key,

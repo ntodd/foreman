@@ -113,6 +113,7 @@ Under **Secrets**, you can replace a personal secret or limit it to selected rep
 
 - [Security model and box trust](docs/security.md)
 - [Private GHCR images and features](docs/setup/ghcr-machine-user.md)
+- [Images on issues and pull requests with gh --attach](docs/setup/attachments.md)
 - [Personal CLI connections and service accounts](docs/setup/api-clients.md)
 - [Pairing tools through connect hooks](docs/setup/connect-hooks.md)
 - [Upgrades, backups, and rollback](docs/setup/upgrading.md)

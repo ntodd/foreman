@@ -11,6 +11,10 @@
 # fixes together make every one hold. Before 254 leaving out any of them
 # breaks something again.
 #
+# attachments.qnt: every invariant holds for the code as it is, and
+# leaving out any one of the fixes review asked for breaks the invariant
+# it is there for.
+#
 #   ./check.sh            QUINT="quint" to use an installed one
 #   SAMPLES=100000 ./check.sh
 
@@ -104,5 +108,31 @@ echo "updates.qnt, systemd before 254, leaving one fix out:"
 expect "$(variant updates.qnt FIX_CONFIRM=false FIX_WATCHDOG=true FIX_ROLLBACK_UNIT=true)" badNeverKept violated
 expect "$(variant updates.qnt FIX_CONFIRM=true FIX_WATCHDOG=false FIX_ROLLBACK_UNIT=true)" updateSettles violated
 expect "$(variant updates.qnt FIX_CONFIRM=true FIX_WATCHDOG=true FIX_ROLLBACK_UNIT=false)" backOnline violated
+
+steps=40
+echo "attachments.qnt, the code as it is:"
+expect attachments.qnt allInvariants ok
+echo "Reachable (witnesses, so the above isn't passing for want of them):"
+expect attachments.qnt noPosts violated
+expect attachments.qnt noPrunes violated
+expect attachments.qnt noCapRefusals violated
+expect attachments.qnt noLostAnswers violated
+
+echo "attachments.qnt, leaving one fix out:"
+expect "$(variant attachments.qnt FIX_LOCK=false)" withinCap violated
+expect "$(variant attachments.qnt FIX_SINGLE_FINISH=false)" sentOnce violated
+expect "$(variant attachments.qnt FIX_ALWAYS_DROP=false)" finishedIsGone violated
+expect "$(variant attachments.qnt FIX_IDLE=false)" noRevival violated
+expect "$(variant attachments.qnt FIX_ACCESS_CHUNK=false)" nothingTakenOutOfReach violated
+expect "$(variant attachments.qnt FIX_WRITER=false)" writersOnly violated
+
+# The length check catches what a second finisher would send short, and
+# with one finisher has nothing to catch.
+echo "attachments.qnt, the length check:"
+expect "$(variant attachments.qnt FIX_SINGLE_FINISH=false)" noShortCaught violated
+expect "$(variant attachments.qnt FIX_SINGLE_FINISH=false)" neverShort ok
+expect "$(variant attachments.qnt FIX_SINGLE_FINISH=false FIX_LENGTH=false)" neverShort violated
+expect "$(variant attachments.qnt FIX_LENGTH=false)" neverShort ok
+expect attachments.qnt noShortCaught ok
 
 exit $failed

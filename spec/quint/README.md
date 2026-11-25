@@ -12,12 +12,18 @@ the rollback unit, and the control plane settling the update. The new release's 
 picked at the start (good, crashes at boot, crashes slowly without joining, never joins, or
 joins and then crashes), and the network comes and goes.
 
+`attachments.qnt` models one environment's attachment uploads in the control plane: opening one
+against the pending cap, chunks arriving in order, the one request that completes a file sending
+it to GitHub, and Housekeeping pruning what was abandoned. Requests overlap, the caller's access
+comes and goes, and GitHub takes the file, refuses it, or never answers.
+
 Run them with [Quint](https://quint-lang.org) 0.33 (`npx @informalsystems/quint` works without
 installing anything):
 
 ```sh
 quint run ops.qnt --invariant=allInvariants --max-samples=30000 --max-steps=40
 quint run updates.qnt --invariant=allInvariants --max-samples=30000 --max-steps=80
+quint run attachments.qnt --invariant=allInvariants --max-samples=30000 --max-steps=40
 ./check.sh   # what both say about the code as it is, and with and without the fixes
 ```
 
@@ -115,6 +121,47 @@ steps. Before 254, leaving any one out breaks something; from 254, `FIX_CONFIRM`
   It rolls back a good release on a box that was off for five minutes after an update, which is
   the case the `max` is there for.
 - Not modelled: the disk filling during a download (#39) and `install.sh` re-runs (#32).
+
+## Attachment uploads (`attachments.qnt`)
+
+The model was written after review of the first version, not before it. Codex found these by
+reading the code over three rounds; the model reproduces each one with its `FIX_*` switch off
+(all are on, as in the code) and holds with them on.
+
+| Invariant | First version | Fix |
+|---|---|---|
+| `sentOnce` | Violated. A completed upload also took an empty chunk as "try again", so any number of requests could send one file. | `FIX_SINGLE_FINISH`: the only way to finish an upload is to be the request whose chunk completed it, and the conditional update lets one request do that. |
+| `neverShort` | Violated with the above: a second finisher reads the chunks after the first has deleted them, and sends an empty file. | `FIX_SINGLE_FINISH`, and `FIX_LENGTH`: nothing is sent unless every chunk that was counted is there. |
+| `withinCap` | Violated. Two starts each count the same room and both take it. | `FIX_LOCK`: the environment's row is locked, so counting and inserting is one step. |
+| `finishedIsGone` | Violated. An upload GitHub didn't take was kept for the retry, and so was one whose finish raised; both counted against the environment until pruned. | `FIX_ALWAYS_DROP`: the upload is deleted when its finish ends, however it ends. |
+| `noRevival` | Violated. A chunk for an upload that had sat ten minutes landed if Housekeeping hadn't been by yet, and the upload lived on. | `FIX_IDLE`: the lookup refuses an upload that has sat that long. |
+| `nothingTakenOutOfReach` | Violated. Chunks were taken after the box stopped being shared or the repository left. | `FIX_ACCESS_CHUNK`: the lookup asks for every chunk. |
+| `writersOnly` | Violated. A file went up for someone who could only read the repository. | `FIX_WRITER`: finish asks GitHub, as the person acting, before it sends. |
+
+One thing the model said that review hadn't: with a single finisher, `FIX_LENGTH` has nothing left
+to catch. `neverShort` holds without it, and the witness for it (`noShortCaught`) is unreachable
+with the fixes on. It stays in the code as a second line, since what it guards against can't be
+undone.
+
+`check.sh` also checks witnesses (`noPosts`, `noPrunes`, `noCapRefusals` and `noLostAnswers` are
+expected to be violated).
+
+### Assumptions and limits
+
+- A request finishes within a clock step: time only moves when none is in flight. A request
+  stalled for ten minutes between finding its upload and writing to it would get past
+  `FIX_IDLE`, and isn't modelled.
+- `nothingTakenOutOfReach` and `writersOnly` are about what was true when the request asked.
+  Access lost between the lookup and the write still lets that chunk land, and a role lost
+  between finish's check and the POST still lets the file go. Both are accepted: the first
+  sends nothing, and GitHub's own check has the same gap.
+- `writersOnly` is largely by construction: the check and the ghost read the same thing.
+- One environment, so nothing here says uploads of two environments can't mix. The code keys
+  every lookup by environment, which the tests cover.
+- A file is one or two chunks and its bytes aren't modelled. Encryption, the chunk size rule
+  and the sixteen-upload count aren't either.
+- Not modelled: the admin page's save, cancel and remove of the token (a race review found
+  there too), and anything in the environment: the proxy, gh, the relay.
 
 ## Not modelled anywhere
 
