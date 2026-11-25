@@ -6,6 +6,7 @@ import os
 import re
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 
@@ -64,6 +65,21 @@ def find_release(base, tag):
     return matches[0] if matches else None
 
 
+# The release list trails a new draft by a second or two: one just made was
+# missing at 0.6s and listed by 1.8s, each time it was measured. A single
+# read straight after creating it failed every release.
+LIST_WAIT = 30
+
+
+def await_release(base, tag):
+    deadline = time.monotonic() + LIST_WAIT
+    while True:
+        row = find_release(base, tag)
+        if row is not None or time.monotonic() >= deadline:
+            return row
+        time.sleep(1)
+
+
 def inspect_release(base, row, tag, notes, expected):
     if (row["tag_name"] != tag or row["prerelease"] or row["name"] != f"Foreman {tag[1:]}"
             or (row["body"] or "").splitlines() != notes.splitlines()):
@@ -116,7 +132,7 @@ def publish(repo, tag, commit, notes_file, out):
     if row is None:
         mutate("release", "create", tag, "--repo", repo, "--draft", "--verify-tag",
                "--target", commit, "--title", f"Foreman {tag[1:]}", "--notes-file", str(notes_file))
-        row = find_release(base, tag)
+        row = await_release(base, tag)
         if row is None:
             raise ValueError("release draft was not created")
 
