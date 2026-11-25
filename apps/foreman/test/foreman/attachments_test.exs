@@ -323,14 +323,14 @@ defmodule Foreman.AttachmentsTest do
       for {error, expected} <- [
             {{:http, 401, "Bad credentials"}, "rejected the attachment token"},
             {{:http, 422, "File is too big"}, "File is too big"},
-            {{:http, 403, "Forbidden"}, "GitHub refused the upload"},
+            {{:http, 403, "Forbidden"}, "GitHub rejected the upload"},
             # Something in front of GitHub can answer for it after passing
             # the file on, so a server's failure says nothing either way.
             {{:http, 504, nil}, "may or may not"},
             # No answer at all: GitHub may have the file.
             {%RuntimeError{message: "timeout"}, "may or may not"},
             # An answer that it has the file, and nothing to reference it by.
-            {:no_asset_url, "named no asset"}
+            {:no_asset_url, "didn't return a URL"}
           ] do
         {:ok, %{id: id}} = start(ctx, %{"name" => "a.png", "size" => 1})
         expect(ClientMock, :upload_attachment, fn _, _, _, _, _ -> {:error, error} end)

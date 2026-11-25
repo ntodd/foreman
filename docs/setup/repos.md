@@ -258,7 +258,7 @@ up as an error from Foreman.
 | A login shell, a dev server you start | `/run/foreman/secrets.env` | New shells immediately; **Restart all** for running processes |
 | A compose file (`${DATABASE_URL}`) | Compose interpolation at start | **Restart affected** recreates the services that use it |
 | git and `gh` | `/run/foreman/github-token`. `gh` uses it when neither `GH_TOKEN` nor `GITHUB_TOKEN` is set, so a secret by either name takes its place for `gh`. `FOREMAN_GH_TOKEN=off` leaves it out, for a `gh auth login` of your own ([attachments.md](attachments.md#using-your-own-gh-login)). | Nothing; read on every use |
-| `gh --attach` | Uploaded by the control plane, with a token it keeps ([attachments.md](attachments.md)) | Nothing |
+| `gh --attach` | The control plane uploads the file, using a token that stays there ([attachments.md](attachments.md)) | Nothing |
 
 Secrets are set in the browser, or from a shell with `foreman secrets`
 ([api-clients.md](api-clients.md#secrets-with-the-installed-cli)).

@@ -12,7 +12,7 @@ Start from [personal.md](personal.md); this page covers what differs.
 | GitHub App | Create it on the org (enter the org's login on the setup page). Installing it on the org needs an org owner. |
 | Tailscale | The Standard plan (Personal is non-commercial). Environments also get `tag:foreman-<login>`, so ACLs can keep each developer to their own. Every such tag must be in `tagOwners` and allowed on the OAuth client. |
 | Private images | If a repo's devcontainer uses a private image or feature on GHCR, add a registry credential: [ghcr-machine-user.md](ghcr-machine-user.md). |
-| Images on pull requests | For `gh --attach` to work in environments, which GitHub refuses from the tokens they hold, add an attachment token: [attachments.md](attachments.md). |
+| Images on pull requests | `gh --attach` fails in environments by default, because GitHub rejects attachment uploads made with a GitHub App token. To make it work, add an attachment token: [attachments.md](attachments.md). |
 
 For RDS, mount the RDS CA bundle read-only inside the control-plane container and set `DATABASE_SSL_CACERTFILE` to its absolute path in the container. Foreman verifies the database hostname and certificate using that bundle. By default it uses the operating system's CA store.
 

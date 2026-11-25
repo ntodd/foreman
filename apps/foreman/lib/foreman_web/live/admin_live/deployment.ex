@@ -277,7 +277,7 @@ defmodule ForemanWeb.AdminLive.Deployment do
      |> assign(checking: false, attachment_owner: nil, attachment_form: nil)
      |> put_flash(
        :info,
-       "Checked and saved the attachment token for #{owner.login}. It is #{owner.attachment_login}'s."
+       "Checked and saved the attachment token for #{owner.login} (#{owner.attachment_login})."
      )
      |> load()}
   end
@@ -286,8 +286,8 @@ defmodule ForemanWeb.AdminLive.Deployment do
     message =
       case reason do
         message when is_binary(message) -> message
-        :unauthorized -> "only an admin sets this"
-        %Ecto.Changeset{} -> "GitHub named an account Foreman can't store"
+        :unauthorized -> "only an admin can set this"
+        %Ecto.Changeset{} -> "GitHub returned an account name Foreman can't store"
       end
 
     {:noreply, socket |> assign(:checking, false) |> put_flash(:error, "Not saved: #{message}")}
@@ -537,7 +537,7 @@ defmodule ForemanWeb.AdminLive.Deployment do
 
         <.panel title="Attachment token">
           <:subtitle>
-            For gh --attach in {owner.login}'s environments. GitHub's upload refuses the tokens environments hold, so Foreman uploads with this one and keeps it here: a machine user's fine-grained token with no permissions. See docs/setup/attachments.md.
+            Lets gh --attach work in {owner.login}'s environments. GitHub only accepts attachment uploads from a personal access token, so Foreman uploads with this one. It stays on the control plane. Use a machine user's fine-grained token with no permissions. See docs/setup/attachments.md.
           </:subtitle>
           <%= if @attachment_owner && @attachment_owner.id == owner.id do %>
             <.form
@@ -590,7 +590,7 @@ defmodule ForemanWeb.AdminLive.Deployment do
                   phx-click="remove_attachment"
                   phx-value-id={owner.id}
                   disabled={@checking}
-                  data-confirm={"Remove the attachment token for #{owner.login}? gh --attach stops working in its environments."}
+                  data-confirm={"Remove the attachment token for #{owner.login}? gh --attach will stop working in its environments."}
                 >Remove</.button>
                 <.button
                   size="sm"

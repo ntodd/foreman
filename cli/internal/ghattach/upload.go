@@ -1,8 +1,8 @@
 // Package ghattach makes gh's --attach work inside a Foreman environment.
 //
 // gh uploads an attached file to uploads.github.com with the token it was
-// given, and GitHub refuses the GitHub App tokens an environment holds
-// (cli/cli#14309). Foreman's control plane holds a token GitHub does
+// given, and GitHub rejects the GitHub App tokens an environment gets
+// (cli/cli#14309). Foreman's control plane has a token GitHub does
 // accept, and uploads a file for the environment that sends it one.
 //
 // So gh runs behind a proxy on loopback that answers for the upload host
@@ -64,7 +64,7 @@ func (u Uploader) Upload(ctx context.Context, file File) (string, error) {
 	}
 	size := opened.Value.ChunkSize
 	if size <= 0 {
-		return "", errors.New("Foreman named no chunk size for the upload")
+		return "", errors.New("Foreman didn't return a chunk size for the upload")
 	}
 	for offset := int64(0); offset < int64(len(file.Data)); offset += size {
 		end := min(offset+size, int64(len(file.Data)))
@@ -92,7 +92,7 @@ func unavailable(err error) error {
 		return &Unavailable{Reason: remote.Message}
 	}
 	if remote.StatusCode == http.StatusNotFound && remote.Code != "resource_not_found" {
-		return &Unavailable{Reason: "This Foreman doesn't attach files yet. It needs a newer control plane."}
+		return &Unavailable{Reason: "This Foreman can't attach files yet. It needs a newer control plane."}
 	}
 	return err
 }

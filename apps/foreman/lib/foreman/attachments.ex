@@ -4,7 +4,7 @@ defmodule Foreman.Attachments do
   pull requests.
 
   GitHub's attachment upload takes a personal access token and refuses a
-  GitHub App's, and every token an environment holds is a GitHub App's
+  GitHub App's, and every token an environment gets is a GitHub App's
   ([cli/cli#14309](https://github.com/cli/cli/issues/14309)). So the
   control plane uploads for it, with a machine user's fine-grained token
   kept on the repository's owner (`Foreman.Repos.update_attachment_token/3`).
@@ -68,11 +68,11 @@ defmodule Foreman.Attachments do
 
   @missing {:error, :resource_not_found, "Resource not found."}
   @invalid_start {:error, :invalid_request,
-                  "Send the file's name and its size in bytes, and at most the " <>
-                    "repository_id of the environment's repository."}
+                  "Send the file's name and its size in bytes. repository_id is optional " <>
+                    "and has to be the environment's own repository."}
   @invalid_chunk {:error, :invalid_request,
-                  "Send the chunk's offset and its bytes as base64 data: " <>
-                    "#{@chunk_bytes} bytes a chunk, and what is left in the last one."}
+                  "Send the chunk's offset and its bytes as base64 in data. Every chunk is " <>
+                    "#{@chunk_bytes} bytes, except the last one."}
 
   def chunk_size, do: @chunk_bytes
   def max_image_bytes, do: @max_image_bytes
@@ -162,7 +162,7 @@ defmodule Foreman.Attachments do
 
       nil ->
         supported = Enum.map_join(@types, ", ", fn {ext, _} -> String.trim_leading(ext, ".") end)
-        {:error, :invalid_request, "That is not a supported file type (supported: #{supported})."}
+        {:error, :invalid_request, "Unsupported file type. Supported: #{supported}."}
     end
   end
 
@@ -172,31 +172,31 @@ defmodule Foreman.Attachments do
   defp token(%{repo: %{owner: owner}}) do
     {:error, :attachments_unavailable,
      "Attachments aren't set up for #{owner.login}. " <>
-       "An admin adds an attachment token for it under Deployment."}
+       "An admin needs to add an attachment token for it on the Deployment page."}
   end
 
   # An upload names the repository by its id on GitHub, and reaches the
   # environment's own and no other.
   defp repository(%{repo: %{github_id: nil} = repo}, _requested) do
     {:error, :attachments_unavailable,
-     "Foreman doesn't know #{repo.full_name}'s id on GitHub yet, so it can't attach files to it."}
+     "Foreman doesn't have a GitHub ID for #{repo.full_name} yet, so it can't attach files to it."}
   end
 
   defp repository(%{repo: %{github_id: id}}, requested) when requested in [nil, id], do: :ok
 
   defp repository(%{repo: repo}, _requested),
-    do: {:error, :invalid_request, "This environment attaches files to #{repo.full_name} only."}
+    do: {:error, :invalid_request, "This environment can only attach files to #{repo.full_name}."}
 
   defp within_limit(_type, size) when size < 1,
-    do: {:error, :invalid_request, "An empty file can't be attached."}
+    do: {:error, :invalid_request, "The file is empty."}
 
   defp within_limit("video/" <> _, size) when size > @max_video_bytes do
     {:error, :invalid_request,
-     "Videos must be at most #{megabytes(@max_video_bytes)} to attach through Foreman."}
+     "Videos can be at most #{megabytes(@max_video_bytes)} when attached through Foreman."}
   end
 
   defp within_limit("image/" <> _, size) when size > @max_image_bytes,
-    do: {:error, :invalid_request, "Images must be at most #{megabytes(@max_image_bytes)}."}
+    do: {:error, :invalid_request, "Images can be at most #{megabytes(@max_image_bytes)}."}
 
   defp within_limit(_type, _size), do: :ok
 
@@ -226,7 +226,7 @@ defmodule Foreman.Attachments do
       if pending + size > @max_pending_bytes or Repo.aggregate(mine, :count) >= @max_open do
         Repo.rollback(
           {:too_many_attachments,
-           "Too many uploads are in progress for this environment. Try again in a few minutes."}
+           "This environment has too many uploads in progress. Try again in a few minutes."}
         )
       else
         Repo.insert!(%Upload{
@@ -303,7 +303,7 @@ defmodule Foreman.Attachments do
 
       received > upload.size ->
         {:error, :invalid_request,
-         "That is more than the #{upload.size} bytes the upload was opened with."}
+         "That's more than the #{upload.size} bytes this upload was opened with."}
 
       # A file a byte at a time would be a row a byte, kept alive by
       # each one.
@@ -347,9 +347,7 @@ defmodule Foreman.Attachments do
   end
 
   defp mismatch(received),
-    do:
-      {:error, :attachment_offset_mismatch,
-       "The next chunk for this upload is at offset #{received}."}
+    do: {:error, :attachment_offset_mismatch, "Expected the next chunk at offset #{received}."}
 
   # -- uploading ---------------------------------------------------------------
 
@@ -370,7 +368,7 @@ defmodule Foreman.Attachments do
     # its own, since "try again" would be wrong: the upload is gone.
     Access.Unavailable ->
       {:error, :repository_access_unavailable,
-       "GitHub couldn't be asked about your access to the repository, so the file wasn't " <>
+       "Couldn't reach GitHub to check your access to the repository, so the file wasn't " <>
          "uploaded. Send the file again."}
   after
     # Whatever happened, anything raised included.
@@ -390,7 +388,7 @@ defmodule Foreman.Attachments do
       do: {:ok, body},
       else:
         {:error, :attachment_upload_failed,
-         "Foreman lost part of the file before it could be uploaded. Send the file again."}
+         "Part of the file went missing before it could be uploaded. Send the file again."}
   end
 
   # Nothing for a chunk the keys can't read (they changed under it),
@@ -453,14 +451,13 @@ defmodule Foreman.Attachments do
 
       {:error, _} ->
         {:error, :repository_access_unavailable,
-         "GitHub couldn't be asked about your access to #{repo.full_name}. #{then}"}
+         "Couldn't reach GitHub to check your access to #{repo.full_name}. #{then}"}
     end
   end
 
   defp not_a_writer(repo) do
     {:error, :forbidden,
-     "Attaching files takes write access to #{repo.full_name}, which your GitHub account " <>
-       "doesn't have."}
+     "You need write access to #{repo.full_name} on GitHub to attach files to it."}
   end
 
   defp audit(principal, upload, env, url) do
@@ -483,32 +480,32 @@ defmodule Foreman.Attachments do
     owner = env.repo.owner
     account = if owner.attachment_login, do: " (#{owner.attachment_login})", else: ""
 
-    "GitHub refused the upload. The attachment token's account#{account} needs write access to " <>
-      "#{env.repo.full_name}, and the token has to include that repository."
+    "GitHub rejected the upload. The attachment token's account#{account} needs write access " <>
+      "to #{env.repo.full_name}, and the token has to include that repository."
   end
 
   defp refusal({:http, 401, _}, env) do
     "GitHub rejected the attachment token for #{env.repo.owner.login}. " <>
-      "An admin replaces it under Deployment."
+      "An admin needs to replace it on the Deployment page."
   end
 
   defp refusal({:http, 422, message}, _env) when is_binary(message),
-    do: "GitHub refused the file: #{message}"
+    do: "GitHub rejected the file: #{message}"
 
   # Any other refusal of the request itself.
   defp refusal({:http, status, _}, _env) when status in 400..499,
-    do: "GitHub refused the upload (it answered #{status})."
+    do: "GitHub rejected the upload (HTTP #{status})."
 
   # GitHub has the file and gave nothing to reference it by.
   defp refusal(:no_asset_url, _env),
-    do: "GitHub took the upload and named no asset for it. Send the file again."
+    do: "GitHub accepted the upload but didn't return a URL for it. Send the file again."
 
   # Everything else leaves it unknown whether GitHub has the file: a
   # server's failure, which something in front of GitHub can answer
   # after passing the file on, a timeout, a connection that dropped.
   defp refusal(_reason, _env) do
-    "GitHub gave no clear answer, so the file may or may not have been uploaded. " <>
-      "Sending it again is safe: an asset nothing references is never shown."
+    "GitHub didn't give a clear answer, so the file may or may not have been uploaded. " <>
+      "It's safe to send it again: an attachment that isn't used anywhere isn't visible."
   end
 
   defp uuid(value) when is_binary(value) and byte_size(value) == 36 do

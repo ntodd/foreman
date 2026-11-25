@@ -99,7 +99,7 @@ var tcpListen = func() (net.Listener, error) { return net.Listen("tcp", "127.0.0
 type unsupportedProxy struct{ scheme string }
 
 func (e *unsupportedProxy) Error() string {
-	return fmt.Sprintf("the %s proxy this environment is set to use isn't one gh's attachments can go through here (an HTTP or HTTPS proxy is)", e.scheme)
+	return fmt.Sprintf("can't send gh's connections through the %s proxy set in this environment; only HTTP and HTTPS proxies are supported", e.scheme)
 }
 
 // Start listens. Close stops it and removes what it made.
@@ -500,7 +500,7 @@ func (p *Proxy) native(w http.ResponseWriter, r *http.Request, why *Unavailable)
 		ModifyResponse: func(res *http.Response) error {
 			if why != nil && res.StatusCode == http.StatusNotFound && p.Notice != nil {
 				p.noticed.Do(func() {
-					fmt.Fprintf(p.Notice, "foreman: GitHub doesn't take attachment uploads from the token this environment holds, and Foreman can't upload for it yet. %s\n", why.Reason)
+					fmt.Fprintf(p.Notice, "foreman: GitHub rejects attachment uploads made with a GitHub App token, which is what this environment has, and Foreman can't upload for it yet. %s\n", why.Reason)
 				})
 			}
 			return nil

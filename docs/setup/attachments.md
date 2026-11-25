@@ -1,81 +1,85 @@
 # Images on issues and pull requests
 
-`gh pr edit --attach shot.png` uploads a file to GitHub and puts it in the
-pull request's body. Coding agents use it to show what they changed. Out of
-the box it fails in an environment:
+`gh pr edit --attach shot.png` uploads a file to GitHub and adds it to the pull
+request's body. Coding agents use it to show what they changed. By default it
+fails in an environment:
 
 ```
 could not upload shot.png: attaching files requires write access to the repository
 ```
 
-The message is misleading. GitHub's upload endpoint takes personal access
-tokens and answers 404 to a GitHub App's token, whatever the token may do
-([cli/cli#14309](https://github.com/cli/cli/issues/14309)). Every token
-Foreman gives an environment is a GitHub App's.
+The message is misleading. GitHub's attachment upload endpoint only accepts
+personal access tokens. It returns 404 for a GitHub App token, no matter what
+that token is allowed to do
+([cli/cli#14309](https://github.com/cli/cli/issues/14309)), and every token
+Foreman gives an environment is a GitHub App token.
 
-So Foreman uploads for the environment. An admin gives each owner an
-**attachment token**, the control plane keeps it, and `gh --attach` in that
-owner's environments works with no change to how it's typed. The token never
-reaches a box or an environment.
+So Foreman does the upload for the environment. An admin sets an **attachment
+token** for each owner. The control plane stores it and uploads with it, and
+`gh --attach` works in that owner's environments with no change to how you run
+it. The token is never sent to a box or an environment.
 
 ## 1. Pick the account
 
-A fine-grained personal access token of an account that can **write** to the
-repos environments attach to.
+You need a fine-grained personal access token from an account that has
+**write** access to the repos that environments attach files to.
 
-- **Team:** a machine user, such as the one that pulls private images
+- **Team:** use a machine user, such as the one that pulls private images
   ([ghcr-machine-user.md](ghcr-machine-user.md)). Give it the Write role on
   those repos, directly or through a team.
-- **Personal:** your own account already has it.
+- **Personal:** your own account already has write access.
 
-Uploads don't show who made them. The pull request or comment that holds the
-image is still written by the person whose environment it is.
+GitHub doesn't show who uploaded an attachment. The pull request or comment
+that contains the image is still posted by the person who owns the
+environment.
 
 ## 2. Create a fine-grained token with no permissions
 
-Signed in as that account: **Settings → Developer settings → Personal access
-tokens → Fine-grained tokens → Generate new token**.
+Signed in as that account, go to **Settings → Developer settings → Personal
+access tokens → Fine-grained tokens → Generate new token**.
 
-- **Resource owner:** the org (or your own account) that owns the repos. An
-  org has to allow fine-grained tokens, and may ask an owner to approve this
-  one.
-- **Repository access:** *Only select repositories*, and the repos
-  environments attach to. *All repositories* works and is more than it needs.
-- **Permissions:** none. Leave every one at *No access*; GitHub adds
-  *Metadata: Read-only* by itself.
-- **Expiration:** whatever the org allows. Foreman shows the date and marks it
-  two weeks before.
+- **Resource owner:** the org (or your own account) that owns the repos. The
+  org has to allow fine-grained tokens, and may require an owner to approve
+  this one.
+- **Repository access:** *Only select repositories*, then pick the repos that
+  environments attach files to. *All repositories* also works, but is broader
+  than needed.
+- **Permissions:** none. Leave everything at *No access*. GitHub adds
+  *Metadata: Read-only* automatically.
+- **Expiration:** whatever the org allows. Foreman shows the expiry date and
+  highlights it two weeks before.
 
-The upload ignores a token's permissions. It asks two things: that the token
-includes the repository, and that the account can write to it. A token with no
-permissions can upload attachments to the selected repos and read their
-metadata, and nothing else.
+The upload endpoint ignores the token's permissions. It checks two things:
+that the token includes the repository, and that the account can write to it.
+A token with no permissions can upload attachments to the selected repos and
+read their metadata, and that's all.
 
-## 3. Paste it into Foreman
+## 3. Add it to Foreman
 
-**Deployment → *the owner* → Attachment token → Add.**
+Go to **Deployment → *the owner* → Attachment token → Add** and paste the
+token.
 
-Foreman asks GitHub whose the token is before saving it, and refuses anything
-but a fine-grained token: a classic one would work for the upload and carries
-scopes that do far more.
+Foreman checks the token with GitHub before saving it. It only accepts
+fine-grained tokens. A classic token would also work for uploads, but its
+scopes allow much more.
 
 ## What an environment needs
 
-Nothing is configured in a repo. An environment picks it up when it has:
+There's nothing to configure in a repo. An environment needs:
 
-- **The Foreman feature 1.3.0 or later,** from a box whose agent release
-  carries it. The feature brings a small helper, `foreman-gh-attach`, and a
-  `gh` wrapper that runs gh behind it. The environment page offers a rebuild
-  when the box ships a newer feature than the environment was built with.
-- **gh 2.102 or later.** Older ones refuse an environment's token themselves,
-  before anything is uploaded.
-- **Write access of your own to the repository.** The upload is made with the
-  attachment token, and only for someone GitHub would have taken it from.
+- **Foreman feature 1.3.0 or later,** from a box whose agent release includes
+  it. The feature installs a small helper, `foreman-gh-attach`, and a `gh`
+  wrapper that runs gh through it. The environment page offers a rebuild when
+  the box has a newer feature than the environment was built with.
+- **gh 2.102 or later.** Older versions reject the environment's token
+  themselves, before uploading anything.
+- **Your own write access to the repository.** Foreman only uploads for
+  someone GitHub would have accepted the upload from.
 
-The Foreman CLI isn't involved, and the feature's `cli` option makes no
-difference.
+The Foreman CLI isn't involved, and the feature's `cli` option doesn't affect
+this.
 
-Then any of gh's commands that take the flag work as documented:
+After that, every gh command that takes `--attach` works as documented:
 
 ```sh
 gh pr create --title "Fix the login error" --body-file body.md --attach ./login.png
@@ -85,77 +89,81 @@ gh issue comment 7 --body "Reproduced." --attach ./repro.mp4
 
 ## How it works
 
-1. The feature's `gh` wrapper sees `--attach` and runs gh behind
-   `foreman-gh-attach`, the helper the feature installed.
-2. The helper starts a proxy on loopback for this one gh, which answers for
-   `uploads.github.com` itself and tunnels every other connection untouched.
-   gh trusts it through a certificate authority made for the run, good for
-   that one host name and gone when gh exits. The proxy serves only the gh it
-   started.
-3. gh uploads as usual. The proxy sends the file to the control plane over the
-   environment's own connection (`/run/foreman/api.sock`), in chunks.
+1. The feature's `gh` wrapper sees `--attach` and runs gh through
+   `foreman-gh-attach`.
+2. The helper starts a proxy on loopback for that one gh process. The proxy
+   handles requests to `uploads.github.com` itself and passes every other
+   connection through untouched. gh trusts the proxy through a certificate
+   authority created for that run. The authority is only valid for that one
+   host name, and it's deleted when gh exits. The proxy only serves the gh
+   process it started.
+3. gh uploads as usual. The proxy sends the file to the control plane in
+   chunks, over the environment's own connection (`/run/foreman/api.sock`).
 4. The control plane checks that the file is an image or video, that it's for
-   the environment's own repository and within the size limits, and that you
-   can write to that repository on GitHub yourself. It uploads the file with
-   the owner's attachment token and returns the asset's URL.
-5. gh puts the URL in the body, the way it would have with its own upload.
+   the environment's own repository, that it's within the size limits, and
+   that you have write access to that repository on GitHub. Then it uploads
+   the file with the owner's attachment token and returns the asset's URL.
+5. gh puts the URL in the body, the same as it would after its own upload.
 
-gh does its own checks and its own rewriting of the markdown. The only thing
-that changes is where the file's bytes go.
+gh still does its own checks and its own markdown rewriting. The only
+difference is where the file's bytes are sent.
 
 ## Limits
 
-- Images up to 10 MB (GitHub's limit), video up to 25 MB.
-- png, jpg, jpeg, gif, webp, svg, mp4, mov and webm, as in gh.
-- The environment's own repository only. A pull request in another repo
-  (an extra repo, a fork's parent) can't take attachments this way yet.
+- Images up to 10 MB (GitHub's limit) and video up to 25 MB.
+- png, jpg, jpeg, gif, webp, svg, mp4, mov and webm, the same as gh.
+- Only the environment's own repository. A pull request in another repo (an
+  extra repo, or a fork's parent) can't get attachments this way yet.
 - A service account's environment has no connection of its own to the control
-  plane, so `--attach` there fails the way it does without Foreman.
+  plane, so `--attach` fails there the same way it does without Foreman.
 
-## When it doesn't work
+## Troubleshooting
 
 | gh says | What it means |
 |---|---|
-| `attaching files requires write access to the repository`, after a line from `foreman:` about attachments not being set up | The owner has no attachment token. gh's own upload was tried and GitHub refused it. Add a token (step 3). |
-| `GitHub refused the upload. The attachment token's account … needs write access to …` | The account can't write to that repo, or the token doesn't include it. Fix the role or the token's repository list. |
-| `GitHub rejected the attachment token for …` | The token expired or was revoked. Replace it under Deployment. |
-| `This environment attaches files to … only` | The pull request or issue is in another repository. |
-| `Attaching files takes write access to …, which your GitHub account doesn't have` | You can read the repository and not push to it. GitHub wouldn't take the upload from you either. |
-| The first row's message with no line from `foreman:` | Either gh's own check, made before anything is uploaded: your account can't write to the repository. Or the environment has no helper (`ls /usr/local/share/foreman/foreman-gh-attach`): it was built with a feature older than 1.3.0, or by an agent release without one, and a rebuild brings it. |
-| A line from `foreman:` about a proxy, or `couldn't connect to …` | The helper passes gh's other connections on the way the environment's proxy settings say, and can go through an HTTP or HTTPS proxy. Through a SOCKS proxy it can't, and gh fails to connect. |
+| `attaching files requires write access to the repository`, after a line starting with `foreman:` saying attachments aren't set up | The owner has no attachment token. gh tried its own upload and GitHub rejected it. Add a token (step 3). |
+| `attaching files requires write access to the repository`, with no `foreman:` line | Either your account doesn't have write access to the repository (gh checks that before uploading), or the environment has no helper. Check with `ls /usr/local/share/foreman/foreman-gh-attach`. If it's missing, the environment was built with a feature older than 1.3.0 or from an agent release without the helper. Rebuild it. |
+| `GitHub rejected the upload. The attachment token's account … needs write access to …` | The token's account can't write to that repo, or the token doesn't include it. Fix the account's role or the token's repository list. |
+| `GitHub rejected the attachment token for …` | The token expired or was revoked. Replace it on the Deployment page. |
+| `This environment can only attach files to …` | The pull request or issue is in a different repository. |
+| `You need write access to … on GitHub to attach files to it` | You can read the repository but not push to it. GitHub wouldn't accept the upload from you directly either. |
+| A `foreman:` line about a proxy, or `couldn't connect to …` | The helper sends gh's other connections wherever the environment's proxy settings say. It supports HTTP and HTTPS proxies. It doesn't support SOCKS proxies, so gh can't connect through one. |
 | `unsupported authentication type` | gh is older than 2.102. Update it in the image. |
 
-Each upload is in the audit log (**Admin → Audit**) as
+Every upload is recorded in the audit log (**Admin → Audit**) as
 `environment.attachment`, with the file's name and size, the repository, the
-asset's URL and who asked.
+asset's URL and who requested it.
 
-## Without a token
+## Without an attachment token
 
-Where an owner has no attachment token, gh's own upload is sent on unchanged,
-so nothing is lost by the wrapper being there. If GitHub starts taking GitHub
-App tokens, `--attach` works without one.
+If an owner has no attachment token, the helper passes gh's own upload through
+to GitHub unchanged, so having the wrapper installed doesn't break anything.
+If GitHub starts accepting GitHub App tokens, `--attach` will work without an
+attachment token.
 
-A gh run with a token of your own (`GH_TOKEN=… gh …`, or `GITHUB_TOKEN`) is
-left alone entirely: the wrapper only steps in for the token Foreman delivers.
-That includes an environment where `GITHUB_TOKEN` is set as a secret: gh uses
-it there, as gh does anywhere, and not Foreman's.
+If you run gh with your own token (`GH_TOKEN=… gh …`, or `GITHUB_TOKEN`), the
+wrapper stays out of the way. It only acts when gh is using the token Foreman
+provides. That also applies to an environment where `GITHUB_TOKEN` is set as a
+secret: gh uses that secret, as it does anywhere else, and not Foreman's
+token.
 
 ## Using your own gh login
 
-To have gh act as a login of your own in an environment, switch Foreman's
-token off for it:
+To make gh use your own login in an environment, turn Foreman's token off for
+that command:
 
 ```sh
 FOREMAN_GH_TOKEN=off gh auth login                      # once
 FOREMAN_GH_TOKEN=off gh pr edit 23 --attach ./shot.png  # as that login
 ```
 
-With the switch, the wrapper runs gh untouched: no token of Foreman's and no
-upload through Foreman, so an upload is gh's own, with whatever your login may
-do. It has to be a switch. gh stores no login while a token is in its
-environment, and uses any token there before one it has stored.
+With `FOREMAN_GH_TOKEN=off`, the wrapper runs gh untouched. It doesn't set
+Foreman's token and doesn't upload through Foreman, so the upload is gh's own
+and can do whatever your login allows. This has to be an explicit setting: gh
+won't store a login while a token is set in its environment, and it uses a
+token from the environment before a stored login.
 
-Export it in a shell, or set it as an environment or user secret, to make your
-login the one gh uses there. git still pushes with Foreman's token either way.
-A login stored in an environment is a credential anything in it can use, and
-it lasts until you `gh auth logout`.
+To make this the default somewhere, export the variable in a shell, or set it
+as an environment or user secret. git still pushes with Foreman's token either
+way. A login stored in an environment is a credential that anything running
+there can use, and it stays until you run `gh auth logout`.

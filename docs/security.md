@@ -546,31 +546,35 @@ These are accepted for now, or need someone to try them:
     token has read the repo and its extra repos; without a GitHub App
     configured, nothing checks.
 22. **Anything in an environment can attach files to its repository.**
-    The control plane uploads what an environment sends it to that
-    environment's repository's attachments, with the owner's attachment
-    token ([attachments.md](setup/attachments.md)). Whatever runs in the
-    environment can ask, as it can push with the scoped token. The file
-    is whatever was sent: its kind is taken from its name and the bytes
-    aren't looked at. An upload can't be deleted from GitHub, and shows
-    nowhere until something references its URL. It is bounded to that
-    one repository, to images and video, to 10 MB and 25 MB a file,
-    and by the relay's request limit, and each one is in the audit log.
-    The token is a machine user's and can write wherever attachments
-    go, so Foreman asks GitHub whether the person acting can write to
-    the repository themselves before it uploads for them: without that,
-    someone who can only read a repository could attach to it.
-    The token itself stays in the control plane: one that leaked could
-    upload to the repos it includes and read their metadata.
-    In the environment, the `gh` it applies to runs behind a proxy that
-    answers for `uploads.github.com` with a certificate authority made
-    for that run. The authority is name-constrained to that host alone, with
-    the names under it and every address excluded, signs one
-    certificate, and its key is discarded; only that gh process is told to trust it. The
-    proxy's port is on loopback, which other users in the container can
-    reach, so it tunnels only for a request carrying a secret made for
-    the run, and answers uploads on a socket in a directory of the
-    user's own. The secret is in gh's environment, which the same user
-    and root can read, as they can the API socket it stands in front of.
+    The control plane uploads whatever an environment sends it to that
+    environment's repository, using the owner's attachment token
+    ([attachments.md](setup/attachments.md)). Anything running in the
+    environment can make that request, the same way it can push with the
+    scoped token. The file isn't inspected: its type comes from its name
+    and the bytes aren't checked. An upload can't be deleted from GitHub,
+    though it isn't visible anywhere until something links to its URL.
+    Uploads are limited to that one repository, to images and video, to
+    10 MB and 25 MB per file, and by the relay's request limit, and each
+    one is in the audit log.
+    The token belongs to a machine user that can write to every repo
+    that takes attachments. So before uploading for someone, Foreman
+    asks GitHub whether that person can write to the repository
+    themselves. Without that check, someone with read-only access could
+    attach files.
+    The token itself never leaves the control plane. If it leaked, it
+    could upload attachments to the repos it includes and read their
+    metadata.
+    In the environment, the `gh` command runs behind a proxy that
+    answers for `uploads.github.com` using a certificate authority
+    created for that run. The authority is name-constrained to that one
+    host, with its subdomains and all IP addresses excluded. It signs
+    one certificate and its key is discarded, and only that gh process
+    is told to trust it. The proxy listens on loopback, which other
+    users in the container can reach, so it only tunnels for requests
+    that carry a per-run secret, and it serves uploads on a socket in a
+    directory owned by the user. The secret is in gh's environment,
+    which the same user and root can read. They can also read the API
+    socket the proxy sits in front of.
 
 ## Things worth trying
 
@@ -600,10 +604,10 @@ These are accepted for now, or need someone to try them:
 - Cross-user access as a member: another user's environments, secrets,
   boxes, or admin pages and Oban Web.
 - Attachments from inside an environment: get a file into another
-  repository's attachments (a `repository_id`, another environment's
-  upload id), past the kinds and sizes allowed, or hold more than the
-  cap in the database; get the attachment token, or anything about it,
-  back in an error.
+  repository's attachments (with a `repository_id`, or another
+  environment's upload id), get past the allowed file types and sizes,
+  or keep more than the cap stored in the database. Get the attachment
+  token, or any detail about it, to show up in an error.
 - Sign-in: the OAuth state and PKCE, open redirects in `return_to`, the
   dev sign-in route in a production build (it shouldn't be compiled in).
 - A Flatcar box's first-boot config: get one, or a Tailscale key,

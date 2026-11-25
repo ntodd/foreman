@@ -111,7 +111,7 @@ if [ -f "$here/bin/foreman-gh-attach" ]; then
   "$share/foreman-gh-attach" >/dev/null 2>&1 || status=$?
   if [ "$status" != 2 ]; then
     rm -f "$share/foreman-gh-attach"
-    echo "foreman: the gh --attach helper doesn't run on $(uname -m), so gh --attach uploads on its own" >&2
+    echo "foreman: the gh --attach helper can't run on $(uname -m), so gh --attach will upload on its own" >&2
   fi
 fi
 
