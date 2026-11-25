@@ -363,7 +363,7 @@ defmodule Foreman.Attachments do
          :ok <- repository(env, upload.repository_id),
          :ok <- writer(principal, env, "Send the file again."),
          {:ok, body} <- assemble(upload) do
-      send_file(principal, upload, env, token, body)
+      deliver(principal, upload, env, token, body)
     end
   rescue
     # GitHub couldn't be asked who may see the repository. An answer of
@@ -405,7 +405,7 @@ defmodule Foreman.Attachments do
     _ -> ""
   end
 
-  defp send_file(principal, upload, env, token, body) do
+  defp deliver(principal, upload, env, token, body) do
     result =
       GitHub.Client.impl().upload_attachment(
         token,

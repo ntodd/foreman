@@ -9,7 +9,7 @@
 //
 // Code it follows (apps/foreman):
 //   lib/foreman/attachments.ex    start, open, append, upload (the lookup), store, write,
-//                                 finish, assemble, send_file, writer, prune
+//                                 finish, assemble, deliver, writer, prune
 //   lib/foreman/jobs/housekeeping.ex    Attachments.prune
 //
 // Modelling choices:
@@ -273,7 +273,7 @@ module attachments {
     }
   }
 
-  // send_file/5: the file goes to GitHub, once, and GitHub takes it, refuses
+  // deliver/5: the file goes to GitHub, once, and GitHub takes it, refuses
   // it, or gives no answer (in which case it may have it).
   action post = {
     nondet r = REQS.oneOf()
