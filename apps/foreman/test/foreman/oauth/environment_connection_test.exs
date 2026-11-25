@@ -41,7 +41,7 @@ defmodule Foreman.OAuth.EnvironmentConnectionTest do
         do: refute(refused in principal.scopes)
 
     for needed <- ~w(environments:read environments:start environments:stop
-                     secrets:list secrets:write operations:read logs:read),
+                     secrets:list secrets:write operations:read logs:read attachments:create),
         do: assert(needed in principal.scopes)
   end
 

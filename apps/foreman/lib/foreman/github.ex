@@ -707,7 +707,7 @@ defmodule Foreman.GitHub do
   repos reference must be pullable with it.
   """
   def check_registry_credential(host, username, token, refs) do
-    with {:ok, info} <- client().check_classic_token(token),
+    with {:ok, info} <- client().check_token(token),
          :ok <- require_scope(info.scopes) do
       failures =
         for ref <- refs,
@@ -726,6 +726,25 @@ defmodule Foreman.GitHub do
       {:error, other} -> {:error, "couldn't check the token: #{inspect(other)}"}
     end
   end
+
+  # -- attachment tokens ------------------------------------------------------------
+
+  @doc """
+  Checks the token attachments are uploaded with: a fine-grained personal
+  access token GitHub accepts. A classic token works for the upload too,
+  but carries scopes that do far more, and a GitHub App's is refused by
+  the upload itself. Says whose the token is and when it lapses.
+  """
+  def check_attachment_token("github_pat_" <> _ = token) do
+    case client().check_token(token) do
+      {:ok, info} -> {:ok, info}
+      {:error, :invalid_token} -> {:error, "GitHub rejected the token"}
+      {:error, other} -> {:error, "couldn't check the token: #{inspect(other)}"}
+    end
+  end
+
+  def check_attachment_token(_token),
+    do: {:error, "use a fine-grained personal access token (it starts with github_pat_)"}
 
   defp require_scope(scopes) do
     if "read:packages" in scopes or "write:packages" in scopes,

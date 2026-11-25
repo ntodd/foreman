@@ -21,7 +21,7 @@ The official CLI ships with a recognized public client ID. An instance admin reg
 
 **Discovery.** For an instance at an HTTPS origin, fetch `/.well-known/oauth-authorization-server` and verify that its `issuer` matches the selected instance before using the advertised endpoints. Metadata lists the device authorization, token and revocation URLs, grant types, client authentication methods and individual scopes. [Authorization server metadata](https://www.rfc-editor.org/rfc/rfc8414.html)
 
-**Scope names.** Use the resource-first form `resource:action`. Any authenticated connection can call `/me`. Request scopes as space-separated values. Use `repos:list`, `boxes:list`, `environments:list`, `environments:read`, `operations:list`, `operations:read` and `logs:read` for the corresponding reads. Mutations use `environments:create`, `environments:start`, `environments:stop` and `environments:destroy`. The scope for an expiry action is also required when setting it. `secrets:list` and `secrets:write` cover secrets and belong to personal connections alone: an admin cannot grant them to a service account. The client must inspect the granted scope.
+**Scope names.** Use the resource-first form `resource:action`. Any authenticated connection can call `/me`. Request scopes as space-separated values. Use `repos:list`, `boxes:list`, `environments:list`, `environments:read`, `operations:list`, `operations:read` and `logs:read` for the corresponding reads. Mutations use `environments:create`, `environments:start`, `environments:stop` and `environments:destroy`. The scope for an expiry action is also required when setting it. `secrets:list` and `secrets:write` cover secrets and belong to personal connections alone: an admin cannot grant them to a service account. `attachments:create` uploads a file to an environment's repository and is personal in the same way. An environment's own connection carries it, and the CLI's login doesn't ask for it. The client must inspect the granted scope.
 
 **Personal connection.** The client selects an instance URL and identifies itself to `POST /oauth/device/code` with its registered client ID. It displays the returned verification URI and user code. The user signs in to that instance using Foreman’s existing browser login, confirms the code, and approves the named client and requested permissions. The client polls `POST /oauth/token` at the advertised interval, handles pending approval, slowdown, denial, and expiry, and exchanges the device code once. This requires only outbound HTTPS from the client. Device codes expire after 10 minutes. A distributed CLI is a public client. [OAuth device authorization grant](https://www.rfc-editor.org/rfc/rfc8628.html)
 
@@ -105,6 +105,29 @@ A personal connection can manage secrets at the four levels the browser offers: 
 **Concurrent writers.** Changes to one scope are applied one request at a time, and the last request to finish wins. Nothing detects that a value changed between a client's read and its write. The request is checked again once its turn comes: the connection's grant is still live, an admin is still one, and the environment or repository is still the caller's to reach. Anything that needs GitHub is asked before the write begins, so an outage there fails the request with nothing changed.
 
 Each change is audited with the client and the acting user.
+
+## Attachments
+
+`gh --attach` in an environment uploads through these two requests ([setup guide](../setup/attachments.md)). GitHub refuses the upload from the tokens an environment holds, so Foreman makes it with an attachment token an admin set for the repository's owner.
+
+`POST /api/v1/environments/{id}/attachments` opens an upload with the file's `name` and `size`. The name's extension decides the kind: png, jpg, jpeg, gif, webp, svg, mp4, mov or webm. An image may be up to 10 MB and a video up to 25 MB. An optional `repository_id` must be the GitHub ID of the environment's own repository, which is also the default. The response has the upload's `id` and `chunk_size`.
+
+`PATCH /api/v1/environments/{id}/attachments/{attachment}` sends the next chunk: its `offset`, and its bytes as base64 in `data`. Chunks go in order, each `chunk_size` bytes until the one that completes the file. That one uploads the file to GitHub and returns the asset's `url`; earlier ones return the bytes `received`. Only one request can complete a file, so it is sent once.
+
+**The caller needs write access of their own.** The attachment token is a machine user's. Before opening an upload and again before sending the file, Foreman asks GitHub, with the acting user's token, whether the repository is theirs to push to. GitHub applies the same rule to an upload made with a person's own token.
+
+| HTTP | Code | Caller action |
+|---|---|---|
+| 409 | `attachments_unavailable` | The owner has no attachment token. An admin adds one. |
+| 403 | `forbidden` | The acting user can't write to the repository on GitHub. |
+| 503 | `repository_access_unavailable` | GitHub couldn't be asked about the user's access. Opening an upload can be tried again. On the completing chunk the upload is gone, and the file is sent again. |
+| 404 | `resource_not_found` | The environment or the upload isn't the caller's to reach, as everywhere in the API. That includes an upload that has sat for ten minutes and, on an instance with a GitHub App, an environment whose owner's GitHub sign-in has expired or whose repository Foreman can't identify on GitHub. Without a GitHub App, an unidentified repository answers `409 attachments_unavailable`. |
+| 422 | `invalid_request` | The message says which: the file's kind or size, another repository, a malformed chunk. |
+| 409 | `attachment_offset_mismatch` | Send the chunk at the offset the message names. |
+| 429 | `too_many_attachments` | The environment's open uploads add up to 50 MB, or there are 16 of them. Finish or wait: an upload nothing is sent to for ten minutes takes no more chunks and stops counting. |
+| 502 | `attachment_upload_failed` | GitHub refused the file, and the message says why, or gave no clear answer (a server error, a timeout), and the message says the file may have been uploaded. Either way the upload is gone: send the file again as a new one. |
+
+Once Foreman has taken the chunk that completes a file, the upload is over whatever it answers. A request refused before that, by a rate limit for one, leaves the upload as it was and can be sent again. An upload cannot be undone on GitHub, and one whose answer was lost may be there: sending the file again makes a second asset, which nothing shows until something references it. Each upload GitHub confirmed is audited with the client and the acting user. One whose answer was lost is not, since Foreman never learned its URL.
 
 ### Create errors
 

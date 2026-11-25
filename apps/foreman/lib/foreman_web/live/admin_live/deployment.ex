@@ -2,7 +2,7 @@ defmodule ForemanWeb.AdminLive.Deployment do
   @moduledoc """
   The deployment at a glance: Foreman's version and updates, GitHub and
   Tailscale, the database, owners with their secrets, registry
-  credentials and extra repos, and agent releases.
+  credentials, attachment tokens and extra repos, and agent releases.
   """
   use ForemanWeb, :live_view
 
@@ -21,6 +21,8 @@ defmodule ForemanWeb.AdminLive.Deployment do
      |> assign(:page_title, "Deployment")
      |> assign(:registry_owner, nil)
      |> assign(:registry_form, nil)
+     |> assign(:attachment_owner, nil)
+     |> assign(:attachment_form, nil)
      |> assign(:extra_repos_owner, nil)
      |> assign(:extra_repos_form, nil)
      |> assign(:checking, false)
@@ -53,7 +55,19 @@ defmodule ForemanWeb.AdminLive.Deployment do
     |> assign(:releases, Releases.list())
   end
 
+  # While a credential is being checked, its save is on the way and
+  # nothing shows that it is but the form. So the form stays, and nothing
+  # else opens, saves or removes a credential until that save has landed
+  # or failed: a Remove made in between would be undone by it, and a
+  # second check finishing first would say nothing was pending.
+  @credential_events ~w(edit_registry cancel_registry save_registry
+                        edit_attachment cancel_attachment save_attachment remove_attachment)
+
   @impl true
+  def handle_event(event, _params, %{assigns: %{checking: true}} = socket)
+      when event in @credential_events,
+      do: {:noreply, socket}
+
   def handle_event("edit_registry", %{"id" => id}, socket) do
     owner = Repos.get_owner!(id)
 
@@ -111,6 +125,41 @@ defmodule ForemanWeb.AdminLive.Deployment do
     {:noreply, socket}
   end
 
+  def handle_event("edit_attachment", %{"id" => id}, socket) do
+    form = to_form(%{"token" => ""}, as: :attachment)
+    {:noreply, assign(socket, attachment_owner: Repos.get_owner!(id), attachment_form: form)}
+  end
+
+  def handle_event("cancel_attachment", _params, socket),
+    do: {:noreply, assign(socket, attachment_owner: nil, attachment_form: nil)}
+
+  # The form opens empty, to replace a token as well as to add one. An
+  # empty one saved would take the token away, which is what Remove is for.
+  def handle_event("save_attachment", %{"attachment" => %{"token" => token}}, socket)
+      when is_binary(token) and byte_size(token) > 0 do
+    if String.trim(token) == "",
+      do: {:noreply, put_flash(socket, :error, "Paste a token to save.")},
+      else: check_attachment(socket, token)
+  end
+
+  def handle_event("save_attachment", _params, socket),
+    do: {:noreply, put_flash(socket, :error, "Paste a token to save.")}
+
+  def handle_event("remove_attachment", %{"id" => id}, socket) do
+    owner = Repos.get_owner!(id)
+
+    case Repos.update_attachment_token(socket.assigns.current_scope, owner, nil) do
+      {:ok, owner} ->
+        {:noreply,
+         socket
+         |> put_flash(:info, "Removed the attachment token for #{owner.login}.")
+         |> load()}
+
+      {:error, _} ->
+        {:noreply, socket}
+    end
+  end
+
   def handle_event("edit_extra_repos", %{"id" => id}, socket) do
     owner = Repos.get_owner!(id)
     form = to_form(%{"repos" => Enum.join(owner.extra_repos, ", ")}, as: :extra_repos)
@@ -163,6 +212,19 @@ defmodule ForemanWeb.AdminLive.Deployment do
      |> start_async(:check_updates, fn -> Updates.check() end)}
   end
 
+  defp check_attachment(socket, token) do
+    owner = socket.assigns.attachment_owner
+    scope = socket.assigns.current_scope
+
+    # GitHub is asked whose the token is, which can take a moment.
+    {:noreply,
+     socket
+     |> assign(:checking, true)
+     |> start_async(:check_attachment, fn ->
+       Repos.update_attachment_token(scope, owner, token)
+     end)}
+  end
+
   defp update_error(:in_progress), do: "An update is already under way."
   defp update_error(:no_updater), do: "The host's updater isn't installed."
   defp update_error(:disabled), do: "This deployment is updated outside Foreman."
@@ -209,6 +271,33 @@ defmodule ForemanWeb.AdminLive.Deployment do
      socket |> assign(:checking, false) |> put_flash(:error, "Check failed: #{inspect(reason)}")}
   end
 
+  def handle_async(:check_attachment, {:ok, {:ok, owner}}, socket) do
+    {:noreply,
+     socket
+     |> assign(checking: false, attachment_owner: nil, attachment_form: nil)
+     |> put_flash(
+       :info,
+       "Checked and saved the attachment token for #{owner.login}. It is #{owner.attachment_login}'s."
+     )
+     |> load()}
+  end
+
+  def handle_async(:check_attachment, {:ok, {:error, reason}}, socket) do
+    message =
+      case reason do
+        message when is_binary(message) -> message
+        :unauthorized -> "only an admin sets this"
+        %Ecto.Changeset{} -> "GitHub named an account Foreman can't store"
+      end
+
+    {:noreply, socket |> assign(:checking, false) |> put_flash(:error, "Not saved: #{message}")}
+  end
+
+  def handle_async(:check_attachment, {:exit, reason}, socket) do
+    {:noreply,
+     socket |> assign(:checking, false) |> put_flash(:error, "Check failed: #{inspect(reason)}")}
+  end
+
   @impl true
   def handle_info(:refresh_update, socket), do: {:noreply, load_update(socket)}
   def handle_info(_message, socket), do: {:noreply, socket}
@@ -230,8 +319,7 @@ defmodule ForemanWeb.AdminLive.Deployment do
 
   defp last_update(%{message: message}), do: message
 
-  defp expiring?(%{registry_token_expires_at: at}),
-    do: DateTime.diff(at, DateTime.utc_now()) < 14 * 86_400
+  defp expiring?(%DateTime{} = at), do: DateTime.diff(at, DateTime.utc_now()) < 14 * 86_400
 
   @impl true
   def render(assigns) do
@@ -409,7 +497,13 @@ defmodule ForemanWeb.AdminLive.Deployment do
                 <.button type="submit" variant="primary" size="sm" disabled={@checking}>{if @checking,
                   do: "Checking…",
                   else: "Check and save"}</.button>
-                <.button type="button" size="sm" variant="ghost" phx-click="cancel_registry">Cancel</.button>
+                <.button
+                  type="button"
+                  size="sm"
+                  variant="ghost"
+                  phx-click="cancel_registry"
+                  disabled={@checking}
+                >Cancel</.button>
               </div>
             </.form>
           <% else %>
@@ -419,16 +513,94 @@ defmodule ForemanWeb.AdminLive.Deployment do
                   {owner.registry_username} on {owner.registry_host}
                   <span
                     :if={owner.registry_token_expires_at}
-                    class={["ml-1", expiring?(owner) && "font-medium text-warning"]}
+                    class={[
+                      "ml-1",
+                      expiring?(owner.registry_token_expires_at) && "font-medium text-warning"
+                    ]}
                   >
                     · expires {Calendar.strftime(owner.registry_token_expires_at, "%b %-d, %Y")}
                   </span>
                 </p>
                 <p :if={is_nil(owner.registry_token)} class="text-ink-3">None set.</p>
               </div>
-              <.button size="sm" phx-click="edit_registry" phx-value-id={owner.id}>{if owner.registry_token,
+              <.button
+                size="sm"
+                phx-click="edit_registry"
+                phx-value-id={owner.id}
+                disabled={@checking}
+              >{if owner.registry_token,
                 do: "Replace",
                 else: "Add"}</.button>
+            </div>
+          <% end %>
+        </.panel>
+
+        <.panel title="Attachment token">
+          <:subtitle>
+            For gh --attach in {owner.login}'s environments. GitHub's upload refuses the tokens environments hold, so Foreman uploads with this one and keeps it here: a machine user's fine-grained token with no permissions. See docs/setup/attachments.md.
+          </:subtitle>
+          <%= if @attachment_owner && @attachment_owner.id == owner.id do %>
+            <.form
+              for={@attachment_form}
+              id="attachment-form"
+              phx-submit="save_attachment"
+              class="space-y-3"
+            >
+              <.input
+                field={@attachment_form[:token]}
+                type="password"
+                label="Fine-grained token (no permissions)"
+                autocomplete="off"
+              />
+              <div class="flex gap-2">
+                <.button type="submit" variant="primary" size="sm" disabled={@checking}>{if @checking,
+                  do: "Checking…",
+                  else: "Check and save"}</.button>
+                <.button
+                  type="button"
+                  size="sm"
+                  variant="ghost"
+                  phx-click="cancel_attachment"
+                  disabled={@checking}
+                >Cancel</.button>
+              </div>
+            </.form>
+          <% else %>
+            <div class="flex flex-wrap items-center justify-between gap-3">
+              <div class="text-sm">
+                <p :if={owner.attachment_token} class="text-ink">
+                  {owner.attachment_login}
+                  <span
+                    :if={owner.attachment_token_expires_at}
+                    class={[
+                      "ml-1 whitespace-nowrap",
+                      expiring?(owner.attachment_token_expires_at) && "font-medium text-warning"
+                    ]}
+                  >
+                    · expires {Calendar.strftime(owner.attachment_token_expires_at, "%b %-d, %Y")}
+                  </span>
+                </p>
+                <p :if={is_nil(owner.attachment_token)} class="text-ink-3">None set.</p>
+              </div>
+              <div class="flex gap-2">
+                <.button
+                  :if={owner.attachment_token}
+                  size="sm"
+                  variant="ghost"
+                  phx-click="remove_attachment"
+                  phx-value-id={owner.id}
+                  disabled={@checking}
+                  data-confirm={"Remove the attachment token for #{owner.login}? gh --attach stops working in its environments."}
+                >Remove</.button>
+                <.button
+                  size="sm"
+                  phx-click="edit_attachment"
+                  phx-value-id={owner.id}
+                  disabled={@checking}
+                >{if owner.attachment_token,
+                  do: "Replace",
+                  else: "Add"}</.button>
+              </div>
             </div>
           <% end %>
         </.panel>

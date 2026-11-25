@@ -206,14 +206,14 @@ defmodule Foreman.GitHubTest do
 
   describe "registry credentials" do
     test "need read:packages and must pull every private reference" do
-      expect(ClientMock, :check_classic_token, fn "ghp_x" ->
+      expect(ClientMock, :check_token, fn "ghp_x" ->
         {:ok, %{login: "bot", scopes: ["repo"], expires_at: nil}}
       end)
 
       assert {:error, message} = GitHub.check_registry_credential("ghcr.io", "bot", "ghp_x", [])
       assert message =~ "read:packages"
 
-      expect(ClientMock, :check_classic_token, fn "ghp_y" ->
+      expect(ClientMock, :check_token, fn "ghp_y" ->
         {:ok, %{login: "bot", scopes: ["read:packages"], expires_at: nil}}
       end)
 
@@ -226,7 +226,7 @@ defmodule Foreman.GitHubTest do
 
       assert message =~ "ghcr.io/w/base:1"
 
-      expect(ClientMock, :check_classic_token, fn "ghp_z" ->
+      expect(ClientMock, :check_token, fn "ghp_z" ->
         {:ok, %{login: "bot", scopes: ["read:packages"], expires_at: ~U[2027-01-01 00:00:00Z]}}
       end)
 

@@ -151,6 +151,28 @@ type SecretChangeResult struct {
 	OthersAffected int64            `json:"others_affected"`
 }
 
+type AttachmentStart struct {
+	Name         string `json:"name"`
+	Size         int64  `json:"size"`
+	RepositoryID *int64 `json:"repository_id,omitempty"`
+}
+
+type AttachmentUpload struct {
+	ID        ID    `json:"id"`
+	ChunkSize int64 `json:"chunk_size"`
+	Received  int64 `json:"received"`
+}
+
+type AttachmentChunk struct {
+	Offset int64  `json:"offset"`
+	Data   string `json:"data"`
+}
+
+type AttachmentProgress struct {
+	Received int64   `json:"received"`
+	URL      *string `json:"url,omitempty"`
+}
+
 type EnvironmentPage struct {
 	Items      []Environment `json:"items"`
 	NextCursor *string       `json:"next_cursor"`
@@ -348,4 +370,14 @@ func (c *Client) ListSecrets(ctx context.Context, scope string, subject string, 
 // ChangeSecrets — Set and remove secrets at one scope together.
 func (c *Client) ChangeSecrets(ctx context.Context, scope string, subject string, body SecretChanges) (*Response[SecretChangeResult], error) {
 	return call[SecretChangeResult](ctx, c, request{method: "PATCH", bearer: true, path: "/api/v1/secrets/" + url.PathEscape(scope) + "/" + url.PathEscape(subject), body: body, success: []int{200}})
+}
+
+// StartAttachment — Open an upload of an image or video to the attachments of the environment's repository.
+func (c *Client) StartAttachment(ctx context.Context, id string, body AttachmentStart) (*Response[AttachmentUpload], error) {
+	return call[AttachmentUpload](ctx, c, request{method: "POST", bearer: true, path: "/api/v1/environments/" + url.PathEscape(id) + "/attachments", body: body, success: []int{201}})
+}
+
+// AppendAttachment — Send the next chunk of an upload.
+func (c *Client) AppendAttachment(ctx context.Context, id string, attachment string, body AttachmentChunk) (*Response[AttachmentProgress], error) {
+	return call[AttachmentProgress](ctx, c, request{method: "PATCH", bearer: true, path: "/api/v1/environments/" + url.PathEscape(id) + "/attachments/" + url.PathEscape(attachment), body: body, success: []int{200}})
 }

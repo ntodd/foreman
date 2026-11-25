@@ -11,7 +11,7 @@ forms = []
 grants = []
 
 def go_name(name)
-  acronyms = {"id" => "ID", "ssh" => "SSH", "uri" => "URI"}
+  acronyms = {"id" => "ID", "ssh" => "SSH", "uri" => "URI", "url" => "URL"}
   name.split(/[_-]/).map { |part| acronyms.fetch(part.downcase) { part.sub(/^./, &:upcase) } }.join
 end
 

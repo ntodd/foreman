@@ -28,8 +28,8 @@ defmodule ForemanWeb.OAuthMetadataControllerTest do
              ["client_secret_basic", "none"]
 
     assert Enum.sort(metadata["scopes_supported"]) ==
-             ~w(boxes:list environments:create environments:destroy environments:list
-                environments:read environments:start environments:stop logs:read operations:list
-                operations:read repos:list secrets:list secrets:write)
+             ~w(attachments:create boxes:list environments:create environments:destroy
+                environments:list environments:read environments:start environments:stop
+                logs:read operations:list operations:read repos:list secrets:list secrets:write)
   end
 end

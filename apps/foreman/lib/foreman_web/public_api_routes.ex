@@ -14,6 +14,12 @@ defmodule ForemanWeb.PublicAPIRoutes do
       # Unlogged: a body that isn't shaped the way the API expects is logged
       # before anything can validate it, and its values are secrets.
       patch "/secrets/:scope/:subject", ForemanWeb.SecretMutationController, :update, log: false
+      post "/environments/:id/attachments", ForemanWeb.AttachmentController, :create
+      # Unlogged: a chunk's parameters are half a megabyte of someone's file.
+      patch "/environments/:id/attachments/:attachment_id",
+            ForemanWeb.AttachmentController,
+            :append,
+            log: false
 
       get "/repos", ForemanWeb.PublicReadController, :repos
       get "/boxes", ForemanWeb.PublicReadController, :boxes

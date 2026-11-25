@@ -346,6 +346,49 @@ paths:
             application/json:
               schema: {$ref: '#/components/schemas/SecretChangeResult'}
         default: {$ref: '#/components/responses/Error'}
+  /api/v1/environments/{id}/attachments:
+    post:
+      operationId: startAttachment
+      x-required-permission: 'attachments:create'
+      summary: Open an upload of an image or video to the attachments of the environment's repository
+      description: Personal connections only, and an environment's own. Foreman uploads the file to GitHub with the attachment token an admin set for the repository's owner, and answers 409 attachments_unavailable when there is none. The acting user must be able to write to the repository on GitHub themselves, or the answer is 403 forbidden. The file is sent in chunks to the upload this opens.
+      security: [{foremanToken: []}]
+      parameters:
+        - {$ref: '#/components/parameters/Id'}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/AttachmentStart'}
+      responses:
+        '201':
+          description: The upload to send chunks to, and the most bytes a chunk may hold
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/AttachmentUpload'}
+        default: {$ref: '#/components/responses/Error'}
+  /api/v1/environments/{id}/attachments/{attachment}:
+    patch:
+      operationId: appendAttachment
+      x-required-permission: 'attachments:create'
+      summary: Send the next chunk of an upload
+      description: Chunks are sent in order, each at the offset the last one ended and each chunk_size bytes long until the one that completes the file. A chunk at any other offset returns 409 attachment_offset_mismatch. The chunk that completes the file uploads it to GitHub and returns the asset's URL. When GitHub does not take it the response is 502 attachment_upload_failed. Once that chunk has been taken the upload is over, whether or not GitHub took the file, and a file is sent again by opening a new one. An upload nothing is sent to for ten minutes takes no more chunks.
+      security: [{foremanToken: []}]
+      parameters:
+        - {$ref: '#/components/parameters/Id'}
+        - {$ref: '#/components/parameters/Attachment'}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/AttachmentChunk'}
+      responses:
+        '200':
+          description: The bytes received so far, with the asset's URL once the file is complete and uploaded
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/AttachmentProgress'}
+        default: {$ref: '#/components/responses/Error'}
 components:
   securitySchemes:
     serviceCredential:
@@ -379,6 +422,12 @@ components:
       required: true
       description: The environment or repository ID, the owner's ID or login, or `me` for the connected user.
       schema: {type: string}
+    Attachment:
+      name: attachment
+      in: path
+      required: true
+      description: The upload's ID, from the request that opened it.
+      schema: {type: string, format: uuid}
     Key:
       name: Idempotency-Key
       in: header
@@ -612,6 +661,49 @@ components:
         others_affected:
           type: integer
           description: How many of other people's running environments the scope reaches.
+    AttachmentStart:
+      type: object
+      additionalProperties: false
+      required: [name, size]
+      properties:
+        name:
+          type: string
+          description: The file's own name, without a directory. Its extension decides the kind (png, jpg, jpeg, gif, webp, svg, mp4, mov or webm).
+        size:
+          type: integer
+          description: The file's size in bytes. An image may be up to 10 MB and a video up to 25 MB.
+        repository_id:
+          type: integer
+          description: The GitHub ID of the repository to attach to. Only the environment's own repository is accepted, which is also the default.
+    AttachmentUpload:
+      type: object
+      required: [id, chunk_size, received]
+      properties:
+        id: {$ref: '#/components/schemas/Id'}
+        chunk_size:
+          type: integer
+          description: The most bytes one chunk may hold, before base64.
+        received: {type: integer}
+    AttachmentChunk:
+      type: object
+      additionalProperties: false
+      required: [offset, data]
+      properties:
+        offset:
+          type: integer
+          description: Where in the file this chunk starts, which is the number of bytes already received.
+        data:
+          type: string
+          description: The chunk's bytes as padded base64. Exactly chunk_size bytes, or what is left of the file in its last chunk.
+    AttachmentProgress:
+      type: object
+      required: [received]
+      properties:
+        received: {type: integer}
+        url:
+          type: string
+          format: uri
+          description: The uploaded asset, to reference from an issue, pull request or comment. Present once the file is complete.
     EnvironmentPage:
       type: object
       required: [items, next_cursor]

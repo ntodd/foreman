@@ -3,8 +3,9 @@ defmodule Foreman.Jobs.Housekeeping do
   Fails operations that were sent to a connected agent and never came
   back (the agent hung, or died mid-build and lost its in-memory state),
   so the environment's queue moves on; settles agent updates; and prunes
-  expired join tokens, old sessions, old operation logs and the secrets
-  kept for redacting finished operations.
+  expired join tokens, old sessions, old operation logs, the secrets
+  kept for redacting finished operations and attachment uploads that
+  were abandoned part way.
 
   Operations on a box that's offline are left alone: they're resent when
   it reconnects. A result that turns up after an operation was failed
@@ -52,6 +53,7 @@ defmodule Foreman.Jobs.Housekeeping do
     Retention.prune_history(now)
     Foreman.OAuth.prune()
     Foreman.Agents.RelayNonce.prune()
+    Foreman.Attachments.prune()
     Redactions.prune()
     :ok
   end

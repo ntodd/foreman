@@ -103,7 +103,9 @@ defmodule Foreman.Release do
       |> Enum.reduce(Changeset.change(row), fn field, changeset ->
         Changeset.force_change(changeset, field, Map.fetch!(row, field))
       end)
-      |> repo.update!()
+      # Unlogged: Ecto logs the values a statement was given, which here
+      # is every secret in the clear.
+      |> repo.update!(log: false)
 
       true
     else

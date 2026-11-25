@@ -67,6 +67,22 @@ defmodule Foreman.ReleaseTest do
       %{current: current, retired: retired}
     end
 
+    test "writes no value to the query log" do
+      secret_fixture("owner", owner_fixture(), "TOKEN", "s3cret-in-rotation")
+      level = Logger.level()
+      Logger.configure(level: :debug)
+      on_exit(fn -> Logger.configure(level: level) end)
+
+      log =
+        ExUnit.CaptureLog.capture_log([level: :debug], fn ->
+          capture_io(&Foreman.Release.reencrypt/0)
+        end)
+
+      # The capture is live: reading the rows it rewrote is in it.
+      assert log =~ ~s(FROM "secrets")
+      refute log =~ "s3cret-in-rotation"
+    end
+
     test "re-encrypts what a retired key encrypted with the current one", keys do
       secret = secret_fixture("owner", owner_fixture(), "TOKEN", "s3cret")
       put_raw_value(secret.id, encrypt("s3cret", keys.retired))
