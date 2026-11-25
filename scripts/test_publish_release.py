@@ -30,10 +30,21 @@ class ReleaseReplayTest(unittest.TestCase):
         self.remote_commit = self.commit
         self.annotated = True
         self.leave_draft = False
-        for name, impl in (("api", self.api), ("mutate", self.mutate)):
-            stub = patch.object(release, name, impl)
+        # How many reads of the release list still miss a draft just created.
+        self.lag = 0
+        self.unlisted = 0
+        self.clock = 0.0
+        self.sleeps = []
+        for target, name, impl in ((release, "api", self.api), (release, "mutate", self.mutate),
+                                   (release.time, "sleep", self.sleep),
+                                   (release.time, "monotonic", lambda: self.clock)):
+            stub = patch.object(target, name, impl)
             stub.start()
             self.addCleanup(stub.stop)
+
+    def sleep(self, seconds):
+        self.sleeps.append(seconds)
+        self.clock += seconds
 
     def api(self, endpoint, *args):
         base = "repos/ntodd/foreman/"
@@ -47,6 +58,9 @@ class ReleaseReplayTest(unittest.TestCase):
             return {"object": {"type": "commit", "sha": self.remote_commit}}
         if path == "releases?per_page=100":
             self.assertEqual(args, ("--paginate", "--slurp"))
+            if self.unlisted:
+                self.unlisted -= 1
+                return [[], []]
             return [[], self.remote]
         if path == "releases/1":
             return self.remote[0]
@@ -62,6 +76,7 @@ class ReleaseReplayTest(unittest.TestCase):
             self.assertIn("--verify-tag", args)
             self.remote.append(dict(id=1, tag_name=self.tag, draft=True, prerelease=False,
                                     name="Foreman 1.2.3", body=self.notes.read_text()))
+            self.unlisted = self.lag
         elif args[:3] == ("release", "upload", self.tag):
             self.assertNotIn("--clobber", args)
             for path in self.out.iterdir():
@@ -164,6 +179,29 @@ class ReleaseReplayTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "metadata"):
             self.publish()
         self.assertEqual(self.mutations, [])
+
+    def test_draft_listed_a_moment_after_it_is_created(self):
+        # The list trails a new draft by a second or two. One read straight
+        # after creating it failed every release (#440).
+        self.lag = 2
+        self.publish()
+        self.assertEqual(len(self.assets), 10)
+        self.assertFalse(self.remote[0]["draft"])
+        self.assertEqual([call[1] for call in self.mutations], ["create", "upload", "edit"])
+        self.assertEqual(self.sleeps, [1, 1])
+
+    def test_draft_that_never_lists_fails_after_a_bounded_wait(self):
+        self.lag = 10 ** 6
+        with self.assertRaisesRegex(ValueError, "release draft was not created"):
+            self.publish()
+        self.assertEqual([call[1] for call in self.mutations], ["create"])
+        self.assertEqual(self.clock, release.LIST_WAIT)
+
+    def test_existing_release_is_not_waited_for(self):
+        self.publish()
+        self.sleeps.clear()
+        self.publish()
+        self.assertEqual(self.sleeps, [])
 
     def test_incomplete_publish_does_not_report_success(self):
         self.leave_draft = True
