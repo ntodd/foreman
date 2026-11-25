@@ -56,6 +56,7 @@ defmodule ForemanAgent.VM.Env do
        when type in ["env.create", "env.rebuild"] do
     with :ok <- Env.check_clone_url(p.clone_url, ctx.config),
          {:ok, _} <- cache_secrets(ctx, p.env_id, p.files),
+         :ok <- leave_outdated_vm(cmd, log, ctx),
          {:ok, spec} <- prepare(p, ctx, log, type),
          {:ok, _how} <- ensure_running(p.env_id, spec, ctx, log),
          :ok <- push_secrets(p.env_id, log, ctx) do
@@ -162,6 +163,57 @@ defmodule ForemanAgent.VM.Env do
 
       true ->
         relay(cmd, log, ctx)
+    end
+  end
+
+  # The agent in the VM does the rebuild, and installs the Foreman feature
+  # it shipped with. A VM keeps the agent and guest image it booted with,
+  # so one that booted before the box was updated would rebuild with the
+  # old feature every time, and nothing short of a stop and a start would
+  # change that. A rebuild recreates every container anyway, so the VM is
+  # shut down first and boots on what the box has now.
+  #
+  # Only a plain rebuild: a pull and rebuild can refuse and leave the
+  # environment as it was, and nothing else is asked to start over.
+  defp leave_outdated_vm(%Command{type: "env.rebuild", payload: p}, log, ctx) do
+    config = ctx.config
+    machine = Machine.impl(config)
+
+    with false <- Map.get(p, :pull) == true,
+         true <- machine.running?(p.env_id, config),
+         {:outdated, booted} <- booted_with(config, p.env_id) do
+      log.(
+        "info",
+        "The box was updated since this environment's VM started (it runs agent " <>
+          "#{booted["agent"] || "unknown"}, and the box has #{ForemanAgent.Identity.version()}). " <>
+          "Restarting the VM so the rebuild uses the box's version.\n"
+      )
+
+      {:ok, stop} = Command.new("env.stop", %{env_id: p.env_id, slug: p.slug})
+
+      case stop_running(stop, machine, log, ctx) do
+        {:ok, _} -> :ok
+        {:error, message} -> {:error, message}
+      end
+    else
+      _ -> :ok
+    end
+  end
+
+  defp leave_outdated_vm(_cmd, _log, _ctx), do: :ok
+
+  # What the running VM booted with, when it isn't what the box would boot
+  # it with now. One with no record of it predates the record.
+  defp booted_with(config, env_id) do
+    case VM.read_meta(config, env_id) do
+      {:ok, %{"booted" => %{} = booted}} ->
+        if VM.snapshot_compatible?(booted, config), do: :current, else: {:outdated, booted}
+
+      {:ok, _meta} ->
+        {:outdated, %{}}
+
+      {:error, _} ->
+        :unknown
     end
   end
 
