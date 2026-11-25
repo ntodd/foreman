@@ -116,6 +116,26 @@ defmodule Foreman.GitHubTokensAndSyncTest do
       assert Repo.reload!(user).refresh_token == "ghr_new"
     end
 
+    test "refreshed tokens never reach the query log" do
+      user = user_fixture()
+      level = Logger.level()
+      Logger.configure(level: :debug)
+      on_exit(fn -> Logger.configure(level: level) end)
+
+      log =
+        ExUnit.CaptureLog.capture_log([level: :debug], fn ->
+          {:ok, _} =
+            Accounts.update_tokens(user, %{
+              access_token: "ghu_fresh-s3cret",
+              refresh_token: "ghr_fresh-s3cret"
+            })
+        end)
+
+      # The capture is live: reading the user's row is in it.
+      assert log =~ ~s(FROM "users")
+      refute log =~ "fresh-s3cret"
+    end
+
     test "a rejected refresh doesn't wipe tokens from a sign-in that happened meanwhile" do
       user = user_fixture(refresh_token: "ghr_old", access_token_expires_at: expiring_in(60))
       stale = Repo.reload!(user)

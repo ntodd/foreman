@@ -66,6 +66,53 @@ check "gh wrapper is first on PATH in login shells" bash -lc '[ "$(command -v gh
 check "gh wrapper reports a missing gh" bash -lc 'gh --version; [ $? -eq 127 ]'
 check "notices print in interactive shells" bash -c "script -qc 'bash -l -c true' /dev/null | grep -q 'secrets pending restart'"
 
+# gh --attach runs behind the helper the agent release ships, which sends
+# the upload through Foreman. The feature's source carries no helper, so
+# first without one, then with a stand-in that says what it was asked.
+sudo tee /usr/local/bin/gh >/dev/null <<'GH'
+#!/bin/sh
+echo "gh: $* token=${GH_TOKEN:-none}"
+GH
+sudo chmod 0755 /usr/local/bin/gh
+wrapped() { bash -lc "$1" 2>/tmp/gh-wrapper.err; }
+
+check "the feature's source ships no helper" test ! -e /usr/local/share/foreman/foreman-gh-attach
+no_helper() {
+  [ "$(wrapped 'gh pr edit 7 --attach a.png')" = "gh: pr edit 7 --attach a.png token=ghu_testtoken" ] &&
+    [ ! -s /tmp/gh-wrapper.err ]
+}
+check "without the helper, gh --attach is the real gh" no_helper
+
+sudo tee /usr/local/share/foreman/foreman-gh-attach >/dev/null <<'HELPER'
+#!/bin/sh
+echo "helper: $* token=${GH_TOKEN:-none}"
+HELPER
+sudo chmod 0755 /usr/local/share/foreman/foreman-gh-attach
+check "gh without --attach is the real gh, with Foreman's token" bash -c \
+  '[ "$(bash -lc "gh pr list --json number")" = "gh: pr list --json number token=ghu_testtoken" ]'
+attaches() { [ "$(wrapped "$1")" = "helper: /usr/local/bin/gh $2 token=ghu_testtoken" ]; }
+check "gh --attach runs behind the helper" attaches 'gh pr edit 7 --attach a.png' 'pr edit 7 --attach a.png'
+check "gh --attach=file does too" attaches 'gh issue comment 7 --attach=a.png -b hi' 'issue comment 7 --attach=a.png -b hi'
+check "so does any argument that reads --attach, wherever it is" attaches 'gh pr edit 7 -b -- --attach a.png' 'pr edit 7 -b -- --attach a.png'
+own_token() { [ "$(wrapped 'GH_TOKEN=ghp_mine gh pr edit 7 --attach a.png')" = "gh: pr edit 7 --attach a.png token=ghp_mine" ]; }
+check "a gh given its own token is left alone" own_token
+# gh reads GH_TOKEN, then GITHUB_TOKEN. Foreman's token stands in when the
+# caller has set neither, so either one is gh's to use as it would anywhere.
+github_token() {
+  [ "$(wrapped 'GITHUB_TOKEN=ghp_theirs gh pr list')" = "gh: pr list token=none" ] &&
+    [ "$(wrapped 'GITHUB_TOKEN=ghp_theirs gh pr edit 7 --attach a.png')" = "gh: pr edit 7 --attach a.png token=none" ]
+}
+check "a gh given GITHUB_TOKEN is left alone too" github_token
+# The way out to a login of one's own: gh stores none while a token is in
+# its environment, and ranks any token there above one it has stored.
+switched_off() {
+  [ "$(wrapped 'FOREMAN_GH_TOKEN=off gh auth login')" = "gh: auth login token=none" ] &&
+    [ "$(wrapped 'FOREMAN_GH_TOKEN=off gh pr edit 7 --attach a.png')" = "gh: pr edit 7 --attach a.png token=none" ] &&
+    [ "$(wrapped 'FOREMAN_GH_TOKEN=on gh pr list')" = "gh: pr list token=ghu_testtoken" ]
+}
+check "FOREMAN_GH_TOKEN=off runs gh with nothing of Foreman's" switched_off
+sudo rm /usr/local/share/foreman/foreman-gh-attach /usr/local/bin/gh
+
 # The container's environment, saved at start for shells that begin
 # without it (Tailscale SSH). In an environment /run/foreman belongs to the
 # devcontainer's user; here the test makes it so.

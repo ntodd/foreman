@@ -339,13 +339,60 @@ defmodule Foreman.Repos do
 
   def update_registry(%Scope{} = scope, %Owner{} = owner, attrs) do
     with :ok <- authorize_admin(scope),
-         {:ok, owner} <- owner |> Owner.registry_changeset(attrs) |> Repo.update() do
+         # Unlogged, like every write of something encrypted: Ecto logs
+         # the values a statement was given.
+         {:ok, owner} <- owner |> Owner.registry_changeset(attrs) |> Repo.update(log: false) do
       Audit.log(scope, "owner.registry", owner, %{
         "host" => owner.registry_host,
         "username" => owner.registry_username
       })
 
       {:ok, owner}
+    end
+  end
+
+  @doc """
+  Sets the token `owner`'s environments' attachments are uploaded with
+  (`Foreman.Attachments`), once GitHub has said whose it is, or removes
+  it when `token` is empty. It is a machine user's fine-grained token
+  with no permissions: the upload takes none, and any other kind can do
+  more than upload.
+  """
+  def update_attachment_token(%Scope{} = scope, %Owner{} = owner, token) do
+    with :ok <- authorize_admin(scope),
+         {:ok, attrs} <- attachment_attrs(String.trim(token || "")),
+         # Unlogged: Ecto logs the values a statement was given, and the
+         # token is encrypted only on its way into the database.
+         {:ok, owner} <-
+           owner |> Owner.attachment_changeset(attrs) |> Repo.update(log: false) do
+      Audit.log(scope, "owner.attachment_token", owner, %{
+        "login" => owner.attachment_login,
+        "set" => not is_nil(owner.attachment_token)
+      })
+
+      {:ok, owner}
+    end
+  end
+
+  defp attachment_attrs("") do
+    {:ok,
+     %{
+       attachment_token: nil,
+       attachment_login: nil,
+       attachment_token_expires_at: nil,
+       attachment_checked_at: nil
+     }}
+  end
+
+  defp attachment_attrs(token) do
+    with {:ok, info} <- Foreman.GitHub.check_attachment_token(token) do
+      {:ok,
+       %{
+         attachment_token: token,
+         attachment_login: info.login,
+         attachment_token_expires_at: info.expires_at,
+         attachment_checked_at: DateTime.utc_now()
+       }}
     end
   end
 

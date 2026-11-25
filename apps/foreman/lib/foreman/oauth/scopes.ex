@@ -3,20 +3,26 @@ defmodule Foreman.OAuth.Scopes do
 
   @actions ~w(repos:list boxes:list environments:list environments:read operations:list
               operations:read logs:read environments:create environments:start
-              environments:stop environments:destroy secrets:list secrets:write)
+              environments:stop environments:destroy secrets:list secrets:write
+              attachments:create)
 
   # A person manages secrets through their own connection. A service
   # account gets the secrets an admin approved for it and manages none.
-  @personal ~w(secrets:list secrets:write)
+  # Attachments go up as files a person's environment made
+  # (`Foreman.Attachments`), and a service account's environment has no
+  # connection of its own to send them through.
+  @personal ~w(secrets:list secrets:write attachments:create)
 
   def all, do: @actions
 
   # What an environment can do to itself from inside: read its own state,
-  # operations and logs, manage its own secrets, and stop, start and
-  # restart. Never destroy or create, and nothing that lists what else
-  # its owner can reach.
+  # operations and logs, manage its own secrets, stop, start and restart,
+  # and attach files to its repository's issues and pull requests. Never
+  # destroy or create, and nothing that lists what else its owner can
+  # reach.
   @environment ~w(environments:list environments:read operations:list operations:read
-                  logs:read environments:start environments:stop secrets:list secrets:write)
+                  logs:read environments:start environments:stop secrets:list secrets:write
+                  attachments:create)
 
   @doc "The actions an environment's own connection carries."
   def environment, do: @environment

@@ -18,6 +18,7 @@ If you're getting a repo ready to run on Foreman, read "Making a repo work with 
 - [Tailscale](docs/setup/tailscale.md): how environments join the tailnet and the box firewall
 - [GitHub App](docs/setup/github-app.md)
 - [Private images on GHCR](docs/setup/ghcr-machine-user.md)
+- [Images on issues and pull requests](docs/setup/attachments.md): making `gh --attach` work in environments with an attachment token the control plane keeps
 - [Upgrading](docs/setup/upgrading.md)
 
 ## How it works

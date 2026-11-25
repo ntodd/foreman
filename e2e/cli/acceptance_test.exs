@@ -140,7 +140,10 @@ defmodule Foreman.CLIAcceptanceTest do
     assert status != 0
     assert hint =~ "Connect again for the permission: foreman login\n"
 
-    # A plain login asks for every permission, secrets and destroy included.
+    # A plain login asks for every permission the CLI has a use for, secrets
+    # and destroy included. Attaching files isn't one: that is asked of
+    # Foreman by gh's helper in an environment, on the environment's own
+    # connection.
     login(ctx, ctx.user)
 
     granted =
@@ -152,7 +155,7 @@ defmodule Foreman.CLIAcceptanceTest do
           select: g.scopes
       )
 
-    assert Enum.sort(granted) == Enum.sort(Foreman.OAuth.Scopes.all())
+    assert Enum.sort(granted) == Enum.sort(Foreman.OAuth.Scopes.all() -- ["attachments:create"])
 
     # A workspace the box has confirmed is running.
     created = json(ctx, ["env", "create", ctx.repo.full_name, "--no-wait"])

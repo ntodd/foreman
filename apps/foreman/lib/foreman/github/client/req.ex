@@ -8,6 +8,10 @@ defmodule Foreman.GitHub.Client.Req do
 
   @api "https://api.github.com"
   @web "https://github.com"
+  @uploads "https://uploads.github.com"
+  # A box gives a relayed request half a minute, and the upload is the
+  # last thing one waits for.
+  @upload_timeout 25_000
 
   defp api(opts) do
     Req.new(
@@ -274,7 +278,7 @@ defmodule Foreman.GitHub.Client.Req do
   end
 
   @impl true
-  def check_classic_token(token) do
+  def check_token(token) do
     case Req.get(api(headers: [{"authorization", "token " <> token}]), url: "/user") do
       {:ok, %{status: 200, body: body} = resp} ->
         scopes =
@@ -299,6 +303,44 @@ defmodule Foreman.GitHub.Client.Req do
         unexpected(other)
     end
   end
+
+  @impl true
+  def upload_attachment(token, repository_id, name, content_type, body) do
+    req =
+      api(
+        base_url: @uploads,
+        headers: [
+          {"authorization", "token " <> token},
+          {"content-type", "application/octet-stream"}
+        ],
+        # An upload can't be undone, so it is sent once.
+        retry: false,
+        receive_timeout: @upload_timeout
+      )
+
+    params = [name: name, content_type: content_type, repository_id: repository_id]
+
+    case Req.post(req, url: "/user-attachments/assets", params: params, body: body) do
+      # Something to reference the asset by, or it wasn't a success worth
+      # the name: the URL goes into a pull request as it is.
+      {:ok, %{status: status, body: body}} when status in 200..299 ->
+        if is_map(body) and asset_url?(body["url"]),
+          do: {:ok, body["url"]},
+          else: {:error, :no_asset_url}
+
+      other ->
+        unexpected(other)
+    end
+  end
+
+  defp asset_url?(url) when is_binary(url) do
+    match?(
+      {:ok, %URI{scheme: "https", host: host}} when is_binary(host) and host != "",
+      URI.new(url)
+    )
+  end
+
+  defp asset_url?(_url), do: false
 
   @impl true
   def check_registry_pull(host, username, token, ref) do

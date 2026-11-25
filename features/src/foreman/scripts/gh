@@ -21,9 +21,41 @@ if [ -z "$real" ]; then
   exit 127
 fi
 
-if [ -z "${GH_TOKEN:-}" ] && [ -s /run/foreman/github-token ]; then
+# The way out to a login of one's own (gh auth login): FOREMAN_GH_TOKEN=off
+# runs gh with nothing of Foreman's. It takes a switch because gh stores
+# no login while a token is in its environment, and ranks any token there
+# above one it has stored, so leaving the token out is the only way to
+# either.
+if [ "${FOREMAN_GH_TOKEN:-}" = off ]; then
+  exec "$real" "$@"
+fi
+
+# gh takes its token from GH_TOKEN, then GITHUB_TOKEN. Foreman's stands in
+# when the caller has set neither, so a token given either way is the one
+# gh uses, as it would anywhere else.
+foreman_token=
+if [ -z "${GH_TOKEN:-}" ] && [ -z "${GITHUB_TOKEN:-}" ] && [ -s /run/foreman/github-token ]; then
   GH_TOKEN=$(cat /run/foreman/github-token)
   export GH_TOKEN
+  foreman_token=1
+fi
+
+# GitHub takes an --attach upload from a personal access token and
+# refuses the GitHub App token Foreman delivers (cli/cli#14309). The
+# helper runs gh with that one upload sent through Foreman, which holds
+# a token GitHub accepts, and with everything else as it is.
+#
+# Only with Foreman's token, so a gh given a token of someone's own does
+# what that token allows. Any argument that reads --attach is enough:
+# behind the helper a gh that attaches nothing behaves as it does alone,
+# and a gh that attaches something without it fails.
+helper=/usr/local/share/foreman/foreman-gh-attach
+if [ -n "$foreman_token" ] && [ -x "$helper" ]; then
+  for arg in "$@"; do
+    case $arg in
+      --attach | --attach=*) exec "$helper" "$real" "$@" ;;
+    esac
+  done
 fi
 
 exec "$real" "$@"

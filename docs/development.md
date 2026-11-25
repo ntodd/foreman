@@ -36,6 +36,8 @@ go build -o /tmp/foreman-dev ./cmd/foreman
 
 CLI unit tests use isolated credentials and HTTP fixtures. To test the upgrade path, run `python3 -B ../e2e/cli-upgrade.py /tmp/foreman-dev` from the same directory. It runs the Python checkout CLI and the built executable against one temporary account while its refresh token rotates.
 
+The module also builds a second executable, `cmd/foreman-gh-attach`. It isn't part of the CLI. The agent release builds it (`docker/box.Dockerfile`) and ships it in the Foreman feature, where the feature's `gh` wrapper runs it for `gh --attach` ([setup/attachments.md](setup/attachments.md)). The only code it shares with the CLI is the API client.
+
 After changing the OpenAPI document, run `go generate ./api` in `cli/` and commit the updated Go client. Regeneration uses Ruby's standard library and `gofmt`. Ordinary builds use the checked-in client.
 
 ## Tests

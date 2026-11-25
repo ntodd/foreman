@@ -359,9 +359,11 @@ defmodule Foreman.Accounts do
           {:error, :stale_token}
 
         true ->
+          # Unlogged: Ecto logs the values a statement was given, and the
+          # tokens are encrypted only on their way into the database.
           current
           |> User.github_changeset(Map.put(token_attrs(tokens), :github_login_expired, false))
-          |> Repo.update()
+          |> Repo.update(log: false)
       end
     end)
   end

@@ -80,9 +80,26 @@ defmodule Foreman.GitHub.Client do
               {:ok, %{ahead_by: non_neg_integer(), behind_by: non_neg_integer()}}
               | {:error, :not_found | term()}
   @callback convert_manifest(code :: String.t()) :: {:ok, map()} | {:error, term()}
-  @callback check_classic_token(token :: String.t()) ::
+  @doc """
+  Whose personal access token this is, the scopes a classic one carries
+  (a fine-grained one reports none) and when it lapses.
+  """
+  @callback check_token(token :: String.t()) ::
               {:ok, %{login: String.t(), scopes: [String.t()], expires_at: DateTime.t() | nil}}
               | {:error, term()}
+  @doc """
+  Uploads a file to `repository_id`'s attachments, the store behind the
+  images in issues and pull requests, and returns the asset's URL. GitHub
+  takes personal access tokens here and refuses a GitHub App's with a 404.
+  """
+  @callback upload_attachment(
+              token :: String.t(),
+              repository_id :: pos_integer(),
+              name :: String.t(),
+              content_type :: String.t(),
+              body :: binary()
+            ) ::
+              {:ok, String.t()} | {:error, {:http, integer(), String.t() | nil} | term()}
   @callback check_registry_pull(
               host :: String.t(),
               username :: String.t(),
