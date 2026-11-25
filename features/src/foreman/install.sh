@@ -9,6 +9,8 @@
 #   - a login-shell hook that loads /run/foreman/secrets.env
 #   - git config that includes /run/foreman/gitconfig, and a credential
 #     helper (plus a gh wrapper) that read /run/foreman/github-token
+#   - the helper that sends gh --attach uploads through Foreman, when the
+#     agent release this feature came in carries one
 #   - the Foreman CLI, which reaches Foreman from inside the environment
 #     through /run/foreman/api.sock with no login
 set -eu
@@ -91,6 +93,26 @@ if ! grep -qF "/run/foreman/gitconfig" /etc/gitconfig; then
 	helper =
 	helper = $share/git-credential-foreman
 EOF
+fi
+
+# --- gh --attach ----------------------------------------------------------------
+# GitHub refuses an attached file from the token Foreman delivers, so the
+# gh wrapper runs gh behind this helper, which sends the upload through
+# Foreman (docs/setup/attachments.md). It is built with the agent release,
+# for the box's architecture: the feature's source has none, and a
+# container of another architecture can't run it. Without one, gh
+# uploads on its own, and one an older build left in the image goes: the
+# wrapper only ever runs the helper it came with.
+rm -f "$share/foreman-gh-attach"
+if [ -f "$here/bin/foreman-gh-attach" ]; then
+  install -m 0755 "$here/bin/foreman-gh-attach" "$share/foreman-gh-attach"
+  # Run with nothing to do, it says how it is used and exits 2.
+  status=0
+  "$share/foreman-gh-attach" >/dev/null 2>&1 || status=$?
+  if [ "$status" != 2 ]; then
+    rm -f "$share/foreman-gh-attach"
+    echo "foreman: the gh --attach helper doesn't run on $(uname -m), so gh --attach uploads on its own" >&2
+  fi
 fi
 
 # --- tailscale ----------------------------------------------------------------

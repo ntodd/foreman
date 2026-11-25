@@ -10,6 +10,19 @@
 # Debian 12+; trixie (OpenSSL 3.5) wouldn't start on Ubuntu 24.04.
 ARG ELIXIR_IMAGE=hexpm/elixir:1.20.4-erlang-29.1.1-ubuntu-jammy-20260810
 ARG RUNTIME_IMAGE=debian:trixie-20261005-slim
+ARG GO_IMAGE=golang:1.26.11-bookworm
+
+# The helper the Foreman feature installs for gh --attach
+# (cli/cmd/foreman-gh-attach): a static binary for the architecture being
+# built, so it runs in a devcontainer whatever its libc.
+FROM ${GO_IMAGE} AS gh-attach
+WORKDIR /src/cli
+COPY cli/go.mod cli/go.sum ./
+RUN go mod download
+COPY cli/api api
+COPY cli/internal/ghattach internal/ghattach
+COPY cli/cmd/foreman-gh-attach cmd/foreman-gh-attach
+RUN CGO_ENABLED=0 go build -trimpath -ldflags "-s -w" -o /foreman-gh-attach ./cmd/foreman-gh-attach
 
 FROM ${ELIXIR_IMAGE} AS agent
 ARG FOREMAN_AGENT_VERSION=0.1.0
@@ -30,6 +43,9 @@ ENV FOREMAN_AGENT_TOOLS=/tools
 WORKDIR /src
 COPY apps/foreman_protocol apps/foreman_protocol
 COPY features features
+# In the feature, where its install script looks, so it ships in the
+# release with the wrapper that runs it.
+COPY --from=gh-attach /foreman-gh-attach features/src/foreman/bin/foreman-gh-attach
 COPY apps/foreman_agent/mix.exs apps/foreman_agent/mix.lock apps/foreman_agent/
 WORKDIR /src/apps/foreman_agent
 RUN mix deps.get --only prod
