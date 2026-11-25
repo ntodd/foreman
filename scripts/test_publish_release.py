@@ -188,15 +188,14 @@ class ReleaseReplayTest(unittest.TestCase):
         self.assertEqual(len(self.assets), 10)
         self.assertFalse(self.remote[0]["draft"])
         self.assertEqual([call[1] for call in self.mutations], ["create", "upload", "edit"])
-        self.assertEqual(len(self.sleeps), 2)
+        self.assertEqual(self.sleeps, [1, 1])
 
     def test_draft_that_never_lists_fails_after_a_bounded_wait(self):
         self.lag = 10 ** 6
         with self.assertRaisesRegex(ValueError, "release draft was not created"):
             self.publish()
         self.assertEqual([call[1] for call in self.mutations], ["create"])
-        self.assertGreaterEqual(self.clock, 10)
-        self.assertLessEqual(self.clock, 120)
+        self.assertEqual(self.clock, release.LIST_WAIT)
 
     def test_existing_release_is_not_waited_for(self):
         self.publish()
