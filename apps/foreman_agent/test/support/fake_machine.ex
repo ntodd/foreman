@@ -22,6 +22,11 @@ defmodule ForemanAgent.Test.FakeMachine do
     :ets.insert(@table, {:opts, Map.new(opts)})
   end
 
+  @doc "Changes some of what `configure/1` set, and keeps the rest."
+  def reconfigure(changes) do
+    :ets.insert(@table, {:opts, Map.merge(opts(), Map.new(changes))})
+  end
+
   defp opts do
     ensure_table()
 
@@ -186,8 +191,16 @@ defmodule ForemanAgent.Test.FakeMachine do
   @impl true
   def power_off(env_id, _timeout, config) do
     report(:power_off, env_id)
-    kill(env_id, config)
-    if opts()[:power_off] == :killed, do: :killed, else: :ok
+
+    case opts()[:power_off] do
+      # The helper couldn't be asked, and the VM is as it was.
+      {:error, _} = error ->
+        error
+
+      how ->
+        kill(env_id, config)
+        if how == :killed, do: :killed, else: :ok
+    end
   end
 
   @impl true

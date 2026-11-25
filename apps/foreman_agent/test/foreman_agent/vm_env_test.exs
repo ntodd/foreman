@@ -401,6 +401,101 @@ defmodule ForemanAgent.VMEnvTest do
     assert Path.dirname(paths.meta) != paths.dir
   end
 
+  # The agent in a VM installs the Foreman feature, and a VM keeps the
+  # agent it booted with. A rebuild in one that booted before the box was
+  # updated would install the old feature again, however often it ran.
+  describe "a rebuild in a VM that booted before the box was updated" do
+    setup ctx do
+      {:ok, _} = run(create(), ctx)
+      flush()
+      :ok
+    end
+
+    defp booted_with(ctx, key, value) do
+      {:ok, meta} = VM.read_meta(ctx.config, @env)
+      VM.write_meta(ctx.config, @env, put_in(meta, ["booted", key], value))
+    end
+
+    defp rebuild(extra \\ %{}) do
+      {:ok, cmd} = Command.new("env.rebuild", Map.merge(create().payload, extra))
+      cmd
+    end
+
+    test "restarts the VM on the box's agent first", ctx do
+      booted_with(ctx, "agent", "0.0.1")
+      version = ForemanAgent.Identity.version()
+
+      assert {:ok, %{"ran" => "env.rebuild"}} = run(rebuild(), ctx)
+
+      # The environment's own stop in the old guest, then off and on.
+      assert_received {:guest, "env.stop", %{slug: "hello-1"}}
+      assert_received {:machine, :power_off, @env}
+      assert_received {:machine, {:boot, %{agent_version: ^version}}, @env}
+      assert_received {:guest, "env.secrets.write", _}
+      assert_received {:guest, "env.rebuild", _}
+      assert {:ok, %{"booted" => %{"agent" => ^version}}} = VM.read_meta(ctx.config, @env)
+
+      # And says why the environment went away for a moment.
+      assert_received {:log, "info", "The box was updated" <> rest}
+      assert rest =~ "0.0.1"
+      assert rest =~ version
+    end
+
+    test "does the same for a guest image the box has replaced", ctx do
+      booted_with(ctx, "guest", String.duplicate("0", 64))
+
+      assert {:ok, %{"ran" => "env.rebuild"}} = run(rebuild(), ctx)
+      assert_received {:machine, :power_off, @env}
+      assert_received {:machine, {:boot, _}, @env}
+    end
+
+    test "restarts one with no record of what it booted with", ctx do
+      {:ok, meta} = VM.read_meta(ctx.config, @env)
+      VM.write_meta(ctx.config, @env, Map.delete(meta, "booted"))
+
+      assert {:ok, _} = run(rebuild(), ctx)
+      assert_received {:machine, :power_off, @env}
+      assert_received {:machine, {:boot, _}, @env}
+    end
+
+    test "leaves a VM on the box's agent running", ctx do
+      assert {:ok, %{"ran" => "env.rebuild"}} = run(rebuild(), ctx)
+
+      refute_received {:guest, "env.stop", _}
+      refute_received {:machine, :power_off, @env}
+      refute_received {:machine, {:boot, _}, @env}
+    end
+
+    # A pull can refuse and leave everything as it was, which it couldn't
+    # after the VM had been restarted.
+    test "leaves the VM running for a pull and rebuild", ctx do
+      booted_with(ctx, "agent", "0.0.1")
+
+      assert {:ok, %{"ran" => "env.rebuild"}} = run(rebuild(%{pull: true}), ctx)
+      refute_received {:machine, :power_off, @env}
+      refute_received {:machine, {:boot, _}, @env}
+    end
+
+    test "nothing else restarts it", ctx do
+      booted_with(ctx, "agent", "0.0.1")
+
+      for cmd <- [command("env.start"), command("env.restart", %{mode: "all"}), create()] do
+        assert {:ok, _} = run(cmd, ctx)
+        refute_received {:machine, :power_off, @env}
+        refute_received {:machine, {:boot, _}, @env}
+      end
+    end
+
+    test "fails, with the VM as it was, when the VM can't be shut down", ctx do
+      booted_with(ctx, "agent", "0.0.1")
+      FakeMachine.reconfigure(power_off: {:error, "the helper didn't answer"})
+
+      assert {:error, "the helper didn't answer"} = run(rebuild(), ctx)
+      refute_received {:machine, {:boot, _}, @env}
+      refute_received {:guest, "env.rebuild", _}
+    end
+  end
+
   describe "a record an old release left in the VM's own directory" do
     setup ctx do
       paths = VM.paths(ctx.config, @env)
