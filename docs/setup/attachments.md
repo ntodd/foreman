@@ -145,7 +145,9 @@ If you run gh with your own token (`GH_TOKEN=… gh …`, or `GITHUB_TOKEN`), th
 wrapper stays out of the way. It only acts when gh is using the token Foreman
 provides. That also applies to an environment where `GITHUB_TOKEN` is set as a
 secret: gh uses that secret, as it does anywhere else, and not Foreman's
-token.
+token. A script that reads Foreman's token with `gh auth token` and passes it
+back in `GH_TOKEN` is still using Foreman's token, so its uploads go through
+Foreman too (from feature 1.3.1).
 
 ## Using your own gh login
 

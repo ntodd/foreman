@@ -103,6 +103,16 @@ github_token() {
     [ "$(wrapped 'GITHUB_TOKEN=ghp_theirs gh pr edit 7 --attach a.png')" = "gh: pr edit 7 --attach a.png token=none" ]
 }
 check "a gh given GITHUB_TOKEN is left alone too" github_token
+# A script that reads Foreman's token (gh auth token) and hands it back is
+# still using Foreman's token, which GitHub won't take an upload from, so
+# its --attach goes through Foreman as well. Any other token is left alone.
+handed_back() {
+  [ "$(wrapped 'GH_TOKEN=ghu_testtoken gh pr edit 7 --attach a.png')" = "helper: /usr/local/bin/gh pr edit 7 --attach a.png token=ghu_testtoken" ] &&
+    [ "$(wrapped 'GITHUB_TOKEN=ghu_testtoken gh pr edit 7 --attach a.png')" = "helper: /usr/local/bin/gh pr edit 7 --attach a.png token=none" ] &&
+    [ "$(wrapped 'GH_TOKEN=ghu_testtoken gh pr list')" = "gh: pr list token=ghu_testtoken" ] &&
+    [ "$(wrapped 'GH_TOKEN=ghu_earlier gh pr edit 7 --attach a.png')" = "gh: pr edit 7 --attach a.png token=ghu_earlier" ]
+}
+check "Foreman's own token handed back still attaches through Foreman" handed_back
 # The way out to a login of one's own: gh stores none while a token is in
 # its environment, and ranks any token there above one it has stored.
 switched_off() {
