@@ -32,12 +32,19 @@ fi
 
 # gh takes its token from GH_TOKEN, then GITHUB_TOKEN. Foreman's stands in
 # when the caller has set neither, so a token given either way is the one
-# gh uses, as it would anywhere else.
+# gh uses, as it would anywhere else. A caller can also hand Foreman's own
+# token back, as a script does that reads it with gh auth token: that is
+# still Foreman's.
 foreman_token=
-if [ -z "${GH_TOKEN:-}" ] && [ -z "${GITHUB_TOKEN:-}" ] && [ -s /run/foreman/github-token ]; then
-  GH_TOKEN=$(cat /run/foreman/github-token)
-  export GH_TOKEN
-  foreman_token=1
+if [ -s /run/foreman/github-token ]; then
+  current=$(cat /run/foreman/github-token)
+  if [ -z "${GH_TOKEN:-}" ] && [ -z "${GITHUB_TOKEN:-}" ]; then
+    GH_TOKEN=$current
+    export GH_TOKEN
+    foreman_token=1
+  elif [ "${GH_TOKEN:-${GITHUB_TOKEN:-}}" = "$current" ]; then
+    foreman_token=1
+  fi
 fi
 
 # GitHub takes an --attach upload from a personal access token and

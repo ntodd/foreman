@@ -1,6 +1,6 @@
 {
   "id": "foreman",
-  "version": "1.3.0",
+  "version": "1.3.1",
   "name": "Foreman",
   "description": "Joins a Foreman environment to the tailnet, wires up the secrets, git identity and GitHub credentials Foreman delivers to /run/foreman, and installs the Foreman CLI, which works inside the environment with no login.",
   "documentationURL": "https://github.com/ntodd/foreman/tree/main/features/src/foreman",
