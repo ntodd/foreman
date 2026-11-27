@@ -407,7 +407,9 @@ defmodule ForemanAgent.VMReclaimerTest do
       plan = %{ask: [item("a", :pressure, 10)], deficit: 6 * @gib}
       reclaim = fn "a", _ -> {:ok, reclaimed(8192)} end
 
-      assert capture_log(fn -> Reclaimer.run_round(plan, 2048, reclaim) end) == ""
+      # capture_log takes in what every process logs, and async tests in
+      # other modules log warnings of their own, so look for the Reclaimer's.
+      refute capture_log(fn -> Reclaimer.run_round(plan, 2048, reclaim) end) =~ "memory from a"
 
       # Only this module's tests log from the Reclaimer, one at a time.
       log =
